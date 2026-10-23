@@ -1,0 +1,60 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/engine_core",
+    "crates/engine_sim",
+    "crates/engine_content",
+    "crates/engine_net",
+    "crates/backend_nakama",
+    "crates/game_api",
+    "tools/project_cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+authors = ["Lynx contributors"]
+repository = "https://github.com/cosmosgc/Lynx"
+
+[workspace.dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+getrandom = "0.4.3"
+ron = "0.12.2"
+semver = { version = "1.0.28", features = ["serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+thiserror = "2.0.21"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }
+
+engine_core = { path = "crates/engine_core" }
+engine_sim = { path = "crates/engine_sim" }
+engine_content = { path = "crates/engine_content" }
+engine_net = { path = "crates/engine_net" }
+backend_nakama = { path = "crates/backend_nakama" }
+game_api = { path = "crates/game_api" }
+
+[profile.dev]
+debug = 1
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+struct_field_names = "allow"

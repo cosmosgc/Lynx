@@ -1,0 +1,21 @@
+[package]
+name = "backend_nakama"
+description = "Native Nakama HTTP adapter for Lynx"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+engine_core = { workspace = true }
+game_api = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+ureq = { workspace = true }
+
+[lints]
+workspace = true

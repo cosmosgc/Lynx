@@ -1,0 +1,121 @@
+# Architecture
+
+This document describes the boundaries that the code is expected to respect.
+Decisions and their rationale live in [`adr/`](adr/).
+
+## System view
+
+```text
+┌──────────────────────── Client / Editor (Bevy) ────────────────────────┐
+│ input → camera → action map → prediction → reconciliation               │
+│ content loading → client ECS → rendering → entity-provided UI           │
+│ network client (engine_net) → Nakama session → world gateway connection │
+└───────────────────────────────┬────────────────────────────────────────┘
+                                │ authenticated protocol (JSON, versioned)
+┌───────────────────────────────▼────────────────────────────────────────┐
+│ World service (Rust, headless)                                          │
+│ engine_sim: zones, entities, action pipeline, minds, links, AI, nav     │
+│ game_api:   auth/session/social/chat/world/character/inventory/admin    │
+└──────────────┬──────────────────────────────────┬──────────────────────┘
+               │ HTTPS (health, login, storage)    │ SQL (transactions)
+┌──────────────▼──────────────┐      ┌────────────▼─────────────────────┐
+│ Nakama 3.41 (native)        │      │ PostgreSQL 17 (native)            │
+│ accounts, sessions, chat,   │      │ characters, inventory, property,  │
+│ groups, matchmaking         │      │ factions, audit, content manifest │
+└─────────────────────────────┘      └───────────────────────────────────┘
+```
+
+## Crates and dependency direction
+
+```text
+engine_core   ← engine_sim ← game_api ← backend_nakama
+     ↑              ↑
+engine_content ─────┘
+     ↑
+engine_net (protocol envelopes; no transport implementation)
+
+project_cli → engine_content, engine_core, backend_nakama
+```
+
+Rules:
+
+- `engine_core` depends on no other workspace crate.
+- `engine_sim` depends on `engine_core` only. It has no I/O, no clock reads, no
+  Bevy, and no database driver.
+- `engine_content` depends on `engine_core` and owns RON parsing, manifests,
+  and content validation.
+- `engine_net` owns protocol envelopes and version negotiation. It does not own
+  a socket, a runtime, or a Nakama type.
+- `game_api` defines backend interfaces and DTOs. It depends on `engine_core`,
+  never on Nakama.
+- `backend_nakama` is the only crate that knows Nakama's HTTP API.
+- Client/editor crates (introduced with Bevy) depend on the crates above and
+  never the reverse.
+
+## Key domain concepts
+
+| Concept | Type | Notes |
+|---|---|---|
+| Durable identity | `StableId` | Prefixed ULID-like; 48-bit ms + 80-bit random |
+| Authored key | `DefinitionId` | Validated slug, e.g. `door.wooden` |
+| Definition | content records | Immutable per content version |
+| Instance | `EntityRecord` | Mutable, zone-scoped, stable ID |
+| Component schema | `ComponentSchema` | Version, fields, visibility, policy |
+| Mind | `Mind` + controller | Player, AI, scripted, or none |
+| Action | `ActionRequest` → `ActionResult` | Server-validated, structured errors |
+| Link | `EntityLink` | Typed, stable IDs, validated endpoints |
+| Faction relation | `FactionRelation` | Directional, -100..100 |
+
+## Request lifecycle
+
+1. Client sends an `ActionRequest` with a client-generated `RequestId`, actor
+   ID, target ID, verb, and parameters.
+2. The world gateway authenticates the session and resolves the actor. A client
+   cannot act as an entity it does not control.
+3. `ActionPipeline` validates: target exists, actor and target share a zone,
+   range, visibility, permission, component state, cooldown, required items,
+   and action-specific preconditions.
+4. On success the action mutates authoritative state, emits domain events, and
+   writes audit records for privileged or high-impact operations.
+5. The server returns `ActionResult` plus replication deltas. On failure it
+   returns a stable `ErrorCode` and a message the UI can present.
+6. Clients reconcile predicted state with the authoritative result.
+
+## Simulation model
+
+- A `Zone` owns an `EntityStore`, a tick counter, a nav grid, and budgets.
+- `tick()` advances controllers, applies queued validated actions, expires
+  cooldowns and temporary modifiers, and produces `TickStats`.
+- Simulation is deterministic given the same inputs, IDs, and tick sequence.
+  Time-dependent features take an explicit `now_ms` argument.
+- Entity removal is a tombstone transition so links and audit records never
+  dangle silently. Missing link endpoints are reported as diagnostics.
+
+## Persistence model
+
+- Character, inventory, property, faction, and audit data live in PostgreSQL.
+- World snapshots store changed entities per zone; the event log captures
+  economy and ownership transitions.
+- Writes that can be retried carry idempotency keys stored in a ledger table.
+- Content definitions are versioned bundles; instances record the content
+  version they were created from.
+
+## Failure and recovery
+
+- Structured errors use `ErrorCode`, never free-form strings alone.
+- Missing or obsolete component data loads through the migration chain; if a
+  migration is impossible, the entity is quarantined and reported instead of
+  silently reset.
+- Zone restart: load last snapshot, replay events after the snapshot, validate
+  references, then accept sessions. Target recovery: 60 seconds.
+- Admin actions and reputation changes are appended to the audit log in the
+  same transaction as the mutation.
+
+## What is deliberately not here yet
+
+- Bevy client crates, rendering, input, and camera modules (Phase 1 client
+  work).
+- A live Nakama-backed world gateway binary; the adapter and interfaces exist,
+  the network server loop does not.
+- The editor application, behavior graph editor, and admin spectator client.
+- WebAssembly scripting, which needs a sandbox design review before adoption.

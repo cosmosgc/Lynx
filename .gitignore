@@ -1,0 +1,25 @@
+# Rust
+/target
+**/*.rs.bk
+*.pdb
+*.dSYM
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Local runtime state
+/.lynx
+/dist
+/backups
+*.log
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Generated project workspaces used during CLI tests
+/tests/fixtures/generated/
