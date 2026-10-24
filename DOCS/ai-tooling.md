@@ -70,6 +70,12 @@ Expected result: created-file summary, validation diagnostics, build result,
 and actionable errors with file paths and error codes. The AI iterates on the
 same commands a human would use.
 
+Generated projects author player-facing text in Brazilian Portuguese (`pt-BR`)
+by default. When an assistant drafts another locale, it must preserve message
+keys and placeholders exactly; `lynx validate` rejects missing keys and
+placeholder mismatches, and machine translations require human review before
+release. See [`internationalization.md`](internationalization.md).
+
 ## Audit and privacy
 
 - Log tool name, version, inputs (redacted), duration, outcome, and actor.

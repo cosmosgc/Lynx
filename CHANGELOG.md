@@ -23,3 +23,6 @@ semantic versioning for engine releases and content bundles.
 - `backend_nakama`: native Nakama HTTP adapter with health and authentication.
 - `lynx` project CLI: `new`, `doctor`, `validate`, and `content hash`.
 - Native non-Docker Nakama/PostgreSQL setup scripts and SQL migrations.
+- Internationalization design: key-based RON catalogs, `pt-BR` as the default
+  and source language, locale negotiation, validation codes, and client-side
+  formatting (ADR 0011).

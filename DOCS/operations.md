@@ -49,6 +49,7 @@ Minimum metrics:
 - Pathfinding expansions, budget exhaustion, AI errors.
 - Database latency and errors.
 - Content version per zone.
+- Missing localization keys by locale (should be zero in release).
 
 ## Backups and recovery
 
@@ -65,7 +66,8 @@ Minimum metrics:
 1. Build and test the exact artifact.
 2. Apply forward-compatible migrations.
 3. Deploy to staging; run smoke and load tests.
-4. Publish content as an immutable versioned bundle.
+4. Publish content as an immutable versioned bundle, including validated
+   localization catalogs for every declared locale.
 5. Roll out to one zone, monitor errors and tick health.
 6. Promote to remaining zones.
 7. Roll back the content bundle first; roll back code if the fault is in the

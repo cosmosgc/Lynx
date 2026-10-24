@@ -13,7 +13,9 @@ Lynx is two deliverables in one repository:
 
 The project guide lives at
 [`docs/lightweight_mmorpg_engine_project_guide.md`](docs/lightweight_mmorpg_engine_project_guide.md).
-Architecture decisions are recorded in [`docs/adr/`](docs/adr/).
+Architecture decisions are recorded in [`docs/adr/`](docs/adr/), and the
+localization model is described in
+[`docs/internationalization.md`](docs/internationalization.md).
 
 ## Status
 
@@ -22,6 +24,10 @@ foundation: pinned toolchain, workspace layout, architecture decision records,
 stable entity IDs, versioned component schemas, faction and inventory domain
 rules, a headless authoritative simulation with action validation, and the
 `lynx` project CLI. Bevy client crates arrive in the next phase.
+
+Brazilian Portuguese (`pt-BR`) is the default language for generated projects,
+templates, and player-facing content. See
+[`docs/internationalization.md`](docs/internationalization.md).
 
 Nothing in this repository should be treated as production-ready yet. See
 [`docs/platforms.md`](docs/platforms.md) for the supported matrix, which is
@@ -44,6 +50,9 @@ cargo run -p project_cli -- doctor --project ../my-world
 The CLI is also exposed as `lynx` when installed with
 `cargo install --path tools/project_cli`.
 
+Generated projects include a Brazilian Portuguese catalog and default to
+`pt-BR`; additional locales are opt-in translations.
+
 Nakama and PostgreSQL are optional for engine development and required only
 for multiplayer work. The native, non-Docker setup is documented in
 [`docs/getting-started.md`](docs/getting-started.md).
@@ -61,8 +70,7 @@ tools/project_cli       `lynx` project scaffolding, doctor, and validation
 server/                 Native Nakama config, SQL migrations, run scripts
 content/                Canonical schemas and example content
 templates/              Generated-project templates
-docs/                   Architecture, operations, security, ADRs
-DOCS/                   Original project guide
+docs/                   Architecture, operations, security, localization, ADRs
 ```
 
 ## Design rules
@@ -72,6 +80,7 @@ DOCS/                   Original project guide
 - Every persistent entity has a stable ID and an explicit persistence policy.
 - Every entity may have a mind; a player is one controller among many.
 - Content and protocol versions are explicit and checked at boundaries.
+- Player-facing text is localized; Brazilian Portuguese is the default language.
 - Tools, diagnostics, and recovery paths are part of the product.
 - Docker is optional. Native operation is the supported baseline.
 

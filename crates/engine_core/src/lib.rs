@@ -7,6 +7,7 @@
 pub mod audit;
 pub mod error;
 pub mod faction;
+pub mod i18n;
 pub mod id;
 pub mod inventory;
 pub mod math;
@@ -14,4 +15,7 @@ pub mod schema;
 pub mod time;
 
 pub use error::{EngineError, ErrorCode};
+pub use i18n::{
+    CatalogSet, DEFAULT_LOCALE, Locale, MessageCatalog, MessageKey, ResolvedMessage, placeholders,
+};
 pub use id::{DefinitionId, IdGenerator, IdKind, StableId};

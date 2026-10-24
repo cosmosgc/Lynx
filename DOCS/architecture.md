@@ -65,6 +65,8 @@ Rules:
 | Action | `ActionRequest` → `ActionResult` | Server-validated, structured errors |
 | Link | `EntityLink` | Typed, stable IDs, validated endpoints |
 | Faction relation | `FactionRelation` | Directional, -100..100 |
+| Locale | BCP 47 tag | Default `pt-BR`; canonicalized at boundaries |
+| Localized text | message key + catalog | Source catalog is `pt-BR` |
 
 ## Request lifecycle
 
@@ -78,8 +80,19 @@ Rules:
 4. On success the action mutates authoritative state, emits domain events, and
    writes audit records for privileged or high-impact operations.
 5. The server returns `ActionResult` plus replication deltas. On failure it
-   returns a stable `ErrorCode` and a message the UI can present.
+   returns a stable `ErrorCode` and typed parameters; the client renders the
+   message from its locale catalog.
 6. Clients reconcile predicted state with the authoritative result.
+
+## Localization
+
+Player-facing strings are addressed by stable message keys, and the source
+catalog is Brazilian Portuguese (`pt-BR`). Definitions, UI panels, and server
+responses carry keys and parameters, never embedded English text. The server
+keeps English only for logs and audit records. Locale resolution, catalog
+format, validation rules, and formatting policy are specified in
+[`internationalization.md`](internationalization.md) and
+[ADR 0011](adr/0011-internationalization-and-locale-defaults.md).
 
 ## Simulation model
 

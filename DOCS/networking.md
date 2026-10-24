@@ -4,7 +4,7 @@
 
 - `PROTOCOL_VERSION` is a semantic version owned by `engine_net`.
 - The handshake exchanges protocol version, engine version, content version,
-  and a feature bitmap.
+  locale (BCP 47, default `pt-BR`), and a feature bitmap.
 - A different **major** version is rejected with `ErrorCode::VersionMismatch`.
 - A different minor version is accepted; the server disables features the
   client does not advertise and reports the degradation.
@@ -56,6 +56,22 @@ when measurements require them.
   and permission before applying an action.
 - Client clocks are never trusted for cooldowns or rewards; the server uses its
   tick and a monotonic session clock.
+- Player-facing failures return a stable `ErrorCode` plus typed parameters, not
+  a pre-localized sentence. The client renders `error.<code>` from its catalog;
+  the default source catalog is Brazilian Portuguese.
+
+## Localization on the wire
+
+- The server replicates definition IDs, message keys, and parameters. It does
+  not broadcast translated strings for ordinary UI.
+- System chat notices, mail, and offline events store a key plus JSON
+  parameters and render in the reader's locale.
+- Names chosen by players are transmitted verbatim and displayed without
+  translation.
+- Locale is part of the session, not of each message. Changing it requires a
+  `SetLocale` request or a new session and takes effect on the next frame.
+- Missing keys render as the key and are logged once; they never close a
+  connection. See [`internationalization.md`](internationalization.md).
 
 ## Prediction and reconciliation
 

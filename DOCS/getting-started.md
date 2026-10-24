@@ -104,10 +104,28 @@ cargo run -p project_cli -- validate --project .
 
 The generated project is a normal Cargo workspace that depends on Lynx crates
 by path or version. It contains a zone, a sample entity, an item, an
-interaction, a UI panel definition, a backend configuration template with
-placeholder values, and migration hooks.
+interaction, a UI panel definition, a Brazilian Portuguese localization
+catalog (`content/localization/pt-BR.ron`), a backend configuration template
+with placeholder values, and migration hooks. The project defaults to `pt-BR`;
+additional locales are declared in the project manifest.
 
-## 5. Troubleshooting
+## 5. Language and localization
+
+`pt-BR` is the default and source language for generated projects. Player-facing
+text lives in `content/localization/pt-BR.ron` and is referenced by message key.
+
+```toml
+[localization]
+default = "pt-BR"
+locales = ["pt-BR"]
+```
+
+Add another locale by creating `content/localization/<locale>.ron`, declaring
+it in `locales`, and translating the keys. `lynx validate` fails on missing
+default keys, mismatched placeholders, and incomplete release locales. See
+[`internationalization.md`](internationalization.md).
+
+## 6. Troubleshooting
 
 - **`rustup` cannot find the pinned toolchain** — update rustup, then retry.
   Do not edit `rust-toolchain.toml` to work around a local mismatch.
