@@ -7,7 +7,8 @@ pub mod validate;
 
 pub use bundle::{ContentManifest, DefinitionEntry, LocaleEntry, is_sha256_hex, sha256_hex};
 pub use definition::{
-    ContentDefinition, ContentKind, DisplayText, Presentation, PresentationMode, is_safe_asset_path,
+    ContentDefinition, ContentKind, DisplayText, MinigameDefinition, Presentation,
+    PresentationMode, UiFieldBinding, UiPanelAction, UiPanelDefinition, is_safe_asset_path,
 };
 pub use diagnostic::{Diagnostic, Severity, ValidationReport};
 pub use validate::{ContentLoader, ContentSet};

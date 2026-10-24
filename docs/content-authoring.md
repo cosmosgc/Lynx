@@ -91,6 +91,12 @@ state, and lists allowed actions. The server sends state and allowed actions,
 never executable UI code. Unknown panel schemas fall back to a generic
 inspection view.
 
+The engine models these contracts explicitly via a panel definition with a
+stable schema, localized labels, allowed actions, and binding metadata. The
+same pattern applies to a server-authoritative minigame definition, which must
+name its panel schema and declare whether authority resides with the server,
+a hybrid client/server flow, or the client for cosmetic-only play.
+
 ## Localization
 
 Brazilian Portuguese (`pt-BR`) is the default and source language. All

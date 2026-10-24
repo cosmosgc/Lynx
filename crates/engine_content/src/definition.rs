@@ -84,6 +84,204 @@ pub enum PresentationMode {
     IconAbstract,
 }
 
+/// An action a client may trigger from a declarative UI panel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiPanelAction {
+    /// Stable action name. Example: `close`, `take`, `submit`.
+    pub name: String,
+    /// Localized label to render in the interface.
+    pub label: MessageKey,
+    /// Optional guard that must be true before the action is offered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gated_by: Option<String>,
+}
+
+/// A data field bound into a panel body or modal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiFieldBinding {
+    /// Stable field key, such as `inventory.count` or `door.state`.
+    pub key: String,
+    /// Data source path from the entity or context.
+    pub source: String,
+    /// Optional formatter or display hint, such as `count` or `percentage`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formatter: Option<String>,
+}
+
+/// A declarative UI panel definition. Panels do not execute code; they describe
+/// the schema, fields, and permitted actions the client can render.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiPanelDefinition {
+    /// Stable definition key, for example `ui.inventory` or `panel.terminal`.
+    pub id: DefinitionId,
+    /// Version of the panel schema and content contract.
+    pub version: SchemaVersion,
+    /// Localized name and description.
+    pub display: DisplayText,
+    /// Panel schema name. The client resolves this to a renderer.
+    pub schema: String,
+    /// Actions available in this panel.
+    pub actions: Vec<UiPanelAction>,
+    /// Fields to display or bind from entity state.
+    pub fields: Vec<UiFieldBinding>,
+    /// Optional fallback schema when a client lacks native support.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_schema: Option<String>,
+}
+
+impl UiPanelDefinition {
+    /// Validate panel metadata and binding shape.
+    #[must_use]
+    pub fn validate_shape(&self) -> Vec<ValidationIssue> {
+        let mut issues = Vec::new();
+        if self.version.major == 0 {
+            issues.push(ValidationIssue::new(
+                "content.invalid_version",
+                "version.major",
+                "panel versions must have a major version of at least one",
+            ));
+        }
+        if self.display.name == self.display.description {
+            issues.push(ValidationIssue::new(
+                "content.duplicate_display_key",
+                "display",
+                "name and description must use different message keys",
+            ));
+        }
+        if self.schema.is_empty() || !self.schema.contains('.') {
+            issues.push(ValidationIssue::new(
+                "ui.invalid_schema",
+                "schema",
+                "panel schema must be a namespaced identifier such as ui.inventory",
+            ));
+        }
+        if self.actions.is_empty() {
+            issues.push(ValidationIssue::new(
+                "ui.empty_actions",
+                "actions",
+                "a panel should expose at least one action or a read-only fallback",
+            ));
+        }
+        for (index, action) in self.actions.iter().enumerate() {
+            if action.name.is_empty() || action.name.contains(char::is_whitespace) {
+                issues.push(ValidationIssue::new(
+                    "ui.invalid_action_name",
+                    format!("actions[{index}].name"),
+                    "action names must be compact identifiers without spaces",
+                ));
+            }
+            if !action.label.as_str().contains('.') {
+                issues.push(ValidationIssue::new(
+                    "i18n.invalid_key",
+                    format!("actions[{index}].label"),
+                    "action labels must be namespaced message keys",
+                ));
+            }
+            if action
+                .gated_by
+                .as_deref()
+                .is_some_and(|gate| gate.trim().is_empty())
+            {
+                issues.push(ValidationIssue::new(
+                    "ui.invalid_gate",
+                    format!("actions[{index}].gated_by"),
+                    "gated_by must be empty or a non-empty condition key",
+                ));
+            }
+        }
+        for (index, field) in self.fields.iter().enumerate() {
+            if field.key.is_empty() || field.key.contains(char::is_whitespace) {
+                issues.push(ValidationIssue::new(
+                    "ui.invalid_field_key",
+                    format!("fields[{index}].key"),
+                    "field keys must be compact identifiers without spaces",
+                ));
+            }
+            if field.source.trim().is_empty() {
+                issues.push(ValidationIssue::new(
+                    "ui.invalid_field_source",
+                    format!("fields[{index}].source"),
+                    "field sources must refer to a bound value or state path",
+                ));
+            }
+            if let Some(formatter) = &field.formatter
+                && formatter.trim().is_empty()
+            {
+                issues.push(ValidationIssue::new(
+                    "ui.invalid_formatter",
+                    format!("fields[{index}].formatter"),
+                    "formatter hints must not be blank",
+                ));
+            }
+        }
+        issues
+    }
+}
+
+/// A server-authored minigame or challenge with explicit authority and rewards.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MinigameDefinition {
+    /// Stable definition key, for example `minigame.lockpick`.
+    pub id: DefinitionId,
+    /// Version of the game rules and reward rules.
+    pub version: SchemaVersion,
+    /// Localized name and description.
+    pub display: DisplayText,
+    /// Panel schema the client opens to play the minigame.
+    pub panel_schema: String,
+    /// Where authority for result resolution lives.
+    pub authority: String,
+    /// Optional reward definitions granted by a successful outcome.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rewards: Vec<DefinitionId>,
+}
+
+impl MinigameDefinition {
+    /// Validate minigame metadata and rules with a small but explicit contract.
+    #[must_use]
+    pub fn validate_shape(&self) -> Vec<ValidationIssue> {
+        let mut issues = Vec::new();
+        if self.version.major == 0 {
+            issues.push(ValidationIssue::new(
+                "content.invalid_version",
+                "version.major",
+                "minigame versions must have a major version of at least one",
+            ));
+        }
+        if self.display.name == self.display.description {
+            issues.push(ValidationIssue::new(
+                "content.duplicate_display_key",
+                "display",
+                "name and description must use different message keys",
+            ));
+        }
+        if self.panel_schema.is_empty() || !self.panel_schema.contains('.') {
+            issues.push(ValidationIssue::new(
+                "ui.invalid_schema",
+                "panel_schema",
+                "minigame panels must use a namespaced schema id",
+            ));
+        }
+        if !matches!(self.authority.as_str(), "server" | "hybrid" | "client") {
+            issues.push(ValidationIssue::new(
+                "minigame.invalid_authority",
+                "authority",
+                "authority must be server, hybrid, or client",
+            ));
+        }
+        for (index, reward) in self.rewards.iter().enumerate() {
+            if reward.namespace().is_none() {
+                issues.push(ValidationIssue::new(
+                    "content.invalid_reference",
+                    format!("rewards[{index}]"),
+                    "reward references must include a namespace",
+                ));
+            }
+        }
+        issues
+    }
+}
+
 /// Presentation assets and mode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Presentation {
@@ -358,5 +556,66 @@ mod tests {
         assert!(codes.contains(&"content.invalid_version".to_string()));
         assert!(codes.contains(&"content.invalid_tag".to_string()));
         assert!(codes.contains(&"content.empty_components".to_string()));
+    }
+
+    #[test]
+    fn ui_panel_definitions_require_a_schema_and_namespaced_labels() {
+        let panel = UiPanelDefinition {
+            id: DefinitionId::new("ui.terminal").unwrap(),
+            version: SchemaVersion::new(1, 0),
+            display: DisplayText {
+                name: key("ui.terminal.title"),
+                description: key("ui.terminal.description"),
+            },
+            schema: "ui.terminal".to_string(),
+            actions: vec![UiPanelAction {
+                name: "close".to_string(),
+                label: key("ui.action.close"),
+                gated_by: None,
+            }],
+            fields: vec![UiFieldBinding {
+                key: "status".to_string(),
+                source: "entity.state.status".to_string(),
+                formatter: Some("status".to_string()),
+            }],
+            fallback_schema: Some("ui.inspect".to_string()),
+        };
+
+        assert!(panel.validate_shape().is_empty());
+
+        let mut invalid = panel.clone();
+        invalid.schema = "terminal".to_string();
+        invalid.actions[0].label = key("close");
+        let codes: Vec<_> = invalid
+            .validate_shape()
+            .into_iter()
+            .map(|issue| issue.code)
+            .collect();
+        assert!(codes.contains(&"ui.invalid_schema".to_string()));
+        assert!(codes.contains(&"i18n.invalid_key".to_string()));
+    }
+
+    #[test]
+    fn minigames_require_explicit_authority() {
+        let game = MinigameDefinition {
+            id: DefinitionId::new("minigame.lockpick").unwrap(),
+            version: SchemaVersion::new(1, 0),
+            display: DisplayText {
+                name: key("minigame.lockpick.name"),
+                description: key("minigame.lockpick.description"),
+            },
+            panel_schema: "ui.lockpick".to_string(),
+            authority: "server".to_string(),
+            rewards: vec![DefinitionId::new("item.dust").unwrap()],
+        };
+
+        assert!(game.validate_shape().is_empty());
+
+        let mut invalid = game;
+        invalid.authority = "godmode".to_string();
+        assert!(invalid
+            .validate_shape()
+            .iter()
+            .any(|issue| issue.code == "minigame.invalid_authority"));
     }
 }
