@@ -7,6 +7,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use std::fmt;
+
 use engine_core::error::{EngineError, ErrorCode};
 use engine_core::id::{DefinitionId, StableId};
 use engine_core::time::Tick;
@@ -50,6 +52,68 @@ pub enum Recipient {
     Authorized,
     /// Staff roles only.
     Staff,
+}
+
+/// Maximum length of a session identifier.
+pub const MAX_SESSION_ID_LEN: usize = 128;
+
+/// An opaque, validated world-session identifier.
+///
+/// Session IDs are issued by the world gateway after authentication. They are
+/// not account or character IDs: a new connection gets a new session even when
+/// it resumes the same character.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct SessionId(String);
+
+impl SessionId {
+    /// Validate and wrap a session identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorCode::InvalidRequest`] when the identifier is empty, too
+    /// long, or contains whitespace or control characters.
+    pub fn new(value: impl Into<String>) -> Result<Self, EngineError> {
+        let value = value.into();
+        if value.is_empty()
+            || value.len() > MAX_SESSION_ID_LEN
+            || value
+                .chars()
+                .any(|ch| ch.is_control() || ch.is_whitespace())
+        {
+            return Err(
+                EngineError::new(ErrorCode::InvalidRequest, "invalid session identifier")
+                    .with_detail("max_bytes", MAX_SESSION_ID_LEN.to_string()),
+            );
+        }
+        Ok(Self(value))
+    }
+
+    /// The identifier as a string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for SessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl TryFrom<String> for SessionId {
+    type Error = EngineError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<SessionId> for String {
+    fn from(value: SessionId) -> Self {
+        value.0
+    }
 }
 
 /// Classification of replicated data.
@@ -121,6 +185,13 @@ pub struct ReplicationUpdate {
     /// Definition that produced the update, for client-side content lookup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition: Option<DefinitionId>,
+    /// Session that must receive a session-directed update.
+    ///
+    /// Required for [`Recipient::Session`] categories. Interest filtering drops
+    /// session-directed updates that do not name a session, so an omitted
+    /// target can never leak to every observer by accident.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionId>,
     /// Authoritative tick at which the change happened.
     pub tick: Tick,
     /// Per-entity sequence for latest-wins ordering.
@@ -139,6 +210,7 @@ impl ReplicationUpdate {
             category,
             entity: None,
             definition: None,
+            session: None,
             tick,
             sequence: 0,
             payload: empty_payload(),
@@ -156,6 +228,13 @@ impl ReplicationUpdate {
     #[must_use]
     pub fn with_definition(mut self, definition: DefinitionId) -> Self {
         self.definition = Some(definition);
+        self
+    }
+
+    /// Address the update to one session.
+    #[must_use]
+    pub fn with_session(mut self, session: SessionId) -> Self {
+        self.session = Some(session);
         self
     }
 
@@ -177,14 +256,21 @@ impl ReplicationUpdate {
     ///
     /// # Errors
     ///
-    /// Returns [`ErrorCode::InvalidRequest`] when a required entity is missing
-    /// or the update claims a tick after its batch, and
+    /// Returns [`ErrorCode::InvalidRequest`] when a required entity or session
+    /// is missing, or when the update claims a tick after its batch, and
     /// [`ErrorCode::CapacityExceeded`] when the payload exceeds JSON limits.
     pub fn validate(&self, batch_tick: Tick) -> Result<(), EngineError> {
         if self.category.requires_entity() && self.entity.is_none() {
             return Err(EngineError::new(
                 ErrorCode::InvalidRequest,
                 "replication update requires an entity",
+            )
+            .with_detail("category", category_name(self.category)));
+        }
+        if self.category.recipient() == Recipient::Session && self.session.is_none() {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "session-directed replication update requires a session",
             )
             .with_detail("category", category_name(self.category)));
         }
@@ -342,6 +428,10 @@ mod tests {
         engine_core::id::DeterministicIdGenerator::new(seed).generate(IdKind::Entity)
     }
 
+    fn session(value: &str) -> SessionId {
+        SessionId::new(value).unwrap()
+    }
+
     #[test]
     fn categories_declare_delivery_and_audience() {
         let cases = [
@@ -392,8 +482,16 @@ mod tests {
             ErrorCode::InvalidRequest
         );
         assert!(update.with_entity(entity(1)).validate(batch_tick).is_ok());
+        assert_eq!(
+            ReplicationUpdate::new(ReplicationCategory::ReliableEvent, batch_tick)
+                .validate(batch_tick)
+                .unwrap_err()
+                .code(),
+            ErrorCode::InvalidRequest
+        );
         assert!(
             ReplicationUpdate::new(ReplicationCategory::ReliableEvent, batch_tick)
+                .with_session(session("s-1"))
                 .validate(batch_tick)
                 .is_ok()
         );
@@ -402,7 +500,8 @@ mod tests {
     #[test]
     fn future_updates_are_rejected() {
         let mut batch = ReplicationBatch::new(Tick(5));
-        let update = ReplicationUpdate::new(ReplicationCategory::ReliableEvent, Tick(6));
+        let update = ReplicationUpdate::new(ReplicationCategory::ReliableEvent, Tick(6))
+            .with_session(session("s-1"));
         assert_eq!(
             batch.push(update).unwrap_err().code(),
             ErrorCode::InvalidRequest
@@ -413,7 +512,8 @@ mod tests {
     #[test]
     fn batches_enforce_their_update_limit() {
         let tick = Tick(1);
-        let update = ReplicationUpdate::new(ReplicationCategory::ReliableEvent, tick);
+        let update = ReplicationUpdate::new(ReplicationCategory::ReliableEvent, tick)
+            .with_session(session("s-1"));
         let batch = ReplicationBatch {
             tick,
             updates: vec![update; MAX_UPDATES_PER_BATCH + 1],
@@ -454,10 +554,10 @@ mod tests {
             )
             .unwrap();
         batch
-            .push(ReplicationUpdate::new(
-                ReplicationCategory::ReliableEvent,
-                tick,
-            ))
+            .push(
+                ReplicationUpdate::new(ReplicationCategory::ReliableEvent, tick)
+                    .with_session(session("s-1")),
+            )
             .unwrap();
 
         assert_eq!(batch.reliable().count(), 1);
@@ -477,6 +577,25 @@ mod tests {
             .unwrap();
         assert_eq!(kept.sequence, 3);
         assert_eq!(kept.payload, json!({ "x": 3 }));
+    }
+
+    #[test]
+    fn session_ids_are_validated_and_round_trip() {
+        assert_eq!(session("session-1").as_str(), "session-1");
+        for invalid in [
+            "",
+            "has space",
+            "line\nbreak",
+            &"x".repeat(MAX_SESSION_ID_LEN + 1),
+        ] {
+            assert!(
+                SessionId::new(invalid).is_err(),
+                "{invalid:?} should be rejected as a session id"
+            );
+        }
+        let parsed: SessionId = serde_json::from_str("\"session-1\"").unwrap();
+        assert_eq!(parsed, session("session-1"));
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), "\"session-1\"");
     }
 
     #[test]

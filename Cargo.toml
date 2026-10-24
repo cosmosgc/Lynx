@@ -7,6 +7,9 @@ members = [
     "crates/engine_net",
     "crates/backend_nakama",
     "crates/game_api",
+    "crates/world_gateway",
+    "crates/world_server",
+    "crates/lynx_world",
     "tools/project_cli",
 ]
 
@@ -39,6 +42,18 @@ engine_content = { path = "crates/engine_content" }
 engine_net = { path = "crates/engine_net" }
 backend_nakama = { path = "crates/backend_nakama" }
 game_api = { path = "crates/game_api" }
+world_gateway = { path = "crates/world_gateway" }
+world_server = { path = "crates/world_server" }
+
+axum = { version = "0.8.9", features = ["ws"] }
+tokio = { version = "1.54.1", features = [
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
 
 [profile.dev]
 debug = 1

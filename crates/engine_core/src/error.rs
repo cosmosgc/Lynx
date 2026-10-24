@@ -23,6 +23,8 @@ pub enum ErrorCode {
     PermissionDenied,
     /// The object exists but is not in a valid state for the operation.
     InvalidState,
+    /// The session or its resumable token is no longer valid.
+    SessionExpired,
     /// The action is on cooldown.
     Cooldown,
     /// A capacity (slots, population, budget) would be exceeded.
@@ -52,6 +54,7 @@ impl ErrorCode {
             Self::NotVisible => "not_visible",
             Self::PermissionDenied => "permission_denied",
             Self::InvalidState => "invalid_state",
+            Self::SessionExpired => "session_expired",
             Self::Cooldown => "cooldown",
             Self::CapacityExceeded => "capacity_exceeded",
             Self::VersionMismatch => "version_mismatch",
@@ -83,6 +86,7 @@ impl ErrorCode {
                 | Self::NotVisible
                 | Self::PermissionDenied
                 | Self::InvalidState
+                | Self::SessionExpired
                 | Self::Cooldown
                 | Self::CapacityExceeded
                 | Self::VersionMismatch
@@ -204,6 +208,7 @@ mod tests {
     fn code_round_trips_through_json() {
         for code in [
             ErrorCode::InvalidRequest,
+            ErrorCode::SessionExpired,
             ErrorCode::BudgetExhausted,
             ErrorCode::VersionMismatch,
             ErrorCode::Internal,

@@ -42,9 +42,8 @@ impl ApiError {
     pub const fn code(&self) -> ErrorCode {
         match self {
             Self::Unavailable(_) | Self::Transport(_) => ErrorCode::Internal,
-            Self::Unauthenticated | Self::SessionExpired | Self::PermissionDenied => {
-                ErrorCode::PermissionDenied
-            }
+            Self::Unauthenticated | Self::PermissionDenied => ErrorCode::PermissionDenied,
+            Self::SessionExpired => ErrorCode::SessionExpired,
             Self::NotFound(_) => ErrorCode::NotFound,
             Self::InvalidRequest(_) => ErrorCode::InvalidRequest,
             Self::Conflict(_) => ErrorCode::Conflict,
@@ -379,5 +378,10 @@ mod tests {
         };
         assert_eq!(error.code(), ErrorCode::NotFound);
         assert!(!error.is_retryable());
+
+        let expired = ApiError::SessionExpired;
+        assert_eq!(expired.code(), ErrorCode::SessionExpired);
+        assert!(!expired.is_retryable());
+        assert_eq!(expired.to_engine_error().code(), ErrorCode::SessionExpired);
     }
 }

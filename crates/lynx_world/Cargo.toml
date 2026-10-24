@@ -1,0 +1,34 @@
+[package]
+name = "lynx-world"
+description = "Runnable WebSocket world service for Lynx"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true }
+clap = { workspace = true }
+engine_core = { workspace = true }
+engine_net = { workspace = true }
+engine_sim = { workspace = true }
+game_api = { workspace = true }
+semver = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+world_gateway = { workspace = true }
+world_server = { workspace = true }
+
+[dev-dependencies]
+futures-util = "0.3.31"
+tokio-tungstenite = "0.30.0"
+
+[lints]
+workspace = true
