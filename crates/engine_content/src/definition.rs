@@ -141,27 +141,44 @@ impl UiPanelDefinition {
                 "panel versions must have a major version of at least one",
             ));
         }
-        if self.display.name == self.display.description {
+        validate_display(&self.display, &mut issues);
+        if !self.id.is_in("ui") && !self.id.is_in("panel") {
             issues.push(ValidationIssue::new(
-                "content.duplicate_display_key",
-                "display",
-                "name and description must use different message keys",
+                "ui.invalid_id",
+                "id",
+                "panel ids must use the ui or panel namespace",
             ));
         }
-        if self.schema.is_empty() || !self.schema.contains('.') {
+        if !is_namespaced(&self.schema) {
             issues.push(ValidationIssue::new(
                 "ui.invalid_schema",
                 "schema",
                 "panel schema must be a namespaced identifier such as ui.inventory",
             ));
         }
-        if self.actions.is_empty() {
+        if self.actions.is_empty() && self.fallback_schema.is_none() {
             issues.push(ValidationIssue::new(
                 "ui.empty_actions",
                 "actions",
-                "a panel should expose at least one action or a read-only fallback",
+                "a panel must expose at least one action or a read-only fallback",
             ));
         }
+        if let Some(fallback) = &self.fallback_schema
+            && !is_namespaced(fallback)
+        {
+            issues.push(ValidationIssue::new(
+                "ui.invalid_schema",
+                "fallback_schema",
+                "fallback schemas must be namespaced identifiers",
+            ));
+        }
+        self.validate_actions(&mut issues);
+        self.validate_fields(&mut issues);
+        issues
+    }
+
+    fn validate_actions(&self, issues: &mut Vec<ValidationIssue>) {
+        let mut action_names = BTreeSet::new();
         for (index, action) in self.actions.iter().enumerate() {
             if action.name.is_empty() || action.name.contains(char::is_whitespace) {
                 issues.push(ValidationIssue::new(
@@ -169,8 +186,14 @@ impl UiPanelDefinition {
                     format!("actions[{index}].name"),
                     "action names must be compact identifiers without spaces",
                 ));
+            } else if !action_names.insert(action.name.as_str()) {
+                issues.push(ValidationIssue::new(
+                    "ui.duplicate_action",
+                    format!("actions[{index}].name"),
+                    format!("action {} is declared more than once", action.name),
+                ));
             }
-            if !action.label.as_str().contains('.') {
+            if !is_namespaced(action.label.as_str()) {
                 issues.push(ValidationIssue::new(
                     "i18n.invalid_key",
                     format!("actions[{index}].label"),
@@ -185,16 +208,26 @@ impl UiPanelDefinition {
                 issues.push(ValidationIssue::new(
                     "ui.invalid_gate",
                     format!("actions[{index}].gated_by"),
-                    "gated_by must be empty or a non-empty condition key",
+                    "gated_by must name a condition when present",
                 ));
             }
         }
+    }
+
+    fn validate_fields(&self, issues: &mut Vec<ValidationIssue>) {
+        let mut field_keys = BTreeSet::new();
         for (index, field) in self.fields.iter().enumerate() {
             if field.key.is_empty() || field.key.contains(char::is_whitespace) {
                 issues.push(ValidationIssue::new(
                     "ui.invalid_field_key",
                     format!("fields[{index}].key"),
                     "field keys must be compact identifiers without spaces",
+                ));
+            } else if !field_keys.insert(field.key.as_str()) {
+                issues.push(ValidationIssue::new(
+                    "ui.duplicate_field",
+                    format!("fields[{index}].key"),
+                    format!("field {} is declared more than once", field.key),
                 ));
             }
             if field.source.trim().is_empty() {
@@ -214,7 +247,6 @@ impl UiPanelDefinition {
                 ));
             }
         }
-        issues
     }
 }
 
@@ -248,14 +280,15 @@ impl MinigameDefinition {
                 "minigame versions must have a major version of at least one",
             ));
         }
-        if self.display.name == self.display.description {
+        validate_display(&self.display, &mut issues);
+        if !self.id.is_in("minigame") {
             issues.push(ValidationIssue::new(
-                "content.duplicate_display_key",
-                "display",
-                "name and description must use different message keys",
+                "minigame.invalid_id",
+                "id",
+                "minigame ids must use the minigame namespace",
             ));
         }
-        if self.panel_schema.is_empty() || !self.panel_schema.contains('.') {
+        if !is_namespaced(&self.panel_schema) {
             issues.push(ValidationIssue::new(
                 "ui.invalid_schema",
                 "panel_schema",
@@ -269,6 +302,14 @@ impl MinigameDefinition {
                 "authority must be server, hybrid, or client",
             ));
         }
+        if self.authority == "client" && !self.rewards.is_empty() {
+            issues.push(ValidationIssue::new(
+                "minigame.client_authority_rewards",
+                "rewards",
+                "client-authoritative minigames must not grant rewards",
+            ));
+        }
+        let mut seen = BTreeSet::new();
         for (index, reward) in self.rewards.iter().enumerate() {
             if reward.namespace().is_none() {
                 issues.push(ValidationIssue::new(
@@ -277,9 +318,51 @@ impl MinigameDefinition {
                     "reward references must include a namespace",
                 ));
             }
+            if !seen.insert(reward.as_str()) {
+                issues.push(ValidationIssue::new(
+                    "content.duplicate_reference",
+                    format!("rewards[{index}]"),
+                    format!("reward {reward} is declared more than once"),
+                ));
+            }
         }
         issues
     }
+}
+
+/// Shared display-key validation for non-component definitions.
+fn validate_display(display: &DisplayText, issues: &mut Vec<ValidationIssue>) {
+    if display.name == display.description {
+        issues.push(ValidationIssue::new(
+            "content.duplicate_display_key",
+            "display",
+            "name and description must use different message keys",
+        ));
+    }
+    for (field, key) in [
+        ("name", &display.name),
+        ("description", &display.description),
+    ] {
+        if !is_namespaced(key.as_str()) {
+            issues.push(ValidationIssue::new(
+                "i18n.invalid_key",
+                format!("display.{field}"),
+                "message keys must be namespaced, for example ui.inventory.title",
+            ));
+        }
+    }
+}
+
+/// Whether a value is a dot-separated, whitespace-free identifier with at least
+/// two non-empty segments.
+fn is_namespaced(value: &str) -> bool {
+    let mut segments = value.split('.');
+    let first = segments.next().unwrap_or_default();
+    let second = segments.next().unwrap_or_default();
+    !first.is_empty()
+        && !second.is_empty()
+        && !value.chars().any(char::is_whitespace)
+        && segments.all(|segment| !segment.is_empty())
 }
 
 /// Presentation assets and mode.
@@ -398,25 +481,7 @@ impl ContentDefinition {
                 "content versions must have a major version of at least one",
             ));
         }
-        if self.display.name == self.display.description {
-            issues.push(ValidationIssue::new(
-                "content.duplicate_display_key",
-                "display",
-                "name and description must use different message keys",
-            ));
-        }
-        for (field, key) in [
-            ("name", &self.display.name),
-            ("description", &self.display.description),
-        ] {
-            if !key.as_str().contains('.') {
-                issues.push(ValidationIssue::new(
-                    "i18n.invalid_key",
-                    format!("display.{field}"),
-                    "message keys must be namespaced, for example entity.door.name",
-                ));
-            }
-        }
+        validate_display(&self.display, &mut issues);
         if self.components.is_empty() {
             issues.push(ValidationIssue::new(
                 "content.empty_components",
@@ -581,7 +646,7 @@ mod tests {
             fallback_schema: Some("ui.inspect".to_string()),
         };
 
-        assert!(panel.validate_shape().is_empty());
+        assert_eq!(panel.validate_shape(), Vec::new());
 
         let mut invalid = panel.clone();
         invalid.schema = "terminal".to_string();
@@ -593,6 +658,57 @@ mod tests {
             .collect();
         assert!(codes.contains(&"ui.invalid_schema".to_string()));
         assert!(codes.contains(&"i18n.invalid_key".to_string()));
+    }
+
+    #[test]
+    fn read_only_panels_need_a_fallback_and_duplicates_are_reported() {
+        let mut panel = UiPanelDefinition {
+            id: DefinitionId::new("panel.terminal").unwrap(),
+            version: SchemaVersion::new(1, 0),
+            display: DisplayText {
+                name: key("ui.terminal.title"),
+                description: key("ui.terminal.description"),
+            },
+            schema: "ui.terminal".to_string(),
+            actions: Vec::new(),
+            fields: vec![UiFieldBinding {
+                key: "status".to_string(),
+                source: "entity.state.status".to_string(),
+                formatter: None,
+            }],
+            fallback_schema: None,
+        };
+
+        assert!(
+            panel
+                .validate_shape()
+                .iter()
+                .any(|issue| issue.code == "ui.empty_actions")
+        );
+
+        panel.fallback_schema = Some("ui.inspect".to_string());
+        assert_eq!(panel.validate_shape(), Vec::new());
+
+        panel.fields.push(panel.fields[0].clone());
+        panel.actions = vec![
+            UiPanelAction {
+                name: "close".to_string(),
+                label: key("ui.action.close"),
+                gated_by: None,
+            },
+            UiPanelAction {
+                name: "close".to_string(),
+                label: key("ui.action.close"),
+                gated_by: None,
+            },
+        ];
+        let codes: Vec<_> = panel
+            .validate_shape()
+            .into_iter()
+            .map(|issue| issue.code)
+            .collect();
+        assert!(codes.contains(&"ui.duplicate_field".to_string()));
+        assert!(codes.contains(&"ui.duplicate_action".to_string()));
     }
 
     #[test]
@@ -609,13 +725,47 @@ mod tests {
             rewards: vec![DefinitionId::new("item.dust").unwrap()],
         };
 
-        assert!(game.validate_shape().is_empty());
+        assert_eq!(game.validate_shape(), Vec::new());
 
         let mut invalid = game;
         invalid.authority = "godmode".to_string();
-        assert!(invalid
+        assert!(
+            invalid
+                .validate_shape()
+                .iter()
+                .any(|issue| issue.code == "minigame.invalid_authority")
+        );
+    }
+
+    #[test]
+    fn client_authoritative_minigames_cannot_grant_rewards() {
+        let mut game = MinigameDefinition {
+            id: DefinitionId::new("minigame.dice").unwrap(),
+            version: SchemaVersion::new(1, 0),
+            display: DisplayText {
+                name: key("minigame.dice.name"),
+                description: key("minigame.dice.description"),
+            },
+            panel_schema: "ui.dice".to_string(),
+            authority: "client".to_string(),
+            rewards: Vec::new(),
+        };
+        assert_eq!(game.validate_shape(), Vec::new());
+
+        game.rewards = vec![DefinitionId::new("item.dust").unwrap()];
+        assert!(
+            game.validate_shape()
+                .iter()
+                .any(|issue| issue.code == "minigame.client_authority_rewards")
+        );
+
+        game.authority = "server".to_string();
+        game.rewards.push(game.rewards[0].clone());
+        let codes: Vec<_> = game
             .validate_shape()
-            .iter()
-            .any(|issue| issue.code == "minigame.invalid_authority"));
+            .into_iter()
+            .map(|issue| issue.code)
+            .collect();
+        assert!(codes.contains(&"content.duplicate_reference".to_string()));
     }
 }
