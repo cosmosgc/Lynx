@@ -18,6 +18,22 @@ cargo run -p project_cli -- new my-world --template minimal --output ../my-world
 cargo run -p project_cli -- doctor --project ../my-world
 ```
 
+Windows users can run the matching scripts in `BAT\` from any working
+directory. For example:
+
+```bat
+BAT\test.bat
+BAT\build.bat
+BAT\validate.bat ..\my-world
+BAT\all-checks.bat
+```
+
+[`BAT/README.md`](../BAT/README.md) lists the available scripts and examples.
+`BAT\all-checks.bat` runs formatting verification, Clippy, workspace tests, and
+a workspace build. Separate scripts are also available for formatting,
+validation, diagnostics, scaffolding, content hashing, and building or testing
+a generated project.
+
 `cargo test --workspace` must pass without network access after dependencies
 are fetched. No database or Nakama instance is needed for engine tests.
 
