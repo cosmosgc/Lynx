@@ -9,6 +9,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+base64 = { workspace = true }
 engine_core = { workspace = true }
 game_api = { workspace = true }
 serde = { workspace = true }

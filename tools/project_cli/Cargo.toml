@@ -18,6 +18,7 @@ backend_nakama = { workspace = true }
 clap = { workspace = true }
 engine_content = { workspace = true }
 engine_core = { workspace = true }
+game_api = { workspace = true }
 serde_json = { workspace = true }
 
 [lints]

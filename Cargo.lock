@@ -62,6 +62,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 name = "backend_nakama"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "engine_core",
  "game_api",
  "serde",
@@ -386,6 +387,7 @@ dependencies = [
  "clap",
  "engine_content",
  "engine_core",
+ "game_api",
  "serde_json",
 ]
 

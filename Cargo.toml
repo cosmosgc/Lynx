@@ -20,6 +20,7 @@ repository = "https://github.com/cosmosgc/Lynx"
 
 [workspace.dependencies]
 anyhow = "1.0.104"
+base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive"] }
 getrandom = "0.4.3"
 ron = "0.12.2"
