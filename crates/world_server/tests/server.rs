@@ -10,15 +10,17 @@ use engine_core::time::{Millis, Tick};
 use engine_net::envelope::{Envelope, MessageId, MessageKind};
 use engine_net::protocol::Handshake;
 use engine_net::replication::{ReplicationBatch, SessionId};
-use engine_sim::action::{ActionResult, Verb};
-use engine_sim::entity::{Door, EntityRecord, Interactable};
+use engine_sim::action::{ActionEffect, ActionResult, Verb};
+use engine_sim::entity::{Door, EntityRecord, Interactable, UiProvider};
 use engine_sim::mind::Mind;
+use engine_sim::minigame::Minigame;
 use engine_sim::nav::NavGrid;
 use engine_sim::zone::{Zone, ZoneConfig};
 use game_api::AccountId;
 use serde_json::json;
 use world_gateway::{
-    GatewayConfig, SequentialResumeTokens, SessionClaims, SessionDelivery, WorldGateway,
+    GatewayConfig, SequentialResumeTokens, SessionClaims, SessionDelivery, UI_ACTION_KIND,
+    UI_STATE_KIND, WorldGateway,
 };
 use world_server::{
     CloseReason, DELTA_KIND, Opened, Outbound, READY_KIND, Ready, SNAPSHOT_KIND, WorldServer,
@@ -33,6 +35,7 @@ struct Fixture {
     bob_principal: StableId,
     alice_door: StableId,
     bob_door: StableId,
+    alice_vault: StableId,
     hidden_crate: StableId,
 }
 
@@ -115,6 +118,18 @@ fn fixture_with_ttl(ttl_ms: u64) -> Fixture {
     )
     .unwrap();
 
+    let alice_vault = id(IdKind::Entity, 40);
+    zone.spawn(
+        EntityRecord::new(alice_vault, text("prop.vault"), Vec3::new(9.0, 0.0, 10.0))
+            .with_interactable(
+                Interactable::new(3.0, [Verb::Use, Verb::Play, Verb::Open]).without_line_of_sight(),
+            )
+            .with_door(Door::locked_with(text("key.vault")))
+            .with_ui(UiProvider::new(text("ui.lockpick"), "Vault Lock"))
+            .with_minigame(Minigame::new(text("minigame.lockpick"), 3, 4, 10, 9).unwrap()),
+    )
+    .unwrap();
+
     let gateway = WorldGateway::new(
         zone,
         handshake(),
@@ -131,6 +146,7 @@ fn fixture_with_ttl(ttl_ms: u64) -> Fixture {
         bob_principal,
         alice_door,
         bob_door,
+        alice_vault,
         hidden_crate,
     }
 }
@@ -153,6 +169,30 @@ fn action(id: &str, body: serde_json::Value) -> Envelope {
     )
 }
 
+fn ui_action(id: &str, body: serde_json::Value) -> Envelope {
+    Envelope::new(
+        MessageId::parse(id).unwrap(),
+        MessageKind::parse(UI_ACTION_KIND).unwrap(),
+        body,
+    )
+}
+
+fn receive_ui(
+    server: &mut WorldServer,
+    connection: world_server::ConnectionId,
+    request_id: &str,
+    body: serde_json::Value,
+    now_ms: i64,
+) -> Vec<Outbound> {
+    server
+        .receive(
+            connection,
+            &ui_action(request_id, body),
+            Millis::new(now_ms),
+        )
+        .unwrap()
+}
+
 fn envelope_with_kind<'a>(opened: &'a Opened, kind: &str) -> &'a Envelope {
     opened
         .messages
@@ -173,6 +213,35 @@ fn message_for(outbound: &[Outbound], connection: world_server::ConnectionId) ->
         } if *target == connection => Some(envelope),
         _ => None,
     })
+}
+
+fn messages_for(outbound: &[Outbound], connection: world_server::ConnectionId) -> Vec<&Envelope> {
+    outbound
+        .iter()
+        .filter_map(|output| match output {
+            Outbound::Message {
+                connection: target,
+                envelope,
+            } if *target == connection => Some(envelope),
+            _ => None,
+        })
+        .collect()
+}
+
+fn secret_for(fixture: &Fixture, vault: StableId, principal: StableId) -> String {
+    fixture
+        .server
+        .gateway()
+        .zone()
+        .entity(vault)
+        .unwrap()
+        .minigame
+        .as_ref()
+        .unwrap()
+        .secret_for(principal)
+        .iter()
+        .map(|digit| char::from(b'0' + digit))
+        .collect()
 }
 
 fn batch_has_entity(batch: &ReplicationBatch, entity: StableId) -> bool {
@@ -261,6 +330,106 @@ fn actions_route_back_to_their_connection() {
             .as_ref()
             .unwrap()
             .open
+    );
+}
+
+#[test]
+fn minigame_actions_route_only_to_the_originating_connection() {
+    let mut fixture = fixture();
+    let alice = open(
+        &mut fixture.server,
+        "account-alice",
+        fixture.alice_principal,
+    );
+    let bob = open(&mut fixture.server, "account-bob", fixture.bob_principal);
+
+    let opened = fixture
+        .server
+        .receive(
+            alice.connection,
+            &action(
+                "req_vault_open_0001",
+                json!({ "verb": "use", "target": fixture.alice_vault.to_string() }),
+            ),
+            Millis::new(2_000),
+        )
+        .unwrap();
+    assert_eq!(messages_for(&opened, alice.connection).len(), 2);
+    assert!(
+        messages_for(&opened, bob.connection).is_empty(),
+        "opening a panel is not a broadcast"
+    );
+    let state = messages_for(&opened, alice.connection)
+        .into_iter()
+        .find(|envelope| envelope.kind.as_str() == UI_STATE_KIND)
+        .expect("opening a panel emits authoritative UI state");
+    assert_eq!(state.body["panel"]["schema"], json!("ui.lockpick"));
+
+    let secret = secret_for(&fixture, fixture.alice_vault, fixture.alice_principal);
+    let wrong = if secret == "000" { "111" } else { "000" };
+    let turn = receive_ui(
+        &mut fixture.server,
+        alice.connection,
+        "req_vault_play_0001",
+        json!({ "schema": "ui.lockpick", "action": "play", "params": { "guess": wrong } }),
+        2_001,
+    );
+    assert!(
+        messages_for(&turn, bob.connection).is_empty(),
+        "a minigame turn reaches only its player"
+    );
+    let turn_messages = messages_for(&turn, alice.connection);
+    assert_eq!(turn_messages.len(), 2);
+    assert_eq!(turn_messages[0].kind.as_str(), "action.result");
+    assert_eq!(turn_messages[1].kind.as_str(), UI_STATE_KIND);
+    let result: ActionResult = serde_json::from_value(turn_messages[0].body.clone()).unwrap();
+    assert!(result.is_applied());
+    assert!(matches!(
+        result.effects().first(),
+        Some(ActionEffect::MinigameAttempt {
+            attempts_left: 3,
+            solved: false,
+            ..
+        })
+    ));
+    assert_eq!(
+        turn_messages[1].body["panel"]["schema"],
+        json!("ui.lockpick")
+    );
+
+    let solved = receive_ui(
+        &mut fixture.server,
+        alice.connection,
+        "req_vault_play_0002",
+        json!({ "schema": "ui.lockpick", "action": "play", "params": { "guess": secret } }),
+        2_002,
+    );
+    assert_eq!(
+        messages_for(&solved, bob.connection).len(),
+        0,
+        "a solved minigame is not broadcast"
+    );
+    let solved_messages = messages_for(&solved, alice.connection);
+    let result: ActionResult = serde_json::from_value(solved_messages[0].body.clone()).unwrap();
+    assert!(result.effects().iter().any(
+        |effect| matches!(effect, ActionEffect::DoorUnlocked { target } if *target == fixture.alice_vault)
+    ));
+    assert_eq!(
+        solved_messages[1].body["panel"],
+        serde_json::Value::Null,
+        "solving closes the panel"
+    );
+    assert!(
+        !fixture
+            .server
+            .gateway()
+            .zone()
+            .entity(fixture.alice_vault)
+            .unwrap()
+            .door
+            .as_ref()
+            .unwrap()
+            .locked
     );
 }
 

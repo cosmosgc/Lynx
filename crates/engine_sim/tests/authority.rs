@@ -15,6 +15,7 @@ use engine_sim::action::{ActionEffect, ActionRequest, Verb};
 use engine_sim::entity::{Door, EntityRecord, Interactable, InteractionPermission, UiProvider};
 use engine_sim::link::{EntityLink, LinkEvent};
 use engine_sim::mind::Mind;
+use engine_sim::minigame::{DigitHint, Minigame};
 use engine_sim::nav::NavGrid;
 use engine_sim::zone::{Zone, ZoneConfig};
 
@@ -72,6 +73,50 @@ fn action(actor: StableId, principal: StableId, target: StableId, verb: Verb) ->
         .on(target)
         .by(principal)
         .at_tick(engine_core::time::Tick::ZERO)
+}
+
+fn vault_at(zone: &mut Zone, seed: u128, position: Vec3) -> StableId {
+    let vault = entity(seed);
+    zone.spawn(
+        EntityRecord::new(vault, text("prop.vault"), position)
+            .with_interactable(
+                Interactable::new(3.0, [Verb::Use, Verb::Play, Verb::Open]).without_line_of_sight(),
+            )
+            .with_door(Door {
+                open: false,
+                locked: true,
+                key: None,
+            })
+            .with_ui(UiProvider::new(text("ui.lockpick"), "Vault Lock"))
+            .with_minigame(Minigame::new(text("minigame.lockpick"), 3, 4, 5, 42).unwrap()),
+    )
+    .unwrap();
+    vault
+}
+
+fn secret(zone: &Zone, vault: StableId, principal: StableId) -> String {
+    zone.entity(vault)
+        .unwrap()
+        .minigame
+        .as_ref()
+        .unwrap()
+        .secret_for(principal)
+        .iter()
+        .map(|digit| char::from(b'0' + digit))
+        .collect()
+}
+
+fn play(
+    actor: StableId,
+    principal: StableId,
+    vault: StableId,
+    request_id: &str,
+    guess: &str,
+) -> ActionRequest {
+    ActionRequest::new(request_id, actor, Verb::Play)
+        .on(vault)
+        .by(principal)
+        .with_param("guess", guess)
 }
 
 #[test]
@@ -474,4 +519,225 @@ fn unused_factions_do_not_change_combat_authority() {
         Millis::new(1),
     );
     assert!(result.is_applied());
+}
+
+#[test]
+fn a_locked_vault_opens_a_minigame_panel_instead_of_the_door() {
+    let mut zone = test_zone();
+    let (actor, principal) = player_at(&mut zone, 1, Vec3::ZERO, 2);
+    let vault = vault_at(&mut zone, 2, Vec3::new(2.0, 0.0, 0.0));
+
+    let result = zone.apply_action(&action(actor, principal, vault, Verb::Use), Millis::new(1));
+    assert!(result.is_applied());
+    assert!(matches!(
+        result.effects().first(),
+        Some(ActionEffect::UiOpened { target, schema, .. })
+            if *target == vault && schema.as_str() == "ui.lockpick"
+    ));
+    assert!(matches!(
+        result.effects().get(1),
+        Some(ActionEffect::MinigameStarted {
+            target,
+            length: 3,
+            attempts_left: 4,
+            solved: false,
+            ..
+        }) if *target == vault
+    ));
+
+    let open = zone.apply_action(&action(actor, principal, vault, Verb::Open), Millis::new(2));
+    assert_eq!(open.error().unwrap().code(), ErrorCode::InvalidState);
+    assert!(zone.entity(vault).unwrap().door.as_ref().unwrap().locked);
+}
+
+#[test]
+fn solving_a_minigame_unlocks_the_door_and_closes_the_panel() {
+    let mut zone = test_zone();
+    let (actor, principal) = player_at(&mut zone, 1, Vec3::ZERO, 2);
+    let vault = vault_at(&mut zone, 2, Vec3::new(2.0, 0.0, 0.0));
+    let secret = secret(&zone, vault, principal);
+    let opened = zone.apply_action(&action(actor, principal, vault, Verb::Use), Millis::new(1));
+    assert!(opened.is_applied());
+
+    let wrong = if secret == "000" { "111" } else { "000" };
+    let attempt = zone.apply_action(
+        &play(actor, principal, vault, "guess-1", wrong),
+        Millis::new(2),
+    );
+    assert!(attempt.is_applied());
+    let ActionEffect::MinigameAttempt {
+        hints,
+        attempts_left,
+        solved,
+        ..
+    } = &attempt.effects()[0]
+    else {
+        panic!("expected a minigame attempt effect");
+    };
+    assert!(!solved);
+    assert_eq!(*attempts_left, 3);
+    assert_eq!(hints.len(), 3);
+    assert!(hints.iter().any(|hint| *hint != DigitHint::Exact));
+    assert!(zone.entity(vault).unwrap().door.as_ref().unwrap().locked);
+
+    let solved = zone.apply_action(
+        &play(actor, principal, vault, "guess-2", &secret),
+        Millis::new(3),
+    );
+    assert!(solved.is_applied());
+    assert!(
+        solved
+            .effects()
+            .iter()
+            .any(|effect| matches!(effect, ActionEffect::MinigameSolved { .. }))
+    );
+    assert!(
+        solved
+            .effects()
+            .iter()
+            .any(|effect| matches!(effect, ActionEffect::DoorUnlocked { .. }))
+    );
+    assert!(
+        solved
+            .effects()
+            .iter()
+            .any(|effect| matches!(effect, ActionEffect::UiClosed { .. }))
+    );
+    assert!(!zone.entity(vault).unwrap().door.as_ref().unwrap().locked);
+
+    let replay = zone.apply_action(
+        &play(actor, principal, vault, "guess-3", &secret),
+        Millis::new(4),
+    );
+    assert_eq!(replay.error().unwrap().code(), ErrorCode::InvalidState);
+
+    let open = zone.apply_action(&action(actor, principal, vault, Verb::Open), Millis::new(5));
+    assert!(open.is_applied());
+    assert!(zone.entity(vault).unwrap().door.as_ref().unwrap().open);
+}
+
+#[test]
+fn malformed_guesses_are_rejected_without_consuming_attempts() {
+    let mut zone = test_zone();
+    let (actor, principal) = player_at(&mut zone, 1, Vec3::ZERO, 2);
+    let vault = vault_at(&mut zone, 2, Vec3::new(2.0, 0.0, 0.0));
+    let opened = zone.apply_action(&action(actor, principal, vault, Verb::Use), Millis::new(1));
+    assert!(opened.is_applied());
+
+    let missing = zone.apply_action(
+        &ActionRequest::new("guess-missing", actor, Verb::Play)
+            .on(vault)
+            .by(principal),
+        Millis::new(2),
+    );
+    assert_eq!(missing.error().unwrap().code(), ErrorCode::InvalidRequest);
+    for (index, guess) in ["", "12", "1234", "12a"].iter().enumerate() {
+        let result = zone.apply_action(
+            &play(
+                actor,
+                principal,
+                vault,
+                &format!("guess-bad-{index}"),
+                guess,
+            ),
+            Millis::new(3),
+        );
+        assert_eq!(result.error().unwrap().code(), ErrorCode::InvalidRequest);
+    }
+
+    let progress = zone
+        .entity(vault)
+        .unwrap()
+        .minigame
+        .as_ref()
+        .unwrap()
+        .progress
+        .get(&principal)
+        .unwrap();
+    assert_eq!(progress.attempts_left, 4);
+    assert!(zone.entity(vault).unwrap().door.as_ref().unwrap().locked);
+}
+
+#[test]
+fn minigame_attempts_are_per_player_and_lock_out_after_exhaustion() {
+    let mut zone = test_zone();
+    let (alice_actor, alice) = player_at(&mut zone, 1, Vec3::ZERO, 2);
+    let (bob_actor, bob) = player_at(&mut zone, 3, Vec3::new(0.0, 0.0, 1.0), 2);
+    let vault = vault_at(&mut zone, 2, Vec3::new(2.0, 0.0, 0.0));
+    let alice_secret = secret(&zone, vault, alice);
+    let bob_secret = secret(&zone, vault, bob);
+    let wrong = if alice_secret == "000" { "111" } else { "000" };
+
+    let alice_open = zone.apply_action(
+        &action(alice_actor, alice, vault, Verb::Use),
+        Millis::new(1),
+    );
+    assert!(alice_open.is_applied());
+    let bob_open = zone.apply_action(&action(bob_actor, bob, vault, Verb::Use), Millis::new(1));
+    assert!(bob_open.is_applied());
+
+    for index in 0..4 {
+        let result = zone.apply_action(
+            &play(
+                alice_actor,
+                alice,
+                vault,
+                &format!("alice-guess-{index}"),
+                wrong,
+            ),
+            Millis::new(2),
+        );
+        assert!(result.is_applied(), "attempt {index} is accepted");
+    }
+    let locked = zone.apply_action(
+        &play(alice_actor, alice, vault, "alice-guess-locked", wrong),
+        Millis::new(3),
+    );
+    assert_eq!(locked.error().unwrap().code(), ErrorCode::Cooldown);
+
+    let bob_turn = zone.apply_action(
+        &play(bob_actor, bob, vault, "bob-guess-1", &bob_secret),
+        Millis::new(3),
+    );
+    assert!(bob_turn.is_applied(), "Bob's budget is independent");
+    assert!(!zone.entity(vault).unwrap().door.as_ref().unwrap().locked);
+
+    for _ in 0..5 {
+        zone.advance_tick();
+    }
+    let recovered = zone.apply_action(
+        &play(
+            alice_actor,
+            alice,
+            vault,
+            "alice-guess-recovered",
+            &alice_secret,
+        ),
+        Millis::new(9),
+    );
+    assert!(
+        recovered.is_applied(),
+        "the attempt budget resets after the lockout"
+    );
+    assert!(
+        recovered
+            .effects()
+            .iter()
+            .any(|effect| matches!(effect, ActionEffect::MinigameSolved { .. }))
+    );
+}
+
+#[test]
+fn minigame_play_requires_range() {
+    let mut zone = test_zone();
+    let (actor, principal) = player_at(&mut zone, 1, Vec3::ZERO, 2);
+    let vault = vault_at(&mut zone, 2, Vec3::new(10.0, 0.0, 0.0));
+    let secret = secret(&zone, vault, principal);
+
+    let result = zone.apply_action(
+        &play(actor, principal, vault, "guess-far", &secret),
+        Millis::new(1),
+    );
+    assert_eq!(result.error().unwrap().code(), ErrorCode::OutOfRange);
+    assert!(zone.entity(vault).unwrap().door.as_ref().unwrap().locked);
 }

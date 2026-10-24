@@ -104,6 +104,36 @@ Entity-provided interfaces are server state, not a client-owned overlay.
 Panel targets, schemas, and titles are never accepted from a client. See
 [ADR 0015](adr/0015-ui-panel-session-state.md).
 
+### Server-validated minigames
+
+The reference minigame is a combination lock attached to an entity-provided
+interface. It runs inside `engine_sim::minigame`; the gateway only routes panel
+actions.
+
+- `use` or `activate` on a locked provider with a minigame opens the panel and
+  returns `UiOpened` plus `MinigameStarted`, carrying the definition, length,
+  remaining attempts, solved flag, and any lockout tick.
+- The combination is derived from a server-held seed and the authenticated
+  principal. Neither the seed nor the combination is replicated, and a client
+  cannot choose its own code. The seed must come from server entropy, not from a
+  content bundle the client also downloads.
+- Guesses arrive as `ui.action` with `action: "play"` and `params.guess`. A
+  direct `action.request` with `verb: "play"` is rejected with `Unsupported`;
+  minigame input must use the panel channel so the server resolves the provider
+  and re-validates range, visibility, and permission.
+- Each accepted guess returns `MinigameAttempt` with a per-digit
+  `exact`/`higher`/`lower` hint and the remaining attempts. Malformed guesses are
+  rejected without consuming an attempt.
+- Solving emits `MinigameSolved`, unlocks the provider's door with
+  `DoorUnlocked`, and closes the panel with `UiClosed`. Exhausting the budget
+  emits `MinigameFailed` and sets a server-tick lockout; further guesses return
+  `Cooldown` until it elapses.
+- Attempt budgets, progress, and lockouts are per principal, so one player
+  cannot consume another player's attempts. Minigame progress is server-only and
+  is absent from interest and owner snapshots.
+
+See [ADR 0016](adr/0016-server-validated-minigame.md).
+
 See [ADR 0014](adr/0014-framed-transport-and-world-server.md).
 
 ## Replication categories
@@ -193,6 +223,8 @@ See [ADR 0013](adr/0013-world-gateway-and-reconnect.md).
 - Panel actions (`ui.action`) carry an action name and parameters, never a
   target. The server resolves the provider from the session's open panel and
   re-validates range and permission before running the action.
+- Minigame outcomes are computed on the server. The client submits a guess, not
+  a result; hints, attempt counts, lockouts, and unlocks are server effects.
 - Movement is validated against colliders, speed, bounds, and zone rules.
 - Combat, inventory, currency, progression, and placement outcomes are
   computed on the server.

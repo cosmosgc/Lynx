@@ -13,6 +13,7 @@ use engine_net::replication::{ReplicationBatch, SessionId};
 use engine_sim::action::{ActionEffect, ActionResult, Verb};
 use engine_sim::entity::{Door, EntityRecord, Interactable, InteractionPermission, UiProvider};
 use engine_sim::mind::Mind;
+use engine_sim::minigame::Minigame;
 use engine_sim::nav::NavGrid;
 use engine_sim::zone::{Zone, ZoneConfig};
 use game_api::AccountId;
@@ -35,6 +36,7 @@ struct Fixture {
     alice_terminal: StableId,
     bob_owned_terminal: StableId,
     alice_display: StableId,
+    alice_vault: StableId,
     hidden_crate: StableId,
     torch: DefinitionId,
 }
@@ -55,7 +57,10 @@ fn claims(account: &str, principal: StableId) -> SessionClaims {
     SessionClaims::new(AccountId::new(account).unwrap(), principal).unwrap()
 }
 
-fn spawn_panels(zone: &mut Zone, bob_principal: StableId) -> (StableId, StableId, StableId) {
+fn spawn_panels(
+    zone: &mut Zone,
+    bob_principal: StableId,
+) -> (StableId, StableId, StableId, StableId) {
     let alice_terminal = id(IdKind::Entity, 40);
     zone.spawn(
         EntityRecord::new(
@@ -102,7 +107,28 @@ fn spawn_panels(zone: &mut Zone, bob_principal: StableId) -> (StableId, StableId
     )
     .unwrap();
 
-    (alice_terminal, bob_owned_terminal, alice_display)
+    let alice_vault = id(IdKind::Entity, 43);
+    zone.spawn(
+        EntityRecord::new(alice_vault, text("prop.vault"), Vec3::new(8.5, 0.0, 10.0))
+            .with_interactable(
+                Interactable::new(3.0, [Verb::Use, Verb::Play, Verb::Open]).without_line_of_sight(),
+            )
+            .with_door(Door {
+                open: false,
+                locked: true,
+                key: None,
+            })
+            .with_ui(UiProvider::new(text("ui.lockpick"), "Vault Lock"))
+            .with_minigame(Minigame::new(text("minigame.lockpick"), 3, 4, 10, 7).unwrap()),
+    )
+    .unwrap();
+
+    (
+        alice_terminal,
+        bob_owned_terminal,
+        alice_display,
+        alice_vault,
+    )
 }
 
 fn spawn_props(zone: &mut Zone) -> (StableId, StableId, StableId, StableId) {
@@ -186,7 +212,7 @@ fn fixture() -> Fixture {
 
     let (alice_door, bob_door, alice_barrel, bob_barrel) = spawn_props(&mut zone);
 
-    let (alice_terminal, bob_owned_terminal, alice_display) =
+    let (alice_terminal, bob_owned_terminal, alice_display, alice_vault) =
         spawn_panels(&mut zone, bob_principal);
 
     let hidden_crate = id(IdKind::Entity, 30);
@@ -222,6 +248,7 @@ fn fixture() -> Fixture {
         alice_terminal,
         bob_owned_terminal,
         alice_display,
+        alice_vault,
         hidden_crate,
         torch,
     }
@@ -271,10 +298,10 @@ fn reply_of_kind<'a>(replies: &'a [Envelope], kind: &str) -> &'a Envelope {
         .unwrap_or_else(|| panic!("expected a {kind} reply"))
 }
 
-fn open_terminal(
+fn open_provider(
     gateway: &mut WorldGateway,
     session: &SessionId,
-    terminal: StableId,
+    provider: StableId,
     request_id: &str,
 ) -> Vec<Envelope> {
     gateway
@@ -282,11 +309,51 @@ fn open_terminal(
             session,
             &action(
                 request_id,
-                json!({ "verb": "use", "target": terminal.to_string() }),
+                json!({ "verb": "use", "target": provider.to_string() }),
             ),
             Millis::new(2_000),
         )
         .unwrap()
+}
+
+fn secret_for(fixture: &Fixture, vault: StableId, principal: StableId) -> String {
+    fixture
+        .gateway
+        .zone()
+        .entity(vault)
+        .unwrap()
+        .minigame
+        .as_ref()
+        .unwrap()
+        .secret_for(principal)
+        .iter()
+        .map(|digit| char::from(b'0' + digit))
+        .collect()
+}
+
+fn play_guess(
+    fixture: &mut Fixture,
+    session: &SessionId,
+    request_id: &str,
+    guess: &str,
+    now_ms: i64,
+) -> Vec<Envelope> {
+    fixture
+        .gateway
+        .handle(
+            session,
+            &envelope(
+                request_id,
+                UI_ACTION_KIND,
+                json!({ "schema": "ui.lockpick", "action": "play", "params": { "guess": guess } }),
+            ),
+            Millis::new(now_ms),
+        )
+        .unwrap()
+}
+
+fn result_of(replies: &[Envelope]) -> ActionResult {
+    serde_json::from_value(reply_of_kind(replies, "action.result").body.clone()).unwrap()
 }
 
 #[test]
@@ -764,7 +831,7 @@ fn opening_a_panel_emits_server_resolved_ui_state() {
         fixture.alice_principal,
     );
 
-    let replies = open_terminal(
+    let replies = open_provider(
         &mut fixture.gateway,
         &alice.session,
         fixture.alice_terminal,
@@ -803,7 +870,7 @@ fn panel_actions_use_the_open_target_and_revalidate_range() {
         "account-alice",
         fixture.alice_principal,
     );
-    let _ = open_terminal(
+    let _ = open_provider(
         &mut fixture.gateway,
         &alice.session,
         fixture.alice_terminal,
@@ -894,7 +961,7 @@ fn a_panel_whose_target_disappeared_is_cleared() {
         "account-alice",
         fixture.alice_principal,
     );
-    let _ = open_terminal(
+    let _ = open_provider(
         &mut fixture.gateway,
         &alice.session,
         fixture.alice_terminal,
@@ -937,7 +1004,7 @@ fn panel_messages_reject_client_targets_and_schema_mismatches() {
         "account-alice",
         fixture.alice_principal,
     );
-    let _ = open_terminal(
+    let _ = open_provider(
         &mut fixture.gateway,
         &alice.session,
         fixture.alice_terminal,
@@ -1041,7 +1108,7 @@ fn panel_state_is_cleared_on_disconnect_and_resume() {
         "account-alice",
         fixture.alice_principal,
     );
-    let _ = open_terminal(
+    let _ = open_provider(
         &mut fixture.gateway,
         &alice.session,
         fixture.alice_terminal,
@@ -1131,13 +1198,13 @@ fn opening_another_panel_replaces_the_previous_state() {
         "account-alice",
         fixture.alice_principal,
     );
-    let _ = open_terminal(
+    let _ = open_provider(
         &mut fixture.gateway,
         &alice.session,
         fixture.alice_terminal,
         "req_ui_open_0001",
     );
-    let _ = open_terminal(
+    let _ = open_provider(
         &mut fixture.gateway,
         &alice.session,
         fixture.alice_display,
@@ -1182,4 +1249,211 @@ fn opening_another_panel_replaces_the_previous_state() {
         fixture.gateway.panel(&alice.session).unwrap().target,
         fixture.alice_display
     );
+}
+
+#[test]
+fn minigame_panel_runs_turns_and_closes_when_solved() {
+    let mut fixture = fixture();
+    let alice = connect(
+        &mut fixture.gateway,
+        "account-alice",
+        fixture.alice_principal,
+    );
+
+    let opened = open_provider(
+        &mut fixture.gateway,
+        &alice.session,
+        fixture.alice_vault,
+        "req_vault_open_0001",
+    );
+    let result = result_of(&opened);
+    assert!(result.is_applied());
+    assert!(matches!(
+        result.effects(),
+        [ActionEffect::UiOpened { target, schema, .. }, ActionEffect::MinigameStarted {
+            target: started,
+            length: 3,
+            attempts_left: 4,
+            solved: false,
+            ..
+        }] if *target == fixture.alice_vault
+            && *started == fixture.alice_vault
+            && schema.as_str() == "ui.lockpick"
+    ));
+    assert_eq!(
+        ui_state(reply_of_kind(&opened, UI_STATE_KIND))
+            .panel
+            .unwrap()
+            .schema,
+        text("ui.lockpick")
+    );
+
+    let secret = secret_for(&fixture, fixture.alice_vault, fixture.alice_principal);
+    let wrong = if secret == "000" { "111" } else { "000" };
+    let turn = play_guess(
+        &mut fixture,
+        &alice.session,
+        "req_vault_play_0001",
+        wrong,
+        2_001,
+    );
+    let result = result_of(&turn);
+    assert!(result.is_applied());
+    let ActionEffect::MinigameAttempt {
+        attempts_left,
+        solved,
+        ..
+    } = &result.effects()[0]
+    else {
+        panic!("expected a minigame attempt effect");
+    };
+    assert!(!solved);
+    assert_eq!(*attempts_left, 3);
+    assert!(
+        ui_state(reply_of_kind(&turn, UI_STATE_KIND))
+            .panel
+            .is_some(),
+        "a failed guess keeps the panel open"
+    );
+
+    let solved = play_guess(
+        &mut fixture,
+        &alice.session,
+        "req_vault_play_0002",
+        &secret,
+        2_002,
+    );
+    let result = result_of(&solved);
+    assert!(result.is_applied());
+    assert!(result.effects().iter().any(
+        |effect| matches!(effect, ActionEffect::MinigameSolved { target } if *target == fixture.alice_vault)
+    ));
+    assert!(result.effects().iter().any(
+        |effect| matches!(effect, ActionEffect::DoorUnlocked { target } if *target == fixture.alice_vault)
+    ));
+    assert!(
+        ui_state(reply_of_kind(&solved, UI_STATE_KIND))
+            .panel
+            .is_none(),
+        "solving the minigame closes the panel"
+    );
+    let vault = fixture.gateway.zone().entity(fixture.alice_vault).unwrap();
+    assert!(!vault.door.as_ref().unwrap().locked);
+
+    let replay = play_guess(
+        &mut fixture,
+        &alice.session,
+        "req_vault_play_0003",
+        &secret,
+        2_003,
+    );
+    let error: ErrorPayload = serde_json::from_value(replay[0].body.clone()).unwrap();
+    assert_eq!(error.code, ErrorCode::InvalidState);
+}
+
+#[test]
+fn minigame_actions_require_the_panel_channel_and_an_open_panel() {
+    let mut fixture = fixture();
+    let alice = connect(
+        &mut fixture.gateway,
+        "account-alice",
+        fixture.alice_principal,
+    );
+    let secret = secret_for(&fixture, fixture.alice_vault, fixture.alice_principal);
+
+    let no_panel = fixture
+        .gateway
+        .handle(
+            &alice.session,
+            &envelope(
+                "req_vault_play_0001",
+                UI_ACTION_KIND,
+                json!({ "schema": "ui.lockpick", "action": "play", "params": { "guess": secret } }),
+            ),
+            Millis::new(2_000),
+        )
+        .unwrap();
+    let error: ErrorPayload = serde_json::from_value(no_panel[0].body.clone()).unwrap();
+    assert_eq!(error.code, ErrorCode::InvalidState);
+
+    let direct = fixture
+        .gateway
+        .handle(
+            &alice.session,
+            &action(
+                "req_vault_direct_0001",
+                json!({ "verb": "play", "target": fixture.alice_vault.to_string(), "params": { "guess": secret } }),
+            ),
+            Millis::new(2_001),
+        )
+        .unwrap();
+    let error: ErrorPayload = serde_json::from_value(direct[0].body.clone()).unwrap();
+    assert_eq!(error.code, ErrorCode::Unsupported);
+    assert!(fixture.gateway.panel(&alice.session).is_none());
+    assert!(
+        fixture
+            .gateway
+            .zone()
+            .entity(fixture.alice_vault)
+            .unwrap()
+            .door
+            .as_ref()
+            .unwrap()
+            .locked
+    );
+}
+
+#[test]
+fn reopening_a_minigame_panel_preserves_the_attempt_budget() {
+    let mut fixture = fixture();
+    let alice = connect(
+        &mut fixture.gateway,
+        "account-alice",
+        fixture.alice_principal,
+    );
+    let _ = open_provider(
+        &mut fixture.gateway,
+        &alice.session,
+        fixture.alice_vault,
+        "req_vault_open_0001",
+    );
+    let secret = secret_for(&fixture, fixture.alice_vault, fixture.alice_principal);
+    let wrong = if secret == "000" { "111" } else { "000" };
+    let _ = fixture
+        .gateway
+        .handle(
+            &alice.session,
+            &envelope(
+                "req_vault_play_0001",
+                UI_ACTION_KIND,
+                json!({ "schema": "ui.lockpick", "action": "play", "params": { "guess": wrong } }),
+            ),
+            Millis::new(2_001),
+        )
+        .unwrap();
+    let _ = fixture
+        .gateway
+        .handle(
+            &alice.session,
+            &envelope("req_vault_close_0001", UI_CLOSE_KIND, json!({})),
+            Millis::new(2_002),
+        )
+        .unwrap();
+
+    let reopened = open_provider(
+        &mut fixture.gateway,
+        &alice.session,
+        fixture.alice_vault,
+        "req_vault_open_0002",
+    );
+    let result: ActionResult =
+        serde_json::from_value(reply_of_kind(&reopened, "action.result").body.clone()).unwrap();
+    assert!(matches!(
+        result.effects().get(1),
+        Some(ActionEffect::MinigameStarted {
+            attempts_left: 3,
+            solved: false,
+            ..
+        })
+    ));
 }

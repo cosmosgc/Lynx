@@ -1,10 +1,11 @@
 //! The built-in demo zone.
 //!
-//! One character, one door, one barrel, and one owner-only crate are spawned
-//! per configured token. Characters are spaced far enough apart that interest
-//! filtering is visible with the default view radius: a player does not receive
-//! another player's props, and the owner-only crate never appears in a
-//! stranger's snapshot.
+//! One character, one door, one barrel, one owner-only crate, and one locked
+//! vault are spawned per configured token. Characters are spaced far enough
+//! apart that interest filtering is visible with the default view radius: a
+//! player does not receive another player's props, and the owner-only crate
+//! never appears in a stranger's snapshot. The vault opens a server-validated
+//! lockpick minigame instead of reporting a locked door.
 
 use std::sync::Arc;
 
@@ -14,8 +15,9 @@ use engine_core::inventory::UniformItemRules;
 use engine_core::math::Vec3;
 use engine_net::protocol::Handshake;
 use engine_sim::action::Verb;
-use engine_sim::entity::{Door, EntityRecord, Interactable};
+use engine_sim::entity::{Door, EntityRecord, Interactable, UiProvider};
 use engine_sim::mind::Mind;
+use engine_sim::minigame::Minigame;
 use engine_sim::nav::NavGrid;
 use engine_sim::zone::{Zone, ZoneConfig};
 use world_gateway::VISIBILITY_OWNER_ONLY_TAG;
@@ -66,10 +68,15 @@ pub fn build_zone(grants: &[Grant]) -> Result<Zone, EngineError> {
     })?;
     let mut zone = Zone::new(config, nav, Arc::new(UniformItemRules::new(99)))?;
 
-    let character_definition = definition("character.player")?;
-    let door_definition = definition("prop.door")?;
-    let barrel_definition = definition("prop.barrel")?;
-    let crate_definition = definition("prop.owner_crate")?;
+    let definitions = DemoDefinitions {
+        character: definition("character.player")?,
+        door: definition("prop.door")?,
+        barrel: definition("prop.barrel")?,
+        owner_crate: definition("prop.owner_crate")?,
+        vault: definition("prop.vault")?,
+        lockpick_schema: definition("ui.lockpick")?,
+        lockpick_minigame: definition("minigame.lockpick")?,
+    };
 
     for (index, grant) in grants.iter().enumerate() {
         let column = u16::try_from(index % COLUMNS).expect("column fits in u16");
@@ -79,49 +86,98 @@ pub fn build_zone(grants: &[Grant]) -> Result<Zone, EngineError> {
             0.0,
             60.0 + f32::from(row) * CHARACTER_SPACING_M,
         );
-
-        let seed = grant.principal.random_bits();
-        let actor = StableId::from_parts(IdKind::Entity, 1, seed);
-        zone.spawn(
-            EntityRecord::new(actor, character_definition.clone(), position)
-                .with_health(100)
-                .with_mind(Mind::player(grant.principal, "unbound")),
-        )?;
-
-        zone.spawn(
-            EntityRecord::new(
-                StableId::from_parts(IdKind::Entity, 1, seed ^ 0x100),
-                door_definition.clone(),
-                position.translated(Vec3::new(2.0, 0.0, 0.0)),
-            )
-            .with_interactable(Interactable::new(3.0, [Verb::Open]).without_line_of_sight())
-            .with_door(Door::new()),
-        )?;
-
-        zone.spawn(
-            EntityRecord::new(
-                StableId::from_parts(IdKind::Entity, 1, seed ^ 0x200),
-                barrel_definition.clone(),
-                position.translated(Vec3::new(-2.0, 0.0, 2.0)),
-            )
-            .with_health(100)
-            .with_interactable(
-                Interactable::new(4.0, [Verb::Inspect, Verb::Attack]).without_line_of_sight(),
-            ),
-        )?;
-
-        zone.spawn(
-            EntityRecord::new(
-                StableId::from_parts(IdKind::Entity, 1, seed ^ 0x300),
-                crate_definition.clone(),
-                position.translated(Vec3::new(0.0, 0.0, -2.0)),
-            )
-            .owned_by(grant.principal)
-            .with_tag(VISIBILITY_OWNER_ONLY_TAG),
-        )?;
+        spawn_grant(&mut zone, grant, position, &definitions)?;
     }
 
     Ok(zone)
+}
+
+/// Content definitions the demo zone needs, resolved once at build time.
+struct DemoDefinitions {
+    character: DefinitionId,
+    door: DefinitionId,
+    barrel: DefinitionId,
+    owner_crate: DefinitionId,
+    vault: DefinitionId,
+    lockpick_schema: DefinitionId,
+    lockpick_minigame: DefinitionId,
+}
+
+/// Spawn one player's character and nearby props.
+fn spawn_grant(
+    zone: &mut Zone,
+    grant: &Grant,
+    position: Vec3,
+    definitions: &DemoDefinitions,
+) -> Result<(), EngineError> {
+    let seed = grant.principal.random_bits();
+    let actor = StableId::from_parts(IdKind::Entity, 1, seed);
+    zone.spawn(
+        EntityRecord::new(actor, definitions.character.clone(), position)
+            .with_health(100)
+            .with_mind(Mind::player(grant.principal, "unbound")),
+    )?;
+
+    zone.spawn(
+        EntityRecord::new(
+            StableId::from_parts(IdKind::Entity, 1, seed ^ 0x100),
+            definitions.door.clone(),
+            position.translated(Vec3::new(2.0, 0.0, 0.0)),
+        )
+        .with_interactable(Interactable::new(3.0, [Verb::Open]).without_line_of_sight())
+        .with_door(Door::new()),
+    )?;
+
+    zone.spawn(
+        EntityRecord::new(
+            StableId::from_parts(IdKind::Entity, 1, seed ^ 0x200),
+            definitions.barrel.clone(),
+            position.translated(Vec3::new(-2.0, 0.0, 2.0)),
+        )
+        .with_health(100)
+        .with_interactable(
+            Interactable::new(4.0, [Verb::Inspect, Verb::Attack]).without_line_of_sight(),
+        ),
+    )?;
+
+    zone.spawn(
+        EntityRecord::new(
+            StableId::from_parts(IdKind::Entity, 1, seed ^ 0x300),
+            definitions.owner_crate.clone(),
+            position.translated(Vec3::new(0.0, 0.0, -2.0)),
+        )
+        .owned_by(grant.principal)
+        .with_tag(VISIBILITY_OWNER_ONLY_TAG),
+    )?;
+
+    zone.spawn(
+        EntityRecord::new(
+            StableId::from_parts(IdKind::Entity, 1, seed ^ 0x400),
+            definitions.vault.clone(),
+            position.translated(Vec3::new(0.0, 0.0, 4.0)),
+        )
+        .with_interactable(
+            Interactable::new(3.0, [Verb::Use, Verb::Play, Verb::Open]).without_line_of_sight(),
+        )
+        .with_door(Door {
+            open: false,
+            locked: true,
+            key: None,
+        })
+        .with_ui(UiProvider::new(
+            definitions.lockpick_schema.clone(),
+            "Vault Lock",
+        ))
+        .with_minigame(Minigame::new(
+            definitions.lockpick_minigame.clone(),
+            3,
+            8,
+            100,
+            random_seed()?,
+        )?),
+    )?;
+
+    Ok(())
 }
 
 /// The server handshake advertised to clients.
@@ -148,6 +204,19 @@ fn definition(value: &str) -> Result<DefinitionId, EngineError> {
     })
 }
 
+/// Generate a server-held minigame seed from operating-system entropy.
+///
+/// The seed must not be derived from a client-visible value such as the
+/// character's stable ID, or a modified client could compute the combination.
+fn random_seed() -> Result<u64, EngineError> {
+    let mut bytes = [0u8; 8];
+    getrandom::fill(&mut bytes).map_err(|error| {
+        EngineError::new(ErrorCode::Internal, "could not generate a minigame seed")
+            .with_detail("error", error.to_string())
+    })?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,8 +237,8 @@ mod tests {
     fn every_grant_gets_a_character_and_nearby_props() {
         let grants = grants(2);
         let zone = build_zone(&grants).unwrap();
-        // Per grant: character, door, barrel, owner-only crate.
-        assert_eq!(zone.entity_count(), grants.len() * 4);
+        // Per grant: character, door, barrel, owner-only crate, locked vault.
+        assert_eq!(zone.entity_count(), grants.len() * 5);
         for grant in &grants {
             let seed = grant.principal.random_bits();
             let actor = StableId::from_parts(IdKind::Entity, 1, seed);
@@ -180,6 +249,22 @@ mod tests {
             );
             assert!(entity.position().x >= 0.0);
         }
+    }
+
+    #[test]
+    fn every_grant_gets_a_locked_vault_with_a_minigame() {
+        let grants = grants(1);
+        let zone = build_zone(&grants).unwrap();
+        let seed = grants[0].principal.random_bits();
+        let vault = zone
+            .entity(StableId::from_parts(IdKind::Entity, 1, seed ^ 0x400))
+            .expect("vault is spawned");
+        assert!(vault.door.as_ref().unwrap().locked);
+        assert_eq!(vault.ui.as_ref().unwrap().schema.as_str(), "ui.lockpick");
+        let minigame = vault.minigame.as_ref().expect("vault has a minigame");
+        assert_eq!(minigame.definition.as_str(), "minigame.lockpick");
+        assert_eq!(minigame.length, 3);
+        assert!(minigame.attempts > 0);
     }
 
     #[test]

@@ -52,11 +52,17 @@ semantic versioning for engine releases and content bundles.
   Panel state clears on disconnect, resume, close, or provider loss.
 - `engine_sim::action::Verb::parse` for wire and panel action names, including
   bounded custom names.
+- `engine_sim::minigame`: a server-authoritative combination lock with a
+  combination derived from a server-held seed and the authenticated principal,
+  per-digit higher/lower/exact hints, a per-principal attempt budget, and a
+  server-tick lockout. Solving unlocks the provider's door and closes the panel.
+  Minigame progress is never replicated (ADR 0016).
 - `lynx-world`: runnable Axum/Tokio WebSocket world service with hashed static
   bearer auth, `/healthz`, `/readyz`, a `session.hello` handshake, one
   `world.token` control message per admission, per-connection backpressure, a
   tick loop, and graceful shutdown. The demo zone spawns one character per
-  configured token hash; state is in memory.
+  configured token hash, plus a door, barrel, owner-only crate, and locked
+  lockpick vault; state is in memory.
 - `world_server` tests and a `lynx-world` WebSocket integration test covering
   handshake, ready/snapshot/token delivery, correlated errors, resume, and
   session expiry.

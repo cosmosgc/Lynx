@@ -636,6 +636,7 @@ dependencies = [
  "engine_sim",
  "futures-util",
  "game_api",
+ "getrandom 0.4.3",
  "semver",
  "serde",
  "serde_json",

@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::entity::{Door, EntityRecord, Health, Interactable, InteractionPermission, UiProvider};
 use crate::link::LinkEvent;
 use crate::mind::{ControlCapability, Controller};
+use crate::minigame::{DigitHint, Minigame, MinigameTurn};
 use crate::zone::{ACTION_CACHE_LIMIT, Zone};
 
 /// Cooldown key: actor, verb, and optional target.
@@ -36,6 +37,7 @@ struct ActionContext {
     target_door: Option<Door>,
     target_health: Option<Health>,
     target_inventory: Option<Inventory>,
+    target_minigame: Option<Minigame>,
 }
 
 /// Data-driven interaction verbs.
@@ -67,6 +69,8 @@ pub enum Verb {
     Activate,
     /// Attempt unauthorized access.
     Hack,
+    /// Play one turn of an entity-provided minigame.
+    Play,
     /// Attack a target.
     Attack,
     /// Game-specific verb introduced by content.
@@ -89,6 +93,7 @@ impl Verb {
             Self::Repair => "repair",
             Self::Activate => "activate",
             Self::Hack => "hack",
+            Self::Play => "play",
             Self::Attack => "attack",
             Self::Custom(name) => name,
         }
@@ -114,6 +119,7 @@ impl Verb {
             "repair" => Self::Repair,
             "activate" => Self::Activate,
             "hack" => Self::Hack,
+            "play" => Self::Play,
             "attack" => Self::Attack,
             _ => {
                 if value.is_empty()
@@ -226,6 +232,55 @@ pub enum ActionEffect {
         schema: DefinitionId,
         /// Panel title.
         title: String,
+    },
+    /// An entity-provided interface should close.
+    UiClosed {
+        /// Providing entity.
+        target: StableId,
+    },
+    /// A minigame attempt started or was refreshed.
+    MinigameStarted {
+        /// Providing entity.
+        target: StableId,
+        /// Content definition.
+        definition: DefinitionId,
+        /// Combination length in digits.
+        length: u8,
+        /// Remaining attempts.
+        attempts_left: u8,
+        /// Whether the player already solved it.
+        solved: bool,
+        /// Tick before which no guess is accepted, after a lockout.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_after_tick: Option<Tick>,
+    },
+    /// One minigame guess was accepted.
+    MinigameAttempt {
+        /// Providing entity.
+        target: StableId,
+        /// Per-digit comparison, in combination order.
+        hints: Vec<DigitHint>,
+        /// Remaining attempts.
+        attempts_left: u8,
+        /// Whether this guess solved the challenge.
+        solved: bool,
+    },
+    /// A minigame was solved.
+    MinigameSolved {
+        /// Providing entity.
+        target: StableId,
+    },
+    /// A minigame exhausted its attempt budget.
+    MinigameFailed {
+        /// Providing entity.
+        target: StableId,
+        /// Tick before which no new guess is accepted.
+        retry_after_tick: Tick,
+    },
+    /// A door was unlocked.
+    DoorUnlocked {
+        /// Door entity.
+        target: StableId,
     },
     /// Items moved between inventories.
     ItemTaken {
@@ -391,6 +446,7 @@ impl Zone {
                 context.target_id,
                 context.target_door,
                 context.target_ui,
+                context.target_minigame.is_some(),
             )?,
             Verb::Talk => {
                 let ui = context.target_ui.ok_or_else(|| {
@@ -404,6 +460,7 @@ impl Zone {
                 }]
             }
             Verb::Take => self.apply_take(request, context.target_id, context.target_inventory)?,
+            Verb::Play => self.apply_play(request, context.target_id)?,
             Verb::Attack => self.apply_attack(request, context.target_id, context.target_health)?,
             Verb::Insert | Verb::Equip | Verb::Repair | Verb::Hack | Verb::Custom(_) => {
                 return Err(EngineError::new(
@@ -556,6 +613,7 @@ impl Zone {
             target_door: target.door.clone(),
             target_health: target.health,
             target_inventory: target.inventory.clone(),
+            target_minigame: target.minigame.clone(),
         })
     }
 
@@ -565,10 +623,17 @@ impl Zone {
         target_id: StableId,
         door: Option<crate::entity::Door>,
         ui: Option<crate::entity::UiProvider>,
+        has_minigame: bool,
     ) -> Result<Vec<ActionEffect>, EngineError> {
         match (&request.verb, door) {
             (Verb::Open | Verb::Close | Verb::Activate | Verb::Use, Some(door)) => {
                 if door.locked {
+                    if matches!(request.verb, Verb::Use | Verb::Activate)
+                        && has_minigame
+                        && let Some(ui) = ui
+                    {
+                        return self.open_minigame(request, target_id, ui);
+                    }
                     return Err(
                         EngineError::new(ErrorCode::InvalidState, "the door is locked")
                             .with_detail("target", target_id.to_string()),
@@ -591,6 +656,9 @@ impl Zone {
             }
             (Verb::Use | Verb::Activate, None) => {
                 if let Some(ui) = ui {
+                    if has_minigame {
+                        return self.open_minigame(request, target_id, ui);
+                    }
                     return Ok(vec![ActionEffect::UiOpened {
                         target: target_id,
                         schema: ui.schema,
@@ -618,6 +686,93 @@ impl Zone {
             .with_detail("target", target_id.to_string())
             .with_detail("verb", request.verb.as_str())),
         }
+    }
+
+    /// Open a minigame panel and report the player's current status.
+    fn open_minigame(
+        &mut self,
+        request: &ActionRequest,
+        target_id: StableId,
+        ui: UiProvider,
+    ) -> Result<Vec<ActionEffect>, EngineError> {
+        let player = request.principal.unwrap_or(request.actor);
+        let tick = self.tick;
+        let entity = self
+            .entities
+            .get_mut(&target_id)
+            .ok_or_else(|| EngineError::not_found("target", target_id))?;
+        let minigame = entity.minigame.as_mut().ok_or_else(|| {
+            EngineError::new(ErrorCode::InvalidState, "target has no minigame")
+                .with_detail("target", target_id.to_string())
+        })?;
+        let status = minigame.status(player, tick);
+        Ok(vec![
+            ActionEffect::UiOpened {
+                target: target_id,
+                schema: ui.schema,
+                title: ui.title,
+            },
+            ActionEffect::MinigameStarted {
+                target: target_id,
+                definition: status.definition,
+                length: status.length,
+                attempts_left: status.attempts_left,
+                solved: status.solved,
+                retry_after_tick: status.retry_after_tick,
+            },
+        ])
+    }
+
+    /// Apply one guess to a minigame.
+    fn apply_play(
+        &mut self,
+        request: &ActionRequest,
+        target_id: StableId,
+    ) -> Result<Vec<ActionEffect>, EngineError> {
+        let player = request.principal.unwrap_or(request.actor);
+        let guess = request.params.get("guess").ok_or_else(|| {
+            EngineError::new(ErrorCode::InvalidRequest, "play requires a guess")
+                .with_detail("parameter", "guess")
+        })?;
+        let tick = self.tick;
+        let entity = self
+            .entities
+            .get_mut(&target_id)
+            .ok_or_else(|| EngineError::not_found("target", target_id))?;
+        let minigame = entity.minigame.as_mut().ok_or_else(|| {
+            EngineError::new(ErrorCode::InvalidState, "target has no minigame")
+                .with_detail("target", target_id.to_string())
+        })?;
+        let turn = minigame.play(player, guess, tick)?;
+        let MinigameTurn {
+            hints,
+            attempts_left,
+            solved,
+            retry_after_tick,
+        } = turn;
+
+        let mut effects = vec![ActionEffect::MinigameAttempt {
+            target: target_id,
+            hints,
+            attempts_left,
+            solved,
+        }];
+        if solved {
+            effects.push(ActionEffect::MinigameSolved { target: target_id });
+            if let Some(door) = entity.door.as_mut()
+                && door.locked
+            {
+                door.locked = false;
+                effects.push(ActionEffect::DoorUnlocked { target: target_id });
+            }
+            effects.push(ActionEffect::UiClosed { target: target_id });
+        } else if let Some(retry_after_tick) = retry_after_tick {
+            effects.push(ActionEffect::MinigameFailed {
+                target: target_id,
+                retry_after_tick,
+            });
+        }
+        Ok(effects)
     }
 
     fn apply_take(
@@ -784,6 +939,7 @@ fn required_capability(verb: &Verb) -> ControlCapability {
         | Verb::Repair
         | Verb::Activate
         | Verb::Hack
+        | Verb::Play
         | Verb::Custom(_) => ControlCapability::Interact,
     }
 }
@@ -837,6 +993,7 @@ mod tests {
             Verb::Repair,
             Verb::Activate,
             Verb::Hack,
+            Verb::Play,
             Verb::Attack,
         ] {
             assert_eq!(Verb::parse(verb.as_str()), Some(verb));

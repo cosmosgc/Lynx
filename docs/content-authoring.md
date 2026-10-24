@@ -144,6 +144,40 @@ Reward references must resolve to a loaded definition. Competitive,
 reward-bearing, or world-changing games must use `server` or `hybrid` so the
 server validates the result before granting anything.
 
+### Wiring a minigame at runtime
+
+The definition describes the contract; the runtime attaches an authoritative
+instance to an entity. The reference runtime (`lynx-world`) attaches a
+`Minigame` to a locked vault together with a `UiProvider` whose schema matches
+the definition's `panel_schema`:
+
+```rust
+EntityRecord::new(vault_id, definition("prop.vault")?, position)
+    .with_interactable(Interactable::new(3.0, [Verb::Use, Verb::Play, Verb::Open]))
+    .with_door(Door::locked_with(key_id))
+    .with_ui(UiProvider::new(definition("ui.lockpick")?, "Vault Lock"))
+    .with_minigame(Minigame::new(
+        definition("minigame.lockpick")?,
+        3,      // digits
+        8,      // attempts before lockout
+        100,    // lockout length in server ticks
+        seed,   // server entropy, never shipped in the bundle
+    )?)
+```
+
+- The combination is derived from `seed` plus the authenticated principal, so
+  the seed must be server entropy. A seed embedded in client-visible content
+  lets a modified client derive every player's code.
+- The client opens the panel with `use` or `activate`; guesses then travel as
+  `ui.action` with `action: "play"`. Content action names must match the verbs
+  the simulation supports.
+- Server-held attempts, lockouts, and progress are not serialized into
+  replication. Only the door's lock state is replicated, so other players see
+  the unlock without learning the combination.
+- Definitions with `authority: "client"` are cosmetic-only and must not be
+  wired to doors, containers, rewards, or other world state. The current runtime
+  rejects a client-supplied `play` verb outside the panel channel.
+
 ## Localization
 
 Brazilian Portuguese (`pt-BR`) is the default and source language. All

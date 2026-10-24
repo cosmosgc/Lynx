@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::action::Verb;
 use crate::mind::Mind;
+use crate::minigame::Minigame;
 
 /// Position and facing in the zone.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -254,6 +255,8 @@ pub struct EntityRecord {
     pub door: Option<Door>,
     /// Entity-provided UI, when it can open an interface.
     pub ui: Option<UiProvider>,
+    /// Server-authoritative minigame attached to the interface, if any.
+    pub minigame: Option<Minigame>,
     /// Owning character or property, when applicable.
     pub owner: Option<StableId>,
     /// Authoring and query tags.
@@ -279,6 +282,7 @@ impl EntityRecord {
             faction: None,
             door: None,
             ui: None,
+            minigame: None,
             owner: None,
             tags: BTreeSet::new(),
             persistence: PersistencePolicy::Transient,
@@ -332,6 +336,13 @@ impl EntityRecord {
     #[must_use]
     pub fn with_ui(mut self, ui: UiProvider) -> Self {
         self.ui = Some(ui);
+        self
+    }
+
+    /// Attach a server-authoritative minigame.
+    #[must_use]
+    pub fn with_minigame(mut self, minigame: Minigame) -> Self {
+        self.minigame = Some(minigame);
         self
     }
 

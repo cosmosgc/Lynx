@@ -36,7 +36,7 @@ use engine_net::protocol::{ErrorPayload, Handshake, Negotiated, negotiate};
 use engine_net::replication::{
     ReplicationBatch, ReplicationCategory, ReplicationUpdate, SessionId,
 };
-use engine_sim::action::{ActionEffect, ActionRequest, Verb};
+use engine_sim::action::{ActionEffect, ActionRequest, ActionResult, Verb};
 use engine_sim::mind::Controller;
 use engine_sim::zone::Zone;
 use serde::Deserialize;
@@ -554,6 +554,13 @@ impl WorldGateway {
         };
 
         let target = intent.target;
+        if intent.verb == Verb::Play {
+            let error = EngineError::new(
+                ErrorCode::Unsupported,
+                "minigame actions must use the ui.action channel",
+            );
+            return Ok(vec![self.error_reply(envelope, &error)]);
+        }
         let mut request =
             ActionRequest::new(scoped_request_id(session, &envelope.id), actor, intent.verb);
         request.target = target;
@@ -563,21 +570,7 @@ impl WorldGateway {
         let mut result = self.zone.apply_action(&request, now);
         result.request_id = envelope.id.as_str().to_string();
 
-        let mut panel_changed = false;
-        if let Some(panel) = opened_panel(result.effects()) {
-            self.sessions.set_panel(session, panel)?;
-            panel_changed = true;
-        } else if result
-            .error()
-            .is_some_and(|error| error.code() == ErrorCode::NotFound)
-            && self
-                .sessions
-                .panel(session)
-                .is_some_and(|panel| Some(panel.target) == target)
-        {
-            let _ = self.sessions.clear_panel(session);
-            panel_changed = true;
-        }
+        let panel_changed = self.sync_panel(session, &result, target)?;
 
         let body = serde_json::to_value(&result).map_err(|error| internal_error(&error))?;
         let mut replies =
@@ -649,19 +642,46 @@ impl WorldGateway {
         let mut result = self.zone.apply_action(&request, now);
         result.request_id = envelope.id.as_str().to_string();
 
-        if let Some(opened) = opened_panel(result.effects()) {
-            self.sessions.set_panel(session, opened)?;
-        } else if result
-            .error()
-            .is_some_and(|error| error.code() == ErrorCode::NotFound)
-        {
-            let _ = self.sessions.clear_panel(session);
-        }
+        self.sync_panel(session, &result, Some(panel.target))?;
 
         let body = serde_json::to_value(&result).map_err(|error| internal_error(&error))?;
         let result_reply = envelope.reply(self.reply_id(), message_kind("action.result"), body);
         let state_reply = self.ui_state_reply(session, envelope)?;
         Ok(vec![result_reply, state_reply])
+    }
+
+    /// Reconcile the session's open panel with a validated action result.
+    ///
+    /// Returns whether the panel changed, so the caller can send `ui.state`.
+    fn sync_panel(
+        &mut self,
+        session: &SessionId,
+        result: &ActionResult,
+        request_target: Option<StableId>,
+    ) -> Result<bool, EngineError> {
+        if let Some(panel) = opened_panel(result.effects()) {
+            self.sessions.set_panel(session, panel)?;
+            return Ok(true);
+        }
+
+        let current = self.sessions.panel(session).cloned();
+        let closed = result.effects().iter().any(|effect| match effect {
+            ActionEffect::UiClosed { target } => current
+                .as_ref()
+                .is_some_and(|panel| panel.target == *target),
+            _ => false,
+        });
+        let provider_missing = result
+            .error()
+            .is_some_and(|error| error.code() == ErrorCode::NotFound)
+            && current
+                .as_ref()
+                .is_some_and(|panel| Some(panel.target) == request_target);
+        if closed || provider_missing {
+            let _ = self.sessions.clear_panel(session);
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     fn ui_state_reply(

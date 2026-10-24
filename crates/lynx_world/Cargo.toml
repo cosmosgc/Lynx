@@ -16,6 +16,7 @@ engine_core = { workspace = true }
 engine_net = { workspace = true }
 engine_sim = { workspace = true }
 game_api = { workspace = true }
+getrandom = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

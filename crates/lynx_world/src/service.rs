@@ -540,7 +540,7 @@ mod tests {
             Authenticator::new(&[digest("one"), digest("two"), digest("three")]).unwrap();
         let grants: Vec<Grant> = authenticator.grants().cloned().collect();
         let zone: Zone = demo::build_zone(&grants).unwrap();
-        assert_eq!(zone.entity_count(), grants.len() * 4);
+        assert_eq!(zone.entity_count(), grants.len() * 5);
         assert_eq!(zone.tick(), Tick::ZERO);
     }
 }

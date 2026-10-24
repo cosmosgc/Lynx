@@ -17,7 +17,8 @@ Decisions and their rationale live in [`adr/`](adr/).
 │ lynx-world:    WebSocket/TLS edge, health, tick loop, shutdown          │
 │ world_server:  connection IDs, wire kinds, snapshot/delta envelopes     │
 │ world_gateway: sessions, resume tokens, action routing, replication     │
-│ engine_sim:    zones, entities, action pipeline, minds, links, AI, nav  │
+│ engine_sim:    zones, entities, action pipeline, minds, links, AI,      │
+│                nav, minigames                                           │
 │ game_api:      auth/session/social/chat/world/character/inventory/admin │
 └──────────────┬──────────────────────────────────┬──────────────────────┘
                │ HTTPS (health, login, storage)    │ SQL (transactions)
@@ -86,6 +87,7 @@ Rules:
 | Interest set | `InterestSet` | Per-session visible entities, distance + visibility |
 | Session | `GatewaySession` | Server-issued ID, authenticated principal, actor, staff flag |
 | Open panel | `OpenPanel` | Server-resolved target, schema, and title for one session |
+| Minigame | `Minigame` | Server-held combination, per-principal attempts, and lockout |
 | Resume token | `ResumeToken` | Server-issued, short-lived, single-use, redacted |
 | Delivery | `SessionDelivery` | One session's interest delta and filtered batch per tick |
 
@@ -117,6 +119,11 @@ Rules:
    sends `ui.state`. Later `ui.action` and `ui.close` messages operate only on
    that stored panel and re-run the normal range, visibility, and permission
    checks.
+8. A minigame guess is a `ui.action` with the `play` verb. The simulation
+   compares it against a combination derived from a server-held seed and the
+   authenticated principal, returns per-digit hints, and owns the attempt
+   budget, lockout, and unlock. The client never receives the combination and
+   never decides the outcome.
 
 ## Localization
 

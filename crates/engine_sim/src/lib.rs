@@ -5,5 +5,6 @@ pub mod ai;
 pub mod entity;
 pub mod link;
 pub mod mind;
+pub mod minigame;
 pub mod nav;
 pub mod zone;
