@@ -531,7 +531,7 @@ impl ComponentSchema {
                         "schema.missing_field",
                         &path,
                         "required field is missing",
-                    ))
+                    ));
                 }
                 None => {}
             }
