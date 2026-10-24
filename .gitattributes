@@ -1,0 +1,7 @@
+# Normalize source and data files to LF so formatting and hashing are
+# consistent across platforms.
+* text=auto eol=lf
+
+# Windows batch files are consumed by cmd.exe, which expects CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
