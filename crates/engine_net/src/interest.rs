@@ -227,14 +227,19 @@ impl InterestEntity {
     /// Whether the entity's visibility class admits this observer.
     #[must_use]
     pub fn is_visible_to(&self, observer: &InterestObserver) -> bool {
-        let is_owner = self
-            .owner
-            .is_some_and(|owner| observer.principal == Some(owner));
+        self.is_visible_to_principal(observer.principal, observer.staff)
+    }
+
+    /// Whether the visibility class admits a principal with an optional staff
+    /// role, without requiring a position.
+    #[must_use]
+    pub fn is_visible_to_principal(&self, principal: Option<StableId>, staff: bool) -> bool {
+        let is_owner = self.owner.is_some_and(|owner| principal == Some(owner));
         match self.visibility {
             Visibility::Public => true,
-            Visibility::Hidden => is_owner || observer.staff,
+            Visibility::Hidden => is_owner || staff,
             Visibility::OwnerOnly => is_owner,
-            Visibility::StaffOnly => observer.staff,
+            Visibility::StaffOnly => staff,
         }
     }
 }
@@ -537,9 +542,12 @@ pub fn filter_batch(
 fn admits(update: &ReplicationUpdate, audience: &ReplicationAudience<'_>) -> bool {
     match update.category.recipient() {
         Recipient::Session => update.session.as_ref() == Some(audience.session),
-        Recipient::Zone => update
-            .entity
-            .is_some_and(|entity| audience.interest.contains(&entity)),
+        Recipient::Zone => update.entity.is_some_and(|entity| {
+            audience.interest.contains(&entity)
+                && audience.world.get(entity).is_some_and(|entity| {
+                    entity.is_visible_to_principal(audience.principal, audience.staff)
+                })
+        }),
         Recipient::Owner => update
             .entity
             .and_then(|entity| audience.world.get(entity))
@@ -860,6 +868,35 @@ mod tests {
             ReplicationUpdate::new(ReplicationCategory::PropertyScoped, tick).with_entity(target),
         );
         assert!(filter_batch(&batch, &audience).is_empty());
+    }
+
+    #[test]
+    fn stale_interest_sets_do_not_leak_removed_or_hidden_entities() {
+        let tick = Tick(1);
+        let removed = entity(1);
+        let hidden = entity(2);
+        let session_a = session("session-a");
+        let principal = character(9);
+        let other = character(8);
+        let interest: InterestSet = [removed, hidden].into_iter().collect();
+        let mut world = InterestWorld::new();
+        world.upsert(
+            InterestEntity::new(hidden, Vec3::ZERO)
+                .with_visibility(Visibility::OwnerOnly)
+                .with_owner(other),
+        );
+        let audience =
+            ReplicationAudience::new(&session_a, &interest, &world).with_principal(principal);
+
+        let mut batch = new_batch(tick);
+        snapshot(&mut batch, removed, 1);
+        snapshot(&mut batch, hidden, 1);
+
+        assert_eq!(
+            filter_batch(&batch, &audience).len(),
+            0,
+            "a cached interest set cannot outlive authoritative visibility"
+        );
     }
 
     #[test]
