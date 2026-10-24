@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use engine_core::error::{EngineError, ErrorCode};
-use engine_core::id::{IdKind, StableId};
+use engine_core::id::{DefinitionId, IdKind, StableId};
 use engine_core::time::{DurationMs, Millis, Tick};
 use engine_net::protocol::Negotiated;
 use engine_net::replication::SessionId;
@@ -135,6 +135,22 @@ impl SessionClaims {
     }
 }
 
+/// A UI panel currently open for one session.
+///
+/// The target, schema, and title are resolved by the server from the entity
+/// that produced the panel. A client never chooses the target. It may echo the
+/// schema on an action as an optimistic concurrency check, but the stored value
+/// is authoritative.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenPanel {
+    /// Entity that provides the interface.
+    pub target: StableId,
+    /// Declarative panel schema the client should render.
+    pub schema: DefinitionId,
+    /// Server-provided panel title.
+    pub title: String,
+}
+
 /// A read-only view of one world session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GatewaySession {
@@ -234,6 +250,7 @@ struct SessionRecord {
     negotiated: Negotiated,
     token: ResumeToken,
     resume: Option<ResumeState>,
+    panel: Option<OpenPanel>,
 }
 
 /// Server-side session table.
@@ -336,6 +353,45 @@ impl SessionRegistry {
         self.sessions.get(id).map(|record| &record.negotiated)
     }
 
+    /// The panel currently open for a session, if any.
+    #[must_use]
+    pub fn panel(&self, id: &SessionId) -> Option<&OpenPanel> {
+        self.sessions
+            .get(id)
+            .and_then(|record| record.panel.as_ref())
+    }
+
+    /// Replace the session's open panel.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorCode::SessionExpired`] when the session is unknown or
+    /// disconnected.
+    pub fn set_panel(&mut self, id: &SessionId, panel: OpenPanel) -> Result<(), EngineError> {
+        let record = self.sessions.get_mut(id).ok_or_else(session_expired)?;
+        if !record.view.connected {
+            return Err(session_expired());
+        }
+        record.panel = Some(panel);
+        Ok(())
+    }
+
+    /// Clear the session's open panel and return the previous value.
+    ///
+    /// Clearing an already closed panel is not an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorCode::SessionExpired`] when the session is unknown or
+    /// disconnected.
+    pub fn clear_panel(&mut self, id: &SessionId) -> Result<Option<OpenPanel>, EngineError> {
+        let record = self.sessions.get_mut(id).ok_or_else(session_expired)?;
+        if !record.view.connected {
+            return Err(session_expired());
+        }
+        Ok(record.panel.take())
+    }
+
     /// Resolve a connected session, rejecting retained but detached sessions.
     ///
     /// # Errors
@@ -428,6 +484,7 @@ impl SessionRegistry {
                 negotiated,
                 token: token.clone(),
                 resume: None,
+                panel: None,
             },
         );
         self.tokens.insert(token.clone(), id);
@@ -470,6 +527,7 @@ impl SessionRegistry {
         record.view.last_ack_tick = last_ack_tick;
         if record.view.connected {
             record.view.connected = false;
+            record.panel = None;
             record.resume = Some(ResumeState {
                 expires_at: Millis::new(now.value().saturating_add(self.ttl.as_i64())),
             });
@@ -524,6 +582,7 @@ impl SessionRegistry {
         self.tokens.insert(next.clone(), id.clone());
         record.token = next.clone();
         record.resume = None;
+        record.panel = None;
         record.view.connected = true;
         record.view.last_ack_tick = last_ack_tick;
         Ok((record.view.clone(), next))

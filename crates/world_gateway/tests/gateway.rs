@@ -10,16 +10,16 @@ use engine_core::time::{Millis, Tick};
 use engine_net::envelope::{Envelope, MessageId, MessageKind};
 use engine_net::protocol::{ErrorPayload, Handshake};
 use engine_net::replication::{ReplicationBatch, SessionId};
-use engine_sim::action::{ActionResult, Verb};
-use engine_sim::entity::{Door, EntityRecord, Interactable};
+use engine_sim::action::{ActionEffect, ActionResult, Verb};
+use engine_sim::entity::{Door, EntityRecord, Interactable, InteractionPermission, UiProvider};
 use engine_sim::mind::Mind;
 use engine_sim::nav::NavGrid;
 use engine_sim::zone::{Zone, ZoneConfig};
 use game_api::AccountId;
 use serde_json::json;
 use world_gateway::{
-    Connection, GatewayConfig, OwnerState, SequentialResumeTokens, SessionClaims, SessionDelivery,
-    WorldGateway,
+    Connection, GatewayConfig, OpenPanel, OwnerState, SequentialResumeTokens, SessionClaims,
+    SessionDelivery, UI_ACTION_KIND, UI_CLOSE_KIND, UI_STATE_KIND, UiState, WorldGateway,
 };
 
 struct Fixture {
@@ -32,6 +32,9 @@ struct Fixture {
     bob_door: StableId,
     alice_barrel: StableId,
     bob_barrel: StableId,
+    alice_terminal: StableId,
+    bob_owned_terminal: StableId,
+    alice_display: StableId,
     hidden_crate: StableId,
     torch: DefinitionId,
 }
@@ -50,6 +53,90 @@ fn handshake() -> Handshake {
 
 fn claims(account: &str, principal: StableId) -> SessionClaims {
     SessionClaims::new(AccountId::new(account).unwrap(), principal).unwrap()
+}
+
+fn spawn_panels(zone: &mut Zone, bob_principal: StableId) -> (StableId, StableId, StableId) {
+    let alice_terminal = id(IdKind::Entity, 40);
+    zone.spawn(
+        EntityRecord::new(
+            alice_terminal,
+            text("prop.terminal"),
+            Vec3::new(10.5, 0.0, 10.0),
+        )
+        .with_interactable(
+            Interactable::new(3.0, [Verb::Use, Verb::Inspect]).without_line_of_sight(),
+        )
+        .with_ui(UiProvider::new(text("ui.terminal"), "Terminal")),
+    )
+    .unwrap();
+
+    let bob_owned_terminal = id(IdKind::Entity, 41);
+    zone.spawn(
+        EntityRecord::new(
+            bob_owned_terminal,
+            text("prop.private_terminal"),
+            Vec3::new(11.5, 0.0, 10.0),
+        )
+        .owned_by(bob_principal)
+        .with_interactable(
+            Interactable::new(3.0, [Verb::Use])
+                .without_line_of_sight()
+                .with_permission(InteractionPermission::Owner),
+        )
+        .with_ui(UiProvider::new(
+            text("ui.private_terminal"),
+            "Private Terminal",
+        )),
+    )
+    .unwrap();
+
+    let alice_display = id(IdKind::Entity, 42);
+    zone.spawn(
+        EntityRecord::new(
+            alice_display,
+            text("prop.display"),
+            Vec3::new(9.5, 0.0, 10.0),
+        )
+        .with_interactable(Interactable::new(3.0, [Verb::Use]).without_line_of_sight())
+        .with_ui(UiProvider::new(text("ui.display"), "Display")),
+    )
+    .unwrap();
+
+    (alice_terminal, bob_owned_terminal, alice_display)
+}
+
+fn spawn_props(zone: &mut Zone) -> (StableId, StableId, StableId, StableId) {
+    let alice_door = id(IdKind::Entity, 10);
+    let bob_door = id(IdKind::Entity, 11);
+    for (door, position) in [
+        (alice_door, Vec3::new(11.0, 0.0, 10.0)),
+        (bob_door, Vec3::new(152.0, 0.0, 150.0)),
+    ] {
+        zone.spawn(
+            EntityRecord::new(door, text("prop.door"), position)
+                .with_interactable(Interactable::new(3.0, [Verb::Open]).without_line_of_sight())
+                .with_door(Door::new()),
+        )
+        .unwrap();
+    }
+
+    let alice_barrel = id(IdKind::Entity, 20);
+    let bob_barrel = id(IdKind::Entity, 21);
+    for (barrel, position) in [
+        (alice_barrel, Vec3::new(12.0, 0.0, 10.0)),
+        (bob_barrel, Vec3::new(149.0, 0.0, 150.0)),
+    ] {
+        zone.spawn(
+            EntityRecord::new(barrel, text("prop.barrel"), position)
+                .with_health(100)
+                .with_interactable(
+                    Interactable::new(4.0, [Verb::Inspect, Verb::Attack]).without_line_of_sight(),
+                ),
+        )
+        .unwrap();
+    }
+
+    (alice_door, bob_door, alice_barrel, bob_barrel)
 }
 
 fn fixture() -> Fixture {
@@ -97,35 +184,10 @@ fn fixture() -> Fixture {
     )
     .unwrap();
 
-    let alice_door = id(IdKind::Entity, 10);
-    let bob_door = id(IdKind::Entity, 11);
-    for (door, position) in [
-        (alice_door, Vec3::new(11.0, 0.0, 10.0)),
-        (bob_door, Vec3::new(152.0, 0.0, 150.0)),
-    ] {
-        zone.spawn(
-            EntityRecord::new(door, text("prop.door"), position)
-                .with_interactable(Interactable::new(3.0, [Verb::Open]).without_line_of_sight())
-                .with_door(Door::new()),
-        )
-        .unwrap();
-    }
+    let (alice_door, bob_door, alice_barrel, bob_barrel) = spawn_props(&mut zone);
 
-    let alice_barrel = id(IdKind::Entity, 20);
-    let bob_barrel = id(IdKind::Entity, 21);
-    for (barrel, position) in [
-        (alice_barrel, Vec3::new(12.0, 0.0, 10.0)),
-        (bob_barrel, Vec3::new(149.0, 0.0, 150.0)),
-    ] {
-        zone.spawn(
-            EntityRecord::new(barrel, text("prop.barrel"), position)
-                .with_health(100)
-                .with_interactable(
-                    Interactable::new(4.0, [Verb::Inspect, Verb::Attack]).without_line_of_sight(),
-                ),
-        )
-        .unwrap();
-    }
+    let (alice_terminal, bob_owned_terminal, alice_display) =
+        spawn_panels(&mut zone, bob_principal);
 
     let hidden_crate = id(IdKind::Entity, 30);
     zone.spawn(
@@ -157,6 +219,9 @@ fn fixture() -> Fixture {
         bob_door,
         alice_barrel,
         bob_barrel,
+        alice_terminal,
+        bob_owned_terminal,
+        alice_display,
         hidden_crate,
         torch,
     }
@@ -192,6 +257,36 @@ fn batch_has_entity(batch: &ReplicationBatch, entity: StableId) -> bool {
         .updates
         .iter()
         .any(|update| update.entity == Some(entity))
+}
+
+fn ui_state(envelope: &Envelope) -> UiState {
+    assert_eq!(envelope.kind.as_str(), UI_STATE_KIND);
+    serde_json::from_value(envelope.body.clone()).unwrap()
+}
+
+fn reply_of_kind<'a>(replies: &'a [Envelope], kind: &str) -> &'a Envelope {
+    replies
+        .iter()
+        .find(|envelope| envelope.kind.as_str() == kind)
+        .unwrap_or_else(|| panic!("expected a {kind} reply"))
+}
+
+fn open_terminal(
+    gateway: &mut WorldGateway,
+    session: &SessionId,
+    terminal: StableId,
+    request_id: &str,
+) -> Vec<Envelope> {
+    gateway
+        .handle(
+            session,
+            &action(
+                request_id,
+                json!({ "verb": "use", "target": terminal.to_string() }),
+            ),
+            Millis::new(2_000),
+        )
+        .unwrap()
 }
 
 #[test]
@@ -658,4 +753,433 @@ fn incompatible_handshakes_never_create_sessions() {
         .unwrap_err();
     assert_eq!(error.code(), ErrorCode::VersionMismatch);
     assert_eq!(fixture.gateway.retained_sessions(), 0);
+}
+
+#[test]
+fn opening_a_panel_emits_server_resolved_ui_state() {
+    let mut fixture = fixture();
+    let alice = connect(
+        &mut fixture.gateway,
+        "account-alice",
+        fixture.alice_principal,
+    );
+
+    let replies = open_terminal(
+        &mut fixture.gateway,
+        &alice.session,
+        fixture.alice_terminal,
+        "req_ui_open_0001",
+    );
+    assert_eq!(
+        replies.len(),
+        2,
+        "an opened panel produces a result and state"
+    );
+
+    let result: ActionResult =
+        serde_json::from_value(reply_of_kind(&replies, "action.result").body.clone()).unwrap();
+    assert!(result.is_applied());
+    assert!(matches!(
+        result.effects(),
+        [ActionEffect::UiOpened { target, .. }] if *target == fixture.alice_terminal
+    ));
+
+    let state = ui_state(reply_of_kind(&replies, UI_STATE_KIND));
+    let expected = OpenPanel {
+        target: fixture.alice_terminal,
+        schema: text("ui.terminal"),
+        title: "Terminal".to_string(),
+    };
+    assert_eq!(state.tick, fixture.gateway.zone().tick());
+    assert_eq!(state.panel, Some(expected.clone()));
+    assert_eq!(fixture.gateway.panel(&alice.session), Some(expected));
+}
+
+#[test]
+fn panel_actions_use_the_open_target_and_revalidate_range() {
+    let mut fixture = fixture();
+    let alice = connect(
+        &mut fixture.gateway,
+        "account-alice",
+        fixture.alice_principal,
+    );
+    let _ = open_terminal(
+        &mut fixture.gateway,
+        &alice.session,
+        fixture.alice_terminal,
+        "req_ui_open_0001",
+    );
+
+    fixture
+        .gateway
+        .zone_mut()
+        .entity_mut(fixture.alice_actor)
+        .unwrap()
+        .transform
+        .position = Vec3::new(80.0, 0.0, 80.0);
+    let out_of_range = fixture
+        .gateway
+        .handle(
+            &alice.session,
+            &envelope(
+                "req_ui_action_0001",
+                UI_ACTION_KIND,
+                json!({ "schema": "ui.terminal", "action": "inspect" }),
+            ),
+            Millis::new(2_001),
+        )
+        .unwrap();
+    let result: ActionResult =
+        serde_json::from_value(reply_of_kind(&out_of_range, "action.result").body.clone()).unwrap();
+    assert_eq!(result.actor, fixture.alice_actor);
+    assert_eq!(result.error().unwrap().code(), ErrorCode::OutOfRange);
+    let state = ui_state(reply_of_kind(&out_of_range, UI_STATE_KIND));
+    assert_eq!(
+        state.panel.as_ref().map(|panel| panel.target),
+        Some(fixture.alice_terminal),
+        "a rejected action keeps the panel open"
+    );
+
+    fixture
+        .gateway
+        .zone_mut()
+        .entity_mut(fixture.alice_actor)
+        .unwrap()
+        .transform
+        .position = Vec3::new(10.0, 0.0, 10.0);
+    let applied = fixture
+        .gateway
+        .handle(
+            &alice.session,
+            &envelope(
+                "req_ui_action_0002",
+                UI_ACTION_KIND,
+                json!({ "schema": "ui.terminal", "action": "inspect" }),
+            ),
+            Millis::new(2_002),
+        )
+        .unwrap();
+    let result: ActionResult =
+        serde_json::from_value(reply_of_kind(&applied, "action.result").body.clone()).unwrap();
+    assert!(result.is_applied());
+    assert!(matches!(
+        result.effects(),
+        [ActionEffect::Inspected { target, .. }] if *target == fixture.alice_terminal
+    ));
+    assert_eq!(result.request_id, "req_ui_action_0002");
+
+    let unsupported = fixture
+        .gateway
+        .handle(
+            &alice.session,
+            &envelope(
+                "req_ui_action_0003",
+                UI_ACTION_KIND,
+                json!({ "schema": "ui.terminal", "action": "attack" }),
+            ),
+            Millis::new(2_003),
+        )
+        .unwrap();
+    let result: ActionResult =
+        serde_json::from_value(reply_of_kind(&unsupported, "action.result").body.clone()).unwrap();
+    assert_eq!(result.error().unwrap().code(), ErrorCode::Unsupported);
+    assert!(fixture.gateway.panel(&alice.session).is_some());
+}
+
+#[test]
+fn a_panel_whose_target_disappeared_is_cleared() {
+    let mut fixture = fixture();
+    let alice = connect(
+        &mut fixture.gateway,
+        "account-alice",
+        fixture.alice_principal,
+    );
+    let _ = open_terminal(
+        &mut fixture.gateway,
+        &alice.session,
+        fixture.alice_terminal,
+        "req_ui_open_0001",
+    );
+
+    fixture
+        .gateway
+        .zone_mut()
+        .despawn(fixture.alice_terminal)
+        .unwrap();
+    let missing = fixture
+        .gateway
+        .handle(
+            &alice.session,
+            &envelope(
+                "req_ui_action_0001",
+                UI_ACTION_KIND,
+                json!({ "schema": "ui.terminal", "action": "inspect" }),
+            ),
+            Millis::new(2_001),
+        )
+        .unwrap();
+    let result: ActionResult =
+        serde_json::from_value(reply_of_kind(&missing, "action.result").body.clone()).unwrap();
+    assert_eq!(result.error().unwrap().code(), ErrorCode::NotFound);
+    let state = ui_state(reply_of_kind(&missing, UI_STATE_KIND));
+    assert!(
+        state.panel.is_none(),
+        "a panel whose target disappeared is cleared"
+    );
+    assert!(fixture.gateway.panel(&alice.session).is_none());
+}
+
+#[test]
+fn panel_messages_reject_client_targets_and_schema_mismatches() {
+    let mut fixture = fixture();
+    let alice = connect(
+        &mut fixture.gateway,
+        "account-alice",
+        fixture.alice_principal,
+    );
+    let _ = open_terminal(
+        &mut fixture.gateway,
+        &alice.session,
+        fixture.alice_terminal,
+        "req_ui_open_0001",
+    );
+
+    let spoof = fixture
+        .gateway
+        .handle(
+            &alice.session,
+            &envelope(
+                "req_ui_spoof_0001",
+                UI_ACTION_KIND,
+                json!({
+                    "schema": "ui.terminal",
+                    "action": "inspect",
+                    "target": fixture.alice_display.to_string(),
+                }),
+            ),
+            Millis::new(2_001),
+        )
+        .unwrap();
+    assert_eq!(spoof.len(), 1);
+    let error: ErrorPayload = serde_json::from_value(spoof[0].body.clone()).unwrap();
+    assert_eq!(error.code, ErrorCode::InvalidRequest);
+    assert!(fixture.gateway.panel(&alice.session).is_some());
+
+    let wrong_schema = fixture
+        .gateway
+        .handle(
+            &alice.session,
+            &envelope(
+                "req_ui_stale_0001",
+                UI_ACTION_KIND,
+                json!({ "schema": "ui.other", "action": "inspect" }),
+            ),
+            Millis::new(2_002),
+        )
+        .unwrap();
+    let error: ErrorPayload = serde_json::from_value(wrong_schema[0].body.clone()).unwrap();
+    assert_eq!(error.code, ErrorCode::Conflict);
+    assert_eq!(
+        fixture
+            .gateway
+            .panel(&alice.session)
+            .unwrap()
+            .schema
+            .as_str(),
+        "ui.terminal"
+    );
+
+    let bad_close = fixture
+        .gateway
+        .handle(
+            &alice.session,
+            &envelope(
+                "req_ui_close_0001",
+                UI_CLOSE_KIND,
+                json!({ "schema": "ui.terminal" }),
+            ),
+            Millis::new(2_003),
+        )
+        .unwrap();
+    let error: ErrorPayload = serde_json::from_value(bad_close[0].body.clone()).unwrap();
+    assert_eq!(error.code, ErrorCode::InvalidRequest);
+    assert!(fixture.gateway.panel(&alice.session).is_some());
+
+    let closed = fixture
+        .gateway
+        .handle(
+            &alice.session,
+            &envelope("req_ui_close_0002", UI_CLOSE_KIND, json!({})),
+            Millis::new(2_004),
+        )
+        .unwrap();
+    let state = ui_state(reply_of_kind(&closed, UI_STATE_KIND));
+    assert!(state.panel.is_none());
+    assert!(fixture.gateway.panel(&alice.session).is_none());
+
+    let no_panel = fixture
+        .gateway
+        .handle(
+            &alice.session,
+            &envelope(
+                "req_ui_action_0001",
+                UI_ACTION_KIND,
+                json!({ "schema": "ui.terminal", "action": "inspect" }),
+            ),
+            Millis::new(2_005),
+        )
+        .unwrap();
+    let error: ErrorPayload = serde_json::from_value(no_panel[0].body.clone()).unwrap();
+    assert_eq!(error.code, ErrorCode::InvalidState);
+}
+
+#[test]
+fn panel_state_is_cleared_on_disconnect_and_resume() {
+    let mut fixture = fixture();
+    let alice = connect(
+        &mut fixture.gateway,
+        "account-alice",
+        fixture.alice_principal,
+    );
+    let _ = open_terminal(
+        &mut fixture.gateway,
+        &alice.session,
+        fixture.alice_terminal,
+        "req_ui_open_0001",
+    );
+    assert!(fixture.gateway.panel(&alice.session).is_some());
+
+    fixture
+        .gateway
+        .disconnect(&alice.session, Tick(0), Millis::new(3_000))
+        .unwrap();
+    assert!(
+        fixture.gateway.panel(&alice.session).is_none(),
+        "a detached transport must not leave a panel open"
+    );
+
+    let resumed = fixture
+        .gateway
+        .resume(&alice.token, &handshake(), Tick(0), Millis::new(4_000))
+        .unwrap();
+    assert!(fixture.gateway.panel(&resumed.session).is_none());
+
+    let replies = fixture
+        .gateway
+        .handle(
+            &resumed.session,
+            &envelope(
+                "req_ui_action_0001",
+                UI_ACTION_KIND,
+                json!({ "schema": "ui.terminal", "action": "inspect" }),
+            ),
+            Millis::new(4_001),
+        )
+        .unwrap();
+    let error: ErrorPayload = serde_json::from_value(replies[0].body.clone()).unwrap();
+    assert_eq!(error.code, ErrorCode::InvalidState);
+}
+
+#[test]
+fn panel_open_requires_permission_and_range() {
+    let mut fixture = fixture();
+    let alice = connect(
+        &mut fixture.gateway,
+        "account-alice",
+        fixture.alice_principal,
+    );
+    let bob = connect(&mut fixture.gateway, "account-bob", fixture.bob_principal);
+
+    let denied = fixture
+        .gateway
+        .handle(
+            &alice.session,
+            &action(
+                "req_ui_denied_0001",
+                json!({ "verb": "use", "target": fixture.bob_owned_terminal.to_string() }),
+            ),
+            Millis::new(2_000),
+        )
+        .unwrap();
+    let result: ActionResult =
+        serde_json::from_value(reply_of_kind(&denied, "action.result").body.clone()).unwrap();
+    assert_eq!(result.error().unwrap().code(), ErrorCode::PermissionDenied);
+    assert!(fixture.gateway.panel(&alice.session).is_none());
+
+    let far = fixture
+        .gateway
+        .handle(
+            &bob.session,
+            &action(
+                "req_ui_far_0001",
+                json!({ "verb": "use", "target": fixture.alice_terminal.to_string() }),
+            ),
+            Millis::new(2_001),
+        )
+        .unwrap();
+    let result: ActionResult =
+        serde_json::from_value(reply_of_kind(&far, "action.result").body.clone()).unwrap();
+    assert_eq!(result.error().unwrap().code(), ErrorCode::OutOfRange);
+    assert!(fixture.gateway.panel(&bob.session).is_none());
+}
+
+#[test]
+fn opening_another_panel_replaces_the_previous_state() {
+    let mut fixture = fixture();
+    let alice = connect(
+        &mut fixture.gateway,
+        "account-alice",
+        fixture.alice_principal,
+    );
+    let _ = open_terminal(
+        &mut fixture.gateway,
+        &alice.session,
+        fixture.alice_terminal,
+        "req_ui_open_0001",
+    );
+    let _ = open_terminal(
+        &mut fixture.gateway,
+        &alice.session,
+        fixture.alice_display,
+        "req_ui_open_0002",
+    );
+    assert_eq!(
+        fixture.gateway.panel(&alice.session).unwrap().schema,
+        text("ui.display")
+    );
+
+    let stale = fixture
+        .gateway
+        .handle(
+            &alice.session,
+            &envelope(
+                "req_ui_action_0001",
+                UI_ACTION_KIND,
+                json!({ "schema": "ui.terminal", "action": "inspect" }),
+            ),
+            Millis::new(2_001),
+        )
+        .unwrap();
+    let error: ErrorPayload = serde_json::from_value(stale[0].body.clone()).unwrap();
+    assert_eq!(error.code, ErrorCode::Conflict);
+
+    let refreshed = fixture
+        .gateway
+        .handle(
+            &alice.session,
+            &envelope(
+                "req_ui_action_0002",
+                UI_ACTION_KIND,
+                json!({ "schema": "ui.display", "action": "use" }),
+            ),
+            Millis::new(2_002),
+        )
+        .unwrap();
+    let result: ActionResult =
+        serde_json::from_value(reply_of_kind(&refreshed, "action.result").body.clone()).unwrap();
+    assert!(result.is_applied());
+    assert_eq!(
+        fixture.gateway.panel(&alice.session).unwrap().target,
+        fixture.alice_display
+    );
 }

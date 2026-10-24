@@ -12,6 +12,10 @@
 //!   authenticated session. Unknown body fields are rejected, not ignored.
 //! - Request IDs are scoped per session before reaching [`Zone`], so one client
 //!   cannot replay another client's cached result.
+//! - UI panels are session state. `ui.action` and `ui.close` operate on the
+//!   panel a validated action opened; a client cannot choose its target, and
+//!   the schema it echoes is only an optimistic concurrency check. Every
+//!   action is re-validated by the simulation.
 //! - Every snapshot is filtered through [`engine_net::interest`] with the
 //!   session's server-chosen view radius, principal, and staff flag.
 //! - Whole-zone broadcasts do not exist. A session receives one delivery per
@@ -21,7 +25,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use engine_core::error::{EngineError, ErrorCode};
-use engine_core::id::StableId;
+use engine_core::id::{DefinitionId, StableId};
 use engine_core::time::{DurationMs, Millis, Tick};
 use engine_net::envelope::{Envelope, MessageId, MessageKind};
 use engine_net::interest::{
@@ -32,7 +36,7 @@ use engine_net::protocol::{ErrorPayload, Handshake, Negotiated, negotiate};
 use engine_net::replication::{
     ReplicationBatch, ReplicationCategory, ReplicationUpdate, SessionId,
 };
-use engine_sim::action::{ActionRequest, Verb};
+use engine_sim::action::{ActionEffect, ActionRequest, Verb};
 use engine_sim::mind::Controller;
 use engine_sim::zone::Zone;
 use serde::Deserialize;
@@ -40,11 +44,20 @@ use serde_json::json;
 
 use crate::replication::{EntitySnapshot, OwnerState, SessionDelivery, interest_entity};
 use crate::session::{
-    GatewaySession, ResumeToken, ResumeTokenSource, SessionClaims, SessionRegistry,
+    GatewaySession, OpenPanel, ResumeToken, ResumeTokenSource, SessionClaims, SessionRegistry,
 };
 
 /// The message kind used for protocol-level failures.
 pub const ERROR_KIND: &str = "protocol.error";
+
+/// A client request to close the session's open panel.
+pub const UI_CLOSE_KIND: &str = "ui.close";
+
+/// A client request to run one action from the session's open panel.
+pub const UI_ACTION_KIND: &str = "ui.action";
+
+/// The authoritative panel state sent to a client.
+pub const UI_STATE_KIND: &str = "ui.state";
 
 /// Gateway tuning. All values are chosen by the server, never by a client.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -165,6 +178,18 @@ pub struct Connection {
     pub snapshot: SessionDelivery,
 }
 
+/// The body of `ui.state`.
+///
+/// The panel target, schema, and title are always server-resolved. An absent
+/// panel means the client should close whatever panel it is showing.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UiState {
+    /// Authoritative tick that produced this state.
+    pub tick: Tick,
+    /// Open panel, or `None` when the client should show no panel.
+    pub panel: Option<OpenPanel>,
+}
+
 #[derive(Debug, Clone)]
 struct TrackedEntity {
     snapshot: EntitySnapshot,
@@ -260,6 +285,16 @@ impl WorldGateway {
     #[must_use]
     pub fn session(&self, id: &SessionId) -> Option<GatewaySession> {
         self.sessions.get(id).cloned()
+    }
+
+    /// The panel currently open for a session, if any.
+    ///
+    /// This is server state derived from a validated `UiOpened` effect. It is
+    /// exposed for authoritative systems and tests, never accepted from a
+    /// client.
+    #[must_use]
+    pub fn panel(&self, session: &SessionId) -> Option<OpenPanel> {
+        self.sessions.panel(session).cloned()
     }
 
     /// Number of currently connected sessions.
@@ -416,6 +451,8 @@ impl WorldGateway {
         match envelope.kind.as_str() {
             "action.request" => self.handle_action(session, principal, actor, envelope, now),
             "session.ack" => self.handle_ack(session, envelope),
+            UI_CLOSE_KIND => self.handle_ui_close(session, envelope),
+            UI_ACTION_KIND => self.handle_ui_action(session, principal, actor, envelope, now),
             _ => {
                 let error = EngineError::new(ErrorCode::Unsupported, "unsupported message kind")
                     .with_detail("kind", envelope.kind.as_str());
@@ -516,20 +553,128 @@ impl WorldGateway {
             }
         };
 
+        let target = intent.target;
         let mut request =
             ActionRequest::new(scoped_request_id(session, &envelope.id), actor, intent.verb);
-        request.target = intent.target;
+        request.target = target;
         request.params = intent.params;
         request.client_tick = intent.client_tick;
         request.principal = Some(principal);
         let mut result = self.zone.apply_action(&request, now);
         result.request_id = envelope.id.as_str().to_string();
+
+        let mut panel_changed = false;
+        if let Some(panel) = opened_panel(result.effects()) {
+            self.sessions.set_panel(session, panel)?;
+            panel_changed = true;
+        } else if result
+            .error()
+            .is_some_and(|error| error.code() == ErrorCode::NotFound)
+            && self
+                .sessions
+                .panel(session)
+                .is_some_and(|panel| Some(panel.target) == target)
+        {
+            let _ = self.sessions.clear_panel(session);
+            panel_changed = true;
+        }
+
         let body = serde_json::to_value(&result).map_err(|error| internal_error(&error))?;
-        Ok(vec![envelope.reply(
-            self.reply_id(),
-            message_kind("action.result"),
-            body,
-        )])
+        let mut replies =
+            vec![envelope.reply(self.reply_id(), message_kind("action.result"), body)];
+        if panel_changed {
+            replies.push(self.ui_state_reply(session, envelope)?);
+        }
+        Ok(replies)
+    }
+
+    fn handle_ui_close(
+        &mut self,
+        session: &SessionId,
+        envelope: &Envelope,
+    ) -> Result<Vec<Envelope>, EngineError> {
+        if let Err(error) = serde_json::from_value::<EmptyBody>(envelope.body.clone()) {
+            let error = EngineError::new(ErrorCode::InvalidRequest, "invalid UI close body")
+                .with_detail("error", error.to_string());
+            return Ok(vec![self.error_reply(envelope, &error)]);
+        }
+        let _ = self.sessions.clear_panel(session)?;
+        Ok(vec![self.ui_state_reply(session, envelope)?])
+    }
+
+    fn handle_ui_action(
+        &mut self,
+        session: &SessionId,
+        principal: StableId,
+        actor: StableId,
+        envelope: &Envelope,
+        now: Millis,
+    ) -> Result<Vec<Envelope>, EngineError> {
+        let intent = match serde_json::from_value::<UiActionIntent>(envelope.body.clone()) {
+            Ok(intent) => intent,
+            Err(error) => {
+                let error = EngineError::new(ErrorCode::InvalidRequest, "invalid UI action body")
+                    .with_detail("error", error.to_string());
+                return Ok(vec![self.error_reply(envelope, &error)]);
+            }
+        };
+
+        let Some(panel) = self.sessions.panel(session).cloned() else {
+            let error = EngineError::new(
+                ErrorCode::InvalidState,
+                "no UI panel is open for this session",
+            );
+            return Ok(vec![self.error_reply(envelope, &error)]);
+        };
+        if panel.schema != intent.schema {
+            let error = EngineError::new(
+                ErrorCode::Conflict,
+                "the UI panel schema does not match the open panel",
+            )
+            .with_detail("expected", panel.schema.to_string())
+            .with_detail("received", intent.schema.to_string());
+            return Ok(vec![self.error_reply(envelope, &error)]);
+        }
+        let Some(verb) = Verb::parse(&intent.action) else {
+            let error = EngineError::new(ErrorCode::InvalidRequest, "invalid panel action name")
+                .with_detail("action", intent.action);
+            return Ok(vec![self.error_reply(envelope, &error)]);
+        };
+
+        let mut request = ActionRequest::new(scoped_request_id(session, &envelope.id), actor, verb);
+        request.target = Some(panel.target);
+        request.params = intent.params;
+        request.client_tick = intent.client_tick;
+        request.principal = Some(principal);
+        let mut result = self.zone.apply_action(&request, now);
+        result.request_id = envelope.id.as_str().to_string();
+
+        if let Some(opened) = opened_panel(result.effects()) {
+            self.sessions.set_panel(session, opened)?;
+        } else if result
+            .error()
+            .is_some_and(|error| error.code() == ErrorCode::NotFound)
+        {
+            let _ = self.sessions.clear_panel(session);
+        }
+
+        let body = serde_json::to_value(&result).map_err(|error| internal_error(&error))?;
+        let result_reply = envelope.reply(self.reply_id(), message_kind("action.result"), body);
+        let state_reply = self.ui_state_reply(session, envelope)?;
+        Ok(vec![result_reply, state_reply])
+    }
+
+    fn ui_state_reply(
+        &mut self,
+        session: &SessionId,
+        request: &Envelope,
+    ) -> Result<Envelope, EngineError> {
+        let state = UiState {
+            tick: self.zone.tick(),
+            panel: self.sessions.panel(session).cloned(),
+        };
+        let body = serde_json::to_value(state).map_err(|error| internal_error(&error))?;
+        Ok(request.reply(self.reply_id(), message_kind(UI_STATE_KIND), body))
     }
 
     fn handle_ack(
@@ -775,6 +920,36 @@ struct ActionIntent {
 #[serde(deny_unknown_fields)]
 struct AckBody {
     tick: Tick,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptyBody {}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UiActionIntent {
+    schema: DefinitionId,
+    action: String,
+    #[serde(default)]
+    params: BTreeMap<String, String>,
+    #[serde(default)]
+    client_tick: Tick,
+}
+
+fn opened_panel(effects: &[ActionEffect]) -> Option<OpenPanel> {
+    effects.iter().find_map(|effect| match effect {
+        ActionEffect::UiOpened {
+            target,
+            schema,
+            title,
+        } => Some(OpenPanel {
+            target: *target,
+            schema: schema.clone(),
+            title: title.clone(),
+        }),
+        _ => None,
+    })
 }
 
 fn scoped_request_id(session: &SessionId, id: &MessageId) -> String {

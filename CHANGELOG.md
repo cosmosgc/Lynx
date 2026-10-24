@@ -44,6 +44,14 @@ semantic versioning for engine releases and content bundles.
   closure on top of the gateway, with no socket or runtime (ADR 0014).
 - `world_gateway::WorldGateway::close_session` for immediate revocation without
   a resume window.
+- `world_gateway`: server-owned UI panel session state. A validated `UiOpened`
+  effect becomes a session `OpenPanel`; `ui.action` and `ui.close` operate on
+  that server-resolved target and `ui.state` carries the authoritative tick and
+  panel (ADR 0015). Panel actions run through the normal action pipeline, so
+  range, visibility, permission, capabilities, and cooldowns are re-validated.
+  Panel state clears on disconnect, resume, close, or provider loss.
+- `engine_sim::action::Verb::parse` for wire and panel action names, including
+  bounded custom names.
 - `lynx-world`: runnable Axum/Tokio WebSocket world service with hashed static
   bearer auth, `/healthz`, `/readyz`, a `session.hello` handshake, one
   `world.token` control message per admission, per-connection backpressure, a

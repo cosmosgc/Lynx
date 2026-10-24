@@ -61,6 +61,9 @@ Every message is a JSON object:
 | `world.delta` | server → client | tick, interest delta, filtered replication |
 | `world.token` | server → client | the session's current resume secret |
 | `action.request` / `action.result` | both | gameplay intent and its outcome |
+| `ui.action` | client → server | schema, panel action name, parameters, optional client tick |
+| `ui.close` | client → server | empty body |
+| `ui.state` | server → client | authoritative tick plus the open panel (or `null`) |
 | `protocol.error` | server → client | stable code, parameters, correlation ID |
 
 `world.snapshot` and `world.delta` share the `WorldUpdate` body: authoritative
@@ -70,6 +73,36 @@ recipient is implied by the connection, so the body never repeats a session ID.
 `world.token` is a control message, not replication. It is sent once after a
 successful open or resume and carries the rotated single-use secret. Transports
 must keep it out of logs, traces, and error details.
+
+### UI panel lifecycle
+
+Entity-provided interfaces are server state, not a client-owned overlay.
+
+- `action.request` may produce an `ActionEffect::UiOpened` effect. The gateway
+  records that panel for the session from the authoritative effect: the target
+  entity, the schema, and the title. It then sends `ui.state` so the client has
+  the canonical panel state in addition to the action result.
+- `ui.state` has the body `{ "tick": <tick>, "panel": <panel or null> }`, where
+  a panel is `{ "target": <entity>, "schema": <definition id>, "title": <text> }`.
+  A `null` panel tells the client to close whatever it is showing.
+- `ui.action` has the body
+  `{ "schema": <definition id>, "action": <name>, "params": { ... }, "client_tick": <tick> }`.
+  The client cannot name a target, actor, principal, or session. The gateway
+  looks up the session's open panel and uses its server-resolved target. The
+  `schema` is an optimistic concurrency check: acting on a replaced panel
+  returns `Conflict`.
+- The action name is parsed into an interaction verb and routed through the
+  normal action pipeline. Range, visibility, permission, target state,
+  capabilities, and cooldowns are re-validated. A client that moves away from
+  the provider cannot keep acting on it.
+- `ui.close` has an empty body. Closing an already closed panel is idempotent
+  and still returns `ui.state`.
+- A disconnect clears the session's panel; a resume starts with no panel.
+  A panel action whose provider is gone clears the panel instead of leaving a
+  stale interface open.
+
+Panel targets, schemas, and titles are never accepted from a client. See
+[ADR 0015](adr/0015-ui-panel-session-state.md).
 
 See [ADR 0014](adr/0014-framed-transport-and-world-server.md).
 
@@ -136,6 +169,13 @@ connection and the authoritative zone. It adds no socket and no runtime.
 - **Acknowledgements.** `session.ack` records the highest server tick the
   client has processed. The value is clamped to the authoritative tick, so a
   client cannot pin the server forward or replay a stale cursor.
+- **Panels are session state.** When a validated action opens an
+  entity-provided interface, the gateway stores the server-resolved target,
+  schema, and title for that session. `ui.action` and `ui.close` operate on
+  that stored panel; a client cannot redirect them to another entity. Panel
+  state is cleared on disconnect and when a panel action finds its provider
+  gone. See
+  [ADR 0015](adr/0015-ui-panel-session-state.md).
 - **Errors stay correlated.** Unknown kinds and malformed bodies produce a
   `protocol.error` reply with `correlation` set to the request ID. They do not
   close the session. Gameplay rejections arrive as `action.result`.
@@ -150,6 +190,9 @@ See [ADR 0013](adr/0013-world-gateway-and-reconnect.md).
 
 - Clients send intent (`action.request`), not state patches. The body names a
   verb, target, and parameters; it cannot name the acting entity.
+- Panel actions (`ui.action`) carry an action name and parameters, never a
+  target. The server resolves the provider from the session's open panel and
+  re-validates range and permission before running the action.
 - Movement is validated against colliders, speed, bounds, and zone rules.
 - Combat, inventory, currency, progression, and placement outcomes are
   computed on the server.

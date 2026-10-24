@@ -6,8 +6,8 @@
 //! - allocate server-side connection IDs and map them to world sessions;
 //! - turn the gateway's typed [`SessionDelivery`] values into versioned
 //!   envelopes (`world.ready`, `world.snapshot`, `world.delta`);
-//! - return correlated action replies and protocol errors to the right
-//!   connection;
+//! - return correlated action, UI control, and protocol-error replies to the
+//!   right connection;
 //! - keep disconnect, resume, and session-revocation bookkeeping consistent.
 //!
 //! It owns no socket, thread, async runtime, or clock. A transport authenticates

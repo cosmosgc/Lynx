@@ -1,9 +1,10 @@
 //! The transport-facing world server loop for Lynx.
 //!
-//! `world_gateway` decides authority, sessions, interest, and reconnect.
-//! `world_server` owns the remaining connection-oriented work: connection IDs,
-//! wire message kinds, snapshot/delta envelopes, disconnect and resume
-//! bookkeeping, and closing connections whose sessions ended.
+//! `world_gateway` decides authority, sessions, interest, reconnect, and UI
+//! panel state. `world_server` owns the remaining connection-oriented work:
+//! connection IDs, wire message kinds, snapshot/delta envelopes, UI control
+//! replies, disconnect and resume bookkeeping, and closing connections whose
+//! sessions ended.
 //!
 //! The crate deliberately contains no socket, thread, async runtime, or clock.
 //! A transport supplies trusted [`SessionClaims`](world_gateway::SessionClaims),

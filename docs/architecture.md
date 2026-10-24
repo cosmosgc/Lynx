@@ -55,9 +55,9 @@ Rules:
 - `game_api` defines backend interfaces and DTOs. It depends on `engine_core`,
   never on Nakama.
 - `world_gateway` composes the simulation, protocol, and backend DTOs into
-  session lifecycle, action routing, and per-session replication. It owns no
-  socket, runtime, or clock; a transport adapter supplies authenticated claims
-  and explicit timestamps.
+  session lifecycle, action routing, server-owned UI panel state, and
+  per-session replication. It owns no socket, runtime, or clock; a transport
+  adapter supplies authenticated claims and explicit timestamps.
 - `world_server` adds connection IDs, `world.ready`/`world.snapshot`/
   `world.delta` encoding, and connection-close bookkeeping on top of
   `world_gateway`. It still owns no socket, runtime, or clock.
@@ -85,6 +85,7 @@ Rules:
 | Localized text | message key + catalog | Source catalog is `pt-BR` |
 | Interest set | `InterestSet` | Per-session visible entities, distance + visibility |
 | Session | `GatewaySession` | Server-issued ID, authenticated principal, actor, staff flag |
+| Open panel | `OpenPanel` | Server-resolved target, schema, and title for one session |
 | Resume token | `ResumeToken` | Server-issued, short-lived, single-use, redacted |
 | Delivery | `SessionDelivery` | One session's interest delta and filtered batch per tick |
 
@@ -111,6 +112,11 @@ Rules:
    `SessionDelivery` per session containing only that session's interest delta
    and audience-filtered replication. Clients reconcile predicted state with
    the authoritative result.
+7. If the action opens an entity-provided interface, the gateway records the
+   server-resolved target, schema, and title as the session's open panel and
+   sends `ui.state`. Later `ui.action` and `ui.close` messages operate only on
+   that stored panel and re-run the normal range, visibility, and permission
+   checks.
 
 ## Localization
 

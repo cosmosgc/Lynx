@@ -22,6 +22,9 @@ use crate::zone::{ACTION_CACHE_LIMIT, Zone};
 /// Cooldown key: actor, verb, and optional target.
 pub type ActionKey = (StableId, Verb, Option<StableId>);
 
+/// Longest accepted custom action name, in bytes.
+pub const MAX_ACTION_NAME_LEN: usize = 64;
+
 /// Validated inputs for the effect stage of the action pipeline.
 struct ActionContext {
     target_id: StableId,
@@ -89,6 +92,42 @@ impl Verb {
             Self::Attack => "attack",
             Self::Custom(name) => name,
         }
+    }
+
+    /// Parse a wire or panel action name.
+    ///
+    /// Known engine verbs map to their variants. Other compact identifiers
+    /// become [`Verb::Custom`] and are rejected by the simulation until a
+    /// content system implements them. Empty, oversized, whitespace, or
+    /// control-character names are rejected outright.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        let verb = match value {
+            "inspect" => Self::Inspect,
+            "use" => Self::Use,
+            "open" => Self::Open,
+            "close" => Self::Close,
+            "take" => Self::Take,
+            "insert" => Self::Insert,
+            "equip" => Self::Equip,
+            "talk" => Self::Talk,
+            "repair" => Self::Repair,
+            "activate" => Self::Activate,
+            "hack" => Self::Hack,
+            "attack" => Self::Attack,
+            _ => {
+                if value.is_empty()
+                    || value.len() > MAX_ACTION_NAME_LEN
+                    || value
+                        .chars()
+                        .any(|ch| ch.is_whitespace() || ch.is_control())
+                {
+                    return None;
+                }
+                Self::Custom(value.to_string())
+            }
+        };
+        Some(verb)
     }
 }
 
@@ -778,4 +817,36 @@ fn param_usize(request: &ActionRequest, key: &str, default: usize) -> Result<usi
 #[must_use]
 pub fn distance_between(a: Vec3, b: Vec3) -> f32 {
     a.distance_xz(b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verb_names_round_trip_and_custom_names_are_bounded() {
+        for verb in [
+            Verb::Inspect,
+            Verb::Use,
+            Verb::Open,
+            Verb::Close,
+            Verb::Take,
+            Verb::Insert,
+            Verb::Equip,
+            Verb::Talk,
+            Verb::Repair,
+            Verb::Activate,
+            Verb::Hack,
+            Verb::Attack,
+        ] {
+            assert_eq!(Verb::parse(verb.as_str()), Some(verb));
+        }
+        assert_eq!(
+            Verb::parse("dance"),
+            Some(Verb::Custom("dance".to_string()))
+        );
+        assert_eq!(Verb::parse(""), None);
+        assert_eq!(Verb::parse("two words"), None);
+        assert_eq!(Verb::parse(&"x".repeat(MAX_ACTION_NAME_LEN + 1)), None);
+    }
 }
