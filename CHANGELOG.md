@@ -28,6 +28,14 @@ semantic versioning for engine releases and content bundles.
   client-authoritative minigames that grant rewards. The loader reads
   `content/ui/`, `content/panels/`, and `content/minigames/`, and bundle
   manifests record the `ui` and `minigame` kinds.
+- `engine_content::diff`: manifest version compatibility for publishing. The
+  diff reports added, removed, and changed definitions and locales, computes the
+  smallest safe semantic version bump, and rejects regressions, too-small
+  content bumps, and definition byte changes without a definition version bump.
+  Removing a definition or locale, or changing a definition kind, requires a
+  major bump.
+- `lynx content diff --base <manifest> --next <manifest>`: human-readable and
+  `--json` manifest comparison for publish gates and CI.
 - `engine_net` and `game_api`: protocol envelopes and backend adapter traits.
 - `engine_net::interest`: per-session interest sets with entry/exit hysteresis,
   visibility classes, deterministic entity caps, audience filtering for every
@@ -69,7 +77,8 @@ semantic versioning for engine releases and content bundles.
 - `engine_core::ErrorCode::SessionExpired` for expired or unknown world
   sessions; `game_api::ApiError::SessionExpired` now maps to it.
 - `backend_nakama`: native Nakama HTTP adapter with health and authentication.
-- `lynx` project CLI: `new`, `doctor`, `validate`, and `content hash`.
+- `lynx` project CLI: `new`, `doctor`, `validate`, `content hash`, and
+  `content diff`.
 - Native non-Docker Nakama/PostgreSQL setup scripts and SQL migrations.
 - Internationalization design: key-based RON catalogs, `pt-BR` as the default
   and source language, locale negotiation, validation codes, and client-side

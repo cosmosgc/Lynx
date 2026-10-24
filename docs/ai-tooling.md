@@ -15,7 +15,7 @@ testing a Lynx project never requires an MCP server.
 
 | Surface | Status | Notes |
 |---|---|---|
-| CLI (`lynx new/doctor/validate/content hash`) | Implemented | Stable, typed, machine-readable JSON via `--json` |
+| CLI (`lynx new/doctor/validate/content hash/content diff`) | Implemented | Stable, typed, machine-readable JSON via `--json` |
 | Engine MCP server | Planned | Narrow tools wrapping the CLI and content validators |
 | External MCP client | Planned | Explicit per-workspace configuration |
 | Shell execution | Not exposed by default | Allowlist or user approval per command |
@@ -26,6 +26,8 @@ Read-only:
 
 - `lynx.project.inspect` — manifest, engine version, content versions.
 - `lynx.content.validate` — schema and reference diagnostics.
+- `lynx.content.diff` — compare two manifests and report the required version
+  bump, additions, removals, changes, and compatibility diagnostics.
 - `lynx.diagnostics` — backend and environment checks.
 - `lynx.build.status` — last build result and error summary.
 

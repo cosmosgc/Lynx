@@ -216,6 +216,66 @@ thresholds of `<= -34` enemy, `-33..=33` neutral, and `>= 34` friend.
 Character-specific reputation overrides are additive and expire when their
 modifier expires.
 
+## Versioning and diffs
+
+Content versions are semantic. The manifest declares one `content_version` for
+the bundle, one `version` per definition, and the engine requirement. Publishing
+requires the candidate to be a valid successor to the deployed bundle, so the
+declared versions must describe the real change set.
+
+The rules are enforced by `engine_content::diff` and are also available from
+the CLI:
+
+```bash
+lynx content diff --base deployed/manifest.json --next build/manifest.json --json
+```
+
+| Change | Required bump |
+|---|---|
+| No definition or locale bytes changed | none |
+| Definition or locale added | minor |
+| Definition bytes or locale catalog changed | minor |
+| Definition removed, definition kind changed, locale removed | major |
+
+Additional rules:
+
+- A changed definition must also raise its own `version`; otherwise the diff
+  reports `content.diff.definition_version_not_bumped`.
+- The declared `content_version` must be at least the required bump. A smaller
+  bump is an error, not a warning.
+- A candidate older than the base is rejected with
+  `content.diff.version_regressed`.
+- A definition version that moves backwards is rejected with
+  `content.diff.definition_version_regressed`.
+- Removing a definition or locale, or changing a definition kind, requires a
+  major content bump. These changes are reported as warnings so that a
+  correctly bumped manifest is compatible; the version rule is what makes them
+  a publish failure when the bump is too small.
+- Moving a definition or catalog path, bumping a definition without changing
+  its bytes, and changing the engine requirement produce warnings without
+  forcing a bump.
+
+| Diagnostic code | Severity | Meaning |
+|---|---|---|
+| `content.diff.version_regressed` | error | Candidate content version is older than the base |
+| `content.diff.version_bump_too_small` | error | Declared bump is smaller than the change set requires |
+| `content.diff.definition_version_not_bumped` | error | Bytes changed without raising the definition version |
+| `content.diff.definition_version_regressed` | error | Definition version moved backwards |
+| `content.diff.definition_removed` | warning | Definition removed; requires a major bump |
+| `content.diff.kind_changed` | warning | Definition kind changed; requires a major bump |
+| `content.diff.locale_removed` | warning | Locale catalog removed; requires a major bump |
+| `content.diff.definition_version_bumped_without_change` | warning | Definition version raised without a byte change |
+| `content.diff.path_changed` | warning | Definition file moved |
+| `content.diff.locale_path_changed` | warning | Locale catalog moved |
+| `content.diff.engine_requirement_changed` | warning | Manifest requires a different engine range |
+
+`lynx content diff` always describes the full change set and exits successfully
+even when the result is incompatible; inspect the JSON `ok` field (or the
+human-readable `compatible`/`incompatible` line) in CI and publish gates. The
+same convention applies to `lynx validate`.
+
+See [ADR 0017](adr/0017-content-manifest-versioning.md).
+
 ## Publishing pipeline
 
 1. Parse and validate schemas.
@@ -223,7 +283,8 @@ modifier expires.
 3. Check budgets (entity counts, texture sizes, link depth).
 4. Validate localization keys, placeholders, and declared-locale completeness.
 5. Build a bundle and compute SHA-256 hashes for content and each catalog.
-6. Show a diff against the deployed content version.
+6. Diff the candidate manifest against the deployed one with
+   `lynx content diff` and require a compatible result.
 7. Require authorization for risky changes.
 8. Publish to staging or one zone.
 9. Monitor errors and tick health.

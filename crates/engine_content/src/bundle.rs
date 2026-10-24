@@ -151,7 +151,7 @@ impl ContentManifest {
         )
     }
 
-    fn add_entry(
+    pub(crate) fn add_entry(
         &mut self,
         path: String,
         kind: ContentKind,

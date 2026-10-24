@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use backend_nakama::{NakamaClient, NakamaConfig};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use engine_content::{ContentLoader, sha256_hex};
+use engine_content::{ContentLoader, ContentManifest, diff, sha256_hex};
 use engine_core::schema::ComponentRegistry;
 use game_api::HealthService;
 use serde_json::{Value, json};
@@ -64,11 +64,23 @@ struct ContentArgs {
 #[derive(Subcommand)]
 enum ContentCommand {
     Hash(HashArgs),
+    Diff(DiffArgs),
 }
 
 #[derive(Args)]
 struct HashArgs {
     path: PathBuf,
+}
+
+#[derive(Args)]
+struct DiffArgs {
+    /// Manifest of the content version clients already have.
+    #[arg(long)]
+    base: PathBuf,
+
+    /// Candidate manifest to publish.
+    #[arg(long)]
+    next: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -222,6 +234,7 @@ fn validate_project(args: &ValidateArgs) -> Result<Value> {
 fn content(args: &ContentArgs) -> Result<Value> {
     match &args.command {
         ContentCommand::Hash(hash_args) => hash_file(hash_args.path.as_path()),
+        ContentCommand::Diff(diff_args) => diff_manifests(diff_args),
     }
 }
 
@@ -235,6 +248,23 @@ fn hash_file(path: &Path) -> Result<Value> {
         "path": path.to_string_lossy(),
         "sha256": digest,
     }))
+}
+
+fn diff_manifests(args: &DiffArgs) -> Result<Value> {
+    let base_path = absolute_path(args.base.as_path())?;
+    let next_path = absolute_path(args.next.as_path())?;
+    let base = ContentManifest::read(&base_path)
+        .with_context(|| format!("failed to read {}", base_path.display()))?;
+    let next = ContentManifest::read(&next_path)
+        .with_context(|| format!("failed to read {}", next_path.display()))?;
+
+    let result = diff(&base, &next);
+    let mut output = serde_json::to_value(&result)?;
+    output["ok"] = Value::Bool(result.is_compatible());
+    output["command"] = Value::String("content diff".to_string());
+    output["base"] = Value::String(base_path.to_string_lossy().into_owned());
+    output["next"] = Value::String(next_path.to_string_lossy().into_owned());
+    Ok(output)
 }
 
 fn validate_dir(project_dir: &Path) -> Value {
@@ -346,6 +376,50 @@ fn render_human_output(output: &Value) -> String {
     if output["command"] == "content hash" {
         let sha = output["sha256"].as_str().unwrap_or("unknown");
         return format!("SHA-256: {sha}");
+    }
+
+    if output["command"] == "content diff" {
+        let ok = output["ok"].as_bool().unwrap_or(false);
+        let base = output["base_version"].as_str().unwrap_or("unknown");
+        let next = output["next_version"].as_str().unwrap_or("unknown");
+        let actual = output["actual_bump"].as_str().unwrap_or("unknown");
+        let required = output["required_bump"].as_str().unwrap_or("unknown");
+        let mut lines = vec![format!(
+            "Content diff {base} -> {next}: {} (actual {actual} bump, required {required} bump)",
+            if ok { "compatible" } else { "incompatible" }
+        )];
+        for key in ["added", "removed"] {
+            for entry in output[key].as_array().into_iter().flatten() {
+                if let Some(id) = entry["id"].as_str() {
+                    lines.push(format!("- {key}: {id}"));
+                }
+            }
+        }
+        for entry in output["changed"].as_array().into_iter().flatten() {
+            if let Some(id) = entry["id"].as_str() {
+                lines.push(format!("- changed: {id}"));
+            }
+        }
+        for key in ["added_locales", "removed_locales", "changed_locales"] {
+            for locale in output[key].as_array().into_iter().flatten() {
+                if let Some(locale) = locale.as_str() {
+                    lines.push(format!("- {key}: {locale}"));
+                }
+            }
+        }
+        for diagnostic in output["report"]["diagnostics"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            lines.push(format!(
+                "- {} {}: {}",
+                diagnostic["severity"].as_str().unwrap_or("?"),
+                diagnostic["code"].as_str().unwrap_or("?"),
+                diagnostic["message"].as_str().unwrap_or("")
+            ));
+        }
+        return lines.join("\n");
     }
 
     if output["command"] == "doctor" {

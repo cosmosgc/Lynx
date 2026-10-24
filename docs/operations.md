@@ -61,6 +61,7 @@ Health checks:
 | World readiness | `GET /readyz` |
 | Database connectivity | `lynx doctor --backend` |
 | Content validity | `lynx validate --project <dir>` |
+| Content compatibility | `lynx content diff --base <manifest> --next <manifest>` |
 | Metrics | Prometheus text endpoint (planned) |
 
 Readiness is stricter than liveness: the current binary becomes ready after the

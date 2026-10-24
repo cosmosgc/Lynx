@@ -50,7 +50,7 @@ Rules:
 - `engine_sim` depends on `engine_core` only. It has no I/O, no clock reads, no
   Bevy, and no database driver.
 - `engine_content` depends on `engine_core` and owns RON parsing, manifests,
-  and content validation.
+  content validation, and manifest version compatibility for publishing.
 - `engine_net` owns protocol envelopes, interest management, and version
   negotiation. It does not own a socket, a runtime, or a Nakama type.
 - `game_api` defines backend interfaces and DTOs. It depends on `engine_core`,
