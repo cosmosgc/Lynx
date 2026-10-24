@@ -1,7 +1,10 @@
 @echo off
 setlocal
 pushd "%~dp0.."
-if errorlevel 1 exit /b 1
+if errorlevel 1 (
+    call "%~dp0_pause.bat"
+    exit /b 1
+)
 
 if "%~1"=="" (
     cargo run -p project_cli -- doctor --project "%CD%"
@@ -11,4 +14,5 @@ if "%~1"=="" (
 set "RESULT=%ERRORLEVEL%"
 
 popd
+call "%~dp0_pause.bat"
 exit /b %RESULT%

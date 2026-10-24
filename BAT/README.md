@@ -1,7 +1,9 @@
 # Windows batch scripts
 
 Run these scripts from the repository or another working directory. Each
-script locates the repository root itself and returns the command's exit code.
+script locates the repository root itself, waits for a keypress after showing
+the result, and returns the command's exit code. The aggregate check suppresses
+pauses in the scripts it calls and waits once at the end.
 
 | Script | Purpose | Example |
 |---|---|---|
