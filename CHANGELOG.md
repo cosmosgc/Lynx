@@ -20,6 +20,9 @@ semantic versioning for engine releases and content bundles.
   and faction-aware ally assistance.
 - `engine_content`: RON content definitions, manifest hashing, and validation.
 - `engine_net` and `game_api`: protocol envelopes and backend adapter traits.
+- `engine_net::interest`: per-session interest sets with entry/exit hysteresis,
+  visibility classes, deterministic entity caps, audience filtering for every
+  replication category, and fail-closed handling of unattributable updates.
 - `backend_nakama`: native Nakama HTTP adapter with health and authentication.
 - `lynx` project CLI: `new`, `doctor`, `validate`, and `content hash`.
 - Native non-Docker Nakama/PostgreSQL setup scripts and SQL migrations.

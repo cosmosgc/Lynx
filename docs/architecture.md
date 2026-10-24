@@ -44,8 +44,8 @@ Rules:
   Bevy, and no database driver.
 - `engine_content` depends on `engine_core` and owns RON parsing, manifests,
   and content validation.
-- `engine_net` owns protocol envelopes and version negotiation. It does not own
-  a socket, a runtime, or a Nakama type.
+- `engine_net` owns protocol envelopes, interest management, and version
+  negotiation. It does not own a socket, a runtime, or a Nakama type.
 - `game_api` defines backend interfaces and DTOs. It depends on `engine_core`,
   never on Nakama.
 - `backend_nakama` is the only crate that knows Nakama's HTTP API.
@@ -67,6 +67,7 @@ Rules:
 | Faction relation | `FactionRelation` | Directional, -100..100 |
 | Locale | BCP 47 tag | Default `pt-BR`; canonicalized at boundaries |
 | Localized text | message key + catalog | Source catalog is `pt-BR` |
+| Interest set | `InterestSet` | Per-session visible entities, distance + visibility |
 
 ## Request lifecycle
 

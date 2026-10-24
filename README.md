@@ -22,8 +22,9 @@ localization model is described in
 Early implementation. The repository currently contains the Phase 0/1
 foundation: pinned toolchain, workspace layout, architecture decision records,
 stable entity IDs, versioned component schemas, faction and inventory domain
-rules, a headless authoritative simulation with action validation, and the
-`lynx` project CLI. Bevy client crates arrive in the next phase.
+rules, a headless authoritative simulation with action validation, versioned
+protocol envelopes, per-session interest management, and the `lynx` project
+CLI. Bevy client crates arrive in the next phase.
 
 Brazilian Portuguese (`pt-BR`) is the default language for generated projects,
 templates, and player-facing content. See

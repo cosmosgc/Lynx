@@ -46,6 +46,32 @@ The server never broadcasts a whole zone to every client. Interest management
 starts with zone + distance + explicit visibility, and gains spatial indexes
 when measurements require them.
 
+## Interest management
+
+`engine_net::interest` computes one view per session and filters each
+replication batch for its recipient. The rules are deliberately boring and
+deterministic:
+
+- An entity **enters** a view at the observer's horizontal view radius
+  (default 64 m) and **leaves** at that radius plus the exit margin (default
+  12.5%). The gap prevents appear/disappear churn at the boundary.
+- Visibility is checked before distance: `public`, `hidden` (owner or staff),
+  `owner_only`, and `staff_only`.
+- At most 512 entities are retained per observer by default. The nearest win;
+  ties break on stable entity ID.
+- Session-directed updates name their `session`. An update without one is
+  dropped, never broadcast.
+- Owner-only updates require the audience's principal to own the entity.
+  Property-scoped updates require ownership or an explicit access entry.
+  Admin updates require a staff session.
+- Missing entities or principals fail closed.
+- Filtering also collapses superseded state snapshots, so a position is not
+  resent twice in one batch.
+
+The world gateway supplies the observer position, principal, and staff flag.
+Clients cannot request a larger radius or choose their own audience. See
+[ADR 0012](adr/0012-interest-management-and-replication-audiences.md).
+
 ## Authority rules
 
 - Clients send intent (`ActionRequest`), not state patches.
