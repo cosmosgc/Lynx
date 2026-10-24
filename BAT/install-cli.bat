@@ -1,4 +1,5 @@
 @echo off
+rem Install the Lynx CLI from tools/project_cli using Cargo.
 setlocal
 pushd "%~dp0.."
 if errorlevel 1 (

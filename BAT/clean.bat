@@ -1,4 +1,5 @@
 @echo off
+rem Remove Cargo build artifacts for the Lynx workspace.
 setlocal
 pushd "%~dp0.."
 if errorlevel 1 (

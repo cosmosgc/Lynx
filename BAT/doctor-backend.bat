@@ -1,4 +1,5 @@
 @echo off
+rem Check connectivity to the configured Nakama backend.
 setlocal
 pushd "%~dp0.."
 if errorlevel 1 (

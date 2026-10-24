@@ -1,4 +1,5 @@
 @echo off
+rem Run Clippy for all workspace targets and treat warnings as errors.
 setlocal
 pushd "%~dp0.."
 if errorlevel 1 (

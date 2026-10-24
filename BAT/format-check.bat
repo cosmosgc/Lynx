@@ -1,4 +1,5 @@
 @echo off
+rem Check Rust formatting without changing any files.
 setlocal
 pushd "%~dp0.."
 if errorlevel 1 (

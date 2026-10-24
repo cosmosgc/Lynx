@@ -1,4 +1,5 @@
 @echo off
+rem Validate content in a generated project directory and show JSON diagnostics.
 setlocal
 if "%~1"=="" (
     echo Usage: %~nx0 ^<project-directory^>

@@ -1,4 +1,5 @@
 @echo off
+rem Create a Lynx project from a selected template.
 setlocal
 if "%~1"=="" (
     echo Usage: %~nx0 ^<name^> [--template minimal^|mmorpg] [--output path]

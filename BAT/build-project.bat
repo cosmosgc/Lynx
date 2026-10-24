@@ -1,4 +1,5 @@
 @echo off
+rem Build a generated Lynx project's Cargo manifest.
 setlocal
 if "%~1"=="" (
     echo Usage: %~nx0 ^<path-to-Cargo.toml^> [cargo build options]

@@ -1,4 +1,5 @@
 @echo off
+rem Run tests for a generated Lynx project's Cargo manifest.
 setlocal
 if "%~1"=="" (
     echo Usage: %~nx0 ^<path-to-Cargo.toml^> [cargo test options]

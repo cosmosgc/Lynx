@@ -1,4 +1,5 @@
 @echo off
+rem Run formatting, Clippy, workspace tests, and build; pause once when finished.
 setlocal
 set "LYNX_NO_PAUSE=1"
 

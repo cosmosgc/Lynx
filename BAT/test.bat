@@ -1,4 +1,5 @@
 @echo off
+rem Run the tests for every crate in the Lynx workspace.
 setlocal
 pushd "%~dp0.."
 if errorlevel 1 (

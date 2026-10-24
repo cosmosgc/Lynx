@@ -1,4 +1,5 @@
 @echo off
+rem Diagnose the current project, or pass options such as --backend.
 setlocal
 pushd "%~dp0.."
 if errorlevel 1 (

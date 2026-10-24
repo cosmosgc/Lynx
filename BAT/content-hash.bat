@@ -1,4 +1,5 @@
 @echo off
+rem Print the SHA-256 hash of a file using the Lynx content CLI.
 setlocal
 if "%~1"=="" (
     echo Usage: %~nx0 ^<file-path^>

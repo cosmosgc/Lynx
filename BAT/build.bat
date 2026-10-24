@@ -1,4 +1,5 @@
 @echo off
+rem Build all crates and binaries in the Lynx workspace.
 setlocal
 pushd "%~dp0.."
 if errorlevel 1 (

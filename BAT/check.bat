@@ -1,4 +1,5 @@
 @echo off
+rem Check all workspace targets without producing final binaries.
 setlocal
 pushd "%~dp0.."
 if errorlevel 1 (
