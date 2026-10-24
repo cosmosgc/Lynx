@@ -23,6 +23,12 @@ semantic versioning for engine releases and content bundles.
 - `engine_net::interest`: per-session interest sets with entry/exit hysteresis,
   visibility classes, deterministic entity caps, audience filtering for every
   replication category, and fail-closed handling of unattributable updates.
+- `world_gateway`: transport-agnostic session lifecycle with server-issued
+  identities, per-character connection limits, single-use rotated resume
+  tokens, session-scoped idempotency, envelope routing, dirty-entity tracking,
+  and interest-filtered per-session replication (ADR 0013).
+- `engine_core::ErrorCode::SessionExpired` for expired or unknown world
+  sessions; `game_api::ApiError::SessionExpired` now maps to it.
 - `backend_nakama`: native Nakama HTTP adapter with health and authentication.
 - `lynx` project CLI: `new`, `doctor`, `validate`, and `content hash`.
 - Native non-Docker Nakama/PostgreSQL setup scripts and SQL migrations.

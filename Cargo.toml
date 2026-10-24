@@ -7,6 +7,7 @@ members = [
     "crates/engine_net",
     "crates/backend_nakama",
     "crates/game_api",
+    "crates/world_gateway",
     "tools/project_cli",
 ]
 
@@ -39,6 +40,7 @@ engine_content = { path = "crates/engine_content" }
 engine_net = { path = "crates/engine_net" }
 backend_nakama = { path = "crates/backend_nakama" }
 game_api = { path = "crates/game_api" }
+world_gateway = { path = "crates/world_gateway" }
 
 [profile.dev]
 debug = 1

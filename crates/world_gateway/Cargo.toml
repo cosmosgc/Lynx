@@ -1,0 +1,24 @@
+[package]
+name = "world_gateway"
+description = "Transport-agnostic authoritative world gateway for Lynx"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+engine_core = { workspace = true }
+engine_net = { workspace = true }
+engine_sim = { workspace = true }
+game_api = { workspace = true }
+getrandom = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+semver = { workspace = true }
+
+[lints]
+workspace = true

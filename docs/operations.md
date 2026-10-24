@@ -13,7 +13,8 @@ or an OS secret store, never from the repository.
 
 ## Native service layout
 
-- `lynx-world` — authoritative world service (not yet implemented as a binary).
+- `lynx-world` — authoritative world service (not yet implemented as a binary;
+  `world_gateway` is the library that will compose it).
 - `nakama` — authentication, social, chat, matchmaking.
 - `postgresql` — durable state.
 
@@ -43,13 +44,31 @@ passwords, or full private chat.
 Minimum metrics:
 
 - Tick duration, missed deadlines, entity count per zone.
-- Connected sessions and zone population.
+- Connected sessions, retained reconnect windows, and zone population.
 - Action throughput, rejection counts by `ErrorCode`.
-- Replication bytes and queue depth.
+- Replication bytes and queue depth, plus per-session delivery counts.
+- Resume attempts by outcome (`resumed`, `expired`, `conflict`) and expired
+  windows swept. Alert on a spike in `SessionExpired` or `Conflict`, which
+  usually means token loss or duplicate clients.
 - Pathfinding expansions, budget exhaustion, AI errors.
 - Database latency and errors.
 - Content version per zone.
 - Missing localization keys by locale (should be zero in release).
+
+## Session operations
+
+- The session cap counts connected and retained sessions. Raise it only with a
+  matching memory and bandwidth budget; reconnect windows are not free.
+- Resume TTL is a gameplay tradeoff: long enough to survive a flaky link, short
+  enough that an abandoned character does not hold a slot or stay in the world
+  indefinitely. The default is 30 seconds.
+- Resume tokens are secrets. Do not log envelopes that contain them, do not
+  include them in error details, and rotate any log pipeline that captured one.
+- A zone restart invalidates in-memory sessions. Announce expected restarts and
+  expect players to log in again until durable session storage exists.
+- Debugging a stuck character starts with its session: connected vs retained,
+  principal, actor, and last acknowledged tick. Do not "fix" it by granting a
+  client-supplied actor or session ID.
 
 ## Backups and recovery
 

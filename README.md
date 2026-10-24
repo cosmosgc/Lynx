@@ -20,11 +20,13 @@ localization model is described in
 ## Status
 
 Early implementation. The repository currently contains the Phase 0/1
-foundation: pinned toolchain, workspace layout, architecture decision records,
-stable entity IDs, versioned component schemas, faction and inventory domain
-rules, a headless authoritative simulation with action validation, versioned
-protocol envelopes, per-session interest management, and the `lynx` project
-CLI. Bevy client crates arrive in the next phase.
+foundation plus the first world gateway: pinned toolchain, workspace layout,
+architecture decision records, stable entity IDs, versioned component schemas,
+faction and inventory domain rules, a headless authoritative simulation with
+action validation, versioned protocol envelopes, per-session interest
+management, a transport-agnostic gateway with resumable sessions and
+interest-filtered replication, and the `lynx` project CLI. Bevy client crates
+arrive in the next phase.
 
 Brazilian Portuguese (`pt-BR`) is the default language for generated projects,
 templates, and player-facing content. See
@@ -64,7 +66,8 @@ for multiplayer work. The native, non-Docker setup is documented in
 crates/engine_core      Stable IDs, schemas, factions, inventory, audit, errors
 crates/engine_sim       Headless authoritative zone simulation and action pipeline
 crates/engine_content   Content definitions, manifests, validation, versioning
-crates/engine_net       Protocol envelopes, replication categories, adapter traits
+crates/engine_net       Protocol envelopes, replication categories, interest management
+crates/world_gateway    Sessions, resume tokens, action routing, per-session replication
 crates/backend_nakama   Native Nakama HTTP adapter (no Docker required)
 crates/game_api         Backend service interfaces and gameplay DTOs
 tools/project_cli       `lynx` project scaffolding, doctor, and validation
@@ -77,6 +80,9 @@ docs/                   Architecture, operations, security, localization, ADRs
 ## Design rules
 
 - The server is authoritative; clients send requests, never outcomes.
+- Client messages carry intent and correlation, never identity: actor,
+  principal, staff role, session ID, view radius, and resume tokens are
+  server-issued.
 - Gameplay is composed from versioned data, not inheritance trees.
 - Every persistent entity has a stable ID and an explicit persistence policy.
 - Every entity may have a mind; a player is one controller among many.

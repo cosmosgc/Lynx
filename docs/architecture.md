@@ -14,8 +14,9 @@ Decisions and their rationale live in [`adr/`](adr/).
                                 │ authenticated protocol (JSON, versioned)
 ┌───────────────────────────────▼────────────────────────────────────────┐
 │ World service (Rust, headless)                                          │
-│ engine_sim: zones, entities, action pipeline, minds, links, AI, nav     │
-│ game_api:   auth/session/social/chat/world/character/inventory/admin    │
+│ world_gateway: sessions, resume tokens, action routing, replication     │
+│ engine_sim:    zones, entities, action pipeline, minds, links, AI, nav  │
+│ game_api:      auth/session/social/chat/world/character/inventory/admin │
 └──────────────┬──────────────────────────────────┬──────────────────────┘
                │ HTTPS (health, login, storage)    │ SQL (transactions)
 ┌──────────────▼──────────────┐      ┌────────────▼─────────────────────┐
@@ -34,6 +35,7 @@ engine_content ─────┘
      ↑
 engine_net (protocol envelopes; no transport implementation)
 
+world_gateway → engine_core, engine_sim, engine_net, game_api
 project_cli → engine_content, engine_core, backend_nakama
 ```
 
@@ -48,6 +50,10 @@ Rules:
   negotiation. It does not own a socket, a runtime, or a Nakama type.
 - `game_api` defines backend interfaces and DTOs. It depends on `engine_core`,
   never on Nakama.
+- `world_gateway` composes the simulation, protocol, and backend DTOs into
+  session lifecycle, action routing, and per-session replication. It owns no
+  socket, runtime, or clock; a transport adapter supplies authenticated claims
+  and explicit timestamps.
 - `backend_nakama` is the only crate that knows Nakama's HTTP API.
 - Client/editor crates (introduced with Bevy) depend on the crates above and
   never the reverse.
@@ -68,22 +74,33 @@ Rules:
 | Locale | BCP 47 tag | Default `pt-BR`; canonicalized at boundaries |
 | Localized text | message key + catalog | Source catalog is `pt-BR` |
 | Interest set | `InterestSet` | Per-session visible entities, distance + visibility |
+| Session | `GatewaySession` | Server-issued ID, authenticated principal, actor, staff flag |
+| Resume token | `ResumeToken` | Server-issued, short-lived, single-use, redacted |
+| Delivery | `SessionDelivery` | One session's interest delta and filtered batch per tick |
 
 ## Request lifecycle
 
-1. Client sends an `ActionRequest` with a client-generated `RequestId`, actor
-   ID, target ID, verb, and parameters.
-2. The world gateway authenticates the session and resolves the actor. A client
-   cannot act as an entity it does not control.
-3. `ActionPipeline` validates: target exists, actor and target share a zone,
+1. A transport authenticates the player and supplies `SessionClaims` (account,
+   character principal, staff flag) to `WorldGateway::connect`. The client
+   never chooses any of these values.
+2. The gateway negotiates the handshake, resolves the principal's actor in the
+   zone, and binds a player controller. A character already connected returns
+   `Conflict`; an incompatible handshake creates no session.
+3. The client sends an `action.request` whose body carries only intent: verb,
+   target, parameters, and an optional client tick. The gateway rejects any
+   body that names an actor, principal, session, or other unknown field.
+4. The gateway scopes the client request ID with the session ID and calls
+   `Zone::apply_action`. `ActionPipeline` validates target existence, zone,
    range, visibility, permission, component state, cooldown, required items,
    and action-specific preconditions.
-4. On success the action mutates authoritative state, emits domain events, and
-   writes audit records for privileged or high-impact operations.
-5. The server returns `ActionResult` plus replication deltas. On failure it
+5. On success the action mutates authoritative state, emits domain events, and
+   writes audit records for privileged or high-impact operations. On failure it
    returns a stable `ErrorCode` and typed parameters; the client renders the
    message from its locale catalog.
-6. Clients reconcile predicted state with the authoritative result.
+6. The server replies with `action.result` and, on the next tick, one
+   `SessionDelivery` per session containing only that session's interest delta
+   and audience-filtered replication. Clients reconcile predicted state with
+   the authoritative result.
 
 ## Localization
 
@@ -129,7 +146,10 @@ format, validation rules, and formatting policy are specified in
 
 - Bevy client crates, rendering, input, and camera modules (Phase 1 client
   work).
-- A live Nakama-backed world gateway binary; the adapter and interfaces exist,
-  the network server loop does not.
+- A transport and process loop around `world_gateway` — WebSocket or UDP
+  framing, rate limiting, and Nakama token refresh. The gateway library itself
+  is transport-agnostic and tested; `lynx-world` is not yet a binary.
+- A durable session store. Resume windows live in memory, so a zone restart
+  still requires players to log in again.
 - The editor application, behavior graph editor, and admin spectator client.
 - WebAssembly scripting, which needs a sandbox design review before adoption.

@@ -72,9 +72,42 @@ The world gateway supplies the observer position, principal, and staff flag.
 Clients cannot request a larger radius or choose their own audience. See
 [ADR 0012](adr/0012-interest-management-and-replication-audiences.md).
 
+## World gateway sessions
+
+`world_gateway` is the transport-agnostic boundary between an authenticated
+connection and the authoritative zone. It adds no socket and no runtime.
+
+- **Connect.** Trusted transport code authenticates the player, then calls
+  `WorldGateway::connect` with `SessionClaims` (account, character principal,
+  staff flag) and the client handshake. The server issues the session ID and
+  the resume token. A character may have one connected session; a second
+  connect returns `Conflict`. An incompatible handshake creates no session.
+- **Action bodies are intent only.** `action.request` accepts `verb`, optional
+  `target`, optional `params`, and optional `client_tick`. Unknown fields —
+  including `actor`, `principal`, or `session` — are rejected with
+  `InvalidRequest` before the simulation runs. Actor and principal come from
+  the session.
+- **Session-scoped idempotency.** The gateway prefixes the client request ID
+  with the session ID before calling the simulator, then rewrites
+  `ActionResult::request_id` to the client's ID. Retries within a session are
+  idempotent; the same ID in another session cannot reuse the cached result.
+- **Acknowledgements.** `session.ack` records the highest server tick the
+  client has processed. The value is clamped to the authoritative tick, so a
+  client cannot pin the server forward or replay a stale cursor.
+- **Errors stay correlated.** Unknown kinds and malformed bodies produce a
+  `protocol.error` reply with `correlation` set to the request ID. They do not
+  close the session. Gameplay rejections arrive as `action.result`.
+- **Replication.** `WorldGateway::tick` advances the zone and returns one
+  `SessionDelivery` per connected session, containing that session's interest
+  delta plus only the replication updates its principal and staff flag admit.
+  Empty deliveries are omitted. There is no whole-zone broadcast path.
+
+See [ADR 0013](adr/0013-world-gateway-and-reconnect.md).
+
 ## Authority rules
 
-- Clients send intent (`ActionRequest`), not state patches.
+- Clients send intent (`action.request`), not state patches. The body names a
+  verb, target, and parameters; it cannot name the acting entity.
 - Movement is validated against colliders, speed, bounds, and zone rules.
 - Combat, inventory, currency, progression, and placement outcomes are
   computed on the server.
@@ -112,12 +145,27 @@ Clients cannot request a larger radius or choose their own audience. See
 
 ## Reconnect and recovery
 
-- Sessions carry a resumable token with a short expiry.
-- On reconnect the client presents the token and last acknowledged server tick.
-- The server replies with a full owner snapshot and a delta for the zone, or a
-  `SessionExpired` error if the token is invalid.
+- A disconnect detaches the transport but keeps the character in the zone and
+  opens a server-configured resume window (default 30 s). The window is counted
+  against the session cap.
+- Sessions carry a server-issued resume token. Tokens are opaque, redacted from
+  logs and debug output, single-use, and rotated on every successful resume; a
+  captured token cannot be replayed.
+- On reconnect the client presents the token, its handshake, and its last
+  acknowledged server tick. The server clamps the tick to its authoritative
+  value, negotiates the handshake again, and replaces the session's handshake
+  record.
+- The reply is always a full owner snapshot (inventories and owner-scoped state)
+  plus a fresh interest snapshot. Subsequent ticks send deltas. There is no
+  client-chosen "since" cursor.
+- An unknown, expired, replayed, or already-connected token returns
+  `ErrorCode::SessionExpired` (or `Conflict` for the connected case) and no
+  session state is handed out. Expired windows are swept on connect, resume,
+  and every tick.
 - Duplicate action IDs after a retry return the original result instead of
-  applying the action twice.
+  applying the action twice. IDs are scoped to the session that sent them.
+- Sessions live in memory today. A zone restart invalidates resume windows;
+  durable session storage is future work.
 
 ## Transport
 
@@ -126,5 +174,9 @@ Clients cannot request a larger radius or choose their own audience. See
 - The world gateway uses an authenticated, versioned connection. Transport
   choice (WebSocket or raw UDP with a reliable layer) is an implementation
   detail behind `WorldGateway`; gameplay messages do not change.
-- Rate limits and per-session message budgets are enforced at the gateway, not
-  in gameplay systems.
+- `world_gateway` currently exposes a library boundary: the server loop
+  supplies envelopes, explicit timestamps, and disconnect events, and receives
+  replies and per-session deliveries.
+- Rate limits and per-session message budgets belong to the gateway layer, not
+  gameplay systems. The `world_gateway` crate enforces the session cap;
+  per-message rate limiting is not implemented yet.

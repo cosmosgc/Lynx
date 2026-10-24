@@ -15,6 +15,16 @@ servers.
   control of an entity.
 - Every action is validated server-side for actor control, distance,
   visibility, permissions, state, cooldown, and cost.
+- The acting entity, character principal, staff flag, session ID, and view
+  radius are resolved from the authenticated session, never from the message.
+  `action.request` bodies that include `actor`, `principal`, `session`, or any
+  other unknown field are rejected before the simulation runs.
+- Per-session request IDs are scoped with the session ID before reaching the
+  simulation's idempotency cache, so one session cannot replay another
+  session's cached result.
+- Replication is filtered per session. Public entity snapshots exclude
+  inventories, minds, tags, and extension components; owner-only payloads are
+  delivered only to the owning principal.
 - Inventory and economy mutations are transactional and idempotent. Replayed
   requests cannot duplicate or destroy items.
 - Stable IDs are server-assigned. Client-supplied entity IDs are rejected.
@@ -25,6 +35,20 @@ servers.
 
 - Player authentication is delegated to Nakama. The world gateway validates the
   session token on connect and on token refresh.
+- `world_gateway` accepts claims only from trusted code that has already
+  authenticated the player. A client cannot construct a session for another
+  account or character, claim a staff role, or choose its own session ID.
+- A character has at most one connected session. Retained sessions count
+  against the session cap, so reconnect windows cannot bypass admission limits.
+- Resume tokens are opaque, server-issued, short-lived (default 30 s),
+  single-use, and rotated on every resume. They are redacted from `Debug` and
+  must never be logged or embedded in error details. Unknown, expired, or
+  replayed tokens fail with `SessionExpired`; a still-connected session fails
+  with `Conflict`.
+- The client's acknowledged tick is clamped to the authoritative tick.
+- Expired resume windows are swept on connect, resume, and every tick. A
+  missing actor invalidates the session instead of resurrecting a stale
+  character.
 - Admin authentication is separate from player authentication and uses its own
   role model. Optional MFA or identity-provider integration is required before
   production admin exposure.
