@@ -17,6 +17,7 @@ use crate::definition::{
     ContentDefinition, ContentKind, MinigameDefinition, UiPanelDefinition, is_safe_asset_path,
 };
 use crate::diagnostic::ValidationReport;
+use crate::publishing::{ModerationState, PublishingRecord};
 
 /// Hash bytes with SHA-256 and return lowercase hexadecimal.
 #[must_use]
@@ -74,6 +75,9 @@ pub struct ContentManifest {
     pub definitions: Vec<DefinitionEntry>,
     /// Localization catalogs. The `pt-BR` source catalog must be present.
     pub locales: Vec<LocaleEntry>,
+    /// Ownership and moderation metadata for user content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publishing: Option<PublishingRecord>,
 }
 
 impl ContentManifest {
@@ -85,7 +89,15 @@ impl ContentManifest {
             engine,
             definitions: Vec::new(),
             locales: Vec::new(),
+            publishing: None,
         }
+    }
+
+    /// Attach ownership and moderation metadata for user content.
+    #[must_use]
+    pub fn with_publishing(mut self, record: PublishingRecord) -> Self {
+        self.publishing = Some(record);
+        self
     }
 
     /// Record a definition file.
@@ -340,6 +352,10 @@ impl ContentManifest {
             );
         }
 
+        if let Some(publishing) = &self.publishing {
+            validate_publishing(publishing, &mut report);
+        }
+
         report
     }
 
@@ -410,12 +426,36 @@ impl ContentManifest {
     }
 }
 
+/// Check moderation metadata for internal consistency.
+fn validate_publishing(publishing: &PublishingRecord, report: &mut ValidationReport) {
+    if publishing.reviewer.is_some()
+        && !matches!(
+            publishing.state,
+            ModerationState::Approved | ModerationState::Rejected
+        )
+    {
+        report.error(
+            "content.publishing.reviewer_without_review",
+            "publishing",
+            "a reviewer is recorded for content that is not approved or rejected",
+        );
+    }
+    if publishing.note.is_some() && publishing.state != ModerationState::Rejected {
+        report.error(
+            "content.publishing.note_without_rejection",
+            "publishing",
+            "a moderation note is recorded for content that is not rejected",
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::definition::{
         DisplayText, MinigameDefinition, Presentation, PresentationMode, UiPanelDefinition,
     };
+    use crate::publishing::{AuthorId, LicenseId, ReviewNote};
     use engine_core::i18n::MessageKey;
     use engine_core::schema::ComponentKey;
     use std::collections::{BTreeMap, BTreeSet};
@@ -532,6 +572,55 @@ mod tests {
         let json = manifest.to_json_pretty().unwrap();
         let parsed = ContentManifest::from_json_str(&json).unwrap();
         assert_eq!(parsed, manifest);
+    }
+
+    #[test]
+    fn publishing_metadata_round_trips_and_is_optional() {
+        let mut manifest = manifest();
+        manifest
+            .add_definition("entities/door.ron", &definition(), b"door")
+            .unwrap();
+        manifest
+            .add_locale("localization/pt-BR.ron", Locale::default(), b"catalog")
+            .unwrap();
+        let json = manifest.to_json_pretty().unwrap();
+        assert!(!json.contains("\"publishing\""));
+        assert!(
+            ContentManifest::from_json_str(&json)
+                .unwrap()
+                .publishing
+                .is_none()
+        );
+
+        let record = PublishingRecord::new(AuthorId::new("alice").unwrap())
+            .with_license(LicenseId::new("CC-BY-4.0").unwrap());
+        let manifest = manifest.with_publishing(record);
+        let json = manifest.to_json_pretty().unwrap();
+        assert!(json.contains("\"publishing\""));
+        assert_eq!(ContentManifest::from_json_str(&json).unwrap(), manifest);
+    }
+
+    #[test]
+    fn publishing_records_reject_inconsistent_reviewer_and_note() {
+        let mut manifest = manifest();
+        manifest
+            .add_definition("entities/door.ron", &definition(), b"door")
+            .unwrap();
+        manifest
+            .add_locale("localization/pt-BR.ron", Locale::default(), b"catalog")
+            .unwrap();
+
+        let mut record = PublishingRecord::new(AuthorId::new("alice").unwrap());
+        record.reviewer = Some(AuthorId::new("moderator").unwrap());
+        record.note = Some(ReviewNote::new("missing collision").unwrap());
+        let report = manifest.with_publishing(record).validate();
+        let codes: Vec<_> = report
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code.as_str())
+            .collect();
+        assert!(codes.contains(&"content.publishing.reviewer_without_review"));
+        assert!(codes.contains(&"content.publishing.note_without_rejection"));
     }
 
     #[test]

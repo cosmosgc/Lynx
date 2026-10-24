@@ -4,6 +4,7 @@ pub mod bundle;
 pub mod definition;
 pub mod diagnostic;
 pub mod diff;
+pub mod publishing;
 pub mod validate;
 
 pub use bundle::{ContentManifest, DefinitionEntry, LocaleEntry, is_sha256_hex, sha256_hex};
@@ -13,4 +14,8 @@ pub use definition::{
 };
 pub use diagnostic::{Diagnostic, Severity, ValidationReport};
 pub use diff::{ContentDiff, DefinitionChange, VersionBump, diff};
+pub use publishing::{
+    AuthorId, LicenseId, ModerationAction, ModerationState, PublishingPolicy, PublishingRecord,
+    ReviewNote, check_publish,
+};
 pub use validate::{ContentLoader, ContentSet};

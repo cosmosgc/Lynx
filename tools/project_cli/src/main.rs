@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use backend_nakama::{NakamaClient, NakamaConfig};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use engine_content::{ContentLoader, ContentManifest, diff, sha256_hex};
+use engine_content::{
+    ContentLoader, ContentManifest, PublishingPolicy, check_publish, diff, sha256_hex,
+};
 use engine_core::schema::ComponentRegistry;
 use game_api::HealthService;
 use serde_json::{Value, json};
@@ -65,6 +67,7 @@ struct ContentArgs {
 enum ContentCommand {
     Hash(HashArgs),
     Diff(DiffArgs),
+    PublishCheck(PublishCheckArgs),
 }
 
 #[derive(Args)]
@@ -81,6 +84,29 @@ struct DiffArgs {
     /// Candidate manifest to publish.
     #[arg(long)]
     next: PathBuf,
+}
+
+#[derive(Args)]
+struct PublishCheckArgs {
+    /// Candidate manifest to publish.
+    #[arg(long)]
+    manifest: PathBuf,
+
+    /// Manifest of the content version clients already have.
+    #[arg(long)]
+    base: PathBuf,
+
+    /// Publish without requiring a moderation approval.
+    #[arg(long)]
+    skip_review: bool,
+
+    /// Allow the author to approve their own content.
+    #[arg(long)]
+    allow_self_review: bool,
+
+    /// Publish without requiring a declared license.
+    #[arg(long)]
+    license_optional: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -235,6 +261,7 @@ fn content(args: &ContentArgs) -> Result<Value> {
     match &args.command {
         ContentCommand::Hash(hash_args) => hash_file(hash_args.path.as_path()),
         ContentCommand::Diff(diff_args) => diff_manifests(diff_args),
+        ContentCommand::PublishCheck(check_args) => check_publish_manifest(check_args),
     }
 }
 
@@ -264,6 +291,41 @@ fn diff_manifests(args: &DiffArgs) -> Result<Value> {
     output["command"] = Value::String("content diff".to_string());
     output["base"] = Value::String(base_path.to_string_lossy().into_owned());
     output["next"] = Value::String(next_path.to_string_lossy().into_owned());
+    Ok(output)
+}
+
+fn check_publish_manifest(args: &PublishCheckArgs) -> Result<Value> {
+    let manifest_path = absolute_path(args.manifest.as_path())?;
+    let base_path = absolute_path(args.base.as_path())?;
+    let candidate = ContentManifest::read(&manifest_path)
+        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+    let base = ContentManifest::read(&base_path)
+        .with_context(|| format!("failed to read {}", base_path.display()))?;
+
+    let Some(record) = &candidate.publishing else {
+        bail!(
+            "manifest has no publishing record: {}",
+            manifest_path.display()
+        );
+    };
+    let policy = PublishingPolicy {
+        require_review: !args.skip_review,
+        allow_self_review: args.allow_self_review,
+        require_license: !args.license_optional,
+    };
+    let result = diff(&base, &candidate);
+    let report = check_publish(record, &result, &policy);
+
+    let mut output = serde_json::to_value(&report)?;
+    output["ok"] = Value::Bool(report.is_ok());
+    output["command"] = Value::String("content publish-check".to_string());
+    output["manifest"] = Value::String(manifest_path.to_string_lossy().into_owned());
+    output["base"] = Value::String(base_path.to_string_lossy().into_owned());
+    output["author"] = Value::String(record.author.to_string());
+    output["state"] = Value::String(record.state.as_str().to_string());
+    output["revision"] = Value::from(record.revision);
+    output["actual_bump"] = serde_json::to_value(result.actual_bump)?;
+    output["required_bump"] = serde_json::to_value(result.required_bump)?;
     Ok(output)
 }
 
@@ -379,47 +441,11 @@ fn render_human_output(output: &Value) -> String {
     }
 
     if output["command"] == "content diff" {
-        let ok = output["ok"].as_bool().unwrap_or(false);
-        let base = output["base_version"].as_str().unwrap_or("unknown");
-        let next = output["next_version"].as_str().unwrap_or("unknown");
-        let actual = output["actual_bump"].as_str().unwrap_or("unknown");
-        let required = output["required_bump"].as_str().unwrap_or("unknown");
-        let mut lines = vec![format!(
-            "Content diff {base} -> {next}: {} (actual {actual} bump, required {required} bump)",
-            if ok { "compatible" } else { "incompatible" }
-        )];
-        for key in ["added", "removed"] {
-            for entry in output[key].as_array().into_iter().flatten() {
-                if let Some(id) = entry["id"].as_str() {
-                    lines.push(format!("- {key}: {id}"));
-                }
-            }
-        }
-        for entry in output["changed"].as_array().into_iter().flatten() {
-            if let Some(id) = entry["id"].as_str() {
-                lines.push(format!("- changed: {id}"));
-            }
-        }
-        for key in ["added_locales", "removed_locales", "changed_locales"] {
-            for locale in output[key].as_array().into_iter().flatten() {
-                if let Some(locale) = locale.as_str() {
-                    lines.push(format!("- {key}: {locale}"));
-                }
-            }
-        }
-        for diagnostic in output["report"]["diagnostics"]
-            .as_array()
-            .into_iter()
-            .flatten()
-        {
-            lines.push(format!(
-                "- {} {}: {}",
-                diagnostic["severity"].as_str().unwrap_or("?"),
-                diagnostic["code"].as_str().unwrap_or("?"),
-                diagnostic["message"].as_str().unwrap_or("")
-            ));
-        }
-        return lines.join("\n");
+        return render_content_diff(output);
+    }
+
+    if output["command"] == "content publish-check" {
+        return render_publish_check(output);
     }
 
     if output["command"] == "doctor" {
@@ -455,6 +481,63 @@ fn render_human_output(output: &Value) -> String {
 
     let errors = output["errors"].as_array().map_or(0, Vec::len);
     format!("Validation failed with {errors} error(s)")
+}
+
+fn render_content_diff(output: &Value) -> String {
+    let ok = output["ok"].as_bool().unwrap_or(false);
+    let base = output["base_version"].as_str().unwrap_or("unknown");
+    let next = output["next_version"].as_str().unwrap_or("unknown");
+    let actual = output["actual_bump"].as_str().unwrap_or("unknown");
+    let required = output["required_bump"].as_str().unwrap_or("unknown");
+    let mut lines = vec![format!(
+        "Content diff {base} -> {next}: {} (actual {actual} bump, required {required} bump)",
+        if ok { "compatible" } else { "incompatible" }
+    )];
+    for key in ["added", "removed"] {
+        for entry in output[key].as_array().into_iter().flatten() {
+            if let Some(id) = entry["id"].as_str() {
+                lines.push(format!("- {key}: {id}"));
+            }
+        }
+    }
+    for entry in output["changed"].as_array().into_iter().flatten() {
+        if let Some(id) = entry["id"].as_str() {
+            lines.push(format!("- changed: {id}"));
+        }
+    }
+    for key in ["added_locales", "removed_locales", "changed_locales"] {
+        for locale in output[key].as_array().into_iter().flatten() {
+            if let Some(locale) = locale.as_str() {
+                lines.push(format!("- {key}: {locale}"));
+            }
+        }
+    }
+    push_diagnostics(&mut lines, &output["report"]["diagnostics"]);
+    lines.join("\n")
+}
+
+fn render_publish_check(output: &Value) -> String {
+    let ok = output["ok"].as_bool().unwrap_or(false);
+    let author = output["author"].as_str().unwrap_or("unknown");
+    let state = output["state"].as_str().unwrap_or("unknown");
+    let revision = output["revision"].as_u64().unwrap_or(0);
+    let mut lines = vec![format!(
+        "Publish check for {author} revision {revision} ({state}): {}",
+        if ok { "allowed" } else { "blocked" }
+    )];
+    push_diagnostics(&mut lines, &output["diagnostics"]);
+    lines.join("\n")
+}
+
+fn push_diagnostics(lines: &mut Vec<String>, diagnostics: &Value) {
+    for diagnostic in diagnostics.as_array().into_iter().flatten() {
+        lines.push(format!(
+            "- {} {}: {}",
+            diagnostic["severity"].as_str().unwrap_or("?"),
+            diagnostic["code"].as_str().unwrap_or("?"),
+            diagnostic["message"].as_str().unwrap_or("")
+        ));
+    }
 }
 
 fn repo_root() -> PathBuf {
