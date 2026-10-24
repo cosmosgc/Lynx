@@ -13,8 +13,8 @@ or an OS secret store, never from the repository.
 
 ## Native service layout
 
-- `lynx-world` — authoritative world service (not yet implemented as a binary;
-  `world_gateway` is the library that will compose it).
+- `lynx-world` — authoritative world service. It owns one in-memory demo zone,
+  serves `/world`, `/healthz`, and `/readyz`, and runs the tick loop.
 - `nakama` — authentication, social, chat, matchmaking.
 - `postgresql` — durable state.
 
@@ -22,18 +22,51 @@ Run each as an OS service in production with restart-on-failure, resource
 limits, and log rotation. Docker Compose may mirror this layout for
 convenience; it is not the reference path.
 
-## Health checks
+## Running the world service
+
+`lynx-world` accepts only SHA-256 hashes of high-entropy bearer tokens. Create a
+hash without writing the token to a file or shell history:
+
+```bash
+printf '%s' "$LYNX_DEMO_TOKEN" | cargo run -p lynx-world -- token-hash
+cargo run -p lynx-world -- serve \
+  --bind 127.0.0.1:8090 \
+  --token-hash <sha256-hex>
+```
+
+Each configured hash creates one demo character. Tokens may also be supplied
+comma- or whitespace-separated through `LYNX_WORLD_TOKEN_HASHES`. Relevant
+flags:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--bind` | `127.0.0.1:8090` | listen address; loopback by default |
+| `--tick-ms` | `50` | authoritative tick interval, 5–1000 ms |
+| `--resume-ttl-ms` | `30000` | reconnect window |
+| `--view-radius-m` | `60` | server-chosen interest radius |
+| `--max-sessions` | `1024` | connected plus retained sessions |
+| `--token-hash` | — | repeat once per demo character |
+
+The process logs through `RUST_LOG` (`info` by default) and shuts down on
+`Ctrl+C`: readiness turns false, the listener stops accepting, connections
+close, and the process exits. State is in memory, so a restart logs everyone
+out and resets the zone.
+
+Health checks:
 
 | Check | Endpoint / command |
 |---|---|
 | Nakama liveness | `GET /healthcheck` |
+| World liveness | `GET /healthz` |
+| World readiness | `GET /readyz` |
 | Database connectivity | `lynx doctor --backend` |
 | Content validity | `lynx validate --project <dir>` |
-| Zone simulation | world service `/healthz` (planned) |
 | Metrics | Prometheus text endpoint (planned) |
 
-Readiness is stricter than liveness: a world service is ready only after
-migrations, content load, and zone recovery complete.
+Readiness is stricter than liveness: the current binary becomes ready after the
+zone is built and before it accepts connections, and turns not-ready as soon as
+shutdown begins. Durable migrations, content loading, and zone recovery will
+join that gate when they exist.
 
 ## Metrics and logs
 
@@ -64,6 +97,18 @@ Minimum metrics:
   indefinitely. The default is 30 seconds.
 - Resume tokens are secrets. Do not log envelopes that contain them, do not
   include them in error details, and rotate any log pipeline that captured one.
+  The binary sends the current token once per admission in `world.token`; treat
+  that control message as sensitive.
+- Static bearer tokens are also secrets, even though the service stores only
+  their SHA-256 hashes. Use high-entropy values, distribute them through the OS
+  secret store, and regenerate the hash when a token is retired. Hashed
+  configuration does not make a weak token safe from offline guessing.
+- A character has at most one connected session. Opening a second connection
+  with the same static token returns `Conflict` until the first detaches or its
+  resume window expires; do not work around it by duplicating hashes.
+- A client that cannot drain its bounded outbound queue is detached instead of
+  slowing the authoritative tick. Alert on repeated detaches; they usually mean
+  a stuck client or a network path with insufficient throughput.
 - A zone restart invalidates in-memory sessions. Announce expected restarts and
   expect players to log in again until durable session storage exists.
 - Debugging a stuck character starts with its session: connected vs retained,

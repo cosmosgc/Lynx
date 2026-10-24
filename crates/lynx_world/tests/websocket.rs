@@ -1,0 +1,151 @@
+//! End-to-end test for the WebSocket transport.
+//!
+//! It exercises the same path a client uses: HTTP upgrade with a bearer
+//! token, `session.hello`, ready/snapshot/token delivery, correlated protocol
+//! errors, and shutdown. The authority loop is the real one.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use engine_core::time::Tick;
+use engine_net::envelope::{Envelope, MessageId, MessageKind};
+use engine_net::framing::{decode_frame, encode_frame};
+use futures_util::{SinkExt, StreamExt};
+use lynx_world::auth::{Authenticator, digest};
+use lynx_world::demo;
+use lynx_world::service::{HELLO_KIND, Hello, Service, TOKEN_KIND};
+use lynx_world::transport::{self, AppState};
+use serde_json::json;
+use tokio::sync::{oneshot, watch};
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::{HeaderValue, header};
+use tokio_tungstenite::{WebSocketStream, connect_async};
+use world_gateway::{GatewayConfig, SystemResumeTokens, WorldGateway};
+use world_server::{READY_KIND, SNAPSHOT_KIND, WorldServer};
+
+const TOKEN: &str = "websocket-integration-token";
+
+fn envelope(id: &str, kind: &str, body: serde_json::Value) -> Envelope {
+    Envelope::new(
+        MessageId::parse(id).unwrap(),
+        MessageKind::parse(kind).unwrap(),
+        body,
+    )
+}
+
+async fn next_envelope<S>(socket: &mut WebSocketStream<S>) -> Envelope
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    loop {
+        let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .expect("the server should answer")
+            .expect("the websocket should stay open")
+            .expect("the frame should be valid");
+        match message {
+            Message::Binary(bytes) => return decode_frame(&bytes).unwrap(),
+            Message::Text(text) => return Envelope::decode(text.as_str()).unwrap(),
+            Message::Ping(_) | Message::Pong(_) => {}
+            other => panic!("unexpected websocket message: {other:?}"),
+        }
+    }
+}
+
+async fn send_envelope<S>(socket: &mut WebSocketStream<S>, envelope: &Envelope)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    socket
+        .send(Message::Binary(encode_frame(envelope).unwrap().into()))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_client_can_authenticate_play_and_receive_correlated_errors() {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let authenticator = Authenticator::new(&[digest(TOKEN)]).unwrap();
+        let grants: Vec<_> = authenticator.grants().cloned().collect();
+        let zone = demo::build_zone(&grants).unwrap();
+        let gateway = WorldGateway::new(
+            zone,
+            demo::handshake().unwrap(),
+            GatewayConfig::default(),
+            SystemResumeTokens::new(),
+        )
+        .unwrap();
+        let service = Service::new(WorldServer::new(gateway), Duration::from_millis(20));
+
+        let (events, receivers) = transport::event_channel();
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let state = Arc::new(AppState::new(events, authenticator));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let service_task = tokio::spawn(service.run(receivers, shutdown_rx));
+        let (server_shutdown, server_shutdown_rx) = oneshot::channel();
+        let server_task = tokio::spawn(transport::serve_with_shutdown(
+            listener,
+            Arc::clone(&state),
+            async move {
+                let _ = server_shutdown_rx.await;
+            },
+        ));
+
+        // Missing credentials never reach the WebSocket.
+        let denied = connect_async(format!("ws://{address}/world").as_str()).await;
+        assert!(denied.is_err(), "an unauthenticated upgrade must fail");
+
+        let mut request = format!("ws://{address}/world")
+            .as_str()
+            .into_client_request()
+            .unwrap();
+        request.headers_mut().insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {TOKEN}")).unwrap(),
+        );
+        let (mut socket, response) = connect_async(request).await.unwrap();
+        assert_eq!(response.status(), 101);
+
+        let hello = Hello {
+            handshake: demo::handshake().unwrap(),
+            last_ack_tick: Tick::ZERO,
+        };
+        let hello = envelope(
+            "req_hello_0001",
+            HELLO_KIND,
+            serde_json::to_value(hello).unwrap(),
+        );
+        send_envelope(&mut socket, &hello).await;
+
+        let ready = next_envelope(&mut socket).await;
+        assert_eq!(ready.kind.as_str(), READY_KIND);
+        assert_eq!(ready.body["resumed"], json!(false));
+        assert!(ready.body["actor"].as_str().is_some());
+
+        let snapshot = next_envelope(&mut socket).await;
+        assert_eq!(snapshot.kind.as_str(), SNAPSHOT_KIND);
+        assert!(snapshot.body["interest"]["set"].as_array().is_some());
+
+        let token = next_envelope(&mut socket).await;
+        assert_eq!(token.kind.as_str(), TOKEN_KIND);
+        assert!(token.body["resume"].as_str().is_some());
+
+        let unsupported = envelope("req_bad_0001", "bogus.kind", json!({}));
+        send_envelope(&mut socket, &unsupported).await;
+        let error = next_envelope(&mut socket).await;
+        assert_eq!(error.kind.as_str(), "protocol.error");
+        assert_eq!(error.correlation.as_ref().unwrap().as_str(), "req_bad_0001");
+        assert_eq!(error.body["code"], json!("unsupported"));
+
+        drop(socket);
+        let _ = shutdown.send(true);
+        let _ = server_shutdown.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(2), service_task).await;
+        let _ = tokio::time::timeout(Duration::from_secs(2), server_task).await;
+    })
+    .await
+    .expect("the websocket integration test timed out");
+}

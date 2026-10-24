@@ -31,6 +31,48 @@ Every message is a JSON object:
 - Message size, nesting depth, and string lengths are capped. Oversized or
   malformed messages increment a counter and are rejected.
 
+## Framing
+
+`engine_net::framing` puts an envelope on a byte stream:
+
+```text
+┌────────────────────┬──────────────────────────────┐
+│ length (4 bytes BE)│ compact JSON envelope        │
+└────────────────────┴──────────────────────────────┘
+```
+
+- The payload cap is the same 64 KiB cap as envelope validation.
+- Zero-length, oversized, truncated, non-UTF-8, and non-JSON frames are
+  rejected. A partial frame is an error, never a clean disconnect.
+- A clean end of stream is allowed only before any header byte is read.
+- WebSocket transports use the same codec inside binary frames. Text frames
+  carrying a bare envelope are accepted for inspection tools; the canonical
+  wire form is binary and length-prefixed.
+
+## World service wire messages
+
+`world_server` owns the connection-oriented message kinds:
+
+| Kind | Direction | Body |
+|---|---|---|
+| `session.hello` | client → server | client handshake and last acknowledged tick |
+| `world.ready` | server → client | session ID, actor, resumed flag, negotiated protocol |
+| `world.snapshot` | server → client | tick, full interest view delta, filtered replication |
+| `world.delta` | server → client | tick, interest delta, filtered replication |
+| `world.token` | server → client | the session's current resume secret |
+| `action.request` / `action.result` | both | gameplay intent and its outcome |
+| `protocol.error` | server → client | stable code, parameters, correlation ID |
+
+`world.snapshot` and `world.delta` share the `WorldUpdate` body: authoritative
+tick, `InterestUpdate`, and an audience-filtered `ReplicationBatch`. The
+recipient is implied by the connection, so the body never repeats a session ID.
+
+`world.token` is a control message, not replication. It is sent once after a
+successful open or resume and carries the rotated single-use secret. Transports
+must keep it out of logs, traces, and error details.
+
+See [ADR 0014](adr/0014-framed-transport-and-world-server.md).
+
 ## Replication categories
 
 | Category | Examples | Delivery |
@@ -169,14 +211,38 @@ See [ADR 0013](adr/0013-world-gateway-and-reconnect.md).
 
 ## Transport
 
-- Nakama HTTP/WebSocket handles authentication and social features over TLS in
-  production.
-- The world gateway uses an authenticated, versioned connection. Transport
-  choice (WebSocket or raw UDP with a reliable layer) is an implementation
-  detail behind `WorldGateway`; gameplay messages do not change.
-- `world_gateway` currently exposes a library boundary: the server loop
-  supplies envelopes, explicit timestamps, and disconnect events, and receives
-  replies and per-session deliveries.
-- Rate limits and per-session message budgets belong to the gateway layer, not
-  gameplay systems. The `world_gateway` crate enforces the session cap;
-  per-message rate limiting is not implemented yet.
+`lynx-world` is the reference transport adapter and binary:
+
+- `GET /healthz` reports process liveness. `GET /readyz` reports readiness and
+  the number of configured characters; readiness turns false while draining.
+- `GET /world` requires an HTTP upgrade and `Authorization: Bearer <token>`.
+  The token is either a configured static token or a gateway-issued resume
+  token. Missing credentials are rejected with `401` before the upgrade.
+- After the upgrade, the first frame must be `session.hello`. The body carries
+  the client `Handshake` and an optional `last_ack_tick`; the server supplies
+  session identity. A handshake that does not arrive within ten seconds closes
+  the connection with a correlated `protocol.error`.
+- Messages travel as binary WebSocket frames containing one length-prefixed
+  envelope. The transport caps frame size to the envelope limit.
+- One authority loop owns the world. Transport tasks send admission, frames,
+  and disconnects over a bounded channel; the loop owns the clock, the tick
+  interval, and per-connection outbound queues. A client that cannot drain its
+  queue is detached rather than stalling the tick.
+- Disconnects keep the session resumable. The transport reports the last
+  acknowledged tick from the session, calls `WorldGateway::disconnect`, and
+  closes the socket. Reconnecting with the resume token produces a fresh
+  `world.ready`, a full owner plus interest snapshot, and a rotated
+  `world.token`.
+- Immediate revocation uses `WorldGateway::close_session`, which removes the
+  session and its interest set without a resume window.
+- Static tokens are hashed with SHA-256 in configuration; plaintext tokens are
+  never stored by the service. This is a development and controlled-deployment
+  mechanism. Production authentication must validate a Nakama session and look
+  up character ownership before opening a gateway session.
+- The binary carries no TLS. Terminate TLS at a reverse proxy or equivalent
+  transport, and keep the listener on loopback while developing.
+
+Raw UDP with a reliable layer remains a possible future transport. Gameplay
+messages do not change: only the framing and socket adapter do. Rate limits and
+per-session message budgets still belong above gameplay systems; the current
+binary enforces sizes and session caps but not a per-message rate limit.

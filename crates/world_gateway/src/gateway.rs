@@ -274,6 +274,18 @@ impl WorldGateway {
         self.sessions.len()
     }
 
+    /// Revoke a session immediately, invalidating its token and dropping its
+    /// interest set.
+    ///
+    /// Use this for administrative kicks, aborted handshakes, and any state
+    /// that must not be resumable. An ordinary transport drop should call
+    /// [`WorldGateway::disconnect`] instead so the player can reconnect.
+    pub fn close_session(&mut self, session: &SessionId) -> Option<GatewaySession> {
+        let removed = self.sessions.remove(session);
+        let _ = self.interest.remove_session(session);
+        removed
+    }
+
     /// Create a session for authenticated claims and bind its character.
     ///
     /// # Errors

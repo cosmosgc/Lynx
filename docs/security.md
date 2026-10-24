@@ -35,6 +35,16 @@ servers.
 
 - Player authentication is delegated to Nakama. The world gateway validates the
   session token on connect and on token refresh.
+- Until that integration lands, `lynx-world` accepts static bearer tokens for
+  development. Configuration stores only SHA-256 hashes, compared in constant
+  time; plaintext tokens are never written by the service. Each hash maps to one
+  server-chosen demo account and character, and a character has at most one
+  connected session. This path is not production authentication and must be
+  replaced by Nakama session validation before exposure.
+- Length-prefixed frames are size-bounded before JSON parsing, and a partial
+  frame is treated as an error rather than a clean disconnect. Handshakes have a
+  deadline, and frames that fail envelope validation close the connection after
+  a correlated `protocol.error`.
 - `world_gateway` accepts claims only from trusted code that has already
   authenticated the player. A client cannot construct a session for another
   account or character, claim a staff role, or choose its own session ID.
@@ -42,9 +52,10 @@ servers.
   against the session cap, so reconnect windows cannot bypass admission limits.
 - Resume tokens are opaque, server-issued, short-lived (default 30 s),
   single-use, and rotated on every resume. They are redacted from `Debug` and
-  must never be logged or embedded in error details. Unknown, expired, or
-  replayed tokens fail with `SessionExpired`; a still-connected session fails
-  with `Conflict`.
+  must never be logged or embedded in error details. The transport delivers the
+  current token once in `world.token`; that message must not reach logs,
+  traces, or crash reports. Unknown, expired, or replayed tokens fail with
+  `SessionExpired`; a still-connected session fails with `Conflict`.
 - The client's acknowledged tick is clamped to the authoritative tick.
 - Expired resume windows are swept on connect, resume, and every tick. A
   missing actor invalidates the session instead of resurrecting a stale

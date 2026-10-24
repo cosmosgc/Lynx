@@ -14,6 +14,8 @@ Decisions and their rationale live in [`adr/`](adr/).
                                 │ authenticated protocol (JSON, versioned)
 ┌───────────────────────────────▼────────────────────────────────────────┐
 │ World service (Rust, headless)                                          │
+│ lynx-world:    WebSocket/TLS edge, health, tick loop, shutdown          │
+│ world_server:  connection IDs, wire kinds, snapshot/delta envelopes     │
 │ world_gateway: sessions, resume tokens, action routing, replication     │
 │ engine_sim:    zones, entities, action pipeline, minds, links, AI, nav  │
 │ game_api:      auth/session/social/chat/world/character/inventory/admin │
@@ -36,6 +38,8 @@ engine_content ─────┘
 engine_net (protocol envelopes; no transport implementation)
 
 world_gateway → engine_core, engine_sim, engine_net, game_api
+world_server  → world_gateway, engine_net, engine_core
+lynx_world    → world_server, world_gateway, engine_sim, engine_net, game_api
 project_cli → engine_content, engine_core, backend_nakama
 ```
 
@@ -54,6 +58,12 @@ Rules:
   session lifecycle, action routing, and per-session replication. It owns no
   socket, runtime, or clock; a transport adapter supplies authenticated claims
   and explicit timestamps.
+- `world_server` adds connection IDs, `world.ready`/`world.snapshot`/
+  `world.delta` encoding, and connection-close bookkeeping on top of
+  `world_gateway`. It still owns no socket, runtime, or clock.
+- `lynx_world` is the runnable service: Axum/Tokio WebSocket transport, static
+  hashed-token admission, health endpoints, the tick loop, and graceful
+  shutdown. All gameplay authority stays in the crates below it.
 - `backend_nakama` is the only crate that knows Nakama's HTTP API.
 - Client/editor crates (introduced with Bevy) depend on the crates above and
   never the reverse.
@@ -146,9 +156,13 @@ format, validation rules, and formatting policy are specified in
 
 - Bevy client crates, rendering, input, and camera modules (Phase 1 client
   work).
-- A transport and process loop around `world_gateway` — WebSocket or UDP
-  framing, rate limiting, and Nakama token refresh. The gateway library itself
-  is transport-agnostic and tested; `lynx-world` is not yet a binary.
+- Production authentication at the world edge. `lynx-world` currently accepts
+  static hashed bearer tokens and spawns one demo character per token;
+  validating a Nakama session and resolving character ownership is still
+  required.
+- Rate limiting, per-session message budgets, metrics export, and TLS
+  termination. Plain WebSocket is intended for loopback development behind a
+  trusted proxy.
 - A durable session store. Resume windows live in memory, so a zone restart
   still requires players to log in again.
 - The editor application, behavior graph editor, and admin spectator client.
