@@ -389,6 +389,11 @@ impl CatalogSet {
         self.catalogs.get(locale)
     }
 
+    /// Iterate over catalogs in locale order.
+    pub fn iter(&self) -> impl Iterator<Item = (&Locale, &MessageCatalog)> {
+        self.catalogs.iter()
+    }
+
     /// Resolve a key through the requested locale's fallback chain.
     ///
     /// The chain is exact tag, language, then `pt-BR`.
