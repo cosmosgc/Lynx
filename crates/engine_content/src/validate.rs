@@ -12,18 +12,18 @@ use engine_core::{EngineError, ErrorCode};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::definition::ContentDefinition;
+use crate::definition::{ContentDefinition, MinigameDefinition, UiPanelDefinition};
 use crate::diagnostic::{Diagnostic, ValidationReport};
 
-/// Directories scanned for definition files, relative to a content root.
-pub const DEFINITION_DIRS: [&str; 6] = [
-    "definitions",
-    "items",
-    "entities",
-    "zones",
-    "behaviors",
-    "ui",
-];
+/// Directories scanned for component-backed definition files, relative to a
+/// content root.
+pub const DEFINITION_DIRS: [&str; 5] = ["definitions", "items", "entities", "zones", "behaviors"];
+
+/// Directories scanned for declarative UI panel definitions.
+pub const PANEL_DIRS: [&str; 2] = ["ui", "panels"];
+
+/// Directories scanned for minigame definitions.
+pub const MINIGAME_DIRS: [&str; 1] = ["minigames"];
 
 /// Maximum directory nesting when scanning content.
 const MAX_SCAN_DEPTH: usize = 32;
@@ -31,12 +31,20 @@ const MAX_SCAN_DEPTH: usize = 32;
 /// Definitions and catalogs loaded from a project.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ContentSet {
-    /// Definitions keyed by ID.
+    /// Component-backed definitions keyed by ID.
     pub definitions: BTreeMap<DefinitionId, ContentDefinition>,
+    /// Declarative UI panels keyed by ID.
+    pub panels: BTreeMap<DefinitionId, UiPanelDefinition>,
+    /// Minigames keyed by ID.
+    pub minigames: BTreeMap<DefinitionId, MinigameDefinition>,
     /// Localization catalogs.
     pub catalogs: CatalogSet,
-    /// Source path for each definition.
+    /// Source path for each component-backed definition.
     pub sources: BTreeMap<DefinitionId, String>,
+    /// Source path for each UI panel.
+    pub panel_sources: BTreeMap<DefinitionId, String>,
+    /// Source path for each minigame.
+    pub minigame_sources: BTreeMap<DefinitionId, String>,
     /// Source path for each catalog.
     pub catalog_paths: BTreeMap<Locale, String>,
 }
@@ -59,21 +67,70 @@ impl ContentSet {
         definition: ContentDefinition,
     ) -> Result<(), EngineError> {
         let path = path.into();
-        if self.definitions.contains_key(&definition.id) {
+        self.check_unique(&definition.id, &path)?;
+        self.sources.insert(definition.id.clone(), path.clone());
+        self.definitions.insert(definition.id.clone(), definition);
+        Ok(())
+    }
+
+    /// Add a UI panel with its relative source path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorCode::Conflict`] for a duplicate ID or path.
+    pub fn insert_panel(
+        &mut self,
+        path: impl Into<String>,
+        panel: UiPanelDefinition,
+    ) -> Result<(), EngineError> {
+        let path = path.into();
+        self.check_unique(&panel.id, &path)?;
+        self.panel_sources.insert(panel.id.clone(), path.clone());
+        self.panels.insert(panel.id.clone(), panel);
+        Ok(())
+    }
+
+    /// Add a minigame with its relative source path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorCode::Conflict`] for a duplicate ID or path.
+    pub fn insert_minigame(
+        &mut self,
+        path: impl Into<String>,
+        minigame: MinigameDefinition,
+    ) -> Result<(), EngineError> {
+        let path = path.into();
+        self.check_unique(&minigame.id, &path)?;
+        self.minigame_sources
+            .insert(minigame.id.clone(), path.clone());
+        self.minigames.insert(minigame.id.clone(), minigame);
+        Ok(())
+    }
+
+    fn check_unique(&self, id: &DefinitionId, path: &str) -> Result<(), EngineError> {
+        if self.definitions.contains_key(id)
+            || self.panels.contains_key(id)
+            || self.minigames.contains_key(id)
+        {
             return Err(
                 EngineError::new(ErrorCode::Conflict, "duplicate definition id")
-                    .with_detail("id", definition.id.to_string())
-                    .with_detail("path", &path),
+                    .with_detail("id", id.to_string())
+                    .with_detail("path", path),
             );
         }
-        if self.sources.values().any(|existing| existing == &path) {
+        if self
+            .sources
+            .values()
+            .chain(self.panel_sources.values())
+            .chain(self.minigame_sources.values())
+            .any(|existing| existing == path)
+        {
             return Err(
                 EngineError::new(ErrorCode::Conflict, "duplicate definition path")
-                    .with_detail("path", &path),
+                    .with_detail("path", path),
             );
         }
-        self.sources.insert(definition.id.clone(), path);
-        self.definitions.insert(definition.id.clone(), definition);
         Ok(())
     }
 
@@ -134,6 +191,27 @@ impl ContentSet {
         for (id, definition) in &self.definitions {
             let path = self.sources.get(id).map_or("", String::as_str);
             self.validate_definition(&mut report, registry, definition, path);
+        }
+        for (id, panel) in &self.panels {
+            let path = self.panel_sources.get(id).map_or("", String::as_str);
+            for issue in panel.validate_shape() {
+                report.push(Diagnostic::from_issue(path, issue));
+            }
+        }
+        for (id, minigame) in &self.minigames {
+            let path = self.minigame_sources.get(id).map_or("", String::as_str);
+            for issue in minigame.validate_shape() {
+                report.push(Diagnostic::from_issue(path, issue));
+            }
+            for (index, reward) in minigame.rewards.iter().enumerate() {
+                if !self.definitions.contains_key(reward) {
+                    report.error(
+                        "content.unknown_reference",
+                        format!("{path}:rewards[{index}]"),
+                        format!("reward {reward} from {} does not resolve", minigame.id),
+                    );
+                }
+            }
         }
         self.validate_localization(&mut report, strict_locales);
         report
@@ -273,6 +351,31 @@ impl ContentSet {
                 format!("{path}:display.description"),
             ));
         }
+        for (id, panel) in &self.panels {
+            let path = self.panel_sources.get(id).map_or("", String::as_str);
+            used.push((panel.display.name.clone(), format!("{path}:display.name")));
+            used.push((
+                panel.display.description.clone(),
+                format!("{path}:display.description"),
+            ));
+            for (index, action) in panel.actions.iter().enumerate() {
+                used.push((
+                    action.label.clone(),
+                    format!("{path}:actions[{index}].label"),
+                ));
+            }
+        }
+        for (id, minigame) in &self.minigames {
+            let path = self.minigame_sources.get(id).map_or("", String::as_str);
+            used.push((
+                minigame.display.name.clone(),
+                format!("{path}:display.name"),
+            ));
+            used.push((
+                minigame.display.description.clone(),
+                format!("{path}:display.description"),
+            ));
+        }
         used
     }
 
@@ -327,6 +430,17 @@ impl ContentSet {
         for definition in self.definitions.values() {
             keys.insert(definition.display.name.clone());
             keys.insert(definition.display.description.clone());
+        }
+        for panel in self.panels.values() {
+            keys.insert(panel.display.name.clone());
+            keys.insert(panel.display.description.clone());
+            for action in &panel.actions {
+                keys.insert(action.label.clone());
+            }
+        }
+        for minigame in self.minigames.values() {
+            keys.insert(minigame.display.name.clone());
+            keys.insert(minigame.display.description.clone());
         }
         keys
     }
@@ -399,6 +513,8 @@ impl ContentLoader {
 
         Self::load_catalogs(root, &mut set, &mut report);
         Self::load_definitions(root, &mut set, &mut report);
+        Self::load_panels(root, &mut set, &mut report);
+        Self::load_minigames(root, &mut set, &mut report);
 
         let validation = set.validate(&self.registry);
         report.extend(validation);
@@ -436,17 +552,7 @@ impl ContentLoader {
     }
 
     fn load_definitions(root: &Path, set: &mut ContentSet, report: &mut ValidationReport) {
-        let mut files = Vec::new();
-        for directory in DEFINITION_DIRS {
-            let path = root.join(directory);
-            if path.is_dir() {
-                collect_ron_files(&path, &mut files, 0);
-            }
-        }
-        files.sort();
-        files.dedup();
-
-        for path in files {
+        for path in collect_files(root, &DEFINITION_DIRS) {
             let relative = relative_path(root, &path);
             match read_ron::<ContentDefinition>(&path) {
                 Ok(definition) => {
@@ -463,6 +569,57 @@ impl ContentLoader {
             }
         }
     }
+
+    fn load_panels(root: &Path, set: &mut ContentSet, report: &mut ValidationReport) {
+        for path in collect_files(root, &PANEL_DIRS) {
+            let relative = relative_path(root, &path);
+            match read_ron::<UiPanelDefinition>(&path) {
+                Ok(panel) => {
+                    if let Err(error) = set.insert_panel(relative.clone(), panel) {
+                        let code = if error.details().contains_key("id") {
+                            "content.duplicate_id"
+                        } else {
+                            "content.duplicate_path"
+                        };
+                        report.error(code, relative, error.to_string());
+                    }
+                }
+                Err(error) => report.error("content.parse", relative, error.to_string()),
+            }
+        }
+    }
+
+    fn load_minigames(root: &Path, set: &mut ContentSet, report: &mut ValidationReport) {
+        for path in collect_files(root, &MINIGAME_DIRS) {
+            let relative = relative_path(root, &path);
+            match read_ron::<MinigameDefinition>(&path) {
+                Ok(minigame) => {
+                    if let Err(error) = set.insert_minigame(relative.clone(), minigame) {
+                        let code = if error.details().contains_key("id") {
+                            "content.duplicate_id"
+                        } else {
+                            "content.duplicate_path"
+                        };
+                        report.error(code, relative, error.to_string());
+                    }
+                }
+                Err(error) => report.error("content.parse", relative, error.to_string()),
+            }
+        }
+    }
+}
+
+fn collect_files(root: &Path, directories: &[&str]) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for directory in directories {
+        let path = root.join(directory);
+        if path.is_dir() {
+            collect_ron_files(&path, &mut files, 0);
+        }
+    }
+    files.sort();
+    files.dedup();
+    files
 }
 
 fn read_ron<T: DeserializeOwned>(path: &Path) -> Result<T, EngineError> {
@@ -741,6 +898,85 @@ mod tests {
         let (set, report) = loader.load_project(&root);
         assert!(set.definitions.is_empty());
         assert!(report.errors().any(|item| item.code == "content.parse"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn loader_reads_declarative_panels_and_minigames() {
+        let root = std::env::temp_dir().join(format!(
+            "lynx-content-ui-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("ui")).unwrap();
+        std::fs::create_dir_all(root.join("minigames")).unwrap();
+        std::fs::create_dir_all(root.join("localization")).unwrap();
+        std::fs::write(
+            root.join("ui/terminal.ron"),
+            r#"(
+                id: "ui.terminal",
+                version: (major: 1, minor: 0),
+                display: (name: "ui.terminal.title", description: "ui.terminal.description"),
+                schema: "ui.terminal",
+                actions: [
+                    (name: "close", label: "ui.action.close"),
+                ],
+                fields: [
+                    (key: "status", source: "entity.state.status"),
+                ],
+            )"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("minigames/lockpick.ron"),
+            r#"(
+                id: "minigame.lockpick",
+                version: (major: 1, minor: 0),
+                display: (name: "minigame.lockpick.name", description: "minigame.lockpick.description"),
+                panel_schema: "ui.lockpick",
+                authority: "server",
+                rewards: ["item.dust"],
+            )"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("localization/pt-BR.ron"),
+            r#"(
+                locale: "pt-BR",
+                messages: {
+                    "ui.terminal.title": "Terminal",
+                    "ui.terminal.description": "Um terminal.",
+                    "ui.action.close": "Fechar",
+                    "minigame.lockpick.name": "Gazua",
+                    "minigame.lockpick.description": "Abra a fechadura.",
+                },
+            )"#,
+        )
+        .unwrap();
+
+        let loader = ContentLoader::new(registry());
+        let (set, report) = loader.load_project(&root);
+        assert_eq!(set.panels.len(), 1);
+        assert_eq!(set.minigames.len(), 1);
+        let panel_id = DefinitionId::new("ui.terminal").unwrap();
+        assert_eq!(
+            set.panel_sources.get(&panel_id).map(String::as_str),
+            Some("ui/terminal.ron")
+        );
+        assert!(
+            report
+                .errors()
+                .any(|item| item.code == "content.unknown_reference"),
+            "missing reward definitions are reported: {report}"
+        );
+        assert!(
+            set.referenced_keys()
+                .iter()
+                .any(|key| key.as_str() == "ui.action.close")
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

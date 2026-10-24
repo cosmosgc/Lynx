@@ -4,7 +4,9 @@
 
 | Kind | Format | Location |
 |---|---|---|
-| Items, entities, zones, behaviors, UI panels | RON | `content/<kind>/` |
+| Items, entities, zones, behaviors | RON | `content/<kind>/` |
+| UI panels | RON | `content/ui/` or `content/panels/` |
+| Minigames | RON | `content/minigames/` |
 | Localization catalogs | RON | `content/localization/<locale>.ron` |
 | Project manifest and runtime config | TOML | project root, `config/` |
 | Schemas | JSON Schema | `content/schemas/` |
@@ -96,6 +98,51 @@ stable schema, localized labels, allowed actions, and binding metadata. The
 same pattern applies to a server-authoritative minigame definition, which must
 name its panel schema and declare whether authority resides with the server,
 a hybrid client/server flow, or the client for cosmetic-only play.
+
+```ron
+(
+  id: "ui.terminal",
+  version: (major: 1, minor: 0),
+  display: (
+    name: "ui.terminal.title",
+    description: "ui.terminal.description",
+  ),
+  schema: "ui.terminal",
+  actions: [
+    (name: "close", label: "ui.action.close"),
+    (name: "submit", label: "ui.action.submit", gated_by: Some("actor.has_access")),
+  ],
+  fields: [
+    (key: "status", source: "entity.state.status", formatter: Some("status")),
+  ],
+  fallback_schema: Some("ui.inspect"),
+)
+```
+
+A panel with no actions is a read-only view and must declare a
+`fallback_schema`. Panel IDs use the `ui` or `panel` namespace; schemas, message
+keys, action names, and field keys are validated at load. Duplicate action
+names and field keys are errors.
+
+```ron
+(
+  id: "minigame.lockpick",
+  version: (major: 1, minor: 0),
+  display: (
+    name: "minigame.lockpick.name",
+    description: "minigame.lockpick.description",
+  ),
+  panel_schema: "ui.lockpick",
+  authority: "server",
+  rewards: ["item.dust"],
+)
+```
+
+`authority` is one of `server`, `hybrid`, or `client`. Client-authoritative
+minigames are restricted to cosmetic play and must not declare rewards.
+Reward references must resolve to a loaded definition. Competitive,
+reward-bearing, or world-changing games must use `server` or `hybrid` so the
+server validates the result before granting anything.
 
 ## Localization
 

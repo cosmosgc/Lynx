@@ -28,6 +28,8 @@ pub enum ContentKind {
     Behavior,
     /// A UI panel definition.
     Ui,
+    /// A minigame definition.
+    Minigame,
 }
 
 impl ContentKind {
@@ -40,6 +42,7 @@ impl ContentKind {
             Self::Zone => "zone",
             Self::Behavior => "behavior",
             Self::Ui => "ui",
+            Self::Minigame => "minigame",
         }
     }
 
@@ -51,6 +54,7 @@ impl ContentKind {
             Some("zone") => Self::Zone,
             Some("behavior" | "ai") => Self::Behavior,
             Some("ui" | "panel") => Self::Ui,
+            Some("minigame") => Self::Minigame,
             _ => Self::Entity,
         }
     }
@@ -563,6 +567,7 @@ mod tests {
             ("zone.tavern", ContentKind::Zone),
             ("behavior.guard", ContentKind::Behavior),
             ("ui.inventory", ContentKind::Ui),
+            ("minigame.lockpick", ContentKind::Minigame),
         ] {
             assert_eq!(
                 ContentKind::infer(&DefinitionId::new(id).unwrap()),

@@ -19,6 +19,15 @@ semantic versioning for engine releases and content bundles.
   possession, typed entity links with cycle detection, bounded grid pathfinding,
   and faction-aware ally assistance.
 - `engine_content`: RON content definitions, manifest hashing, and validation.
+- `engine_content`: declarative UI panel and minigame definitions. Panels
+  declare a namespaced schema, localized labels, allowed actions, field
+  bindings, and an optional fallback for read-only clients. Minigames declare
+  their panel schema, explicit `server`/`hybrid`/`client` authority, and
+  reward references. Validation rejects malformed IDs and keys, duplicate
+  actions or fields, missing fallbacks, unknown rewards, and
+  client-authoritative minigames that grant rewards. The loader reads
+  `content/ui/`, `content/panels/`, and `content/minigames/`, and bundle
+  manifests record the `ui` and `minigame` kinds.
 - `engine_net` and `game_api`: protocol envelopes and backend adapter traits.
 - `engine_net::interest`: per-session interest sets with entry/exit hysteresis,
   visibility classes, deterministic entity caps, audience filtering for every

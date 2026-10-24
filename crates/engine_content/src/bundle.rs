@@ -13,7 +13,9 @@ use engine_core::{EngineError, ErrorCode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::definition::{ContentDefinition, ContentKind, is_safe_asset_path};
+use crate::definition::{
+    ContentDefinition, ContentKind, MinigameDefinition, UiPanelDefinition, is_safe_asset_path,
+};
 use crate::diagnostic::ValidationReport;
 
 /// Hash bytes with SHA-256 and return lowercase hexadecimal.
@@ -98,7 +100,65 @@ impl ContentManifest {
         definition: &ContentDefinition,
         bytes: &[u8],
     ) -> Result<(), EngineError> {
-        let path = path.into();
+        self.add_entry(
+            path.into(),
+            definition.kind(),
+            definition.id.clone(),
+            definition.version,
+            bytes,
+        )
+    }
+
+    /// Record a UI panel file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorCode::Conflict`] for a duplicate path or definition ID,
+    /// and [`ErrorCode::InvalidRequest`] for an unsafe path.
+    pub fn add_panel(
+        &mut self,
+        path: impl Into<String>,
+        panel: &UiPanelDefinition,
+        bytes: &[u8],
+    ) -> Result<(), EngineError> {
+        self.add_entry(
+            path.into(),
+            ContentKind::Ui,
+            panel.id.clone(),
+            panel.version,
+            bytes,
+        )
+    }
+
+    /// Record a minigame file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorCode::Conflict`] for a duplicate path or definition ID,
+    /// and [`ErrorCode::InvalidRequest`] for an unsafe path.
+    pub fn add_minigame(
+        &mut self,
+        path: impl Into<String>,
+        minigame: &MinigameDefinition,
+        bytes: &[u8],
+    ) -> Result<(), EngineError> {
+        self.add_entry(
+            path.into(),
+            ContentKind::Minigame,
+            minigame.id.clone(),
+            minigame.version,
+            bytes,
+        )
+    }
+
+    fn add_entry(
+        &mut self,
+        path: String,
+        kind: ContentKind,
+        id: DefinitionId,
+        version: SchemaVersion,
+        bytes: &[u8],
+    ) -> Result<(), EngineError> {
         if !is_safe_asset_path(&path) {
             return Err(EngineError::new(
                 ErrorCode::InvalidRequest,
@@ -112,22 +172,18 @@ impl ContentManifest {
                     .with_detail("path", &path),
             );
         }
-        if self
-            .definitions
-            .iter()
-            .any(|entry| entry.id == definition.id)
-        {
+        if self.definitions.iter().any(|entry| entry.id == id) {
             return Err(
                 EngineError::new(ErrorCode::Conflict, "duplicate definition id")
-                    .with_detail("id", definition.id.to_string())
+                    .with_detail("id", id.to_string())
                     .with_detail("path", &path),
             );
         }
         self.definitions.push(DefinitionEntry {
             path,
-            kind: definition.kind(),
-            id: definition.id.clone(),
-            version: definition.version,
+            kind,
+            id,
+            version,
             sha256: sha256_hex(bytes),
         });
         Ok(())
@@ -357,7 +413,9 @@ impl ContentManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::definition::{DisplayText, Presentation, PresentationMode};
+    use crate::definition::{
+        DisplayText, MinigameDefinition, Presentation, PresentationMode, UiPanelDefinition,
+    };
     use engine_core::i18n::MessageKey;
     use engine_core::schema::ComponentKey;
     use std::collections::{BTreeMap, BTreeSet};
@@ -485,6 +543,51 @@ mod tests {
                 .unwrap_err()
                 .code(),
             ErrorCode::InvalidRequest
+        );
+    }
+
+    #[test]
+    fn panels_and_minigames_are_recorded_with_their_kinds() {
+        let panel = UiPanelDefinition {
+            id: DefinitionId::new("ui.terminal").unwrap(),
+            version: SchemaVersion::new(1, 0),
+            display: DisplayText {
+                name: key("ui.terminal.title"),
+                description: key("ui.terminal.description"),
+            },
+            schema: "ui.terminal".to_string(),
+            actions: Vec::new(),
+            fields: Vec::new(),
+            fallback_schema: Some("ui.inspect".to_string()),
+        };
+        let minigame = MinigameDefinition {
+            id: DefinitionId::new("minigame.lockpick").unwrap(),
+            version: SchemaVersion::new(1, 0),
+            display: DisplayText {
+                name: key("minigame.lockpick.name"),
+                description: key("minigame.lockpick.description"),
+            },
+            panel_schema: "ui.lockpick".to_string(),
+            authority: "server".to_string(),
+            rewards: Vec::new(),
+        };
+
+        let mut manifest = manifest();
+        manifest
+            .add_panel("ui/terminal.ron", &panel, b"panel")
+            .unwrap();
+        manifest
+            .add_minigame("minigames/lockpick.ron", &minigame, b"game")
+            .unwrap();
+
+        assert_eq!(manifest.definitions[0].kind, ContentKind::Ui);
+        assert_eq!(manifest.definitions[1].kind, ContentKind::Minigame);
+        assert_eq!(
+            manifest
+                .add_panel("ui/duplicate.ron", &panel, b"panel")
+                .unwrap_err()
+                .code(),
+            ErrorCode::Conflict
         );
     }
 }

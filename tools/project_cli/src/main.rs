@@ -245,6 +245,8 @@ fn validate_dir(project_dir: &Path) -> Value {
             "errors": [format!("project missing: {}", project_dir.display())],
             "warnings": [],
             "definitions": 0,
+            "panels": 0,
+            "minigames": 0,
             "catalogs": 0,
         });
     }
@@ -256,6 +258,8 @@ fn validate_dir(project_dir: &Path) -> Value {
             "errors": [format!("project path is not a directory: {}", project_dir.display())],
             "warnings": [],
             "definitions": 0,
+            "panels": 0,
+            "minigames": 0,
             "catalogs": 0,
         });
     }
@@ -275,6 +279,8 @@ fn validate_dir(project_dir: &Path) -> Value {
         "errors": errors,
         "warnings": warnings,
         "definitions": set.definitions.len(),
+        "panels": set.panels.len(),
+        "minigames": set.minigames.len(),
         "catalogs": set.catalogs.len(),
     })
 }
