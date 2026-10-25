@@ -67,6 +67,22 @@ Apply migrations:
 
 Environment variables (see `.env.example`):
 
+The native scripts load `.env` from the repository root. Start by copying the
+example file, then set a strong application password:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+```bash
+cp .env.example .env
+```
+
+Values already exported in the process environment take precedence over `.env`.
+The scripts accept simple `KEY=VALUE` lines and strip matching single or double
+quotes; they do not expand variables or interpret shell expressions. `.env` is
+gitignored and must never contain credentials that are committed or shared.
+
 | Variable | Default | Purpose |
 |---|---|---|
 | `LYNX_PG_HOST` | `127.0.0.1` | PostgreSQL host |
@@ -74,12 +90,23 @@ Environment variables (see `.env.example`):
 | `LYNX_PG_DATABASE` | `lynx` | Database name |
 | `LYNX_PG_USER` | `lynx` | Least-privilege application role |
 | `LYNX_PG_PASSWORD` | — | Required; never commit |
+| `LYNX_PG_SUPERUSER` | `postgres` | Setup only; PostgreSQL administrator role |
+| `LYNX_PG_MAINTENANCE_DB` | `postgres` | Setup only; database used for admin connections |
+
+`setup-postgres.*` authenticates as the superuser through PostgreSQL/libpq
+(peer authentication, a pgpass file, or `PGPASSWORD`); `LYNX_PG_PASSWORD` is
+the application role's password, not the superuser password. `db-migrate.*`
+connects as the application role.
 
 ## 3. Nakama 3.41 (native)
 
 Download the official release for your platform from
 <https://github.com/heroiclabs/nakama/releases/tag/v3.41.0> and place the
-binary on `PATH` (or set `NAKAMA_BIN`).
+binary on `PATH` (or set `NAKAMA_BIN` in `.env` or the process environment).
+The run scripts also read `LYNX_NAKAMA_CONSOLE_USER`,
+`LYNX_NAKAMA_CONSOLE_PASSWORD`, `LYNX_NAKAMA_SERVER_KEY`, and
+`LYNX_NAKAMA_LOG_LEVEL` from `.env` or the process environment. Use unique
+console credentials even for local development; the defaults are insecure.
 
 Windows note: the official Windows build is distributed as a `.tar.gz`; extract
 it with `tar -xzf nakama-3.41.0-windows-amd64.tar.gz`.
@@ -102,12 +129,21 @@ curl http://127.0.0.1:7350/healthcheck
 
 The expected response is `{}` with HTTP 200. Nakama's console listens on
 `127.0.0.1:7351`; it is bound to localhost in the development config.
+The checked-in `server/nakama/local.yml` contains non-secret settings and
+intentionally omits the database address. The startup script creates the
+gitignored `.lynx/nakama.local.yml` overlay with encoded database credentials,
+then passes both files to Nakama using repeated `--config` arguments. Do not
+share or commit the generated overlay.
 
 Check engine-to-backend connectivity:
 
 ```bash
 cargo run -p project_cli -- doctor --backend
 ```
+
+The CLI reads its Nakama URL from the process environment (`LYNX_NAKAMA_URL`,
+then `NAKAMA_URL` or `NAKAMA_BASE_URL`); unlike the native scripts, it does not
+load `.env` itself. The default URL is `http://127.0.0.1:7350`.
 
 ## 4. First project
 
@@ -120,10 +156,11 @@ cargo run -p project_cli -- validate --project .
 
 The generated project is a normal Cargo workspace that depends on Lynx crates
 by path or version. It contains a zone, a sample entity, an item, an
-interaction, a UI panel definition, a Brazilian Portuguese localization
-catalog (`content/localization/pt-BR.ron`), a backend configuration template
-with placeholder values, and migration hooks. The project defaults to `pt-BR`;
-additional locales are declared in the project manifest.
+interaction, a UI panel definition, and a Brazilian Portuguese localization
+catalog (`content/localization/pt-BR.ron`). The project defaults to `pt-BR`;
+additional locales are declared in the project manifest. Generated
+interactions describe client intent only; the server must validate requests
+and determine gameplay outcomes.
 
 ## 5. Language and localization
 

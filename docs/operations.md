@@ -11,6 +11,33 @@
 Configuration is environment-specific. Secrets come from environment variables
 or an OS secret store, never from the repository.
 
+For native PostgreSQL/Nakama development, copy `.env.example` to `.env` in the
+repository root and fill in local values. The `scripts/*.ps1` and
+`scripts/*.sh` entry points load that file without overriding variables
+already present in the process environment. They accept simple `KEY=VALUE`
+entries and matching quotes, but do not perform shell expansion. Keep `.env`
+local and untracked; do not use it as a production secret store.
+
+`LYNX_PG_PASSWORD` is the application database role's password.
+`setup-postgres.*` separately connects as `LYNX_PG_SUPERUSER` (default
+`postgres`), using libpq authentication such as peer auth, a pgpass file, or
+`PGPASSWORD`; it does not use the application password for that connection.
+Use `LYNX_PG_MAINTENANCE_DB` to choose the database used for setup operations.
+
+`run-nakama.*` locates the binary using `NAKAMA_BIN` (default `nakama`) and
+reads console credentials, server key, and log level from the corresponding
+`LYNX_NAKAMA_*` environment variables. `server/nakama/local.yml` contains
+non-secret development settings and deliberately has no database address. The
+script renders `.lynx/nakama.local.yml` with the database URL and optional
+overrides, then starts Nakama with both configs via repeated `--config`
+arguments. `.lynx/` is gitignored; the overlay contains credentials and must
+not be shared. The PowerShell script writes it using the current directory ACL;
+the Bash script restricts its permissions with `umask 077`.
+
+The `lynx` CLI does not load `.env`. For `lynx doctor --backend`, set
+`LYNX_NAKAMA_URL` in the process environment (or use `NAKAMA_URL` /
+`NAKAMA_BASE_URL`); otherwise it checks the default `http://127.0.0.1:7350`.
+
 ## Native service layout
 
 - `lynx-world` — authoritative world service. It owns one in-memory demo zone,

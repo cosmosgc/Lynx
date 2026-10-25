@@ -22,7 +22,7 @@
 [CmdletBinding()]
 param(
     [string]$Superuser,
-    [string]$MaintenanceDatabase = 'postgres'
+    [string]$MaintenanceDatabase
 )
 
 . (Join-Path $PSScriptRoot 'common.ps1')
@@ -33,6 +33,9 @@ $pg = Get-LynxPgConfig
 
 if (-not $Superuser) {
     $Superuser = Get-LynxSetting 'LYNX_PG_SUPERUSER' 'postgres'
+}
+if (-not $MaintenanceDatabase) {
+    $MaintenanceDatabase = Get-LynxSetting 'LYNX_PG_MAINTENANCE_DB' 'postgres'
 }
 if (-not (Get-Command psql -ErrorAction SilentlyContinue)) {
     throw 'psql was not found on PATH. Install PostgreSQL 17 or add its bin directory to PATH.'
