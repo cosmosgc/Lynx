@@ -14,7 +14,7 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=common.sh
+# shellcheck source=scripts/common.sh
 . "$script_dir/common.sh"
 
 root="$(cd "$script_dir/.." && pwd)"
