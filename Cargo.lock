@@ -129,6 +129,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend_memory"
+version = "0.1.0"
+dependencies = [
+ "engine_core",
+ "game_api",
+]
+
+[[package]]
 name = "backend_nakama"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,16 @@
+[package]
+name = "backend_memory"
+description = "In-memory backend adapter for Lynx tests and offline development"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+game_api = { workspace = true }
+engine_core = { workspace = true }
+
+[lints]
+workspace = true

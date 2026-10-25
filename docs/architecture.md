@@ -33,8 +33,8 @@ Decisions and their rationale live in [`adr/`](adr/).
 
 ```text
 engine_core   ← engine_sim ← game_api ← backend_nakama
-     ↑              ↑
-engine_content ─────┘
+     ↑                              ← backend_memory
+engine_content
      ↑
 engine_net (protocol envelopes; no transport implementation)
 
@@ -55,6 +55,9 @@ Rules:
   negotiation. It does not own a socket, a runtime, or a Nakama type.
 - `game_api` defines backend interfaces and DTOs. It depends on `engine_core`,
   never on Nakama.
+- `backend_memory` implements the shared backend traits for tests and offline
+  development. Its ephemeral, predictable tokens are not suitable for real
+  player authentication.
 - `world_gateway` composes the simulation, protocol, and backend DTOs into
   session lifecycle, action routing, server-owned UI panel state, and
   per-session replication. It owns no socket, runtime, or clock; a transport

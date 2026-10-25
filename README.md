@@ -83,6 +83,7 @@ crates/world_gateway    Sessions, resume tokens, action routing, per-session rep
 crates/world_server     Connection IDs, wire messages, and delivery envelopes
 crates/lynx_world       Runnable WebSocket world service (`lynx-world`)
 crates/backend_nakama   Native Nakama HTTP adapter (no Docker required)
+crates/backend_memory   Non-persistent test/offline adapter (not production auth)
 crates/game_api         Backend service interfaces and gameplay DTOs
 tools/project_cli       `lynx` project scaffolding, doctor, and validation
 server/                 Native Nakama config, SQL migrations, run scripts

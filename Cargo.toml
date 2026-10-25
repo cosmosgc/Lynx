@@ -6,6 +6,7 @@ members = [
     "crates/engine_content",
     "crates/engine_net",
     "crates/backend_nakama",
+    "crates/backend_memory",
     "crates/game_api",
     "crates/world_gateway",
     "crates/world_server",
@@ -41,6 +42,7 @@ engine_sim = { path = "crates/engine_sim" }
 engine_content = { path = "crates/engine_content" }
 engine_net = { path = "crates/engine_net" }
 backend_nakama = { path = "crates/backend_nakama" }
+backend_memory = { path = "crates/backend_memory" }
 game_api = { path = "crates/game_api" }
 world_gateway = { path = "crates/world_gateway" }
 world_server = { path = "crates/world_server" }
