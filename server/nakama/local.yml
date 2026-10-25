@@ -1,0 +1,31 @@
+# Nakama 3.41 development configuration.
+#
+# This file contains no secrets. scripts/run-nakama.* supply the database
+# address, server key, console credentials, and log level from the
+# environment.
+name: "lynx-local"
+
+data_dir: ".lynx/nakama"
+
+logger:
+  level: "info"
+
+session:
+  token_expiry_sec: 7200
+  refresh_token_expiry_sec: 604800
+
+socket:
+  address: "127.0.0.1"
+  port: 7350
+  server_key: "defaultkey"
+  max_message_size_bytes: 65536
+  max_request_size_bytes: 262144
+
+runtime:
+  path: "server/nakama/modules"
+  http_key: "defaulthttpkey"
+
+console:
+  address: "127.0.0.1"
+  port: 7351
+  username: "admin"
