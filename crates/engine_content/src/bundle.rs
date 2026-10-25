@@ -428,6 +428,26 @@ impl ContentManifest {
 
 /// Check moderation metadata for internal consistency.
 fn validate_publishing(publishing: &PublishingRecord, report: &mut ValidationReport) {
+    if matches!(
+        publishing.state,
+        ModerationState::Approved | ModerationState::Rejected
+    ) && publishing.reviewer.is_none()
+    {
+        report.error(
+            "content.publishing.missing_reviewer",
+            "publishing",
+            "approved or rejected content must record the reviewing moderator",
+        );
+    }
+
+    if publishing.state == ModerationState::Rejected && publishing.note.is_none() {
+        report.error(
+            "content.publishing.missing_rejection_note",
+            "publishing",
+            "rejected content must include a moderation note",
+        );
+    }
+
     if publishing.reviewer.is_some()
         && !matches!(
             publishing.state,
@@ -621,6 +641,38 @@ mod tests {
             .collect();
         assert!(codes.contains(&"content.publishing.reviewer_without_review"));
         assert!(codes.contains(&"content.publishing.note_without_rejection"));
+    }
+
+    #[test]
+    fn publishing_records_require_reviewer_and_note_when_needed() {
+        let mut manifest = manifest();
+        manifest
+            .add_definition("entities/door.ron", &definition(), b"door")
+            .unwrap();
+        manifest
+            .add_locale("localization/pt-BR.ron", Locale::default(), b"catalog")
+            .unwrap();
+
+        let mut approved = PublishingRecord::new(AuthorId::new("alice").unwrap());
+        approved.state = ModerationState::Approved;
+        let approved_report = manifest.clone().with_publishing(approved).validate();
+        let approved_codes: Vec<_> = approved_report
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code.as_str())
+            .collect();
+        assert!(approved_codes.contains(&"content.publishing.missing_reviewer"));
+
+        let mut rejected = PublishingRecord::new(AuthorId::new("alice").unwrap());
+        rejected.state = ModerationState::Rejected;
+        rejected.reviewer = Some(AuthorId::new("moderator").unwrap());
+        let rejected_report = manifest.clone().with_publishing(rejected).validate();
+        let rejected_codes: Vec<_> = rejected_report
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code.as_str())
+            .collect();
+        assert!(rejected_codes.contains(&"content.publishing.missing_rejection_note"));
     }
 
     #[test]
