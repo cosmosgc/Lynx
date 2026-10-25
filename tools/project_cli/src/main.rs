@@ -594,10 +594,10 @@ fn project_main(project_name: &str) -> String {
 }
 
 fn cargo_toml_for(project_name: &str, repo_root: &Path, _template: Template) -> String {
-    let repo_root = repo_root.to_string_lossy().replace('\\', "\\\\");
+    let repo_root = repo_root.to_string_lossy().replace('\\', "/");
 
     format!(
-        "[package]\nname = \"{project_name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nengine_core = {{ path = \"{repo_root}\\\\crates\\\\engine_core\" }}\nengine_content = {{ path = \"{repo_root}\\\\crates\\\\engine_content\" }}\nengine_sim = {{ path = \"{repo_root}\\\\crates\\\\engine_sim\" }}\nbackend_nakama = {{ path = \"{repo_root}\\\\crates\\\\backend_nakama\" }}\nserde = {{ version = \"1\", features = [\"derive\"] }}\nserde_json = \"1\"\nron = \"0.12\"\n\n[profile.dev]\ndebug = 1\n\n[profile.release]\nlto = \"thin\"\ncodegen-units = 1\n",
+        "[package]\nname = \"{project_name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nengine_core = {{ path = \"{repo_root}/crates/engine_core\" }}\nengine_content = {{ path = \"{repo_root}/crates/engine_content\" }}\nengine_sim = {{ path = \"{repo_root}/crates/engine_sim\" }}\nbackend_nakama = {{ path = \"{repo_root}/crates/backend_nakama\" }}\nserde = {{ version = \"1\", features = [\"derive\"] }}\nserde_json = \"1\"\nron = \"0.12\"\n\n[profile.dev]\ndebug = 1\n\n[profile.release]\nlto = \"thin\"\ncodegen-units = 1\n",
     )
 }
 
