@@ -32,27 +32,23 @@ Every definition carries:
 
 ```ron
 (
-  id: "door.wooden",
+  id: "entity.tavern_keeper",
   version: (major: 1, minor: 0),
-  display: (name: "entity.door.wooden.name", description: "entity.door.wooden.description"),
+  display: (name: "entity.tavern_keeper.name", description: "entity.tavern_keeper.description"),
   components: {
-    "core.interactable": (
-      verbs: [Inspect, Open, Lock],
-      range_m: 2.5,
-      requires_line_of_sight: true,
-      permission: OwnerOrPublic,
-    ),
-    "core.door": (starts_open: false, starts_locked: false, key: None),
+    "core.interactable": {
+      "verbs": ["inspect", "talk"],
+      "range_m": 2.5,
+      "requires_line_of_sight": true,
+    },
   },
-  presentation: Token(
-    mode: Hybrid,
-    model: "models/door_wooden.glb",
-    portrait: "ui/portraits/door.png",
-    animation_set: "anim/door_minimal.ron",
-  ),
-  tags: ["structure", "wood"],
+  tags: ["npc", "tavern"],
 )
 ```
+
+Component values are RON maps because the content format carries them as typed
+key/value data. The CLI's starter project registers `core.interactable`,
+`core.item`, and `core.zone` with the schemas used by its generated examples.
 
 ## Required fields and validation
 

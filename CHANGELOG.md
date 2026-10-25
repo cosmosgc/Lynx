@@ -77,8 +77,14 @@ semantic versioning for engine releases and content bundles.
 - `engine_core::ErrorCode::SessionExpired` for expired or unknown world
   sessions; `game_api::ApiError::SessionExpired` now maps to it.
 - `backend_nakama`: native Nakama HTTP adapter with health and authentication.
+- `backend_memory`: non-persistent backend adapter for tests and offline
+  development; it is explicitly not a production identity provider.
 - `lynx` project CLI: `new`, `doctor`, `validate`, `content hash`, and
-  `content diff`.
+  `content diff`, with minimal and MMORPG templates containing validated
+  starter zones, entities, items, interactions, UI panels, and a `pt-BR`
+  source catalog.
+- Cross-platform CI for Rust formatting, Clippy, tests, builds, generated
+  project validation, ShellCheck, and PostgreSQL 17 migrations.
 - Native non-Docker Nakama/PostgreSQL setup scripts and SQL migrations.
 - Internationalization design: key-based RON catalogs, `pt-BR` as the default
   and source language, locale negotiation, validation codes, and client-side
