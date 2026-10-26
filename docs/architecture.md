@@ -94,6 +94,25 @@ Rules:
 | Resume token | `ResumeToken` | Server-issued, short-lived, single-use, redacted |
 | Delivery | `SessionDelivery` | One session's interest delta and filtered batch per tick |
 
+## Persistent world dynamics
+
+The shared faction, territory, event-calendar, and engine-upgrade design is
+specified in [`world-simulation.md`](world-simulation.md). These capabilities
+extend the existing authoritative simulation and persistence boundaries; they
+are not yet implied by the current implementation status.
+
+- Authored map topology and stable zone IDs are content. Territory ownership,
+  faction treasury, event lifecycle, and event results are mutable durable
+  state, transactionally persisted and audited.
+- A guild is a player-governed faction. Player- and NPC-governed factions use
+  the same domain operations; controller type does not confer authority.
+- The server validates faction actions, event enrollment, conflict
+  participation, and outcomes. A durable event result and all affected
+  territory changes commit atomically and are idempotent.
+- Engine/runtime releases and content bundles have distinct versions and
+  compatibility checks. Games adopt releases through controlled upgrades;
+  breaking changes require explicit migration rather than silent live mutation.
+
 ## Request lifecycle
 
 1. A transport authenticates the player and supplies `SessionClaims` (account,

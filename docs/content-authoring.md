@@ -5,6 +5,7 @@
 | Kind | Format | Location |
 |---|---|---|
 | Items, entities, zones, behaviors | RON | `content/<kind>/` |
+| Lore, quest, and event templates | RON | `content/lore/`, `content/quests/`, `content/events/` |
 | UI panels | RON | `content/ui/` or `content/panels/` |
 | Minigames | RON | `content/minigames/` |
 | Localization catalogs | RON | `content/localization/<locale>.ron` |
@@ -66,6 +67,12 @@ key/value data. The CLI's starter project registers `core.interactable`,
   `IconAbstract`.
 - Gameplay behavior must not depend on the presentation mode.
 
+Lore and quest definitions use stable IDs and localized message keys, and may
+reference zones, factions, items, or other definitions. Event templates contain
+the authored objectives and versioned rules; a scheduled calendar event is a
+durable runtime instance that records the template version it uses. Validate
+all references when building and publishing a bundle.
+
 ## Zones
 
 A zone definition contains:
@@ -81,6 +88,10 @@ A zone definition contains:
 
 Links are validated at load: endpoints exist, link type is compatible with both
 components, no unsupported cycles, and cross-zone links use an explicit route.
+The world atlas composes stable zone IDs and explicit routes. Dynamic territory
+ownership is runtime state, not part of a zone's authored identity or geometry.
+The editor must visualize routes and territory without baking live ownership
+into a content bundle.
 
 ## UI panels
 
@@ -211,6 +222,25 @@ mirror them for tools and previews. Alignment is `-100..=100` with default
 thresholds of `<= -34` enemy, `-33..=33` neutral, and `>= 34` friend.
 Character-specific reputation overrides are additive and expire when their
 modifier expires.
+
+Guilds and NPC polities use the same faction model and authoritative
+operations; governance and controller policy distinguish them. Membership,
+treasury, power inputs, and territory ownership are durable runtime state.
+Wealth-based power is calculated from documented, versioned rules rather than
+authored as a client-controlled value.
+
+## World calendar and faction events
+
+Scheduled world events are durable, versioned records with a lifecycle,
+world-clock timestamps, affected zones, participant eligibility, and
+resolution policy. Conflict definitions may reference faction and territory
+IDs, but event enrollment, participation, results, and territory changes are
+authoritative runtime state. Content validation must resolve every referenced
+zone and faction. Cancellation and retries must not award a result or apply
+ownership changes twice.
+
+The full domain contract, map-editor requirements, and upgrade behavior are in
+[`world-simulation.md`](world-simulation.md).
 
 ## Versioning and diffs
 

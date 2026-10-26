@@ -53,6 +53,12 @@ settings.
 -   **Tools are part of the product:** world editing, item creation,
     entity placement, behavior authoring, live operations, and spectator
     tools are first-class features.
+-   **A living, shared world model:** player guilds and NPC polities use
+    the same faction, wealth, and territory rules; scheduled conflicts
+    can be joined, stopped, and resolved into durable world changes.
+-   **Upgradeable without forking:** engine releases provide shared
+    features to compatible game projects through validated upgrades,
+    without silently changing a live game's rules or content.
 -   **Safe live changes:** distinguish safe data edits from changes that
     require validation, migration, or a server restart.
 -   **Portable core:** keep gameplay and content logic independent of
@@ -78,6 +84,11 @@ Players should be able to:
     access and placed furnishings.
 -   Encounter player and AI factions whose relationships can change
     dynamically from hostile through neutral to friendly.
+-   Join scheduled faction conflicts shown on an in-game calendar, help
+    determine their outcome, and see territory ownership change as a
+    result.
+-   Find a group through a configurable party finder and use
+    server-authorized teleport and zone travel where the game rules allow.
 -   Interact with doors, terminals, computers, vehicles, machinery,
     containers, stations, and other players.
 -   Connect world entities into interactive systems, such as levers
@@ -390,6 +401,15 @@ are directional. Persist changes with an audit/event record and
 replicate only the resulting relationship state needed by each client.
 Faction changes must immediately affect relevant perception, targeting,
 and interaction decisions.
+
+Guilds are player-governed factions, not a separate mechanics system.
+NPC-governed factions use the same server-validated membership, economy,
+diplomacy, territory, and conflict operations, with different controllers
+and configured permissions. Faction wealth is durable ledger state that
+feeds a documented, configurable power calculation; it is not an
+unvalidated score or a direct combat override. For territory ownership,
+calendar events, map tooling, and cross-game engine upgrades, see
+[`world-simulation.md`](world-simulation.md).
 
 ------------------------------------------------------------------------
 
@@ -713,6 +733,13 @@ separate microservice. Avoid over-distributing the architecture early.
 Organize the world into zones, scenes, rooms, or shards with clear
 boundaries.
 
+Keep authored map topology and zone identity separate from mutable
+territory ownership. Every persistent player-facing zone is owned or
+unclaimed and can be captured under its configured rules; a capture
+changes runtime ownership, never the zone's authored geometry or stable
+ID. Map routes, territory state, and active conflicts must survive
+restarts according to explicit persistence rules.
+
 Each zone should define:
 
 -   Stable ID and content version.
@@ -749,6 +776,9 @@ Bevy application or a dedicated tool sharing engine crates.
 
 ### World editing
 
+-   World atlas for creating and arranging zones, editing explicit
+    travel routes, and viewing ownership, contested state, and scheduled
+    conflict overlays.
 -   Create, rename, duplicate, and delete maps/zones.
 -   Place, move, rotate, scale, duplicate, group, and delete entities.
 -   Grid snapping, rotation snapping, layers, selection filters, and
@@ -847,6 +877,15 @@ Publishing should be an explicit pipeline:
 ## 14. Live server changes and operations
 
 Support live changes, but classify them carefully.
+
+A shared engine release makes its compatible capabilities available to
+games that upgrade the declared engine dependency/runtime. Each game
+owns its engine/content compatibility range and rollout: upgrades are
+validated and staged, and changes to persistent data, protocols, or
+gameplay semantics require explicit migration and a rollback path.
+Features must not silently alter a running game's authored rules. The
+upgrade contract is detailed in
+[`world-simulation.md`](world-simulation.md).
 
 ### Safe live changes
 
@@ -982,6 +1021,7 @@ unless the user explicitly configures an approved integration.
 -   Asset/content folders and schemas.
 -   Example behavior tree or state machine.
 -   A health/diagnostics endpoint or command.
+-   Engine and content compatibility metadata with an upgrade path.
 -   Optional MCP configuration and tools for project creation,
     validation, and diagnostics, disabled unless explicitly configured.
 -   CI workflow and formatting/lint/test defaults.
@@ -1246,7 +1286,8 @@ through a common protocol.
 
 ### Phase 5 --- Editor and content pipeline
 
--   Map editor, placement, inspector, snapping, undo/redo.
+-   World atlas and map editor, zone routes, territory overlays,
+    placement, inspector, snapping, undo/redo.
 -   Item/entity definition editor.
 -   Validated link graph editor and player placement/property rules.
 -   User-content schemas, ownership metadata, moderation states, and
@@ -1266,6 +1307,8 @@ without editing engine source code.
 -   Read-only inspection and live metrics.
 -   Role-based admin actions and audit log.
 -   Staging publish, rollout, and rollback.
+-   Engine/content compatibility checks and a staged upgrade/rollback
+    workflow for game projects.
 
 **Exit criteria:** an authorized operator can inspect a live zone and
 apply a safe content change with a traceable rollback path.
@@ -1282,8 +1325,10 @@ session and recover from disconnects and server restarts.
 
 ### Phase 8 --- Expand and stabilize
 
--   Economy, progression, quests, parties/guilds, trading, additional
-    zones, moderation, localization, and content tools.
+-   Economy, progression, quests, parties, player/NPC faction parity,
+    guilds, faction wealth and territory, scheduled interruptible
+    conflicts, calendar, trading, additional zones, moderation,
+    localization, and content tools.
 -   Load testing, backups, operational drills, and release automation.
 -   Additional platform support only after automated validation.
 
@@ -1316,10 +1361,12 @@ Avoid building a huge content library, complex combat, or all camera
 modes before proving the end-to-end pipeline.
 
 Player housing, unrestricted public user-content publishing, large
-faction ecosystems, and complex multi-zone link networks should follow
-the vertical slice. Prove the underlying ownership, permissions,
-persistence, moderation, and authority rules with small bounded
-examples first.
+faction ecosystems, territory wars, and complex multi-zone link
+networks should follow the vertical slice. Prove the underlying
+ownership, permissions, persistence, moderation, and authority rules
+with small bounded examples first. See
+[`world-simulation.md`](world-simulation.md) for the staged world
+simulation contract.
 
 ------------------------------------------------------------------------
 
@@ -1379,6 +1426,8 @@ Maintain:
 -   `docs/architecture.md` --- boundaries and data flow.
 -   `docs/getting-started.md` --- install and run without Docker.
 -   `docs/content-authoring.md` --- maps, items, entities, UI, and AI.
+-   `docs/world-simulation.md` --- shared faction, territory, calendar,
+    world-map, and engine-upgrade contracts.
 -   `docs/ai-tooling.md` --- MCP setup, supported tools, permissions,
     approvals, and AI-assisted project creation.
 -   `docs/networking.md` --- replication, authority, and protocol

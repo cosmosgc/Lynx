@@ -13,6 +13,9 @@ Lynx is two deliverables in one repository:
 
 The project guide lives at
 [`docs/lightweight_mmorpg_engine_project_guide.md`](docs/lightweight_mmorpg_engine_project_guide.md).
+The cross-system design for faction parity, territory, scheduled world events,
+map authoring, and engine upgrades is in
+[`docs/world-simulation.md`](docs/world-simulation.md).
 Architecture decisions are recorded in [`docs/adr/`](docs/adr/), and the
 localization model is described in
 [`docs/internationalization.md`](docs/internationalization.md).
