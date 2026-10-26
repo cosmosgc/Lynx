@@ -7,6 +7,7 @@
 mod admin;
 mod character;
 mod chat;
+mod faction;
 mod inventory;
 mod social;
 
@@ -14,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
+use engine_core::faction::FactionWorld;
 use game_api::{
     Account, AccountId, ApiError, AuditRecord, AuthService, Character, CharacterId, ChatChannel,
     ChatChannelKind, ChatMessage, DeviceLogin, FriendState, HealthService, HealthStatus,
@@ -70,6 +72,7 @@ struct State {
     channels: BTreeMap<String, ChatChannel>,
     messages: BTreeMap<String, VecDeque<ChatMessage>>,
     audit: Vec<AuditRecord>,
+    faction_world: FactionWorld,
     next_event_id: u64,
     next_id: u64,
 }

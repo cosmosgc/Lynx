@@ -3,6 +3,7 @@
 pub mod admin;
 pub mod character;
 pub mod chat;
+pub mod faction;
 pub mod inventory;
 pub mod service;
 pub mod social;
@@ -15,6 +16,9 @@ pub use character::{Character, CharacterId, CharacterService, CharacterStatus};
 pub use chat::{
     ChatChannel, ChatChannelKind, ChatMessage, ChatService, MAX_MESSAGE_CHARS, MAX_MESSAGE_PAGE,
     SendChatMessage, validate_channel_id, validate_page,
+};
+pub use faction::{
+    FactionMemberView, FactionService, FactionStore, FactionView, TerritoryView, validate_snapshot,
 };
 pub use inventory::{InventoryService, InventorySlot, InventoryStore, validate_slots};
 pub use service::{

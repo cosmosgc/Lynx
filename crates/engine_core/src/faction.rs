@@ -1,8 +1,17 @@
-//! Faction alignment, relations, and character reputation.
+//! Faction alignment, relations, reputation, governance, and territory.
 //!
 //! Alignment is always a signed integer in `-100..=100`. The server resolves
 //! effective alignment; clients receive only the result they are allowed to
 //! know. See `docs/adr/0009-faction-alignment-and-reputation.md`.
+//!
+//! Governance, membership, treasury ledger, power, and territory ownership
+//! live in the sibling modules. They are durable server state, not authored
+//! content, and follow `docs/adr/0020-faction-governance-treasury-and-territory.md`.
+
+pub mod governance;
+pub mod territory;
+pub mod treasury;
+pub mod world;
 
 use std::collections::BTreeMap;
 
@@ -12,6 +21,61 @@ use crate::error::{EngineError, ErrorCode};
 use crate::id::DefinitionId;
 use crate::schema::SchemaVersion;
 use crate::time::Millis;
+
+pub use governance::{
+    DEFAULT_MAX_MEMBERS, DEFAULT_OFFICER_SPEND_LIMIT, FactionController, FactionMember,
+    FactionPermission, FactionRole, GovernancePolicy, Membership,
+};
+pub use territory::{
+    MAX_TERRITORY_WINDOW_MS, Territory, TerritoryBook, TerritoryChange, TerritoryChangeKind,
+    TerritoryRules,
+};
+pub use treasury::{
+    PowerBreakdown, PowerRules, Treasury, TreasuryEntry, TreasuryEntryKind, TreasuryTransferReceipt,
+};
+pub use world::{
+    FACTION_SCHEMA_VERSION, FACTION_WORLD_SCHEMA_VERSION, Faction, FactionSnapshot, FactionWorld,
+};
+
+/// The largest accepted idempotency or action key.
+pub const MAX_ACTION_KEY_LEN: usize = 128;
+
+/// The largest accepted human-readable reason on a ledger or history record.
+pub const MAX_REASON_LEN: usize = 512;
+
+/// Validate an idempotency key used by a retryable faction mutation.
+pub(crate) fn validate_action_key(key: &str) -> Result<(), EngineError> {
+    if key.is_empty() || key.len() > MAX_ACTION_KEY_LEN {
+        return Err(EngineError::new(
+            ErrorCode::InvalidRequest,
+            "faction action keys must be 1..=128 characters",
+        ));
+    }
+    if key.chars().any(char::is_control) {
+        return Err(EngineError::new(
+            ErrorCode::InvalidRequest,
+            "faction action keys must not contain control characters",
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a reason recorded next to a durable faction mutation.
+pub(crate) fn validate_reason(reason: &str) -> Result<(), EngineError> {
+    if reason.trim().is_empty() || reason.len() > MAX_REASON_LEN {
+        return Err(EngineError::new(
+            ErrorCode::InvalidRequest,
+            "faction reasons must be 1..=512 non-blank characters",
+        ));
+    }
+    if reason.chars().any(char::is_control) {
+        return Err(EngineError::new(
+            ErrorCode::InvalidRequest,
+            "faction reasons must not contain control characters",
+        ));
+    }
+    Ok(())
+}
 
 /// The lowest possible alignment.
 pub const ALIGNMENT_MIN: i16 = -100;
@@ -175,6 +239,54 @@ impl FactionDefinition {
             version: SchemaVersion::new(1, 0),
             description: None,
         }
+    }
+
+    /// Validate the durable faction catalog record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorCode::InvalidRequest`] for a missing `faction` namespace,
+    /// blank or oversized display text, a non-positive content version, or an
+    /// oversized description.
+    pub fn validate(&self) -> Result<(), EngineError> {
+        if !self.id.is_in("faction") {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "faction ids must use the faction namespace",
+            )
+            .with_detail("faction", self.id.to_string()));
+        }
+        let display_name = self.display_name.trim();
+        if display_name.is_empty()
+            || display_name.len() > 128
+            || self.display_name != display_name
+            || display_name.chars().any(char::is_control)
+        {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "faction display names must be 1..=128 trimmed non-control characters",
+            )
+            .with_detail("faction", self.id.to_string()));
+        }
+        if self.version.major == 0 {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "faction content versions must have a major version of at least one",
+            )
+            .with_detail("faction", self.id.to_string()));
+        }
+        if self
+            .description
+            .as_ref()
+            .is_some_and(|description| description.len() > 1024)
+        {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "faction descriptions must be at most 1024 characters",
+            )
+            .with_detail("faction", self.id.to_string()));
+        }
+        Ok(())
     }
 }
 

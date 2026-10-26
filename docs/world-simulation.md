@@ -8,9 +8,11 @@ of delivery status.
 
 **Current implementation:** authored world-map atlases place stable zone IDs on
 map cells, declare explicit routes, and validate duplicate, missing, and
-orphaned references (ADR 0019). Territory ownership, faction governance and
-wealth, the world calendar, event enrollment, and conflict resolution remain
-design-only.
+orphaned references (ADR 0019). Faction governance, membership, an append-only
+treasury ledger, inspectable power, and per-zone territory ownership with
+expiry, contest state, and history are implemented in the faction domain and
+persisted through a versioned snapshot (ADR 0020). The world calendar, event
+enrollment, and conflict resolution remain design-only.
 
 ## Design goals
 

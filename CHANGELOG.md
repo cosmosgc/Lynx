@@ -8,6 +8,19 @@ semantic versioning for engine releases and content bundles.
 
 ### Added
 
+- `engine_core`: durable faction governance, an append-only treasury ledger,
+  inspectable power rules, and per-zone territory ownership. Player, NPC, and
+  system factions share explicit roles, permissions, spend limits, leader
+  succession, idempotent transfers, capture protection/cooldown, contest state,
+  and validated snapshot recovery (ADR 0020). A canonical faction-world fixture
+  covers deserialization, power, history, and tamper rejection.
+- `game_api` and `backend_memory`: read-only `FactionService` views for
+  authenticated accounts plus the trusted `FactionStore` snapshot load/replace
+  seam used by the authoritative world service.
+- `server/migrations/0004_factions.sql`: faction catalog, role permissions,
+  membership, treasury ledger and transfer receipts, territory ownership and
+  append-only history, derived views, deferred leader/treasury/transfer checks,
+  and the `map` content kind.
 - `engine_content`: authored world-map atlases. `WorldMapDefinition` places
   stable zone definition IDs on integer atlas cells and declares explicit
   `passage`, `gateway`, or `portal` routes with an optional bidirectional flag.

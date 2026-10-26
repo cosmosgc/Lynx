@@ -86,6 +86,9 @@ Rules:
 | Action | `ActionRequest` → `ActionResult` | Server-validated, structured errors |
 | Link | `EntityLink` | Typed, stable IDs, validated endpoints |
 | Faction relation | `FactionRelation` | Directional, -100..100 |
+| Faction | `Faction` | Controller, policy, members, treasury, and power |
+| Treasury | `Treasury` | Append-only signed ledger; balance is derived |
+| Territory | `TerritoryBook` | Per-zone owner, expiry, contest state, and history |
 | Locale | BCP 47 tag | Default `pt-BR`; canonicalized at boundaries |
 | Localized text | message key + catalog | Source catalog is `pt-BR` |
 | Interest set | `InterestSet` | Per-session visible entities, distance + visibility |
@@ -104,10 +107,15 @@ extend the existing authoritative simulation and persistence boundaries.
 - Authored map topology and stable zone IDs are content. `engine_content`
   validates world-map placements, explicit routes, and zone references (ADR
   0019). Territory ownership, faction treasury, event lifecycle, and event
-  results remain mutable durable state; they are not implemented yet and must
-  be transactionally persisted and audited when they are.
+  results remain mutable durable state; faction ownership, wealth, and
+  territory history are implemented in `engine_core::faction` (ADR 0020), while
+  the event lifecycle remains design-only and must be transactionally persisted
+  and audited when it is implemented.
 - A guild is a player-governed faction. Player- and NPC-governed factions use
   the same domain operations; controller type does not confer authority.
+- Faction membership, leadership succession, treasury spending, and territory
+  captures are permission-checked and idempotent. A transfer or ownership change
+  either commits fully or leaves every affected faction unchanged.
 - The server validates faction actions, event enrollment, conflict
   participation, and outcomes. A durable event result and all affected
   territory changes commit atomically and are idempotent.

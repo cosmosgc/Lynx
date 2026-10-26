@@ -1,0 +1,271 @@
+{
+  "schema_version": {
+    "major": 1,
+    "minor": 0
+  },
+  "territory_rules": {
+    "claim_enabled": true,
+    "capture_enabled": true,
+    "claim_protection": 86400000,
+    "capture_cooldown": 3600000,
+    "minimum_capture_power": 100
+  },
+  "factions": [
+    {
+      "definition": {
+        "id": "faction.road_bandits",
+        "display_name": "Road Bandits",
+        "version": {
+          "major": 1,
+          "minor": 0
+        },
+        "description": null
+      },
+      "governance": {
+        "controller": "player",
+        "role_permissions": {
+          "leader": [
+            "invite_member",
+            "remove_member",
+            "set_role",
+            "transfer_leadership",
+            "deposit_treasury",
+            "spend_treasury",
+            "claim_territory",
+            "capture_territory",
+            "release_territory",
+            "declare_conflict"
+          ],
+          "officer": [
+            "invite_member",
+            "remove_member",
+            "deposit_treasury",
+            "spend_treasury",
+            "claim_territory",
+            "capture_territory",
+            "release_territory"
+          ],
+          "member": [
+            "deposit_treasury"
+          ]
+        },
+        "spend_limits": {
+          "leader": 18446744073709551615,
+          "officer": 10000
+        },
+        "max_members": 100
+      },
+      "power_rules": {
+        "version": {
+          "major": 1,
+          "minor": 0
+        },
+        "base_power": 0,
+        "treasury_weight_bps": 1000,
+        "reserve": 0,
+        "cap": 1000000
+      },
+      "treasury": {
+        "balance": 3000,
+        "entries": [
+          {
+            "key": "aid-1",
+            "kind": "transfer_in",
+            "amount": 3000,
+            "counterparty": "faction.town_guard",
+            "reason": "faction treasury transfer",
+            "at": 4000,
+            "schema_version": {
+              "major": 1,
+              "minor": 0
+            }
+          }
+        ]
+      },
+      "membership": {
+        "members": {
+          "ent_00000000000000000000000003": {
+            "id": "ent_00000000000000000000000003",
+            "role": "leader",
+            "joined_at": 1000
+          }
+        }
+      },
+      "schema_version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "definition": {
+        "id": "faction.town_guard",
+        "display_name": "Town Guard",
+        "version": {
+          "major": 1,
+          "minor": 0
+        },
+        "description": null
+      },
+      "governance": {
+        "controller": "player",
+        "role_permissions": {
+          "leader": [
+            "invite_member",
+            "remove_member",
+            "set_role",
+            "transfer_leadership",
+            "deposit_treasury",
+            "spend_treasury",
+            "claim_territory",
+            "capture_territory",
+            "release_territory",
+            "declare_conflict"
+          ],
+          "officer": [
+            "invite_member",
+            "remove_member",
+            "deposit_treasury",
+            "spend_treasury",
+            "claim_territory",
+            "capture_territory",
+            "release_territory"
+          ],
+          "member": [
+            "deposit_treasury"
+          ]
+        },
+        "spend_limits": {
+          "leader": 18446744073709551615,
+          "officer": 10000
+        },
+        "max_members": 100
+      },
+      "power_rules": {
+        "version": {
+          "major": 1,
+          "minor": 0
+        },
+        "base_power": 0,
+        "treasury_weight_bps": 1000,
+        "reserve": 0,
+        "cap": 1000000
+      },
+      "treasury": {
+        "balance": 8500,
+        "entries": [
+          {
+            "key": "seed",
+            "kind": "deposit",
+            "amount": 12000,
+            "counterparty": null,
+            "reason": "city taxes",
+            "at": 3000,
+            "schema_version": {
+              "major": 1,
+              "minor": 0
+            }
+          },
+          {
+            "key": "aid-1",
+            "kind": "transfer_out",
+            "amount": 3000,
+            "counterparty": "faction.road_bandits",
+            "reason": "faction treasury transfer",
+            "at": 4000,
+            "schema_version": {
+              "major": 1,
+              "minor": 0
+            }
+          },
+          {
+            "key": "upkeep",
+            "kind": "spend",
+            "amount": 500,
+            "counterparty": null,
+            "reason": "wall repairs",
+            "at": 5000,
+            "schema_version": {
+              "major": 1,
+              "minor": 0
+            }
+          }
+        ]
+      },
+      "membership": {
+        "members": {
+          "chr_00000000000000000000000001": {
+            "id": "chr_00000000000000000000000001",
+            "role": "leader",
+            "joined_at": 1000
+          },
+          "chr_00000000000000000000000002": {
+            "id": "chr_00000000000000000000000002",
+            "role": "officer",
+            "joined_at": 2000
+          }
+        }
+      },
+      "schema_version": {
+        "major": 1,
+        "minor": 0
+      }
+    }
+  ],
+  "territories": [
+    {
+      "zone": "zone.bandit_camp",
+      "owner": null,
+      "contested": false,
+      "claimed_at": null,
+      "protection_until": null,
+      "cooldown_until": null,
+      "revision": 1,
+      "schema_version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "zone": "zone.town_square",
+      "owner": "faction.town_guard",
+      "contested": false,
+      "claimed_at": 6000,
+      "protection_until": 86406000,
+      "cooldown_until": 3606000,
+      "revision": 2,
+      "schema_version": {
+        "major": 1,
+        "minor": 0
+      }
+    }
+  ],
+  "territory_history": [
+    {
+      "key": "claim-1",
+      "zone": "zone.town_square",
+      "action": "claim",
+      "from": null,
+      "to": "faction.town_guard",
+      "actor": "chr_00000000000000000000000001",
+      "at": 6000,
+      "revision": 2,
+      "schema_version": {
+        "major": 1,
+        "minor": 0
+      }
+    }
+  ],
+  "transfers": [
+    {
+      "key": "aid-1",
+      "source": "faction.town_guard",
+      "target": "faction.road_bandits",
+      "amount": 3000,
+      "at": 4000,
+      "schema_version": {
+        "major": 1,
+        "minor": 0
+      }
+    }
+  ]
+}

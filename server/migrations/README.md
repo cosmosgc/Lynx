@@ -42,12 +42,14 @@ mismatch is an error.
 | `0001_core.sql` | Accounts, characters, versioned components, inventory slots, property ownership, idempotency keys, audit events, and shared triggers. |
 | `0002_content.sql` | Immutable content bundles, definition and locale indexes, and moderation history. |
 | `0003_zone_state.sql` | Zone leases, snapshots, and the recovery event log. |
+| `0004_factions.sql` | Faction catalog, role permissions, membership, treasury ledger and transfers, territory ownership and history, and derived views. |
 
 ## Audit retention
 
-`lynx.audit_events`, `lynx.content_moderation_events`, and `lynx.zone_events`
-reject `UPDATE` and `DELETE`. A retention job may purge rows only inside a
-transaction that sets:
+`lynx.audit_events`, `lynx.content_moderation_events`, `lynx.zone_events`,
+`lynx.faction_treasury_entries`, `lynx.faction_treasury_transfers`, and
+`lynx.faction_territory_history` reject `UPDATE` and `DELETE`. A retention job
+may purge rows only inside a transaction that sets:
 
 ```sql
 SET LOCAL lynx.allow_append_only_purge = 'on';
