@@ -1226,6 +1226,11 @@ upgrade/rollback procedures.
 
 ## 23. Suggested implementation roadmap
 
+The roadmap below defines the scope and exit criteria for each phase; it is
+the source of truth for *what to build*. Current delivery progress against
+these phases, with per-phase task lists and progress bars, is tracked in the
+[Progress section of `README.md`](../README.md#progress).
+
 ### Phase 0 --- Architecture proof
 
 -   Pin Rust, Bevy, Nakama, and PostgreSQL versions.
