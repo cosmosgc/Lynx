@@ -25,8 +25,10 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use engine_core::error::{EngineError, ErrorCode};
+use engine_core::faction::FactionWorld;
 use engine_core::id::{DefinitionId, StableId};
 use engine_core::time::{DurationMs, Millis, Tick};
+use engine_core::world_event::WorldCalendar;
 use engine_net::envelope::{Envelope, MessageId, MessageKind};
 use engine_net::interest::{
     DEFAULT_VIEW_RADIUS_M, InterestConfig, InterestManager, InterestObserver, InterestWorld,
@@ -37,11 +39,16 @@ use engine_net::replication::{
     ReplicationBatch, ReplicationCategory, ReplicationUpdate, SessionId,
 };
 use engine_sim::action::{ActionEffect, ActionRequest, ActionResult, Verb};
+use engine_sim::calendar::CalendarActionRequest;
 use engine_sim::mind::Controller;
 use engine_sim::zone::Zone;
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::calendar::{
+    CALENDAR_COMMAND_KIND, CALENDAR_QUERY_KIND, CALENDAR_RESULT_KIND, CALENDAR_STATE_KIND,
+    CalendarCommandIntent, CalendarPersistence, CalendarQuery, CalendarStage,
+};
 use crate::replication::{EntitySnapshot, OwnerState, SessionDelivery, interest_entity};
 use crate::session::{
     GatewaySession, OpenPanel, ResumeToken, ResumeTokenSource, SessionClaims, SessionRegistry,
@@ -213,6 +220,8 @@ pub struct WorldGateway {
     interest: InterestManager,
     world: InterestWorld,
     tracked: BTreeMap<StableId, TrackedEntity>,
+    calendar: Option<CalendarStage>,
+    calendar_store: Option<Box<dyn CalendarPersistence + Send>>,
     reply_sequence: u64,
 }
 
@@ -251,10 +260,43 @@ impl WorldGateway {
             interest,
             world: InterestWorld::new(),
             tracked: BTreeMap::new(),
+            calendar: None,
+            calendar_store: None,
             reply_sequence: 0,
         };
         let _ = gateway.sync_world();
         Ok(gateway)
+    }
+
+    /// Attach a world calendar and its faction state.
+    ///
+    /// The calendar is cross-validated against the faction world before it
+    /// becomes reachable through the `calendar.command` and `calendar.query`
+    /// kinds.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`EngineError`] from cross-validation.
+    pub fn with_calendar(
+        mut self,
+        calendar: WorldCalendar,
+        factions: FactionWorld,
+    ) -> Result<Self, EngineError> {
+        self.calendar = Some(CalendarStage::new(calendar, factions)?);
+        Ok(self)
+    }
+
+    /// Attach the trusted persistence seam for applied calendar commands.
+    #[must_use]
+    pub fn with_calendar_store(mut self, store: impl CalendarPersistence + Send + 'static) -> Self {
+        self.calendar_store = Some(Box::new(store));
+        self
+    }
+
+    /// The attached calendar stage, when this world runs a calendar.
+    #[must_use]
+    pub fn calendar_stage(&self) -> Option<&CalendarStage> {
+        self.calendar.as_ref()
     }
 
     /// The authoritative zone. Server systems may read it directly.
@@ -450,6 +492,10 @@ impl WorldGateway {
         };
         match envelope.kind.as_str() {
             "action.request" => self.handle_action(session, principal, actor, envelope, now),
+            CALENDAR_COMMAND_KIND => {
+                self.handle_calendar_command(session, principal, actor, envelope, now)
+            }
+            CALENDAR_QUERY_KIND => self.handle_calendar_query(session, envelope),
             "session.ack" => self.handle_ack(session, envelope),
             UI_CLOSE_KIND => self.handle_ui_close(session, envelope),
             UI_ACTION_KIND => self.handle_ui_action(session, principal, actor, envelope, now),
@@ -648,6 +694,98 @@ impl WorldGateway {
         let result_reply = envelope.reply(self.reply_id(), message_kind("action.result"), body);
         let state_reply = self.ui_state_reply(session, envelope)?;
         Ok(vec![result_reply, state_reply])
+    }
+
+    /// Execute one server-resolved calendar command.
+    ///
+    /// Lifecycle operations are staff-gated inside the command stage; the
+    /// gateway only resolves the session's actor, principal, and staff flag.
+    /// A repeated request ID returns the original outcome without applying
+    /// the command twice. Applied commands commit both snapshots through the
+    /// configured [`CalendarPersistence`] seam before the result is replied.
+    fn handle_calendar_command(
+        &mut self,
+        session: &SessionId,
+        principal: StableId,
+        _actor: StableId,
+        envelope: &Envelope,
+        now: Millis,
+    ) -> Result<Vec<Envelope>, EngineError> {
+        let intent = match serde_json::from_value::<CalendarCommandIntent>(envelope.body.clone()) {
+            Ok(intent) => intent,
+            Err(error) => {
+                let error =
+                    EngineError::new(ErrorCode::InvalidRequest, "invalid calendar command body")
+                        .with_detail("error", error.to_string());
+                return Ok(vec![self.error_reply(envelope, &error)]);
+            }
+        };
+        let staff = self.sessions.active(session)?.staff;
+        // Calendar commands are bound to the account's character, not to the
+        // zone entity controlled by it: enrollment is durable data about a
+        // character, so the request actor is the authenticated principal.
+        let mut request = CalendarActionRequest::new(
+            scoped_request_id(session, &envelope.id),
+            principal,
+            intent.action,
+        )
+        .by(principal);
+        if staff {
+            request.staff = true;
+        }
+
+        let Some(stage) = self.calendar.as_mut() else {
+            let error =
+                EngineError::new(ErrorCode::Unsupported, "this world does not run a calendar");
+            return Ok(vec![self.error_reply(envelope, &error)]);
+        };
+        let mut result = stage.execute(&request, now);
+        result.request_id = envelope.id.as_str().to_string();
+
+        if result.is_applied()
+            && let Some(store) = self.calendar_store.as_ref()
+            && let Some(stage) = &self.calendar
+        {
+            let (calendar_snapshot, faction_snapshot) = stage.snapshots();
+            if let Err(error) = store.commit(&calendar_snapshot, &faction_snapshot) {
+                let persistence_error =
+                    EngineError::new(ErrorCode::Internal, "the calendar could not be persisted")
+                        .with_detail("error", error.to_string());
+                return Ok(vec![self.error_reply(envelope, &persistence_error)]);
+            }
+        }
+
+        let body = serde_json::to_value(&result).map_err(|error| internal_error(&error))?;
+        Ok(vec![envelope.reply(
+            self.reply_id(),
+            message_kind(CALENDAR_RESULT_KIND),
+            body,
+        )])
+    }
+
+    /// Reply with the player-visible calendar snapshot.
+    fn handle_calendar_query(
+        &mut self,
+        _session: &SessionId,
+        envelope: &Envelope,
+    ) -> Result<Vec<Envelope>, EngineError> {
+        if let Err(error) = serde_json::from_value::<CalendarQuery>(envelope.body.clone()) {
+            let error = EngineError::new(ErrorCode::InvalidRequest, "invalid calendar query body")
+                .with_detail("error", error.to_string());
+            return Ok(vec![self.error_reply(envelope, &error)]);
+        }
+        let Some(stage) = self.calendar.as_ref() else {
+            let error =
+                EngineError::new(ErrorCode::Unsupported, "this world does not run a calendar");
+            return Ok(vec![self.error_reply(envelope, &error)]);
+        };
+        let snapshot = stage.state();
+        let body = serde_json::to_value(snapshot).map_err(|error| internal_error(&error))?;
+        Ok(vec![envelope.reply(
+            self.reply_id(),
+            message_kind(CALENDAR_STATE_KIND),
+            body,
+        )])
     }
 
     /// Reconcile the session's open panel with a validated action result.

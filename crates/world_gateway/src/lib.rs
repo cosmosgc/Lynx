@@ -14,10 +14,16 @@
 //! See `docs/adr/0013-world-gateway-and-reconnect.md` and
 //! `docs/adr/0015-ui-panel-session-state.md`.
 
+pub mod calendar;
 pub mod gateway;
 pub mod replication;
 pub mod session;
 
+pub use calendar::{
+    CALENDAR_COMMAND_KIND, CALENDAR_QUERY_KIND, CALENDAR_RESULT_KIND, CALENDAR_STATE_KIND,
+    CalendarCommandIntent, CalendarEventView, CalendarPersistence, CalendarQuery,
+    CalendarResultView, CalendarSideView, CalendarStage, CalendarStateBody,
+};
 pub use gateway::{
     Connection, ERROR_KIND, GatewayConfig, UI_ACTION_KIND, UI_CLOSE_KIND, UI_STATE_KIND, UiState,
     WorldGateway,
