@@ -19,6 +19,10 @@ semantic versioning for engine releases and content bundles.
   snapshot recovery validates history, enrollment, results, and cross-aggregate
   consistency (ADR 0021). Canonical calendar and post-siege faction fixtures
   cover deserialization, participant counts, capture, and tamper rejection.
+- `engine_sim`: a world-scoped calendar command stage. Participant enrollment
+  and staff-gated lifecycle commands carry intent only, are deduplicated by
+  request ID, produce structured effects with stable error codes, and must be
+  committed by persisting the new calendar and faction snapshots together.
 - `game_api` and `backend_memory`: read-only `CalendarService` views for public
   events, enrollment, and conflict results plus the trusted `CalendarStore`
   snapshot load/replace seam. The in-memory adapter cross-validates calendar and

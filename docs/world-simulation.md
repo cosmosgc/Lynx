@@ -179,6 +179,12 @@ and partial failure must never produce duplicate rewards or ownership flips.
   migration `0005_world_events.sql` stores the same facts with append-only
   transitions, enrollment, and result tables plus deferred lifecycle, side,
   enrollment, and result checks.
+- `engine_sim::calendar` is the authoritative command stage over the calendar.
+  Participants send enrollment intent; every lifecycle operation is a
+  staff-gated world command with an audit reason. Requests carry intent only
+  and are deduplicated by request ID, rejections are structured with stable
+  error codes, and applied commands must be committed by persisting the new
+  calendar and faction snapshots together.
 
 ## Engine features and game upgrades
 

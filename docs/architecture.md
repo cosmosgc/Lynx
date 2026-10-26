@@ -92,6 +92,7 @@ Rules:
 | World event | `WorldEvent` | Published schedule, two sides, rules, and lifecycle status |
 | World calendar | `WorldCalendar` | Durable events, transitions, enrollment, and results |
 | Conflict result | `ConflictResolution` | Versioned inputs, scores, outcome, and capture proof |
+| Calendar commands | `CalendarCommands` | Replay-protected participant and staff intents over one calendar |
 | Locale | BCP 47 tag | Default `pt-BR`; canonicalized at boundaries |
 | Localized text | message key + catalog | Source catalog is `pt-BR` |
 | Interest set | `InterestSet` | Per-session visible entities, distance + visibility |

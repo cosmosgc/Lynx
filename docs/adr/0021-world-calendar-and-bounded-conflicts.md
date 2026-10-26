@@ -89,9 +89,12 @@ cannot award a territory twice.
   protection and cooldown rules as ordinary captures.
 - Calendar and faction snapshots cannot be loaded into a mutually inconsistent
   world; recovery fails loudly instead of silently preferring one aggregate.
-- `CalendarService` is read-only. Mutating calendar commands remain
-  authoritative simulation actions and are not yet exposed as client-facing
-  backend traits.
+- `CalendarService` is read-only. Mutating calendar commands are authoritative
+  simulation actions: `engine_sim::calendar` validates participant enrollment
+  and staff-gated lifecycle operations against the calendar and faction world,
+  deduplicates requests, and expects the caller to persist both snapshots
+  together. Routing these commands through backend traits and the world gateway
+  remains future work.
 - Event objectives, rewards, and map-editor calendar overlays remain future
   work. The current conflict is intentionally one bounded attacker-versus-
   defender contest over one territory.

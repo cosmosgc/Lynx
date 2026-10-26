@@ -2,6 +2,7 @@
 
 pub mod action;
 pub mod ai;
+pub mod calendar;
 pub mod entity;
 pub mod link;
 pub mod mind;
