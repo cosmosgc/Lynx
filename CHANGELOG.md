@@ -8,6 +8,25 @@ semantic versioning for engine releases and content bundles.
 
 ### Added
 
+- `engine_core`: durable world calendar and bounded faction conflicts. Events
+  have an audited `Draft -> Scheduled -> Open -> Active` lifecycle with
+  suspension, cancellation policy, and exactly one attacker and one defender
+  over one target territory. Enrollment reads authoritative faction membership
+  and enforces side and capacity rules. Deterministic resolution records both
+  sides' inputs, uses participants or faction power, gives ties to the defender,
+  and applies at most one territory capture through the trusted faction path.
+  Resolution is idempotent and atomic across calendar and faction state, and
+  snapshot recovery validates history, enrollment, results, and cross-aggregate
+  consistency (ADR 0021). Canonical calendar and post-siege faction fixtures
+  cover deserialization, participant counts, capture, and tamper rejection.
+- `game_api` and `backend_memory`: read-only `CalendarService` views for public
+  events, enrollment, and conflict results plus the trusted `CalendarStore`
+  snapshot load/replace seam. The in-memory adapter cross-validates calendar and
+  faction snapshots in both directions before replacing state.
+- `server/migrations/0005_world_events.sql`: calendar events, bounded sides,
+  append-only lifecycle transitions, enrollment, conflict results, deferred
+  lifecycle/side/enrollment/result checks, reservation uniqueness, and public
+  calendar views.
 - `engine_core`: durable faction governance, an append-only treasury ledger,
   inspectable power rules, and per-zone territory ownership. Player, NPC, and
   system factions share explicit roles, permissions, spend limits, leader

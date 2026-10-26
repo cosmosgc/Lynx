@@ -5,6 +5,7 @@
 //! security boundary. Do not use it to authenticate real players.
 
 mod admin;
+mod calendar;
 mod character;
 mod chat;
 mod faction;
@@ -16,6 +17,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use engine_core::faction::FactionWorld;
+use engine_core::world_event::WorldCalendar;
 use game_api::{
     Account, AccountId, ApiError, AuditRecord, AuthService, Character, CharacterId, ChatChannel,
     ChatChannelKind, ChatMessage, DeviceLogin, FriendState, HealthService, HealthStatus,
@@ -73,6 +75,7 @@ struct State {
     messages: BTreeMap<String, VecDeque<ChatMessage>>,
     audit: Vec<AuditRecord>,
     faction_world: FactionWorld,
+    calendar: WorldCalendar,
     next_event_id: u64,
     next_id: u64,
 }

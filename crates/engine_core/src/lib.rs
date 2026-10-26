@@ -13,6 +13,7 @@ pub mod inventory;
 pub mod math;
 pub mod schema;
 pub mod time;
+pub mod world_event;
 
 pub use error::{EngineError, ErrorCode};
 pub use i18n::{

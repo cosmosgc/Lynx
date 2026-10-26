@@ -115,7 +115,7 @@ pub fn validate_snapshot(snapshot: &FactionSnapshot) -> Result<(), ApiError> {
         .map_err(|error| map_engine_error(&error))
 }
 
-fn map_engine_error(error: &EngineError) -> ApiError {
+pub(crate) fn map_engine_error(error: &EngineError) -> ApiError {
     let message = error.message().to_owned();
     match error.code() {
         ErrorCode::NotFound => ApiError::NotFound(message),

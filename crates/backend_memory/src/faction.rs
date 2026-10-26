@@ -56,6 +56,10 @@ impl FactionStore for MemoryBackend {
         let world = FactionWorld::from_snapshot(snapshot.clone())
             .map_err(|error| ApiError::Conflict(error.to_string()))?;
         let mut state = self.lock_state()?;
+        state
+            .calendar
+            .validate_against(&world)
+            .map_err(|error| ApiError::Conflict(error.to_string()))?;
         state.faction_world = world;
         Ok(())
     }

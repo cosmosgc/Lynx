@@ -488,6 +488,29 @@ impl FactionWorld {
         self.territories.release(key, actor, faction, zone, at)
     }
 
+    /// Award a contested territory to the winner of a resolution.
+    ///
+    /// This trusted method is for the authoritative conflict resolver. It is not
+    /// a player action and does not check role permissions.
+    pub fn award_territory(
+        &mut self,
+        key: &str,
+        actor: StableId,
+        faction: &DefinitionId,
+        zone: &DefinitionId,
+        expected_owner: &DefinitionId,
+        at: Millis,
+    ) -> Result<TerritoryChange, EngineError> {
+        if !self.factions.contains_key(faction) {
+            return Err(EngineError::not_found("faction", faction));
+        }
+        if !self.factions.contains_key(expected_owner) {
+            return Err(EngineError::not_found("faction", expected_owner));
+        }
+        self.territories
+            .award_capture(key, actor, faction, zone, expected_owner, at)
+    }
+
     /// Mark a territory as contested or clear the contest.
     pub fn set_territory_contested(
         &mut self,

@@ -26,7 +26,9 @@ Early implementation. The repository currently contains the Phase 0/1
 foundation plus a runnable world service: pinned toolchain, workspace layout,
 architecture decision records, stable entity IDs, versioned component schemas,
 validated world-map atlases with explicit zone routes, faction alignment,
-governance, treasury, and territory rules, inventory domain rules, a headless
+governance, treasury, and territory rules, a durable world calendar with
+bounded faction conflicts, enrollment, and deterministic territory-changing
+results, inventory domain rules, a headless
 authoritative simulation with action validation, versioned protocol envelopes,
 per-session interest management, a transport-agnostic gateway with resumable
 sessions and interest-filtered replication, a framed connection loop, a
@@ -79,7 +81,7 @@ for multiplayer work. The native, non-Docker setup is documented in
 ## Repository layout
 
 ```text
-crates/engine_core      Stable IDs, schemas, factions, inventory, audit, errors
+crates/engine_core      Stable IDs, schemas, factions, world events, inventory, audit, errors
 crates/engine_sim       Headless authoritative zone simulation and action pipeline
 crates/engine_content   Content definitions, world maps, manifests, validation, versioning
 crates/engine_net       Protocol envelopes, framing, replication categories, interest management

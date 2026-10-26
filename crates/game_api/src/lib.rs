@@ -1,6 +1,7 @@
 //! Backend service interfaces and gameplay DTOs.
 
 pub mod admin;
+pub mod calendar;
 pub mod character;
 pub mod chat;
 pub mod faction;
@@ -11,6 +12,10 @@ pub mod social;
 pub use admin::{
     AdminClaims, AdminRole, AdminService, AuditPage, AuditQuery, AuditRecord, DEFAULT_AUDIT_PAGE,
     MAX_AUDIT_PAGE,
+};
+pub use calendar::{
+    CalendarService, CalendarStore, ConflictResolutionView, EventEnrollmentView, EventSideView,
+    TerritoryChangeView, WorldEventView, validate_calendar_snapshot,
 };
 pub use character::{Character, CharacterId, CharacterService, CharacterStatus};
 pub use chat::{

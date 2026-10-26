@@ -111,4 +111,4 @@ jobs:
           ./scripts/db-migrate.sh
           ./scripts/db-migrate.sh --status
           applied="$(PGPASSWORD="$LYNX_PG_PASSWORD" psql -X -q -tA -v ON_ERROR_STOP=1 -h "$LYNX_PG_HOST" -p "$LYNX_PG_PORT" -U "$LYNX_PG_USER" -d "$LYNX_PG_DATABASE" -c 'SELECT count(*) FROM lynx.schema_migrations;')"
-          test "$applied" = "4"
+          test "$applied" = "5"

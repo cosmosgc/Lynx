@@ -43,12 +43,15 @@ mismatch is an error.
 | `0002_content.sql` | Immutable content bundles, definition and locale indexes, and moderation history. |
 | `0003_zone_state.sql` | Zone leases, snapshots, and the recovery event log. |
 | `0004_factions.sql` | Faction catalog, role permissions, membership, treasury ledger and transfers, territory ownership and history, and derived views. |
+| `0005_world_events.sql` | Calendar events, bounded conflict sides, append-only lifecycle transitions, enrollment, conflict results, consistency triggers, and calendar views. |
 
 ## Audit retention
 
 `lynx.audit_events`, `lynx.content_moderation_events`, `lynx.zone_events`,
-`lynx.faction_treasury_entries`, `lynx.faction_treasury_transfers`, and
-`lynx.faction_territory_history` reject `UPDATE` and `DELETE`. A retention job
+`lynx.faction_treasury_entries`, `lynx.faction_treasury_transfers`,
+`lynx.faction_territory_history`, `lynx.world_event_transitions`,
+`lynx.world_event_enrollments`, `lynx.world_event_results`, and
+`lynx.world_event_result_sides` reject `UPDATE` and `DELETE`. A retention job
 may purge rows only inside a transaction that sets:
 
 ```sql

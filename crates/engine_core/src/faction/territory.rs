@@ -656,6 +656,118 @@ impl TerritoryBook {
         Ok(change)
     }
 
+    /// Award a contested territory to a conflict winner.
+    ///
+    /// This is the trusted conflict-resolution path, not a player action. It
+    /// requires the recorded defender to still own the territory, respects the
+    /// configured protection and cooldown windows, and clears the contest.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorCode::Unsupported`] when capture is disabled,
+    /// [`ErrorCode::NotFound`] for an unregistered zone,
+    /// [`ErrorCode::Conflict`] when the defender no longer owns the zone,
+    /// and [`ErrorCode::Cooldown`] while protection or a cooldown is active.
+    pub fn award_capture(
+        &mut self,
+        key: &str,
+        actor: StableId,
+        faction: &DefinitionId,
+        zone: &DefinitionId,
+        expected_owner: &DefinitionId,
+        now: Millis,
+    ) -> Result<TerritoryChange, EngineError> {
+        if let Some(existing) = self.receipts.get(key) {
+            return Ok(existing.clone());
+        }
+        validate_action_key(key)?;
+        if !self.rules.capture_enabled {
+            return Err(EngineError::new(
+                ErrorCode::Unsupported,
+                "capture is disabled by the territory rules",
+            ));
+        }
+        let territory = self
+            .territories
+            .get(zone)
+            .ok_or_else(|| EngineError::not_found("territory", zone))?
+            .clone();
+        let previous = territory.owner.clone().ok_or_else(|| {
+            EngineError::new(
+                ErrorCode::Conflict,
+                "an unclaimed territory cannot be awarded by a conflict",
+            )
+            .with_detail("zone", zone.to_string())
+        })?;
+        if previous != *expected_owner {
+            return Err(EngineError::new(
+                ErrorCode::Conflict,
+                "the territory is no longer owned by the recorded defender",
+            )
+            .with_detail("zone", zone.to_string())
+            .with_detail("expected_owner", expected_owner.to_string())
+            .with_detail("actual_owner", previous.to_string()));
+        }
+        if previous == *faction {
+            return Err(EngineError::new(
+                ErrorCode::Conflict,
+                "the winning faction already owns this territory",
+            )
+            .with_detail("zone", zone.to_string()));
+        }
+        if let Some(protection_until) = territory.protection_until
+            && now < protection_until
+        {
+            return Err(EngineError::new(
+                ErrorCode::Cooldown,
+                "territory protection is still active",
+            )
+            .with_detail("zone", zone.to_string())
+            .with_detail(
+                "remaining_ms",
+                now.remaining_until(protection_until).to_string(),
+            ));
+        }
+        if let Some(cooldown_until) = territory.cooldown_until
+            && now < cooldown_until
+        {
+            return Err(EngineError::new(
+                ErrorCode::Cooldown,
+                "territory cooldown is still active",
+            )
+            .with_detail("zone", zone.to_string())
+            .with_detail(
+                "remaining_ms",
+                now.remaining_until(cooldown_until).to_string(),
+            ));
+        }
+
+        let revision = territory.revision.saturating_add(1);
+        let updated = Territory {
+            owner: Some(faction.clone()),
+            contested: false,
+            claimed_at: Some(now),
+            protection_until: Some(deadline(now, self.rules.claim_protection)),
+            cooldown_until: Some(deadline(now, self.rules.capture_cooldown)),
+            revision,
+            ..territory
+        };
+        self.territories.insert(zone.clone(), updated);
+        let change = TerritoryChange {
+            key: key.to_owned(),
+            zone: zone.clone(),
+            action: TerritoryChangeKind::Capture,
+            from: Some(previous),
+            to: Some(faction.clone()),
+            actor,
+            at: now,
+            revision,
+            schema_version: TERRITORY_SCHEMA_VERSION,
+        };
+        self.record(change.clone());
+        Ok(change)
+    }
+
     /// Release a territory owned by `faction`.
     ///
     /// # Errors

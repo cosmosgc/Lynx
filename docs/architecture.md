@@ -89,6 +89,9 @@ Rules:
 | Faction | `Faction` | Controller, policy, members, treasury, and power |
 | Treasury | `Treasury` | Append-only signed ledger; balance is derived |
 | Territory | `TerritoryBook` | Per-zone owner, expiry, contest state, and history |
+| World event | `WorldEvent` | Published schedule, two sides, rules, and lifecycle status |
+| World calendar | `WorldCalendar` | Durable events, transitions, enrollment, and results |
+| Conflict result | `ConflictResolution` | Versioned inputs, scores, outcome, and capture proof |
 | Locale | BCP 47 tag | Default `pt-BR`; canonicalized at boundaries |
 | Localized text | message key + catalog | Source catalog is `pt-BR` |
 | Interest set | `InterestSet` | Per-session visible entities, distance + visibility |
@@ -107,18 +110,21 @@ extend the existing authoritative simulation and persistence boundaries.
 - Authored map topology and stable zone IDs are content. `engine_content`
   validates world-map placements, explicit routes, and zone references (ADR
   0019). Territory ownership, faction treasury, event lifecycle, and event
-  results remain mutable durable state; faction ownership, wealth, and
-  territory history are implemented in `engine_core::faction` (ADR 0020), while
-  the event lifecycle remains design-only and must be transactionally persisted
-  and audited when it is implemented.
+  results remain mutable durable state. Faction ownership, wealth, and territory
+  history are implemented in `engine_core::faction` (ADR 0020); the world
+  calendar, enrollment, and bounded conflict resolution are implemented in
+  `engine_core::world_event` (ADR 0021).
 - A guild is a player-governed faction. Player- and NPC-governed factions use
   the same domain operations; controller type does not confer authority.
 - Faction membership, leadership succession, treasury spending, and territory
   captures are permission-checked and idempotent. A transfer or ownership change
   either commits fully or leaves every affected faction unchanged.
 - The server validates faction actions, event enrollment, conflict
-  participation, and outcomes. A durable event result and all affected
-  territory changes commit atomically and are idempotent.
+  participation, and outcomes. Calendar and faction state are cloned before a
+  conflict result is applied, so a failed resolution leaves both unchanged and a
+  replay returns the original result. A successful attacker victory captures the
+  territory through the trusted faction path and records the proof in the
+  result.
 - Engine/runtime releases and content bundles have distinct versions and
   compatibility checks. Games adopt releases through controlled upgrades;
   breaking changes require explicit migration rather than silent live mutation.

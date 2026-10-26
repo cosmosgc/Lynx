@@ -1,0 +1,236 @@
+{
+  "schema_version": {
+    "major": 1,
+    "minor": 0
+  },
+  "events": [
+    {
+      "id": "event.siege_town_square",
+      "title": "Siege of the Town Square",
+      "description": "Road bandits and their mercenaries contest the town guard.",
+      "schedule": {
+        "enrollment_opens_at": 10000,
+        "enrollment_closes_at": 20000,
+        "starts_at": 20000,
+        "ends_at": 90000000
+      },
+      "target_zone": "zone.town_square",
+      "sides": [
+        {
+          "id": "side.attackers",
+          "role": "attacker",
+          "display_name": "Road Bandits",
+          "faction": "faction.road_bandits"
+        },
+        {
+          "id": "side.defenders",
+          "role": "defender",
+          "display_name": "Town Guard",
+          "faction": "faction.town_guard"
+        }
+      ],
+      "enrollment": {
+        "requires_faction_membership": false,
+        "allow_unaffiliated": true,
+        "max_participants_per_side": null
+      },
+      "conflict": {
+        "version": {
+          "major": 1,
+          "minor": 0
+        },
+        "metric": "participants",
+        "minimum_participants_per_side": 1
+      },
+      "cancellation": "before_start_only",
+      "status": "resolved",
+      "schema_version": {
+        "major": 1,
+        "minor": 0
+      }
+    }
+  ],
+  "transitions": [
+    {
+      "key": "event.siege_town_square:1",
+      "event": "event.siege_town_square",
+      "action": "created",
+      "from": null,
+      "to": "draft",
+      "actor": "chr_00000000000000000000000009",
+      "at": 7000,
+      "reason": null,
+      "schema_version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "key": "event.siege_town_square:2",
+      "event": "event.siege_town_square",
+      "action": "scheduled",
+      "from": "draft",
+      "to": "scheduled",
+      "actor": "chr_00000000000000000000000009",
+      "at": 7000,
+      "reason": null,
+      "schema_version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "key": "event.siege_town_square:3",
+      "event": "event.siege_town_square",
+      "action": "opened",
+      "from": "scheduled",
+      "to": "open",
+      "actor": "chr_00000000000000000000000009",
+      "at": 12000,
+      "reason": null,
+      "schema_version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "key": "event.siege_town_square:4",
+      "event": "event.siege_town_square",
+      "action": "activated",
+      "from": "open",
+      "to": "active",
+      "actor": "chr_00000000000000000000000009",
+      "at": 20000,
+      "reason": null,
+      "schema_version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "key": "event.siege_town_square:5",
+      "event": "event.siege_town_square",
+      "action": "resolved",
+      "from": "active",
+      "to": "resolved",
+      "actor": "chr_00000000000000000000000009",
+      "at": 90000000,
+      "reason": null,
+      "schema_version": {
+        "major": 1,
+        "minor": 0
+      }
+    }
+  ],
+  "enrollments": [
+    {
+      "event": "event.siege_town_square",
+      "participant": "ent_00000000000000000000000003",
+      "side": "side.attackers",
+      "faction": "faction.road_bandits",
+      "at": 15000,
+      "schema_version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "event": "event.siege_town_square",
+      "participant": "chr_00000000000000000000000001",
+      "side": "side.defenders",
+      "faction": "faction.town_guard",
+      "at": 15000,
+      "schema_version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "event": "event.siege_town_square",
+      "participant": "chr_00000000000000000000000002",
+      "side": "side.defenders",
+      "faction": "faction.town_guard",
+      "at": 15000,
+      "schema_version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "event": "event.siege_town_square",
+      "participant": "chr_00000000000000000000000004",
+      "side": "side.attackers",
+      "faction": null,
+      "at": 15000,
+      "schema_version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "event": "event.siege_town_square",
+      "participant": "chr_00000000000000000000000005",
+      "side": "side.attackers",
+      "faction": null,
+      "at": 15000,
+      "schema_version": {
+        "major": 1,
+        "minor": 0
+      }
+    }
+  ],
+  "resolutions": [
+    {
+      "event": "event.siege_town_square",
+      "resolver": "chr_00000000000000000000000009",
+      "resolved_at": 90000000,
+      "rule": {
+        "version": {
+          "major": 1,
+          "minor": 0
+        },
+        "metric": "participants",
+        "minimum_participants_per_side": 1
+      },
+      "winning_side": "side.attackers",
+      "winning_faction": "faction.road_bandits",
+      "outcome": "attacker_victory",
+      "sides": [
+        {
+          "side": "side.attackers",
+          "role": "attacker",
+          "faction": "faction.road_bandits",
+          "participants": 3,
+          "faction_power": 300,
+          "score": 3
+        },
+        {
+          "side": "side.defenders",
+          "role": "defender",
+          "faction": "faction.town_guard",
+          "participants": 2,
+          "faction_power": 850,
+          "score": 2
+        }
+      ],
+      "territory_change": {
+        "key": "event.siege_town_square:result",
+        "zone": "zone.town_square",
+        "action": "capture",
+        "from": "faction.town_guard",
+        "to": "faction.road_bandits",
+        "actor": "chr_00000000000000000000000009",
+        "at": 90000000,
+        "revision": 3,
+        "schema_version": {
+          "major": 1,
+          "minor": 0
+        }
+      },
+      "schema_version": {
+        "major": 1,
+        "minor": 0
+      }
+    }
+  ]
+}

@@ -11,8 +11,11 @@ map cells, declare explicit routes, and validate duplicate, missing, and
 orphaned references (ADR 0019). Faction governance, membership, an append-only
 treasury ledger, inspectable power, and per-zone territory ownership with
 expiry, contest state, and history are implemented in the faction domain and
-persisted through a versioned snapshot (ADR 0020). The world calendar, event
-enrollment, and conflict resolution remain design-only.
+persisted through a versioned snapshot (ADR 0020). A durable world calendar now
+implements the event lifecycle, faction-checked enrollment, and one bounded
+conflict per event whose deterministic result can change territory ownership
+([ADR 0021](adr/0021-world-calendar-and-bounded-conflicts.md)). Map-editor
+overlays and player-facing event objectives remain design-only.
 
 ## Design goals
 
@@ -132,6 +135,51 @@ participants or eligible aggregates, outcome, and ownership changes so an
 operator can explain and recover it. Cancellation, restart, delayed execution,
 and partial failure must never produce duplicate rewards or ownership flips.
 
+### Implemented calendar and conflict rules
+
+`engine_core::world_event` provides the durable aggregate and its contracts:
+
+- A `WorldEvent` uses an `event.*` definition ID, a title and optional
+  description, an absolute `EventSchedule`, one `zone.*` target territory, and
+  exactly two sides in the `side.*` namespace. One side is the attacker and one
+  is the defender, and each side names exactly one `faction.*` participant.
+- The lifecycle is `Draft -> Scheduled -> Open -> Active`; `Active` may
+  `Suspended` and back; cancellation is accepted from any non-terminal state
+  subject to `CancellationPolicy`; only `Active -> Resolved` applies a result.
+  Every transition is an append-only, time-ordered `EventTransition` with a
+  validated actor, and suspension or cancellation requires a reason.
+- Scheduling requires the defender to own the target and reserves the target
+  against another non-terminal event. Activation marks the territory contested.
+  Suspension, cancellation, and defender victory clear the contest. Resuming
+  requires that the target still belongs to the defender.
+- `EnrollmentRules` decide whether faction membership is required, whether
+  unaffiliated participants are allowed, and the per-side capacity. The
+  authoritative `FactionWorld` supplies the participant's faction; membership
+  and side choices are validated before an immutable `EventEnrollment` is
+  recorded, and a participant cannot change sides.
+- `ConflictRule` records a version, the scored input (`participants` or
+  `faction_power`), and a minimum per side. Resolution compares the two scores;
+  a tie goes to the defender. The result records both sides' inputs and scores
+  plus the exact rule snapshot.
+- An attacker victory captures the target through the trusted
+  `FactionWorld::award_territory` path, which rechecks the recorded defender and
+  the configured protection and cooldown windows. A defender victory records no
+  territory change. Resolution requires the scheduled end time, and replaying a
+  resolved event returns the original result.
+- `WorldCalendar` and the faction world are cloned before mutation. The calendar
+  status, result record, and territory capture commit together, or neither
+  aggregate changes.
+- `CalendarSnapshot` is the versioned persistence format. Recovery rebuilds the
+  transition chain, requires a result for every resolved event, checks
+  enrollment against side membership, and cross-validates the calendar against a
+  `FactionSnapshot` so two persisted aggregates cannot disagree.
+- `game_api::CalendarService` exposes public events, enrollment, and results to
+  authenticated accounts and hides drafts. `CalendarStore` is the trusted
+  load/replace seam; the in-memory adapter cross-checks both snapshots. SQL
+  migration `0005_world_events.sql` stores the same facts with append-only
+  transitions, enrollment, and result tables plus deferred lifecycle, side,
+  enrollment, and result checks.
+
 ## Engine features and game upgrades
 
 Engine releases should make shared capabilities available to every compatible
@@ -172,8 +220,9 @@ exists in the initial playable slice:
 2. Extend the shared faction model with governance, treasury, membership, and
    transactional territory ownership.
 3. Add a durable calendar/event lifecycle and one bounded faction conflict.
+   *Implemented in ADR 0021.*
 4. Add player enrollment, NPC participation through the same action rules, and
-   deterministic territory-changing resolution.
+   deterministic territory-changing resolution. *Implemented in ADR 0021.*
 5. Add map-editor overlays and calendar/faction inspection, then exercise
    engine and content upgrades through staging and rollback.
 
