@@ -12,7 +12,9 @@ use engine_core::{EngineError, ErrorCode};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::definition::{ContentDefinition, MinigameDefinition, UiPanelDefinition};
+use crate::definition::{
+    ContentDefinition, ContentKind, MinigameDefinition, UiPanelDefinition, WorldMapDefinition,
+};
 use crate::diagnostic::{Diagnostic, ValidationReport};
 
 /// Directories scanned for component-backed definition files, relative to a
@@ -24,6 +26,9 @@ pub const PANEL_DIRS: [&str; 2] = ["ui", "panels"];
 
 /// Directories scanned for minigame definitions.
 pub const MINIGAME_DIRS: [&str; 1] = ["minigames"];
+
+/// Directories scanned for world map and atlas definitions.
+pub const MAP_DIRS: [&str; 1] = ["maps"];
 
 /// Maximum directory nesting when scanning content.
 const MAX_SCAN_DEPTH: usize = 32;
@@ -37,6 +42,8 @@ pub struct ContentSet {
     pub panels: BTreeMap<DefinitionId, UiPanelDefinition>,
     /// Minigames keyed by ID.
     pub minigames: BTreeMap<DefinitionId, MinigameDefinition>,
+    /// World maps keyed by ID.
+    pub maps: BTreeMap<DefinitionId, WorldMapDefinition>,
     /// Localization catalogs.
     pub catalogs: CatalogSet,
     /// Source path for each component-backed definition.
@@ -45,6 +52,8 @@ pub struct ContentSet {
     pub panel_sources: BTreeMap<DefinitionId, String>,
     /// Source path for each minigame.
     pub minigame_sources: BTreeMap<DefinitionId, String>,
+    /// Source path for each world map.
+    pub map_sources: BTreeMap<DefinitionId, String>,
     /// Source path for each catalog.
     pub catalog_paths: BTreeMap<Locale, String>,
 }
@@ -108,10 +117,28 @@ impl ContentSet {
         Ok(())
     }
 
+    /// Add a world map with its relative source path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorCode::Conflict`] for a duplicate ID or path.
+    pub fn insert_map(
+        &mut self,
+        path: impl Into<String>,
+        map: WorldMapDefinition,
+    ) -> Result<(), EngineError> {
+        let path = path.into();
+        self.check_unique(&map.id, &path)?;
+        self.map_sources.insert(map.id.clone(), path.clone());
+        self.maps.insert(map.id.clone(), map);
+        Ok(())
+    }
+
     fn check_unique(&self, id: &DefinitionId, path: &str) -> Result<(), EngineError> {
         if self.definitions.contains_key(id)
             || self.panels.contains_key(id)
             || self.minigames.contains_key(id)
+            || self.maps.contains_key(id)
         {
             return Err(
                 EngineError::new(ErrorCode::Conflict, "duplicate definition id")
@@ -124,6 +151,7 @@ impl ContentSet {
             .values()
             .chain(self.panel_sources.values())
             .chain(self.minigame_sources.values())
+            .chain(self.map_sources.values())
             .any(|existing| existing == path)
         {
             return Err(
@@ -213,8 +241,60 @@ impl ContentSet {
                 }
             }
         }
+        self.validate_maps(&mut report);
         self.validate_localization(&mut report, strict_locales);
         report
+    }
+
+    fn validate_maps(&self, report: &mut ValidationReport) {
+        let zone_ids: BTreeSet<&DefinitionId> = self
+            .definitions
+            .iter()
+            .filter(|(_, definition)| definition.kind() == ContentKind::Zone)
+            .map(|(id, _)| id)
+            .collect();
+        let mut mapped = BTreeSet::new();
+
+        for (id, map) in &self.maps {
+            let path = self.map_sources.get(id).map_or("", String::as_str);
+            for issue in map.validate_shape() {
+                report.push(Diagnostic::from_issue(path, issue));
+            }
+            for (index, placement) in map.zones.iter().enumerate() {
+                if !zone_ids.contains(&placement.zone) {
+                    report.error(
+                        "world.unknown_zone",
+                        format!("{path}:zones[{index}].zone"),
+                        format!(
+                            "zone {} from {} does not resolve to a loaded zone definition",
+                            placement.zone, map.id
+                        ),
+                    );
+                }
+                if !mapped.insert(placement.zone.clone()) {
+                    report.error(
+                        "world.zone_in_multiple_maps",
+                        format!("{path}:zones[{index}].zone"),
+                        format!(
+                            "zone {} is placed on more than one world map",
+                            placement.zone
+                        ),
+                    );
+                }
+            }
+        }
+
+        if !self.maps.is_empty() {
+            for zone in zone_ids {
+                if !mapped.contains(zone) {
+                    report.warning(
+                        "world.unmapped_zone",
+                        self.sources.get(zone).map_or("maps", String::as_str),
+                        format!("zone {zone} is not placed on any world map"),
+                    );
+                }
+            }
+        }
     }
 
     fn validate_definition(
@@ -376,6 +456,14 @@ impl ContentSet {
                 format!("{path}:display.description"),
             ));
         }
+        for (id, map) in &self.maps {
+            let path = self.map_sources.get(id).map_or("", String::as_str);
+            used.push((map.display.name.clone(), format!("{path}:display.name")));
+            used.push((
+                map.display.description.clone(),
+                format!("{path}:display.description"),
+            ));
+        }
         used
     }
 
@@ -441,6 +529,10 @@ impl ContentSet {
         for minigame in self.minigames.values() {
             keys.insert(minigame.display.name.clone());
             keys.insert(minigame.display.description.clone());
+        }
+        for map in self.maps.values() {
+            keys.insert(map.display.name.clone());
+            keys.insert(map.display.description.clone());
         }
         keys
     }
@@ -515,6 +607,7 @@ impl ContentLoader {
         Self::load_definitions(root, &mut set, &mut report);
         Self::load_panels(root, &mut set, &mut report);
         Self::load_minigames(root, &mut set, &mut report);
+        Self::load_maps(root, &mut set, &mut report);
 
         let validation = set.validate(&self.registry);
         report.extend(validation);
@@ -595,6 +688,25 @@ impl ContentLoader {
             match read_ron::<MinigameDefinition>(&path) {
                 Ok(minigame) => {
                     if let Err(error) = set.insert_minigame(relative.clone(), minigame) {
+                        let code = if error.details().contains_key("id") {
+                            "content.duplicate_id"
+                        } else {
+                            "content.duplicate_path"
+                        };
+                        report.error(code, relative, error.to_string());
+                    }
+                }
+                Err(error) => report.error("content.parse", relative, error.to_string()),
+            }
+        }
+    }
+
+    fn load_maps(root: &Path, set: &mut ContentSet, report: &mut ValidationReport) {
+        for path in collect_files(root, &MAP_DIRS) {
+            let relative = relative_path(root, &path);
+            match read_ron::<WorldMapDefinition>(&path) {
+                Ok(map) => {
+                    if let Err(error) = set.insert_map(relative.clone(), map) {
                         let code = if error.details().contains_key("id") {
                             "content.duplicate_id"
                         } else {
@@ -976,6 +1088,150 @@ mod tests {
             set.referenced_keys()
                 .iter()
                 .any(|key| key.as_str() == "ui.action.close")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn world_map(
+        id: &str,
+        zones: Vec<(&str, i32, i32)>,
+        routes: Vec<(&str, &str)>,
+    ) -> crate::definition::WorldMapDefinition {
+        crate::definition::WorldMapDefinition {
+            id: DefinitionId::new(id).unwrap(),
+            version: SchemaVersion::new(1, 0),
+            display: crate::definition::DisplayText {
+                name: key("map.overworld.name"),
+                description: key("map.overworld.description"),
+            },
+            zones: zones
+                .into_iter()
+                .map(|(zone, x, y)| crate::definition::MapZone {
+                    zone: DefinitionId::new(zone).unwrap(),
+                    position: crate::definition::MapPosition { x, y },
+                })
+                .collect(),
+            routes: routes
+                .into_iter()
+                .map(|(from, to)| crate::definition::ZoneRoute {
+                    from: DefinitionId::new(from).unwrap(),
+                    to: DefinitionId::new(to).unwrap(),
+                    bidirectional: true,
+                    kind: crate::definition::RouteKind::Passage,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn maps_resolve_zones_and_report_unknown_and_unmapped_zones() {
+        let mut set = set(
+            vec![
+                definition("zone.starter", None),
+                definition("zone.orphan", None),
+            ],
+            vec![catalog(
+                "pt-BR",
+                &[
+                    ("entity.zone.starter.name", "Início"),
+                    ("entity.zone.starter.description", "Uma zona."),
+                    ("entity.zone.orphan.name", "Órfã"),
+                    ("entity.zone.orphan.description", "Sem mapa."),
+                    ("map.overworld.name", "Mundo"),
+                    ("map.overworld.description", "O atlas."),
+                ],
+            )],
+        );
+        set.insert_map(
+            "maps/overworld.ron",
+            world_map(
+                "map.overworld",
+                vec![("zone.starter", 0, 0), ("zone.missing", 1, 0)],
+                vec![("zone.starter", "zone.missing")],
+            ),
+        )
+        .unwrap();
+
+        let report = set.validate(&registry());
+        let codes: Vec<_> = report
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code.as_str())
+            .collect();
+        assert!(codes.contains(&"world.unknown_zone"));
+        assert!(codes.contains(&"world.unmapped_zone"));
+        assert!(
+            set.referenced_keys()
+                .iter()
+                .any(|key| key.as_str() == "map.overworld.name")
+        );
+    }
+
+    #[test]
+    fn loader_reads_world_maps_and_rejects_duplicate_placements() {
+        let root = std::env::temp_dir().join(format!(
+            "lynx-content-map-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("zones")).unwrap();
+        std::fs::create_dir_all(root.join("maps")).unwrap();
+        std::fs::create_dir_all(root.join("localization")).unwrap();
+        std::fs::write(
+            root.join("zones/starter.ron"),
+            r#"(
+                id: "zone.starter",
+                version: (major: 1, minor: 0),
+                display: (name: "zone.starter.name", description: "zone.starter.description"),
+                components: {
+                    "core.door": {"locked": false},
+                },
+            )"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("maps/overworld.ron"),
+            r#"(
+                id: "map.overworld",
+                version: (major: 1, minor: 0),
+                display: (name: "map.overworld.name", description: "map.overworld.description"),
+                zones: [
+                    (zone: "zone.starter", position: (x: 0, y: 0)),
+                    (zone: "zone.starter", position: (x: 0, y: 0)),
+                ],
+            )"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("localization/pt-BR.ron"),
+            r#"(
+                locale: "pt-BR",
+                messages: {
+                    "zone.starter.name": "Início",
+                    "zone.starter.description": "Uma zona.",
+                    "map.overworld.name": "Mundo",
+                    "map.overworld.description": "O atlas.",
+                },
+            )"#,
+        )
+        .unwrap();
+
+        let loader = ContentLoader::new(registry());
+        let (set, report) = loader.load_project(&root);
+        assert_eq!(set.maps.len(), 1);
+        let map_id = DefinitionId::new("map.overworld").unwrap();
+        assert_eq!(
+            set.map_sources.get(&map_id).map(String::as_str),
+            Some("maps/overworld.ron")
+        );
+        assert!(
+            report
+                .errors()
+                .any(|item| item.code == "world.duplicate_zone"),
+            "{report}"
         );
         std::fs::remove_dir_all(root).unwrap();
     }

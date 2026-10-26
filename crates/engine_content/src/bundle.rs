@@ -14,7 +14,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::definition::{
-    ContentDefinition, ContentKind, MinigameDefinition, UiPanelDefinition, is_safe_asset_path,
+    ContentDefinition, ContentKind, MinigameDefinition, UiPanelDefinition, WorldMapDefinition,
+    is_safe_asset_path,
 };
 use crate::diagnostic::ValidationReport;
 use crate::publishing::{ModerationState, PublishingRecord};
@@ -159,6 +160,27 @@ impl ContentManifest {
             ContentKind::Minigame,
             minigame.id.clone(),
             minigame.version,
+            bytes,
+        )
+    }
+
+    /// Record a world map file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorCode::Conflict`] for a duplicate path or definition ID,
+    /// and [`ErrorCode::InvalidRequest`] for an unsafe path.
+    pub fn add_map(
+        &mut self,
+        path: impl Into<String>,
+        map: &WorldMapDefinition,
+        bytes: &[u8],
+    ) -> Result<(), EngineError> {
+        self.add_entry(
+            path.into(),
+            ContentKind::Map,
+            map.id.clone(),
+            map.version,
             bytes,
         )
     }
@@ -473,7 +495,8 @@ fn validate_publishing(publishing: &PublishingRecord, report: &mut ValidationRep
 mod tests {
     use super::*;
     use crate::definition::{
-        DisplayText, MinigameDefinition, Presentation, PresentationMode, UiPanelDefinition,
+        DisplayText, MapPosition, MapZone, MinigameDefinition, Presentation, PresentationMode,
+        UiPanelDefinition, WorldMapDefinition,
     };
     use crate::publishing::{AuthorId, LicenseId, ReviewNote};
     use engine_core::i18n::MessageKey;
@@ -713,6 +736,20 @@ mod tests {
             rewards: Vec::new(),
         };
 
+        let map = WorldMapDefinition {
+            id: DefinitionId::new("map.overworld").unwrap(),
+            version: SchemaVersion::new(1, 0),
+            display: DisplayText {
+                name: key("map.overworld.name"),
+                description: key("map.overworld.description"),
+            },
+            zones: vec![MapZone {
+                zone: DefinitionId::new("zone.starter").unwrap(),
+                position: MapPosition { x: 0, y: 0 },
+            }],
+            routes: Vec::new(),
+        };
+
         let mut manifest = manifest();
         manifest
             .add_panel("ui/terminal.ron", &panel, b"panel")
@@ -720,9 +757,13 @@ mod tests {
         manifest
             .add_minigame("minigames/lockpick.ron", &minigame, b"game")
             .unwrap();
+        manifest
+            .add_map("maps/overworld.ron", &map, b"map")
+            .unwrap();
 
         assert_eq!(manifest.definitions[0].kind, ContentKind::Ui);
         assert_eq!(manifest.definitions[1].kind, ContentKind::Minigame);
+        assert_eq!(manifest.definitions[2].kind, ContentKind::Map);
         assert_eq!(
             manifest
                 .add_panel("ui/duplicate.ron", &panel, b"panel")

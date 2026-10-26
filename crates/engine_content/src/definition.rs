@@ -24,6 +24,8 @@ pub enum ContentKind {
     Entity,
     /// A zone definition.
     Zone,
+    /// A world map or atlas definition.
+    Map,
     /// A behavior graph definition.
     Behavior,
     /// A UI panel definition.
@@ -40,6 +42,7 @@ impl ContentKind {
             Self::Item => "item",
             Self::Entity => "entity",
             Self::Zone => "zone",
+            Self::Map => "map",
             Self::Behavior => "behavior",
             Self::Ui => "ui",
             Self::Minigame => "minigame",
@@ -52,6 +55,7 @@ impl ContentKind {
         match id.namespace() {
             Some("item") => Self::Item,
             Some("zone") => Self::Zone,
+            Some("map" | "world") => Self::Map,
             Some("behavior" | "ai") => Self::Behavior,
             Some("ui" | "panel") => Self::Ui,
             Some("minigame") => Self::Minigame,
@@ -334,6 +338,177 @@ impl MinigameDefinition {
     }
 }
 
+/// A stable position on the authored world atlas, measured in map cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MapPosition {
+    /// Horizontal atlas cell.
+    pub x: i32,
+    /// Vertical atlas cell.
+    pub y: i32,
+}
+
+/// The kind of transfer a zone route supports.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RouteKind {
+    /// A walkable passage or road.
+    #[default]
+    Passage,
+    /// A gateway that may require an explicit interaction.
+    Gateway,
+    /// A magical or technological portal.
+    Portal,
+}
+
+impl RouteKind {
+    /// The wire and authoring name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Passage => "passage",
+            Self::Gateway => "gateway",
+            Self::Portal => "portal",
+        }
+    }
+}
+
+/// One zone placed on a world map.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MapZone {
+    /// Stable zone definition ID.
+    pub zone: DefinitionId,
+    /// Position on the atlas.
+    pub position: MapPosition,
+}
+
+/// An explicit route between two zones on the same map.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ZoneRoute {
+    /// The zone where travel starts.
+    pub from: DefinitionId,
+    /// The zone where travel ends.
+    pub to: DefinitionId,
+    /// Whether the route works in both directions.
+    #[serde(default)]
+    pub bidirectional: bool,
+    /// The transfer style.
+    #[serde(default)]
+    pub kind: RouteKind,
+}
+
+/// An authored world atlas: stable zone placements and the routes between them.
+///
+/// The atlas owns static topology only. Live territory ownership, conflict
+/// state, and ownership history are runtime state and must not be baked into a
+/// content bundle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorldMapDefinition {
+    /// Stable map key, for example `map.overworld`.
+    pub id: DefinitionId,
+    /// Version of the map schema and topology.
+    pub version: SchemaVersion,
+    /// Localized name and description.
+    pub display: DisplayText,
+    /// Zones placed on this map.
+    pub zones: Vec<MapZone>,
+    /// Explicit routes, including transfer points, between placed zones.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<ZoneRoute>,
+}
+
+impl WorldMapDefinition {
+    /// Validate map topology without resolving zone definitions.
+    ///
+    /// Zone existence and unmapped-zone diagnostics require a loaded
+    /// [`crate::validate::ContentSet`].
+    #[must_use]
+    pub fn validate_shape(&self) -> Vec<ValidationIssue> {
+        let mut issues = Vec::new();
+        if self.version.major == 0 {
+            issues.push(ValidationIssue::new(
+                "content.invalid_version",
+                "version.major",
+                "map versions must have a major version of at least one",
+            ));
+        }
+        validate_display(&self.display, &mut issues);
+        if !self.id.is_in("map") && !self.id.is_in("world") {
+            issues.push(ValidationIssue::new(
+                "world.invalid_id",
+                "id",
+                "map ids must use the map or world namespace",
+            ));
+        }
+        if self.zones.is_empty() {
+            issues.push(ValidationIssue::new(
+                "world.empty_map",
+                "zones",
+                "a world map must place at least one zone",
+            ));
+        }
+
+        let mut zone_ids = BTreeSet::new();
+        let mut positions = BTreeSet::new();
+        for (index, zone) in self.zones.iter().enumerate() {
+            if !zone.zone.is_in("zone") {
+                issues.push(ValidationIssue::new(
+                    "world.invalid_zone_reference",
+                    format!("zones[{index}].zone"),
+                    "map placements must reference a zone definition",
+                ));
+            }
+            if !zone_ids.insert(zone.zone.as_str()) {
+                issues.push(ValidationIssue::new(
+                    "world.duplicate_zone",
+                    format!("zones[{index}].zone"),
+                    format!("zone {} is placed more than once", zone.zone),
+                ));
+            }
+            if !positions.insert((zone.position.x, zone.position.y)) {
+                issues.push(ValidationIssue::new(
+                    "world.duplicate_position",
+                    format!("zones[{index}].position"),
+                    format!(
+                        "another zone already occupies atlas cell ({}, {})",
+                        zone.position.x, zone.position.y
+                    ),
+                ));
+            }
+        }
+
+        let mut routes = BTreeSet::new();
+        for (index, route) in self.routes.iter().enumerate() {
+            if route.from == route.to {
+                issues.push(ValidationIssue::new(
+                    "world.self_route",
+                    format!("routes[{index}]"),
+                    "a zone route must connect two different zones",
+                ));
+            }
+            for (field, endpoint) in [("from", &route.from), ("to", &route.to)] {
+                if !zone_ids.contains(endpoint.as_str()) {
+                    issues.push(ValidationIssue::new(
+                        "world.unknown_route_endpoint",
+                        format!("routes[{index}].{field}"),
+                        format!("route endpoint {endpoint} is not placed on this map"),
+                    ));
+                }
+            }
+            if !routes.insert((route.from.as_str(), route.to.as_str())) {
+                issues.push(ValidationIssue::new(
+                    "world.duplicate_route",
+                    format!("routes[{index}]"),
+                    format!(
+                        "route {} -> {} is declared more than once",
+                        route.from, route.to
+                    ),
+                ));
+            }
+        }
+        issues
+    }
+}
+
 /// Shared display-key validation for non-component definitions.
 fn validate_display(display: &DisplayText, issues: &mut Vec<ValidationIssue>) {
     if display.name == display.description {
@@ -565,6 +740,8 @@ mod tests {
             ("item.torch", ContentKind::Item),
             ("door.wooden", ContentKind::Entity),
             ("zone.tavern", ContentKind::Zone),
+            ("map.overworld", ContentKind::Map),
+            ("world.overworld", ContentKind::Map),
             ("behavior.guard", ContentKind::Behavior),
             ("ui.inventory", ContentKind::Ui),
             ("minigame.lockpick", ContentKind::Minigame),
@@ -626,6 +803,80 @@ mod tests {
         assert!(codes.contains(&"content.invalid_version".to_string()));
         assert!(codes.contains(&"content.invalid_tag".to_string()));
         assert!(codes.contains(&"content.empty_components".to_string()));
+    }
+
+    fn map_zone(zone: &str, x: i32, y: i32) -> MapZone {
+        MapZone {
+            zone: DefinitionId::new(zone).unwrap(),
+            position: MapPosition { x, y },
+        }
+    }
+
+    #[test]
+    fn world_maps_validate_placements_and_routes() {
+        let mut map = WorldMapDefinition {
+            id: DefinitionId::new("map.overworld").unwrap(),
+            version: SchemaVersion::new(1, 0),
+            display: DisplayText {
+                name: key("map.overworld.name"),
+                description: key("map.overworld.description"),
+            },
+            zones: vec![
+                map_zone("zone.starter", 0, 0),
+                map_zone("zone.market", 1, 0),
+            ],
+            routes: vec![ZoneRoute {
+                from: DefinitionId::new("zone.starter").unwrap(),
+                to: DefinitionId::new("zone.market").unwrap(),
+                bidirectional: true,
+                kind: RouteKind::Passage,
+            }],
+        };
+        assert_eq!(map.validate_shape(), Vec::new());
+
+        map.zones.push(map_zone("zone.starter", 0, 0));
+        map.routes.push(ZoneRoute {
+            from: DefinitionId::new("zone.starter").unwrap(),
+            to: DefinitionId::new("zone.missing").unwrap(),
+            bidirectional: false,
+            kind: RouteKind::Portal,
+        });
+        map.routes.push(ZoneRoute {
+            from: DefinitionId::new("zone.starter").unwrap(),
+            to: DefinitionId::new("zone.market").unwrap(),
+            bidirectional: false,
+            kind: RouteKind::Gateway,
+        });
+        let codes: Vec<_> = map
+            .validate_shape()
+            .into_iter()
+            .map(|issue| issue.code)
+            .collect();
+        assert!(codes.contains(&"world.duplicate_zone".to_string()));
+        assert!(codes.contains(&"world.duplicate_position".to_string()));
+        assert!(codes.contains(&"world.unknown_route_endpoint".to_string()));
+        assert!(codes.contains(&"world.duplicate_route".to_string()));
+    }
+
+    #[test]
+    fn world_maps_require_placements_and_the_map_namespace() {
+        let map = WorldMapDefinition {
+            id: DefinitionId::new("overworld").unwrap(),
+            version: SchemaVersion::new(1, 0),
+            display: DisplayText {
+                name: key("map.overworld.name"),
+                description: key("map.overworld.description"),
+            },
+            zones: Vec::new(),
+            routes: Vec::new(),
+        };
+        let codes: Vec<_> = map
+            .validate_shape()
+            .into_iter()
+            .map(|issue| issue.code)
+            .collect();
+        assert!(codes.contains(&"world.invalid_id".to_string()));
+        assert!(codes.contains(&"world.empty_map".to_string()));
     }
 
     #[test]

@@ -79,6 +79,7 @@ Rules:
 | Durable identity | `StableId` | Prefixed ULID-like; 48-bit ms + 80-bit random |
 | Authored key | `DefinitionId` | Validated slug, e.g. `door.wooden` |
 | Definition | content records | Immutable per content version |
+| World map | `WorldMapDefinition` | Authored zone placements, cells, and explicit routes |
 | Instance | `EntityRecord` | Mutable, zone-scoped, stable ID |
 | Component schema | `ComponentSchema` | Version, fields, visibility, policy |
 | Mind | `Mind` + controller | Player, AI, scripted, or none |
@@ -98,12 +99,13 @@ Rules:
 
 The shared faction, territory, event-calendar, and engine-upgrade design is
 specified in [`world-simulation.md`](world-simulation.md). These capabilities
-extend the existing authoritative simulation and persistence boundaries; they
-are not yet implied by the current implementation status.
+extend the existing authoritative simulation and persistence boundaries.
 
-- Authored map topology and stable zone IDs are content. Territory ownership,
-  faction treasury, event lifecycle, and event results are mutable durable
-  state, transactionally persisted and audited.
+- Authored map topology and stable zone IDs are content. `engine_content`
+  validates world-map placements, explicit routes, and zone references (ADR
+  0019). Territory ownership, faction treasury, event lifecycle, and event
+  results remain mutable durable state; they are not implemented yet and must
+  be transactionally persisted and audited when they are.
 - A guild is a player-governed faction. Player- and NPC-governed factions use
   the same domain operations; controller type does not confer authority.
 - The server validates faction actions, event enrollment, conflict

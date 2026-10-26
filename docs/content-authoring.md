@@ -5,6 +5,7 @@
 | Kind | Format | Location |
 |---|---|---|
 | Items, entities, zones, behaviors | RON | `content/<kind>/` |
+| World atlas and zone routes | RON | `content/maps/` |
 | Lore, quest, and event templates | RON | `content/lore/`, `content/quests/`, `content/events/` |
 | UI panels | RON | `content/ui/` or `content/panels/` |
 | Minigames | RON | `content/minigames/` |
@@ -88,10 +89,52 @@ A zone definition contains:
 
 Links are validated at load: endpoints exist, link type is compatible with both
 components, no unsupported cycles, and cross-zone links use an explicit route.
-The world atlas composes stable zone IDs and explicit routes. Dynamic territory
-ownership is runtime state, not part of a zone's authored identity or geometry.
-The editor must visualize routes and territory without baking live ownership
-into a content bundle.
+Dynamic territory ownership is runtime state, not part of a zone's authored
+identity or geometry. The editor must visualize routes and territory without
+baking live ownership into a content bundle.
+
+### World atlas and routes
+
+A world atlas is authored in `content/maps/` and places stable zone IDs on whole
+map cells. Zones carry their own geometry, spawn points, and navigation; the
+atlas carries only topology.
+
+```ron
+(
+  id: "map.overworld",
+  version: (major: 1, minor: 0),
+  display: (
+    name: "map.overworld.name",
+    description: "map.overworld.description",
+  ),
+  zones: [
+    (zone: "zone.starter", position: (x: 0, y: 0)),
+    (zone: "zone.market", position: (x: 1, y: 0)),
+  ],
+  routes: [
+    (
+      from: "zone.starter",
+      to: "zone.market",
+      bidirectional: true,
+      kind: passage,
+    ),
+  ],
+)
+```
+
+- Map IDs use the `map` or `world` namespace. Zone references use the `zone`
+  namespace and must resolve to a loaded zone definition.
+- A zone may be placed only once per map and only on one map. No two placements
+  may share an atlas cell.
+- Routes name both endpoints explicitly. A route endpoint must be placed on the
+  same map, a route cannot connect a zone to itself, and duplicate routes are
+  errors. `kind` is `passage`, `gateway`, or `portal`; `bidirectional` defaults
+  to `false`.
+- Zone definitions that are not placed on any map produce a warning once at
+  least one map exists, so an accidentally omitted zone is visible.
+- Publishing a map change follows the normal content diff. Authored topology and
+  runtime territory ownership are separate: publishing a map must never transfer
+  territory or cancel a live event.
 
 ## UI panels
 
@@ -327,6 +370,17 @@ See [ADR 0017](adr/0017-content-manifest-versioning.md).
 | `content.incompatible_version` | Major version mismatch with the engine |
 | `content.link_cycle` | Link graph contains an unsupported cycle |
 | `content.missing_asset` | Referenced asset absent from the bundle |
+| `world.invalid_id` | A map ID does not use the `map` or `world` namespace |
+| `world.empty_map` | A map places no zones |
+| `world.invalid_zone_reference` | A placement does not reference a `zone.*` definition |
+| `world.unknown_zone` | A map placement does not resolve to a zone definition |
+| `world.unknown_route_endpoint` | A route names a zone that is not placed on its map |
+| `world.duplicate_zone` | A zone is placed more than once on one map |
+| `world.duplicate_position` | Two zones occupy the same atlas cell |
+| `world.duplicate_route` | The same directed route is declared twice |
+| `world.self_route` | A route connects a zone to itself |
+| `world.zone_in_multiple_maps` | A zone is placed on more than one map |
+| `world.unmapped_zone` | Warning: a zone definition appears on no map |
 | `i18n.missing_key` | A referenced message key is absent from a catalog |
 | `i18n.placeholder_mismatch` | A translation does not preserve source placeholders |
 | `i18n.unknown_locale` | Locale tag is malformed or not declared |

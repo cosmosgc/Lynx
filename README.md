@@ -25,12 +25,12 @@ localization model is described in
 Early implementation. The repository currently contains the Phase 0/1
 foundation plus a runnable world service: pinned toolchain, workspace layout,
 architecture decision records, stable entity IDs, versioned component schemas,
-faction and inventory domain rules, a headless authoritative simulation with
-action validation, versioned protocol envelopes, per-session interest
-management, a transport-agnostic gateway with resumable sessions and
-interest-filtered replication, a framed connection loop, a WebSocket
-`lynx-world` binary, and the `lynx` project CLI. Bevy client crates arrive in
-the next phase.
+validated world-map atlases with explicit zone routes, faction and inventory
+domain rules, a headless authoritative simulation with action validation,
+versioned protocol envelopes, per-session interest management, a
+transport-agnostic gateway with resumable sessions and interest-filtered
+replication, a framed connection loop, a WebSocket `lynx-world` binary, and the
+`lynx` project CLI. Bevy client crates arrive in the next phase.
 
 Brazilian Portuguese (`pt-BR`) is the default language for generated projects,
 templates, and player-facing content. See
@@ -80,7 +80,7 @@ for multiplayer work. The native, non-Docker setup is documented in
 ```text
 crates/engine_core      Stable IDs, schemas, factions, inventory, audit, errors
 crates/engine_sim       Headless authoritative zone simulation and action pipeline
-crates/engine_content   Content definitions, manifests, validation, versioning
+crates/engine_content   Content definitions, world maps, manifests, validation, versioning
 crates/engine_net       Protocol envelopes, framing, replication categories, interest management
 crates/world_gateway    Sessions, resume tokens, action routing, per-session replication
 crates/world_server     Connection IDs, wire messages, and delivery envelopes

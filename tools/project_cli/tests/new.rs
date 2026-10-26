@@ -43,7 +43,7 @@ fn has_file(report: &Value, path: &Path) -> bool {
 #[test]
 fn templates_generate_and_validate_their_starter_content() {
     let temp = temp_dir();
-    for (template, definitions, panels, minigames) in [("minimal", 3, 1, 0), ("mmorpg", 4, 2, 1)] {
+    for (template, definitions, panels, minigames) in [("minimal", 4, 1, 0), ("mmorpg", 5, 2, 1)] {
         let project = temp.join(template);
         let project_str = project.to_string_lossy().into_owned();
         let created = run(&[
@@ -58,7 +58,9 @@ fn templates_generate_and_validate_their_starter_content() {
         assert_eq!(created["ok"], json!(true));
         assert_eq!(created["template"], json!(template));
         for relative in [
+            "content/maps/overworld.ron",
             "content/zones/starter.ron",
+            "content/zones/market.ron",
             "content/entities/tavern_keeper.ron",
             "content/items/torch.ron",
             "content/ui/inventory.ron",
@@ -72,6 +74,7 @@ fn templates_generate_and_validate_their_starter_content() {
         assert_eq!(doctor["project"]["definitions"], json!(definitions));
         assert_eq!(doctor["project"]["panels"], json!(panels));
         assert_eq!(doctor["project"]["minigames"], json!(minigames));
+        assert_eq!(doctor["project"]["maps"], json!(1));
         assert_eq!(doctor["project"]["catalogs"], json!(1));
 
         let validation = run(&["--json", "validate", "--project", &project_str]);

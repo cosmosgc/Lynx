@@ -155,9 +155,10 @@ cargo run -p project_cli -- validate --project .
 ```
 
 The generated project is a normal Cargo workspace that depends on Lynx crates
-by path or version. It contains a zone, a sample entity, an item, an
-interaction, a UI panel definition, and a Brazilian Portuguese localization
-catalog (`content/localization/pt-BR.ron`). The project defaults to `pt-BR`;
+by path or version. It contains a world atlas (`content/maps/overworld.ron`),
+two connected zones, a sample entity, an item, an interaction, a UI panel
+definition, and a Brazilian Portuguese localization catalog
+(`content/localization/pt-BR.ron`). The project defaults to `pt-BR`;
 additional locales are declared in the project manifest. Generated
 interactions describe client intent only; the server must validate requests
 and determine gameplay outcomes.

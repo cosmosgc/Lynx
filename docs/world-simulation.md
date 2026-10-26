@@ -6,6 +6,12 @@ not features that are already implemented. The implementation roadmap in the
 [project guide](lightweight_mmorpg_engine_project_guide.md) remains the source
 of delivery status.
 
+**Current implementation:** authored world-map atlases place stable zone IDs on
+map cells, declare explicit routes, and validate duplicate, missing, and
+orphaned references (ADR 0019). Territory ownership, faction governance and
+wealth, the world calendar, event enrollment, and conflict resolution remain
+design-only.
+
 ## Design goals
 
 - A creator can build and operate a complete MMORPG world without forking the

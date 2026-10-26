@@ -8,6 +8,15 @@ semantic versioning for engine releases and content bundles.
 
 ### Added
 
+- `engine_content`: authored world-map atlases. `WorldMapDefinition` places
+  stable zone definition IDs on integer atlas cells and declares explicit
+  `passage`, `gateway`, or `portal` routes with an optional bidirectional flag.
+  Validation rejects duplicate placements and cells, self-routes, duplicate
+  routes, route endpoints missing from the map, unknown zone references, and a
+  zone placed on multiple maps, and warns about zones that no map references.
+  Maps are a manifest kind and participate in content diffs (ADR 0019).
+- `lynx new` templates now generate `content/maps/overworld.ron` plus a second
+  connected starter zone; `lynx doctor` reports the map count.
 - Phase 0/1 workspace foundation: pinned Rust 1.99 toolchain, workspace lints,
   and crate boundaries.
 - Architecture decision records for toolchain, backend topology, persistence,
