@@ -72,7 +72,14 @@ flags:
 | `--resume-ttl-ms` | `30000` | reconnect window |
 | `--view-radius-m` | `60` | server-chosen interest radius |
 | `--max-sessions` | `1024` | connected plus retained sessions |
+| `--staff` | off | mark every demo grant as staff; enables calendar lifecycle commands (loopback development only) |
 | `--token-hash` | — | repeat once per demo character |
+
+At startup the service also publishes one open faction conflict over the demo
+zone. Player sessions may enroll through `calendar.command` and inspect the
+calendar with `calendar.query`; lifecycle transitions (schedule, activate,
+resolve, …) are accepted only from `--staff` sessions. Applied commands are
+committed to the in-memory backend together with the faction snapshot.
 
 The process logs through `RUST_LOG` (`info` by default) and shuts down on
 `Ctrl+C`: readiness turns false, the listener stops accepting, connections

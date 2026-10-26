@@ -14,7 +14,11 @@ expiry, contest state, and history are implemented in the faction domain and
 persisted through a versioned snapshot (ADR 0020). A durable world calendar now
 implements the event lifecycle, faction-checked enrollment, and one bounded
 conflict per event whose deterministic result can change territory ownership
-([ADR 0021](adr/0021-world-calendar-and-bounded-conflicts.md)). Map-editor
+([ADR 0021](adr/0021-world-calendar-and-bounded-conflicts.md)). The world
+gateway now routes calendar commands and inspection over the
+`calendar.command`/`calendar.result` and `calendar.query`/`calendar.state`
+wire kinds, and the runnable `lynx-world` demo publishes one open conflict
+over the demo zone at startup. Map-editor
 overlays and player-facing event objectives remain design-only.
 
 ## Design goals
@@ -185,6 +189,16 @@ and partial failure must never produce duplicate rewards or ownership flips.
   and are deduplicated by request ID, rejections are structured with stable
   error codes, and applied commands must be committed by persisting the new
   calendar and faction snapshots together.
+- `world_gateway::calendar` routes that stage over the wire:
+  `calendar.command`/`calendar.result` carry intents and correlated outcomes
+  with actor, principal, and staff flag resolved from the authenticated
+  session, and a repeated request ID returns the original outcome without
+  re-applying the command or re-committing snapshots.
+  `calendar.query`/`calendar.state` expose the player-visible calendar with
+  drafts hidden. Applied commands hand both snapshots to a trusted
+  `CalendarPersistence` seam (`backend_memory::MemoryBackend::
+  replace_world_state` in the demo service), which cross-validates and swaps
+  the calendar and faction aggregates together.
 
 ## Engine features and game upgrades
 

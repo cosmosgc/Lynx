@@ -23,6 +23,19 @@ semantic versioning for engine releases and content bundles.
   and staff-gated lifecycle commands carry intent only, are deduplicated by
   request ID, produce structured effects with stable error codes, and must be
   committed by persisting the new calendar and faction snapshots together.
+- `world_gateway`: a calendar stage over the wire. `calendar.command`/
+  `calendar.result` carry replay-protected calendar commands with actor,
+  principal, and staff flag resolved from the authenticated session, and
+  repeated request IDs return the original outcome without re-applying or
+  re-committing. `calendar.query`/`calendar.state` expose the player-visible
+  calendar with drafts hidden, and applied snapshots pass through a trusted
+  `CalendarPersistence` seam.
+- `backend_memory`: `replace_world_state` commits calendar and faction
+  snapshots as one cross-validated pair under a single lock.
+- `lynx-world`: the demo publishes one open faction conflict over the demo
+  zone at startup; players enroll and inspect through the new wire kinds,
+  staff sessions (new `--staff` flag) drive lifecycle transitions, and
+  committed state flows into the in-memory backend.
 - `game_api` and `backend_memory`: read-only `CalendarService` views for public
   events, enrollment, and conflict results plus the trusted `CalendarStore`
   snapshot load/replace seam. The in-memory adapter cross-validates calendar and

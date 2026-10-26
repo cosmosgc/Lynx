@@ -61,6 +61,8 @@ Every message is a JSON object:
 | `world.delta` | server → client | tick, interest delta, filtered replication |
 | `world.token` | server → client | the session's current resume secret |
 | `action.request` / `action.result` | both | gameplay intent and its outcome |
+| `calendar.command` / `calendar.result` | both | world calendar intent (enroll; staff lifecycle) and its correlated outcome |
+| `calendar.query` / `calendar.state` | both | read request and the player-visible calendar (drafts hidden) |
 | `ui.action` | client → server | schema, panel action name, parameters, optional client tick |
 | `ui.close` | client → server | empty body |
 | `ui.state` | server → client | authoritative tick plus the open panel (or `null`) |
@@ -196,6 +198,13 @@ connection and the authoritative zone. It adds no socket and no runtime.
   with the session ID before calling the simulator, then rewrites
   `ActionResult::request_id` to the client's ID. Retries within a session are
   idempotent; the same ID in another session cannot reuse the cached result.
+- **Calendar bodies are intent only.** `calendar.command` accepts a caller
+  `request_id` and one `CalendarAction`. Unknown fields — including `actor`,
+  `principal`, or `staff` — are rejected, and those values come from the
+  session. Enrollment is open to any connected character; lifecycle
+  transitions are staff-gated inside the simulation stage. A repeated request
+  ID returns the cached outcome and never re-applies or re-persists the
+  command.
 - **Acknowledgements.** `session.ack` records the highest server tick the
   client has processed. The value is clamped to the authoritative tick, so a
   client cannot pin the server forward or replay a stale cursor.

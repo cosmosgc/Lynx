@@ -59,15 +59,20 @@ Rules:
   development. Its ephemeral, predictable tokens are not suitable for real
   player authentication.
 - `world_gateway` composes the simulation, protocol, and backend DTOs into
-  session lifecycle, action routing, server-owned UI panel state, and
-  per-session replication. It owns no socket, runtime, or clock; a transport
-  adapter supplies authenticated claims and explicit timestamps.
+  session lifecycle, action routing, server-owned UI panel state, per-session
+  replication, and the world calendar: `calendar.command`/`calendar.result`
+  carry replay-protected calendar commands, `calendar.query`/`calendar.state`
+  expose the player-visible calendar, and applied snapshots pass through a
+  trusted `CalendarPersistence` seam. It owns no socket, runtime, or clock; a
+  transport adapter supplies authenticated claims and explicit timestamps.
 - `world_server` adds connection IDs, `world.ready`/`world.snapshot`/
   `world.delta` encoding, and connection-close bookkeeping on top of
   `world_gateway`. It still owns no socket, runtime, or clock.
 - `lynx_world` is the runnable service: Axum/Tokio WebSocket transport, static
   hashed-token admission, health endpoints, the tick loop, and graceful
-  shutdown. All gameplay authority stays in the crates below it.
+  shutdown. It publishes one open demo conflict over the demo zone and commits
+  calendar/faction snapshots into the in-memory backend. All gameplay authority
+  stays in the crates below it.
 - `backend_nakama` is the only crate that knows Nakama's HTTP API.
 - Client/editor crates (introduced with Bevy) depend on the crates above and
   never the reverse.
@@ -93,6 +98,7 @@ Rules:
 | World calendar | `WorldCalendar` | Durable events, transitions, enrollment, and results |
 | Conflict result | `ConflictResolution` | Versioned inputs, scores, outcome, and capture proof |
 | Calendar commands | `CalendarCommands` | Replay-protected participant and staff intents over one calendar |
+| Calendar stage | `CalendarStage` | Gateway-owned calendar + faction world; executes commands and serves `calendar.state` |
 | Locale | BCP 47 tag | Default `pt-BR`; canonicalized at boundaries |
 | Localized text | message key + catalog | Source catalog is `pt-BR` |
 | Interest set | `InterestSet` | Per-session visible entities, distance + visibility |

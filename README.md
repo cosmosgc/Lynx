@@ -78,7 +78,7 @@ Phase 4  UI & minigames              [███████████░░░
 Phase 5  Editor & content pipeline   [█████░░░░░░░░░░░░░]  30%  In progress
 Phase 6  Live operations             [███░░░░░░░░░░░░░░░]  20%  Early
 Phase 7  MMORPG vertical slice       [█░░░░░░░░░░░░░░░░░]  10%  Blocked on client
-Phase 8  Expand & stabilize          [█░░░░░░░░░░░░░░░░░]  10%  Selected systems delivered early
+Phase 8  Expand & stabilize          [██░░░░░░░░░░░░░░░░]  15%  Selected systems delivered early
 ```
 
 ### Phase 0 — Architecture proof · Complete
@@ -180,7 +180,8 @@ Phase 8  Expand & stabilize          [█░░░░░░░░░░░░░
 ### Phase 7 — MMORPG vertical slice · Blocked on client
 
 - [~] A runnable WebSocket world service with a demo zone (characters, doors,
-      barrels, owner-only crate, locked vault) is playable headless today.
+      barrels, owner-only crate, locked vault, and one publishable faction
+      conflict) is playable headless today.
 - [~] Device authentication exists in `backend_nakama`; character selection
       and the in-game flow await the client.
 - [ ] One polished zone with movement, chat, inventory, and persistence in a
@@ -194,10 +195,16 @@ Phase 8  Expand & stabilize          [█░░░░░░░░░░░░░
 Faction governance, treasury, territory, calendar, and bounded conflicts were
 pulled forward from this phase and are shipped and tested (ADR 0020, 0021;
 migrations 0004, 0005) — see [`docs/world-simulation.md`](docs/world-simulation.md)
-for what is implemented versus design-only.
+for what is implemented versus design-only. The gateway now routes calendar
+enrollment and staff lifecycle commands over the wire, and the runnable demo
+service publishes one open conflict at startup.
 
 - [x] Player/NPC faction parity groundwork, faction wealth, territory.
 - [x] Scheduled, interruptible world events with deterministic capture.
+- [~] Calendar command routing through the world gateway and the demo
+      service: commands, inspection, replay protection, and paired
+      persistence are live; editor overlays and event objectives stay
+      design-only.
 - [x] Internationalization framework (`pt-BR` default; ADR 0011).
 - [ ] Guilds, quests, progression, economy, trading, parties.
 - [ ] Additional zones, loot systems, and moderation tooling.
@@ -220,11 +227,15 @@ cargo run -p project_cli -- doctor --project ../my-world
 # Run the world service. Configure a hash, not a plaintext token.
 printf '%s' 'replace-with-a-long-random-token' | cargo run -p lynx-world -- token-hash
 cargo run -p lynx-world -- serve --bind 127.0.0.1:8090 --token-hash <sha256-hex>
+# Add --staff on loopback to drive calendar lifecycle commands (demo only).
 ```
 
 The service exposes `GET /healthz`, `GET /readyz`, and the WebSocket endpoint
 `GET /world` with `Authorization: Bearer <token>`. The first frame must be a
-`session.hello` envelope. Wire kinds and reconnection rules are documented in
+`session.hello` envelope. The demo publishes one open faction conflict over
+the demo zone; player sessions enroll through `calendar.command` and inspect
+it with `calendar.query` (lifecycle transitions require `--staff`). Wire
+kinds and reconnection rules are documented in
 [`docs/networking.md`](docs/networking.md); operation flags and shutdown
 behavior are in [`docs/operations.md`](docs/operations.md). There is no client
 crate yet, and world state is in memory.
@@ -258,7 +269,7 @@ crates/engine_core      Stable IDs, schemas, factions, world events, inventory, 
 crates/engine_sim       Headless authoritative zone simulation and action pipeline
 crates/engine_content   Content definitions, world maps, manifests, validation, versioning
 crates/engine_net       Protocol envelopes, framing, replication categories, interest management
-crates/world_gateway    Sessions, resume tokens, action routing, per-session replication
+crates/world_gateway    Sessions, resume tokens, calendar command routing, per-session replication
 crates/world_server     Connection IDs, wire messages, and delivery envelopes
 crates/lynx_world       Runnable WebSocket world service (`lynx-world`)
 crates/backend_nakama   Native Nakama HTTP adapter (no Docker required)
