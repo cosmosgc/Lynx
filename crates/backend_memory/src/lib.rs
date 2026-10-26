@@ -4,14 +4,27 @@
 //! persistence, password verification, cryptographic token generation, or
 //! security boundary. Do not use it to authenticate real players.
 
-use std::collections::BTreeMap;
+mod admin;
+mod character;
+mod chat;
+mod inventory;
+mod social;
+
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use game_api::{
-    Account, AccountId, ApiError, AuthService, DeviceLogin, HealthService, HealthStatus, Session,
-    SessionToken, WorldService, WorldSession, Zone,
+    Account, AccountId, ApiError, AuditRecord, AuthService, Character, CharacterId, ChatChannel,
+    ChatChannelKind, ChatMessage, DeviceLogin, FriendState, HealthService, HealthStatus,
+    InventorySlot, Session, SessionToken, WorldService, WorldSession, Zone,
 };
+
+/// Default number of non-deleted characters one account may own.
+pub const DEFAULT_CHARACTER_LIMIT: usize = 8;
+
+/// The single local chat room provided for offline development.
+const LOCAL_CHANNEL_ID: &str = "global";
 
 /// A local in-memory implementation of the shared backend contracts.
 ///
@@ -20,6 +33,7 @@ use game_api::{
 pub struct MemoryBackend {
     state: Arc<Mutex<State>>,
     zones: BTreeMap<String, Zone>,
+    character_limit: usize,
 }
 
 impl fmt::Debug for MemoryBackend {
@@ -35,6 +49,7 @@ impl Clone for MemoryBackend {
         Self {
             state: Arc::clone(&self.state),
             zones: self.zones.clone(),
+            character_limit: self.character_limit,
         }
     }
 }
@@ -48,7 +63,32 @@ struct State {
     refresh_tokens: BTreeMap<String, AccountId>,
     refresh_access_tokens: BTreeMap<String, String>,
     world_sessions: BTreeMap<AccountId, WorldSession>,
+    characters: BTreeMap<CharacterId, Character>,
+    inventory: BTreeMap<CharacterId, Vec<InventorySlot>>,
+    friends: BTreeMap<AccountId, BTreeMap<AccountId, FriendState>>,
+    blocked: BTreeMap<AccountId, BTreeSet<AccountId>>,
+    channels: BTreeMap<String, ChatChannel>,
+    messages: BTreeMap<String, VecDeque<ChatMessage>>,
+    audit: Vec<AuditRecord>,
+    next_event_id: u64,
     next_id: u64,
+}
+
+fn initial_state() -> State {
+    let mut state = State::default();
+    state.channels.insert(
+        LOCAL_CHANNEL_ID.to_owned(),
+        ChatChannel {
+            id: LOCAL_CHANNEL_ID.to_owned(),
+            name: Some("Global".into()),
+            kind: ChatChannelKind::Room,
+            member_count: 0,
+        },
+    );
+    state
+        .messages
+        .insert(LOCAL_CHANNEL_ID.to_owned(), VecDeque::new());
+    state
 }
 
 impl MemoryBackend {
@@ -62,8 +102,9 @@ impl MemoryBackend {
             capacity: Some(100),
         };
         Self {
-            state: Arc::new(Mutex::new(State::default())),
+            state: Arc::new(Mutex::new(initial_state())),
             zones: BTreeMap::from([(zone.id.clone(), zone)]),
+            character_limit: DEFAULT_CHARACTER_LIMIT,
         }
     }
 
@@ -99,9 +140,19 @@ impl MemoryBackend {
             ));
         }
         Ok(Self {
-            state: Arc::new(Mutex::new(State::default())),
+            state: Arc::new(Mutex::new(initial_state())),
             zones: configured,
+            character_limit: DEFAULT_CHARACTER_LIMIT,
         })
+    }
+
+    /// Override the number of non-deleted characters one account may own.
+    ///
+    /// Values below one are treated as one.
+    #[must_use]
+    pub const fn with_character_limit(mut self, limit: usize) -> Self {
+        self.character_limit = if limit == 0 { 1 } else { limit };
+        self
     }
 
     fn lock_state(&self) -> Result<std::sync::MutexGuard<'_, State>, ApiError> {
@@ -351,6 +402,21 @@ impl WorldService for MemoryBackend {
                 "world session does not match the active session".into(),
             )),
             None => Err(ApiError::NotFound("no active world session".into())),
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use engine_core::Locale;
+    use game_api::DeviceLogin;
+
+    pub(crate) fn login(device_id: &str, create: bool) -> DeviceLogin {
+        DeviceLogin {
+            device_id: device_id.into(),
+            username: None,
+            create,
+            locale: Locale::default(),
         }
     }
 }
