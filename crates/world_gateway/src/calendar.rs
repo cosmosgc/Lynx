@@ -174,6 +174,16 @@ impl CalendarStage {
         self.commands.len()
     }
 
+    /// Whether a request ID already has a cached outcome.
+    ///
+    /// Callers that commit applied state may skip persistence for re-executed
+    /// request IDs: their outcome came from the replay cache, not from a new
+    /// mutation of the aggregates.
+    #[must_use]
+    pub fn request_is_cached(&self, request_id: &str) -> bool {
+        self.commands.contains(request_id)
+    }
+
     /// Execute one server-resolved calendar command.
     #[must_use]
     pub fn execute(

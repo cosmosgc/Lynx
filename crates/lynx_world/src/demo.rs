@@ -8,11 +8,20 @@
 //! lockpick minigame instead of reporting a locked door.
 
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use engine_core::error::{EngineError, ErrorCode};
+use engine_core::faction::{
+    Faction, FactionDefinition, FactionWorld, GovernancePolicy, PowerRules, TerritoryRules,
+};
 use engine_core::id::{DefinitionId, IdKind, StableId};
 use engine_core::inventory::UniformItemRules;
 use engine_core::math::Vec3;
+use engine_core::time::{DurationMs, Millis};
+use engine_core::world_event::{
+    CancellationPolicy, ConflictRule, EnrollmentRules, EventSchedule, EventSide, EventSideRole,
+    WORLD_EVENT_SCHEMA_VERSION, WorldCalendar, WorldEvent, WorldEventStatus,
+};
 use engine_net::protocol::Handshake;
 use engine_sim::action::Verb;
 use engine_sim::entity::{Door, EntityRecord, Interactable, UiProvider};
@@ -29,6 +38,21 @@ const COLUMNS: usize = 6;
 const BASE_HEIGHT_M: u16 = 240;
 const WIDTH_M: u16 = 800;
 const MAX_CHARACTERS: usize = 32;
+/// The demo conflict opens for enrollment one minute before the fight.
+const DEMO_CONFLICT_WINDOW_MS: i64 = 60_000;
+
+/// The authoritative world-clock timestamp, in epoch milliseconds.
+///
+/// Authoritative systems take explicit time; nothing reads a clock inside the
+/// simulation crates.
+#[must_use]
+pub fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(i64::MAX, |elapsed| {
+            i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+        })
+}
 
 /// Build the demo zone with one character per authenticated grant.
 ///
@@ -192,6 +216,139 @@ pub fn handshake() -> Result<Handshake, EngineError> {
             .with_detail("error", error.to_string())
     })?;
     Ok(Handshake::new(version.clone(), version))
+}
+
+/// The faction of demo characters that defend the demo territory.
+pub(crate) const DEMO_DEFENDERS: &str = "faction.guardas";
+/// The faction of demo characters that attack the demo territory.
+pub(crate) const DEMO_ATTACKERS: &str = "faction.assaltantes";
+/// The one demo conflict, published and open at startup.
+pub(crate) const DEMO_EVENT: &str = "event.assalto_praca";
+
+pub(crate) fn system_actor() -> StableId {
+    StableId::from_parts(IdKind::Character, 2, 1)
+}
+
+/// The distinct founder character for demo faction `seed`.
+///
+/// Founders become their faction's first member, so every demo faction uses
+/// its own character.
+fn faction_founder(seed: u128) -> StableId {
+    StableId::from_parts(IdKind::Character, 2, 10 + seed)
+}
+
+/// Build the demo faction world with the demo territory owned by
+/// [`DEMO_DEFENDERS`].
+///
+/// # Errors
+///
+/// Returns an error when a built-in identifier is malformed or a faction
+/// operation is rejected.
+pub fn build_faction_world(now_ms: i64) -> Result<FactionWorld, EngineError> {
+    let now = Millis::new(now_ms);
+    let rules = TerritoryRules {
+        // The demo rotates rules fast so a full conflict cycle is reachable
+        // within one session.
+        claim_protection: DurationMs::new(0),
+        capture_cooldown: DurationMs::new(0),
+        minimum_capture_power: 0,
+        ..TerritoryRules::default()
+    };
+    let mut world = FactionWorld::new(rules);
+    // Each faction needs its own founder: becoming a founder makes the
+    // character that faction's first member, and one character may belong to
+    // at most one faction.
+    for (faction_id, name, founder_seed) in [
+        (definition(DEMO_DEFENDERS)?, "Guardas da Praça", 1u128),
+        (definition(DEMO_ATTACKERS)?, "Assaltantes", 2),
+    ] {
+        world.add_faction(
+            Faction::new(
+                FactionDefinition::new(faction_id, name),
+                GovernancePolicy::default(),
+                PowerRules::default(),
+                faction_founder(founder_seed),
+                now,
+            )
+            .map_err(|error| {
+                EngineError::new(ErrorCode::Internal, "the demo faction is invalid")
+                    .with_detail("error", error.to_string())
+            })?,
+        )?;
+    }
+    world.register_territory(definition("zone.demo")?)?;
+    // Claims require faction membership, so the defenders' founder — their
+    // first member and leader — performs the demo's initial claim.
+    world.claim_territory(
+        "claim-demo",
+        faction_founder(1),
+        &definition(DEMO_DEFENDERS)?,
+        &definition("zone.demo")?,
+        now,
+    )?;
+    Ok(world)
+}
+
+/// Build the demo calendar: one bounded, open conflict over the demo zone.
+///
+/// Enrollment opens immediately and the conflict window is short, so a staff
+/// session can drive `activate` and `resolve` within a single demo run.
+///
+/// # Errors
+///
+/// Returns an error when a built-in identifier is malformed or the calendar
+/// rejects the demo event.
+pub fn build_calendar(
+    factions: &mut FactionWorld,
+    now_ms: i64,
+) -> Result<WorldCalendar, EngineError> {
+    let author = system_actor();
+    let now = Millis::new(now_ms);
+    let mut calendar = WorldCalendar::new();
+    let event = WorldEvent {
+        id: definition(DEMO_EVENT)?,
+        title: "Assalto à praça demo".into(),
+        description: Some(
+            "Um único conflito limitado entre Guardas e Assaltantes pela praça demo.".into(),
+        ),
+        schedule: EventSchedule {
+            enrollment_opens_at: now,
+            enrollment_closes_at: Millis::new(now_ms + DEMO_CONFLICT_WINDOW_MS),
+            starts_at: Millis::new(now_ms + DEMO_CONFLICT_WINDOW_MS),
+            ends_at: Millis::new(now_ms + 2 * DEMO_CONFLICT_WINDOW_MS),
+        },
+        target_zone: definition("zone.demo")?,
+        sides: vec![
+            EventSide {
+                id: definition("side.assaltantes")?,
+                role: EventSideRole::Attacker,
+                display_name: "Assaltantes".into(),
+                faction: definition(DEMO_ATTACKERS)?,
+            },
+            EventSide {
+                id: definition("side.guardas")?,
+                role: EventSideRole::Defender,
+                display_name: "Guardas da Praça".into(),
+                faction: definition(DEMO_DEFENDERS)?,
+            },
+        ],
+        enrollment: EnrollmentRules {
+            // The demo spawns unaffiliated characters; anyone may join either
+            // side so a single player can exercise both roles across restarts.
+            requires_faction_membership: false,
+            allow_unaffiliated: true,
+            max_participants_per_side: None,
+        },
+        conflict: ConflictRule::default(),
+        cancellation: CancellationPolicy::AnyTimeBeforeResolution,
+        status: WorldEventStatus::Draft,
+        schema_version: WORLD_EVENT_SCHEMA_VERSION,
+    };
+    let event_id = event.id.clone();
+    calendar.create(event, author, now)?;
+    calendar.schedule(factions, &event_id, author, now)?;
+    calendar.open(&event_id, author, now)?;
+    Ok(calendar)
 }
 
 fn definition(value: &str) -> Result<DefinitionId, EngineError> {

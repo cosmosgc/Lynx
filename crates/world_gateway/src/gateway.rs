@@ -288,8 +288,8 @@ impl WorldGateway {
 
     /// Attach the trusted persistence seam for applied calendar commands.
     #[must_use]
-    pub fn with_calendar_store(mut self, store: impl CalendarPersistence + Send + 'static) -> Self {
-        self.calendar_store = Some(Box::new(store));
+    pub fn with_calendar_store(mut self, store: Box<dyn CalendarPersistence + Send>) -> Self {
+        self.calendar_store = Some(store);
         self
     }
 
@@ -739,10 +739,14 @@ impl WorldGateway {
                 EngineError::new(ErrorCode::Unsupported, "this world does not run a calendar");
             return Ok(vec![self.error_reply(envelope, &error)]);
         };
+        // A cached request ID produces a replayed outcome, not a fresh
+        // mutation, so it must not be persisted again.
+        let fresh = !stage.request_is_cached(&request.request_id);
         let mut result = stage.execute(&request, now);
         result.request_id = envelope.id.as_str().to_string();
 
-        if result.is_applied()
+        if fresh
+            && result.is_applied()
             && let Some(store) = self.calendar_store.as_ref()
             && let Some(stage) = &self.calendar
         {

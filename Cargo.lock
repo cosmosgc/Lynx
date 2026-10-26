@@ -638,6 +638,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "backend_memory",
  "clap",
  "engine_core",
  "engine_net",

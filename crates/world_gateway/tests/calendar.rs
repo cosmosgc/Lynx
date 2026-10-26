@@ -1,8 +1,6 @@
 //! End-to-end tests for the gateway calendar stage: command routing,
 //! staff gating, replay protection, snapshot persistence, and inspection.
 
-use std::cell::RefCell;
-
 use engine_core::faction::{
     Faction, FactionDefinition, GovernancePolicy, PowerRules, TerritoryRules,
 };
@@ -195,15 +193,32 @@ fn demo_calendar(
     calendar
 }
 
-/// Records every committed snapshot pair for assertions.
+/// Counts every committed snapshot pair for assertions.
+///
+/// The counter itself is shared through `Arc` so a test can read the count
+/// after the gateway has consumed the store.
 struct RecordingStore {
-    commits: RefCell<Vec<(u32, u32)>>,
+    /// Shared with the test through a cloned handle.
+    commits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl RecordingStore {
     fn new() -> Self {
         Self {
-            commits: RefCell::new(Vec::new()),
+            commits: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    fn count(&self) -> usize {
+        self.commits.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Cheap clone sharing the counter.
+impl Clone for RecordingStore {
+    fn clone(&self) -> Self {
+        Self {
+            commits: std::sync::Arc::clone(&self.commits),
         }
     }
 }
@@ -211,13 +226,11 @@ impl RecordingStore {
 impl CalendarPersistence for RecordingStore {
     fn commit(
         &self,
-        calendar: &engine_core::world_event::CalendarSnapshot,
-        factions: &engine_core::faction::FactionSnapshot,
+        _calendar: &engine_core::world_event::CalendarSnapshot,
+        _factions: &engine_core::faction::FactionSnapshot,
     ) -> Result<(), engine_core::error::EngineError> {
-        self.commits.borrow_mut().push((
-            calendar.events.len() as u32,
-            factions.territories.len() as u32,
-        ));
+        self.commits
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 }
@@ -243,7 +256,7 @@ fn fixture(store: Option<RecordingStore>) -> CalendarFixture {
     .with_calendar(calendar, factions)
     .unwrap();
     if let Some(store) = store {
-        gateway = gateway.with_calendar_store(store);
+        gateway = gateway.with_calendar_store(Box::new(store));
     }
     let actor = id(IdKind::Character, 1);
     let staff_principal = id(IdKind::Character, 7);
@@ -310,7 +323,7 @@ fn open_event_enrolls_a_participant() {
         .find(|envelope| envelope.kind.as_str() == CALENDAR_RESULT_KIND)
         .unwrap();
     assert_eq!(
-        reply.correlation.as_ref().map(|id| id.as_str()),
+        reply.correlation.as_ref().map(MessageId::as_str),
         Some("req-1")
     );
     let outcome = reply
@@ -435,26 +448,85 @@ fn a_staff_session_can_publish_and_replay_returns_the_same_outcome() {
 
 #[test]
 fn applied_commands_commit_calendar_and_faction_snapshots() {
+    let mut factions = demo_faction_world();
+    let calendar = demo_calendar(&mut factions, 1_000);
+    let mut gateway = WorldGateway::new(
+        zone(),
+        handshake(),
+        GatewayConfig::default(),
+        world_gateway::SequentialResumeTokens::new(1),
+    )
+    .unwrap()
+    .with_calendar(calendar, factions)
+    .unwrap();
     let store = RecordingStore::new();
-    let mut fixture = fixture(Some(store));
-    fixture
-        .gateway
-        .handle(
-            &fixture.session,
-            &envelope(
-                "req-1",
-                CALENDAR_COMMAND_KIND,
-                json!({
-                    "request_id": "enroll-1",
-                    "action": { "kind": "enroll", "event": "event.demo.assault", "side": "side.attackers" }
-                }),
-            ),
-            Millis::new(1_100),
+    gateway = gateway.with_calendar_store(Box::new(store.clone()));
+
+    let player = gateway
+        .connect(
+            claims("player", id(IdKind::Character, 1)),
+            &handshake(),
+            Millis::new(1_000),
         )
         .unwrap();
-    let stage = fixture.gateway.calendar_stage().unwrap();
-    let (calendar, _factions) = stage.snapshots();
-    assert_eq!(calendar.events.len(), 1);
+    let send = |gateway: &mut WorldGateway| {
+        gateway
+            .handle(
+                &player.session,
+                &envelope(
+                    "req-1",
+                    CALENDAR_COMMAND_KIND,
+                    json!({
+                        "request_id": "enroll-1",
+                        "action": { "kind": "enroll", "event": "event.demo.assault", "side": "side.attackers" }
+                    }),
+                ),
+                Millis::new(1_100),
+            )
+            .unwrap()
+    };
+    let replies = send(&mut gateway);
+    let status = replies
+        .iter()
+        .find(|envelope| envelope.kind.as_str() == CALENDAR_RESULT_KIND)
+        .unwrap()
+        .body
+        .pointer("/outcome/status")
+        .and_then(|status| status.as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert_eq!(status, "applied");
+    // One applied command commits exactly one snapshot pair.
+    assert_eq!(store.count(), 1);
+
+    // A replayed request ID returns the original result without a new commit.
+    let replay = send(&mut gateway);
+    let replay_status = replay
+        .iter()
+        .find(|envelope| envelope.kind.as_str() == CALENDAR_RESULT_KIND)
+        .unwrap()
+        .body
+        .pointer("/outcome")
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        reply_outcome(&replies),
+        replay_status,
+        "the replay must return the original outcome"
+    );
+    assert_eq!(store.count(), 1);
+}
+
+/// The correlated `outcome` object of a `calendar.result` reply.
+fn reply_outcome(replies: &[Envelope]) -> serde_json::Value {
+    replies
+        .iter()
+        .find(|envelope| envelope.kind.as_str() == CALENDAR_RESULT_KIND)
+        .unwrap()
+        .body
+        .pointer("/outcome")
+        .cloned()
+        .unwrap()
 }
 
 #[test]

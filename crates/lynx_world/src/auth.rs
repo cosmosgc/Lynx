@@ -91,6 +91,19 @@ impl Authenticator {
         Ok(Self { entries })
     }
 
+    /// Whether demo sessions carry a staff role.
+    ///
+    /// This exists for loopback development only: a staff session may drive
+    /// world calendar lifecycle commands. Never enable it on a service that
+    /// real players can reach.
+    #[must_use]
+    pub fn with_staff(mut self, staff: bool) -> Self {
+        for entry in &mut self.entries {
+            entry.grant.staff = staff;
+        }
+        self
+    }
+
     /// Resolve a presented bearer token, if it matches a configured hash.
     ///
     /// The compared value is the SHA-256 digest, so a leak of this process's

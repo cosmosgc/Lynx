@@ -3,7 +3,8 @@
 //! The crate splits the service into four pieces:
 //!
 //! - [`auth`] maps hashed bearer tokens to trusted server-side identities;
-//! - [`demo`] builds the in-memory zone and server handshake;
+//! - [`backend`] commits calendar and faction snapshots for the demo;
+//! - [`demo`] builds the in-memory zone, calendar, and server handshake;
 //! - [`service`] serializes admission, input, and ticks on one authority loop;
 //! - [`transport`] exposes health endpoints and moves length-prefixed
 //!   envelopes over WebSocket connections.
@@ -13,6 +14,7 @@
 //! sessions and zone state are reset on restart.
 
 pub mod auth;
+pub mod backend;
 pub mod config;
 pub mod demo;
 pub mod service;

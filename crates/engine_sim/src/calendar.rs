@@ -280,6 +280,16 @@ impl CalendarCommands {
         result
     }
 
+    /// Whether a request ID already has a cached result.
+    ///
+    /// A caller that must commit applied state may use this to skip
+    /// persistence for replayed requests: a cached result was effectively
+    /// applied once already.
+    #[must_use]
+    pub fn contains(&self, request_id: &str) -> bool {
+        self.results.contains_key(request_id)
+    }
+
     fn remember(&mut self, result: &CalendarActionResult) {
         self.results
             .insert(result.request_id.clone(), result.clone());

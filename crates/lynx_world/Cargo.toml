@@ -11,6 +11,7 @@ repository.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 axum = { workspace = true }
+backend_memory = { workspace = true }
 clap = { workspace = true }
 engine_core = { workspace = true }
 engine_net = { workspace = true }

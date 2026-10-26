@@ -42,6 +42,10 @@ pub struct ServeArgs {
     #[arg(long, default_value_t = 1_024)]
     pub max_sessions: usize,
 
+    /// Grant every demo session a staff role. Development aid only.
+    #[arg(long)]
+    pub staff: bool,
+
     /// SHA-256 hash of a bearer token. Repeat once per demo character.
     #[arg(long = "token-hash", value_name = "SHA256")]
     pub token_hashes: Vec<String>,
@@ -122,6 +126,7 @@ mod tests {
             resume_ttl_ms: 30_000,
             view_radius_m: 60.0,
             max_sessions: 1_024,
+            staff: false,
             token_hashes: vec![crate::auth::hash_hex("token")],
         }
     }

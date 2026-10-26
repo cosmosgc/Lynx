@@ -384,4 +384,61 @@ mod tests {
                 .is_ok()
         );
     }
+
+    #[test]
+    fn replace_world_state_commits_a_consistent_pair_together() {
+        let backend = MemoryBackend::new();
+        let world = seed_world(&backend);
+        let calendar = scheduled(&world);
+
+        backend
+            .replace_world_state(&calendar.snapshot(), &world.snapshot())
+            .unwrap();
+        assert_eq!(backend.load_calendar().unwrap(), calendar.snapshot());
+        assert_eq!(backend.load_faction_world().unwrap(), world.snapshot());
+    }
+
+    #[test]
+    fn replace_world_state_rejects_a_mismatched_pair() {
+        let backend = MemoryBackend::new();
+        let world = seed_world(&backend);
+        let mut world_copy = world.clone();
+        let mut calendar = scheduled(&world);
+        let event_id = id("event.siege");
+        calendar.open(&event_id, actor(9), Millis::new(10)).unwrap();
+        calendar
+            .activate(&mut world_copy, &event_id, actor(9), Millis::new(20))
+            .unwrap();
+
+        // The activated calendar demands a contested target, but the supplied
+        // faction snapshot does not carry the contest, so the pair is
+        // rejected and persisted state stays untouched.
+        assert!(matches!(
+            backend.replace_world_state(&calendar.snapshot(), &world.snapshot()),
+            Err(ApiError::Conflict(_))
+        ));
+        assert_eq!(backend.load_calendar().unwrap().resolutions, Vec::new());
+    }
+
+    #[test]
+    fn replace_world_state_accepts_a_resolved_pair() {
+        let backend = MemoryBackend::new();
+        let mut world = seed_world(&backend);
+        let mut calendar = scheduled(&world);
+        let event_id = id("event.siege");
+        calendar.open(&event_id, actor(9), Millis::new(10)).unwrap();
+        calendar
+            .activate(&mut world, &event_id, actor(9), Millis::new(20))
+            .unwrap();
+        calendar
+            .resolve(&mut world, &event_id, actor(9), Millis::new(30))
+            .unwrap();
+
+        // Attacker victory captured the target, so calendar and territory
+        // history must move at once.
+        backend
+            .replace_world_state(&calendar.snapshot(), &world.snapshot())
+            .unwrap();
+        assert_eq!(backend.load_calendar().unwrap(), calendar.snapshot());
+    }
 }

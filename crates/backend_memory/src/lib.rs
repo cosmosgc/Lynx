@@ -16,12 +16,13 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use engine_core::faction::FactionWorld;
-use engine_core::world_event::WorldCalendar;
+use engine_core::faction::{FactionSnapshot, FactionWorld};
+use engine_core::world_event::{CalendarSnapshot, WorldCalendar};
 use game_api::{
     Account, AccountId, ApiError, AuditRecord, AuthService, Character, CharacterId, ChatChannel,
     ChatChannelKind, ChatMessage, DeviceLogin, FriendState, HealthService, HealthStatus,
     InventorySlot, Session, SessionToken, WorldService, WorldSession, Zone,
+    validate_calendar_snapshot,
 };
 
 /// Default number of non-deleted characters one account may own.
@@ -112,6 +113,34 @@ impl MemoryBackend {
             zones: BTreeMap::from([(zone.id.clone(), zone)]),
             character_limit: DEFAULT_CHARACTER_LIMIT,
         }
+    }
+
+    /// Replace persisted calendar and faction-world state in one trusted
+    /// step.
+    ///
+    /// Callers that apply a mutation through the simulation must commit both
+    /// snapshots together: a calendar change that moved territory and a fresh
+    /// faction world are cross-validated and swapped under one lock, so an
+    /// observer never sees one aggregate without the other.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiError::Conflict`] when the two snapshots disagree and
+    /// [`ApiError::InvalidRequest`] for malformed records.
+    pub fn replace_world_state(
+        &self,
+        calendar: &CalendarSnapshot,
+        factions: &FactionSnapshot,
+    ) -> Result<(), ApiError> {
+        validate_calendar_snapshot(calendar, factions)?;
+        let calendar = WorldCalendar::from_snapshot(calendar.clone())
+            .map_err(|error| ApiError::Conflict(error.to_string()))?;
+        let world = FactionWorld::from_snapshot(factions.clone())
+            .map_err(|error| ApiError::Conflict(error.to_string()))?;
+        let mut state = self.lock_state()?;
+        state.calendar = calendar;
+        state.faction_world = world;
+        Ok(())
     }
 
     /// Create an empty backend with configured zones.

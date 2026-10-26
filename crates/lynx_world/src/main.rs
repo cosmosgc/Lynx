@@ -20,6 +20,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use lynx_world::auth::{self, Authenticator, Grant};
+use lynx_world::backend;
 use lynx_world::config::ServeArgs;
 use lynx_world::demo;
 use lynx_world::service::Service;
@@ -83,16 +84,31 @@ fn token_hash() -> Result<()> {
 
 async fn serve(args: ServeArgs) -> Result<()> {
     let gateway_config = args.gateway_config()?;
-    let authenticator = Authenticator::new(&args.token_hashes()?)?;
+    let authenticator = Authenticator::new(&args.token_hashes()?)?.with_staff(args.staff);
     let grants: Vec<Grant> = authenticator.grants().cloned().collect();
     let zone = demo::build_zone(&grants).context("failed to build the demo zone")?;
-    let gateway = WorldGateway::new(
+
+    // The demo publishes one bounded, open conflict over the demo zone at
+    // startup. Lifecycle transitions are staff-gated commands; enrollment is
+    // open to every demo character.
+    let now_ms = demo::now_ms();
+    let mut factions =
+        demo::build_faction_world(now_ms).context("failed to build the demo faction world")?;
+    let calendar =
+        demo::build_calendar(&mut factions, now_ms).context("failed to build the demo calendar")?;
+    let mut gateway = WorldGateway::new(
         zone,
         demo::handshake().context("failed to build the server handshake")?,
         gateway_config,
         SystemResumeTokens::new(),
     )
     .context("failed to create the world gateway")?;
+    gateway = gateway
+        .with_calendar(calendar, factions)
+        .context("failed to attach the demo calendar")?;
+    gateway = gateway.with_calendar_store(Box::new(backend::DemoCalendarCommit::new(
+        backend_memory::MemoryBackend::new(),
+    )));
     let server = WorldServer::new(gateway);
     let service = Service::new(server, args.tick_interval());
 
