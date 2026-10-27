@@ -8,4 +8,5 @@ pub mod link;
 pub mod mind;
 pub mod minigame;
 pub mod nav;
+pub mod snapshot;
 pub mod zone;

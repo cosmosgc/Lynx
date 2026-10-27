@@ -8,6 +8,7 @@
 //! ordering guarantees and makes backpressure explicit.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use engine_core::error::{EngineError, ErrorCode};
@@ -23,6 +24,7 @@ use world_gateway::{ERROR_KIND, ResumeToken, SessionClaims};
 use world_server::{CloseReason, ConnectionId, Opened, Outbound, WorldServer};
 
 use crate::auth::Grant;
+use crate::persistence::{SnapshotStore, WorldSnapshot, WorldSnapshotInputs};
 
 /// Client handshake message kind. Its body is [`Hello`].
 pub const HELLO_KIND: &str = "session.hello";
@@ -110,6 +112,17 @@ pub struct Service {
     writers: BTreeMap<ConnectionId, mpsc::Sender<ServerFrame>>,
     reply_sequence: u64,
     token_sequence: u64,
+    persistence: Option<Persistence>,
+}
+
+/// How and when the service writes durable world snapshots.
+#[derive(Debug, Clone)]
+pub struct Persistence {
+    /// The trusted snapshot store.
+    store: Arc<dyn SnapshotStore + Send + Sync>,
+    /// Ticks between automatic saves; one tick when the interval is shorter
+    /// than the world tick.
+    interval_ticks: u64,
 }
 
 impl std::fmt::Debug for Service {
@@ -132,7 +145,30 @@ impl Service {
             writers: BTreeMap::new(),
             reply_sequence: 0,
             token_sequence: 0,
+            persistence: None,
         }
+    }
+
+    /// Write world snapshots on a fixed interval and at shutdown.
+    ///
+    /// A save failure never stops the loop: the in-memory world stays
+    /// authoritative and the error is reported through structured logging.
+    #[must_use]
+    pub fn with_persistence(
+        mut self,
+        store: Arc<dyn SnapshotStore + Send + Sync>,
+        interval: Duration,
+    ) -> Self {
+        let tick_ms = u64::try_from(self.tick.as_millis()).unwrap_or(1).max(1);
+        let interval_ticks = u64::try_from(interval.as_millis())
+            .unwrap_or(1)
+            .max(tick_ms)
+            / tick_ms;
+        self.persistence = Some(Persistence {
+            store,
+            interval_ticks: interval_ticks.max(1),
+        });
+        self
     }
 
     /// Drive admission, input, replication, and shutdown until the channel
@@ -145,6 +181,7 @@ impl Service {
         let mut ticker = tokio::time::interval(self.tick);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         ticker.tick().await;
+        let mut ticks_since_save = 0u64;
 
         loop {
             tokio::select! {
@@ -158,12 +195,51 @@ impl Service {
                     let Some(event) = event else { break };
                     self.handle(event);
                 }
-                _ = ticker.tick() => self.advance(),
+                _ = ticker.tick() => {
+                    self.advance();
+                    ticks_since_save = ticks_since_save.wrapping_add(1);
+                    if let Some(persistence) = &self.persistence
+                        && ticks_since_save >= persistence.interval_ticks
+                    {
+                        ticks_since_save = 0;
+                        self.save_world();
+                    }
+                }
             }
         }
 
+        self.save_world();
         self.close_all();
         tracing::debug!("world service loop stopped");
+    }
+
+    /// Capture and write one world snapshot, recording failures in the log.
+    fn save_world(&mut self) {
+        let Some(persistence) = &self.persistence else {
+            return;
+        };
+        let store = Arc::clone(&persistence.store);
+        let world = WorldSnapshot::capture(&self.snapshot_inputs(), clock().value());
+        if let Err(error) = store.save(&world) {
+            tracing::warn!(
+                code = ?error.code(),
+                details = %error,
+                "the world snapshot could not be written"
+            );
+        }
+    }
+
+    /// The authoritative state a snapshot is built from.
+    fn snapshot_inputs(&self) -> WorldSnapshotInputs {
+        let gateway = self.server.gateway();
+        let calendar_factions = gateway.calendar_stage().map(|stage| {
+            let (calendar, factions) = stage.snapshots();
+            (calendar, factions)
+        });
+        WorldSnapshotInputs {
+            zone: gateway.zone().snapshot(),
+            calendar_factions,
+        }
     }
 
     fn handle(&mut self, event: ServerEvent) {
@@ -542,5 +618,71 @@ mod tests {
         let zone: Zone = demo::build_zone(&grants).unwrap();
         assert_eq!(zone.entity_count(), grants.len() * 5);
         assert_eq!(zone.tick(), Tick::ZERO);
+    }
+
+    /// Counts saves and keeps the latest world snapshot.
+    #[derive(Debug, Default)]
+    struct MemoryStore {
+        state: std::sync::Mutex<MemoryState>,
+    }
+
+    #[derive(Debug, Default)]
+    struct MemoryState {
+        saves: u64,
+        last: Option<crate::persistence::WorldSnapshot>,
+    }
+
+    impl crate::persistence::SnapshotStore for MemoryStore {
+        fn load(&self) -> Result<Option<crate::persistence::WorldSnapshot>, EngineError> {
+            Ok(self.state.lock().unwrap().last.clone())
+        }
+
+        fn save(&self, snapshot: &crate::persistence::WorldSnapshot) -> Result<(), EngineError> {
+            let mut state = self.state.lock().unwrap();
+            state.saves += 1;
+            state.last = Some(snapshot.clone());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn the_service_snapshots_the_world_and_saves_once_more_at_shutdown() {
+        let (service, grant, _) = service();
+        let counts = Arc::new(MemoryStore::default());
+        let store: Arc<dyn crate::persistence::SnapshotStore + Send + Sync> =
+            Arc::clone(&counts) as _;
+        let service = service.with_persistence(store, Duration::from_millis(1));
+
+        let (events, receiver) = mpsc::channel(8);
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let task = tokio::spawn(service.run(receiver, shutdown_rx));
+
+        let (out_tx, mut out_rx) = mpsc::channel(16);
+        let _admitted = admit(&events, Credential::Static(grant), out_tx)
+            .await
+            .unwrap();
+        // Drain the admission messages so the writer queue cannot back up.
+        while tokio::time::timeout(Duration::from_millis(50), out_rx.recv())
+            .await
+            .is_ok()
+        {}
+
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        let saves_while_up = counts.state.lock().unwrap().saves;
+        assert!(saves_while_up >= 1, "the interval cadence saves the world");
+
+        shutdown.send(true).unwrap();
+        task.await.unwrap();
+        let state = counts.state.lock().unwrap();
+        assert!(
+            state.saves > saves_while_up,
+            "shutdown performs a final save"
+        );
+        let last = state.last.as_ref().unwrap();
+        assert_eq!(last.zone.config.definition.as_str(), "zone.demo");
+        assert!(
+            last.calendar.is_none() && last.factions.is_none(),
+            "this test gateway runs no calendar, so no calendar snapshot is written"
+        );
     }
 }

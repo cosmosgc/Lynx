@@ -27,7 +27,7 @@ localization model is described in
 | Workspace crates | 11 (10 crates + the `lynx` CLI) |
 | Rust edition / toolchain | 2024 edition, pinned to Rust **1.99** via `rust-toolchain.toml` |
 | Source code | ~33,000 LOC across 81 `.rs` files |
-| Tests | 353 test functions (unit + integration), zero unsafe code (`unsafe_code = "forbid"`) |
+| Tests | 390 test functions (unit + integration), zero unsafe code (`unsafe_code = "forbid"`) |
 | ADRs | 21 accepted architecture decision records |
 | Platform database | 5 SQL migrations (Nakama/PostgreSQL) |
 | Docs | 11 design docs + full ADR index (see [Documentation](#documentation)) |
@@ -44,10 +44,13 @@ deterministic territory-changing results, inventory domain rules, a headless
 authoritative simulation with action validation, versioned protocol envelopes,
 per-session interest management, a transport-agnostic gateway with resumable
 sessions and interest-filtered replication, a framed connection loop, a
-WebSocket `lynx-world` binary, and the `lynx` project CLI.
+WebSocket `lynx-world` binary, optional durable whole-world snapshots
+(zone, calendar, and faction state in one versioned file), and the `lynx`
+project CLI.
 
 **Not started:** Bevy client crates (rendering, input, camera), the world
-editor, and durable world persistence — world state is currently in memory.
+editor, and a database-backed persistence adapter — `--state-file` snapshots
+are durable, sessions are still in memory.
 
 Brazilian Portuguese (`pt-BR`) is the default language for generated projects,
 templates, and player-facing content. See
@@ -115,7 +118,9 @@ Phase 8  Expand & stabilize          [██░░░░░░░░░░░░
 - [x] Server-side action validation: range, permission, state, and cooldown
       checks proven by tests.
 - [~] Persistence: Postgres migrations 0001–0005 exist and backend adapters
-      are in place, but the runnable world service is still memory-only.
+      are in place; `lynx-world` now loads and writes durable whole-world
+      snapshots behind a trusted, engine-owned seam. A SQL adapter behind the
+      same seams is the next persistence increment.
 - [ ] Exit criterion: two graphical clients observing consistent state
       (headless integration tests cover consistency; clients are pending).
 
@@ -227,18 +232,20 @@ cargo run -p project_cli -- doctor --project ../my-world
 # Run the world service. Configure a hash, not a plaintext token.
 printf '%s' 'replace-with-a-long-random-token' | cargo run -p lynx-world -- token-hash
 cargo run -p lynx-world -- serve --bind 127.0.0.1:8090 --token-hash <sha256-hex>
-# Add --staff on loopback to drive calendar lifecycle commands (demo only).
+# Add --state-file world.json for durable world state, and --staff on loopback
+# to drive calendar lifecycle commands (demo only).
 ```
 
 The service exposes `GET /healthz`, `GET /readyz`, and the WebSocket endpoint
 `GET /world` with `Authorization: Bearer <token>`. The first frame must be a
 `session.hello` envelope. The demo publishes one open faction conflict over
 the demo zone; player sessions enroll through `calendar.command` and inspect
-it with `calendar.query` (lifecycle transitions require `--staff`). Wire
-kinds and reconnection rules are documented in
+it with `calendar.query` (lifecycle transitions require `--staff`). With
+`--state-file <path>` the zone, calendar, and faction state survive restarts;
+sessions still do not. Wire kinds and reconnection rules are documented in
 [`docs/networking.md`](docs/networking.md); operation flags and shutdown
 behavior are in [`docs/operations.md`](docs/operations.md). There is no client
-crate yet, and world state is in memory.
+crate yet.
 
 ### The `lynx` CLI
 

@@ -71,8 +71,13 @@ Rules:
 - `lynx_world` is the runnable service: Axum/Tokio WebSocket transport, static
   hashed-token admission, health endpoints, the tick loop, and graceful
   shutdown. It publishes one open demo conflict over the demo zone and commits
-  calendar/faction snapshots into the in-memory backend. All gameplay authority
-  stays in the crates below it.
+  calendar/faction snapshots into the in-memory backend. With `--state-file`,
+  it loads a whole-world snapshot at startup and rewrites it on an interval and
+  at shutdown: `engine_sim`'s versioned `ZoneSnapshot` carries persistent
+  entities, links, cooldowns, idempotency caches, and transfer receipts, and
+  `lynx_world::persistence` pairs it with the calendar and faction snapshots
+  behind a trusted `SnapshotStore` seam. All gameplay authority stays in the
+  crates below it.
 - `backend_nakama` is the only crate that knows Nakama's HTTP API.
 - Client/editor crates (introduced with Bevy) depend on the crates above and
   never the reverse.
@@ -194,8 +199,12 @@ format, validation rules, and formatting policy are specified in
 
 - Character, inventory, property, faction, and audit data live in PostgreSQL.
 - World snapshots store changed entities per zone; the event log captures
-  economy and ownership transitions.
+  economy and ownership transitions. Today that seam is
+  `engine_sim::snapshot::ZoneSnapshot` plus the `lynx-world` file store; a SQL
+  adapter implements the same trusted boundaries later.
 - Writes that can be retried carry idempotency keys stored in a ledger table.
+  The zone snapshot persists transfer receipts so retries stay idempotent
+  across a restart.
 - Content definitions are versioned bundles; instances record the content
   version they were created from.
 
@@ -222,6 +231,12 @@ format, validation rules, and formatting policy are specified in
   termination. Plain WebSocket is intended for loopback development behind a
   trusted proxy.
 - A durable session store. Resume windows live in memory, so a zone restart
-  still requires players to log in again.
+  still requires players to log in again. Whole-world snapshots (`--state-file`)
+  are durable, but they restore the zone, calendar, and factions — not
+  sessions.
+- A database-backed persistence adapter. The snapshot seam is engine-owned and
+  file-backed today; the Postgres migrations already cover calendar, faction,
+  and inventory categories, and a `backend_nakama`/SQL adapter behind the same
+  seams is the next persistence increment.
 - The editor application, behavior graph editor, and admin spectator client.
 - WebAssembly scripting, which needs a sandbox design review before adoption.

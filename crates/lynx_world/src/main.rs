@@ -11,18 +11,22 @@
 //! lynx-world serve --bind 127.0.0.1:8090 --token-hash <sha256-hex>
 //! ```
 //!
-//! There is no database in this increment: sessions, characters, and world
-//! state live in memory and reset on restart. See `docs/operations.md`.
+//! Add `--state-file world.json` for durable state: the service loads that
+//! snapshot at startup and rewrites it on a fixed interval and at shutdown.
+//! Without it, sessions, characters, and world state are transient.
 
 use std::io::Read;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use engine_core::faction::FactionWorld;
+use engine_core::world_event::WorldCalendar;
 use lynx_world::auth::{self, Authenticator, Grant};
 use lynx_world::backend;
 use lynx_world::config::ServeArgs;
 use lynx_world::demo;
+use lynx_world::persistence::{FileSnapshotStore, SnapshotStore, WorldSnapshot};
 use lynx_world::service::Service;
 use lynx_world::transport::{self, AppState};
 use tokio::sync::watch;
@@ -86,16 +90,54 @@ async fn serve(args: ServeArgs) -> Result<()> {
     let gateway_config = args.gateway_config()?;
     let authenticator = Authenticator::new(&args.token_hashes()?)?.with_staff(args.staff);
     let grants: Vec<Grant> = authenticator.grants().cloned().collect();
-    let zone = demo::build_zone(&grants).context("failed to build the demo zone")?;
+    let snapshot_interval = args
+        .snapshot_interval()
+        .context("invalid snapshot interval")?;
 
-    // The demo publishes one bounded, open conflict over the demo zone at
-    // startup. Lifecycle transitions are staff-gated commands; enrollment is
-    // open to every demo character.
+    // Durable state: behind the optional snapshot file, the service resumes
+    // the world it wrote last; without it, the demo world starts fresh.
+    let store: Option<Arc<dyn SnapshotStore + Send + Sync>> = args
+        .state_file
+        .as_ref()
+        .map(|path| Arc::new(FileSnapshotStore::new(path.clone())) as _);
+    let saved: Option<WorldSnapshot> = match &store {
+        Some(store) => store
+            .load()
+            .context("failed to read the world snapshot file")?,
+        None => None,
+    };
+
+    let zone = match saved.as_ref() {
+        Some(world) => {
+            tracing::info!(
+                saved_at_ms = world.saved_at_ms,
+                entities = world.zone.entities.len(),
+                "restoring the world from the snapshot file"
+            );
+            demo::restore_zone(&world.zone).context("failed to restore the demo zone")?
+        }
+        None => demo::build_zone(&grants).context("failed to build the demo zone")?,
+    };
+
     let now_ms = demo::now_ms();
-    let mut factions =
-        demo::build_faction_world(now_ms).context("failed to build the demo faction world")?;
-    let calendar =
-        demo::build_calendar(&mut factions, now_ms).context("failed to build the demo calendar")?;
+    let (calendar, factions) = if let Some(world) = saved.as_ref()
+        && world.calendar.is_some()
+    {
+        // Calendar and faction state are restored together: a conflict
+        // resolution mutates both aggregates.
+        (
+            WorldCalendar::from_snapshot(world.calendar.clone().expect("checked above"))
+                .context("failed to restore the demo calendar")?,
+            FactionWorld::from_snapshot(world.factions.clone().expect("paired with the calendar"))
+                .context("failed to restore faction state")?,
+        )
+    } else {
+        let mut factions =
+            demo::build_faction_world(now_ms).context("failed to build the demo faction world")?;
+        let calendar = demo::build_calendar(&mut factions, now_ms)
+            .context("failed to build the demo calendar")?;
+        (calendar, factions)
+    };
     let mut gateway = WorldGateway::new(
         zone,
         demo::handshake().context("failed to build the server handshake")?,
@@ -110,7 +152,11 @@ async fn serve(args: ServeArgs) -> Result<()> {
         backend_memory::MemoryBackend::new(),
     )));
     let server = WorldServer::new(gateway);
-    let service = Service::new(server, args.tick_interval());
+    let service = match &store {
+        Some(store) => Service::new(server, args.tick_interval())
+            .with_persistence(Arc::clone(store), snapshot_interval),
+        None => Service::new(server, args.tick_interval()),
+    };
 
     let (events, receivers) = transport::event_channel();
     let (shutdown, shutdown_rx) = watch::channel(false);
@@ -126,6 +172,8 @@ async fn serve(args: ServeArgs) -> Result<()> {
         address = %local,
         characters = grants.len(),
         tick_ms = args.tick_ms,
+        snapshot_ms = args.snapshot_ms,
+        state_file = ?args.state_file,
         "lynx-world listening"
     );
 

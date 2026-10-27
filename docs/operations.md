@@ -74,6 +74,8 @@ flags:
 | `--max-sessions` | `1024` | connected plus retained sessions |
 | `--staff` | off | mark every demo grant as staff; enables calendar lifecycle commands (loopback development only) |
 | `--token-hash` | — | repeat once per demo character |
+| `--state-file <path>` | off | write durable world snapshots to this JSON file and load it at startup |
+| `--snapshot-ms <ms>` | 10000 | how often a configured snapshot file is rewritten (must be at least the tick interval) |
 
 At startup the service also publishes one open faction conflict over the demo
 zone. Player sessions may enroll through `calendar.command` and inspect the
@@ -81,10 +83,17 @@ calendar with `calendar.query`; lifecycle transitions (schedule, activate,
 resolve, …) are accepted only from `--staff` sessions. Applied commands are
 committed to the in-memory backend together with the faction snapshot.
 
+With `--state-file` configured, the service loads that snapshot at startup —
+zone entities, links, calendar, and faction state — rewrites it on the
+snapshot interval and once more at shutdown, and resumes the saved tick.
+Snapshots follow each entity's explicit persistence policy; sessions, resume
+tokens, and minigame replication stay in memory as before. Without the flag,
+state is in memory and a restart logs everyone out and resets the zone.
+
 The process logs through `RUST_LOG` (`info` by default) and shuts down on
-`Ctrl+C`: readiness turns false, the listener stops accepting, connections
-close, and the process exits. State is in memory, so a restart logs everyone
-out and resets the zone.
+`Ctrl+C`: readiness turns false, the listener stops accepting, a final world
+snapshot (when configured) is written, connections close, and the process
+exits.
 
 Health checks:
 

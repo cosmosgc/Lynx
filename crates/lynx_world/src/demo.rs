@@ -6,6 +6,10 @@
 //! player does not receive another player's props, and the owner-only crate
 //! never appears in a stranger's snapshot. The vault opens a server-validated
 //! lockpick minigame instead of reporting a locked door.
+//!
+//! Every demo entity is marked `PersistentEntity` so a whole-world snapshot
+//! restores it; when a saved snapshot exists, [`restore_zone`] rebuilds the
+//! zone from it instead of spawning fresh entities.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -15,8 +19,9 @@ use engine_core::faction::{
     Faction, FactionDefinition, FactionWorld, GovernancePolicy, PowerRules, TerritoryRules,
 };
 use engine_core::id::{DefinitionId, IdKind, StableId};
-use engine_core::inventory::UniformItemRules;
+use engine_core::inventory::{ItemRules, UniformItemRules};
 use engine_core::math::Vec3;
+use engine_core::schema::PersistencePolicy;
 use engine_core::time::{DurationMs, Millis};
 use engine_core::world_event::{
     CancellationPolicy, ConflictRule, EnrollmentRules, EventSchedule, EventSide, EventSideRole,
@@ -28,6 +33,7 @@ use engine_sim::entity::{Door, EntityRecord, Interactable, UiProvider};
 use engine_sim::mind::Mind;
 use engine_sim::minigame::Minigame;
 use engine_sim::nav::NavGrid;
+use engine_sim::snapshot::ZoneSnapshot;
 use engine_sim::zone::{Zone, ZoneConfig};
 use world_gateway::VISIBILITY_OWNER_ONLY_TAG;
 
@@ -40,6 +46,8 @@ const WIDTH_M: u16 = 800;
 const MAX_CHARACTERS: usize = 32;
 /// The demo conflict opens for enrollment one minute before the fight.
 const DEMO_CONFLICT_WINDOW_MS: i64 = 60_000;
+/// Navigation cell size in meters, shared by the demo and its restored zones.
+const DEMO_CELL_SIZE_M: f32 = 2.0;
 
 /// The authoritative world-clock timestamp, in epoch milliseconds.
 ///
@@ -81,17 +89,8 @@ pub fn build_zone(grants: &[Grant]) -> Result<Zone, EngineError> {
         Vec3::ZERO,
         Vec3::new(f32::from(WIDTH_M), 4.0, f32::from(height_m)),
     )?;
-    let nav = NavGrid::new(
-        usize::from(WIDTH_M / 2),
-        usize::from(height_m / 2),
-        2.0,
-        Vec3::ZERO,
-    )
-    .ok_or_else(|| {
-        EngineError::new(ErrorCode::InvalidRequest, "demo navigation grid is invalid")
-    })?;
-    let mut zone = Zone::new(config, nav, Arc::new(UniformItemRules::new(99)))?;
-
+    let nav = demo_nav(&config)?;
+    let mut zone = Zone::new(config, nav, demo_rules())?;
     let definitions = DemoDefinitions {
         character: definition("character.player")?,
         door: definition("prop.door")?,
@@ -114,6 +113,48 @@ pub fn build_zone(grants: &[Grant]) -> Result<Zone, EngineError> {
     }
 
     Ok(zone)
+}
+
+/// Build a navigation grid covering `config` with the demo cell size.
+///
+/// # Errors
+///
+/// Returns [`ErrorCode::InvalidRequest`] when the bounds are too small for
+/// even one cell.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the demo zone keeps positive whole-meter bounds, so the cell count is exact"
+)]
+fn demo_nav(config: &ZoneConfig) -> Result<NavGrid, EngineError> {
+    let width_m = config.max.x - config.min.x;
+    let height_m = config.max.z - config.min.z;
+    NavGrid::new(
+        (width_m / DEMO_CELL_SIZE_M) as usize,
+        (height_m / DEMO_CELL_SIZE_M) as usize,
+        DEMO_CELL_SIZE_M,
+        config.min,
+    )
+    .ok_or_else(|| EngineError::new(ErrorCode::InvalidRequest, "demo navigation grid is invalid"))
+}
+
+/// Rebuild the demo zone from a saved snapshot.
+///
+/// The snapshot supplies the zone configuration, so a restored world keeps the
+/// bounds it was saved with even when the configured token count has changed.
+/// New tokens resolve to no character until the zone is reset.
+///
+/// # Errors
+///
+/// Returns [`ErrorCode::InvalidRequest`] for an incompatible snapshot version
+/// or invalid bounds, and every error [`Zone::restore`] can produce.
+pub fn restore_zone(snapshot: &ZoneSnapshot) -> Result<Zone, EngineError> {
+    let nav = demo_nav(&snapshot.config)?;
+    Zone::restore(snapshot, nav, demo_rules())
+}
+
+fn demo_rules() -> Arc<dyn ItemRules + Send + Sync> {
+    Arc::new(UniformItemRules::new(99))
 }
 
 /// Content definitions the demo zone needs, resolved once at build time.
@@ -139,7 +180,8 @@ fn spawn_grant(
     zone.spawn(
         EntityRecord::new(actor, definitions.character.clone(), position)
             .with_health(100)
-            .with_mind(Mind::player(grant.principal, "unbound")),
+            .with_mind(Mind::player(grant.principal, "unbound"))
+            .with_persistence(PersistencePolicy::PersistentEntity),
     )?;
 
     zone.spawn(
@@ -149,7 +191,8 @@ fn spawn_grant(
             position.translated(Vec3::new(2.0, 0.0, 0.0)),
         )
         .with_interactable(Interactable::new(3.0, [Verb::Open]).without_line_of_sight())
-        .with_door(Door::new()),
+        .with_door(Door::new())
+        .with_persistence(PersistencePolicy::PersistentEntity),
     )?;
 
     zone.spawn(
@@ -161,7 +204,8 @@ fn spawn_grant(
         .with_health(100)
         .with_interactable(
             Interactable::new(4.0, [Verb::Inspect, Verb::Attack]).without_line_of_sight(),
-        ),
+        )
+        .with_persistence(PersistencePolicy::PersistentEntity),
     )?;
 
     zone.spawn(
@@ -171,7 +215,8 @@ fn spawn_grant(
             position.translated(Vec3::new(0.0, 0.0, -2.0)),
         )
         .owned_by(grant.principal)
-        .with_tag(VISIBILITY_OWNER_ONLY_TAG),
+        .with_tag(VISIBILITY_OWNER_ONLY_TAG)
+        .with_persistence(PersistencePolicy::PersistentEntity),
     )?;
 
     zone.spawn(
@@ -198,7 +243,8 @@ fn spawn_grant(
             8,
             100,
             random_seed()?,
-        )?),
+        )?)
+        .with_persistence(PersistencePolicy::PersistentEntity),
     )?;
 
     Ok(())
@@ -442,5 +488,40 @@ mod tests {
     fn the_handshake_is_valid_semver() {
         let handshake = handshake().unwrap();
         assert_eq!(handshake.protocol, engine_net::protocol::protocol_version());
+    }
+
+    #[test]
+    fn every_demo_entity_is_enduring_so_snapshots_keep_the_world() {
+        let zone = build_zone(&grants(2)).unwrap();
+        assert!(
+            zone.entities()
+                .all(|entity| entity.persistence == PersistencePolicy::PersistentEntity)
+        );
+    }
+
+    #[test]
+    fn a_demo_zone_round_trips_through_restore_zone() {
+        let grants = grants(2);
+        let mut built = build_zone(&grants).unwrap();
+        for _ in 0..5 {
+            built.advance_tick();
+        }
+        let snapshot = built.snapshot();
+
+        let restored = restore_zone(&snapshot).unwrap();
+        assert_eq!(restored.entity_count(), built.entity_count());
+        assert_eq!(restored.tick(), built.tick());
+        assert_eq!(restored.config(), &snapshot.config);
+        let seed = grants[0].principal.random_bits();
+        let vault = StableId::from_parts(IdKind::Entity, 1, seed ^ 0x400);
+        assert!(
+            restored
+                .entity(vault)
+                .unwrap()
+                .door
+                .as_ref()
+                .unwrap()
+                .locked
+        );
     }
 }

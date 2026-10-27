@@ -509,6 +509,23 @@ impl TransferLedger {
     pub fn applied_count(&self) -> usize {
         self.applied.len()
     }
+
+    /// All applied receipts. The order is unspecified.
+    pub fn applied(&self) -> impl Iterator<Item = &TransferReceipt> {
+        self.applied.values()
+    }
+
+    /// Adopt receipts recorded before a restart.
+    ///
+    /// Used when restoring a snapshot so retries that were already applied
+    /// before the restart still return the original receipt. A later receipt
+    /// with the same key overwrites the earlier one, mirroring a fresh
+    /// application.
+    pub fn adopt(&mut self, receipts: impl IntoIterator<Item = TransferReceipt>) {
+        for receipt in receipts {
+            self.applied.insert(receipt.key.clone(), receipt);
+        }
+    }
 }
 
 #[cfg(test)]

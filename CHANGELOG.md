@@ -8,6 +8,32 @@ semantic versioning for engine releases and content bundles.
 
 ### Added
 
+- `engine_sim`: versioned zone snapshots. `Zone::snapshot` captures persistent
+  entities (honoring each record's explicit persistence policy), links whose
+  endpoints were saved, the tick counter, active cooldowns, the action and
+  link replay caches, and applied inventory-transfer receipts, in a canonical
+  order. `Zone::restore` rebuilds a zone from a snapshot plus runtime-only
+  navigation and item rules and re-validates every entry through the normal
+  spawn, link, and range checks, so a stale or tampered file fails startup
+  instead of yielding a partial world.
+- `engine_core::inventory::TransferLedger` gained `applied` and `adopt` so
+  idempotency receipts recorded before a restart survive the reload.
+- `lynx_world`: durable whole-world snapshots. `--state-file <path>` makes the
+  runnable service load that file at startup and rewrite it on
+  `--snapshot-ms` (default 10 s) and once more at shutdown
+  (`Service::with_persistence`). The `WorldSnapshot` pairs the zone snapshot
+  with the calendar and faction snapshots, mirroring the trusted
+  `CalendarPersistence` commit contract; load validation rejects unsupported
+  schema versions and an unpaired calendar/faction aggregate, and the gateway
+  cross-validates the restored calendar before any session is accepted. The
+  demo marks every entity `PersistentEntity`, and `demo::restore_zone` rebuilds
+  the zone with its saved bounds. Sessions, resume tokens, and minigame
+  replication stay in memory and a save failure never stops the authority
+  loop.
+- `docs` updates for the snapshot path (architecture, operations, README
+  progress) and an end-to-end restart integration test that drives save →
+  restart → reconnect against the real gateway.
+
 - `engine_core`: durable world calendar and bounded faction conflicts. Events
   have an audited `Draft -> Scheduled -> Open -> Active` lifecycle with
   suspension, cancellation policy, and exactly one attacker and one defender

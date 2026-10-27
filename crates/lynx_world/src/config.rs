@@ -5,6 +5,7 @@
 //! line or through `LYNX_WORLD_TOKEN_HASHES` (comma- or whitespace-separated).
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -18,6 +19,9 @@ pub const DEFAULT_BIND: &str = "127.0.0.1:8090";
 
 /// Environment variable holding additional token hashes.
 pub const TOKEN_HASH_ENV: &str = "LYNX_WORLD_TOKEN_HASHES";
+
+/// Default interval between world snapshot writes, in milliseconds.
+pub const DEFAULT_SNAPSHOT_MS: u64 = 10_000;
 
 /// Arguments for `lynx-world serve`.
 #[derive(Debug, Clone, Args)]
@@ -45,6 +49,17 @@ pub struct ServeArgs {
     /// Grant every demo session a staff role. Development aid only.
     #[arg(long)]
     pub staff: bool,
+
+    /// Write durable world snapshots to this JSON file and load one at
+    /// startup. The file is the only persistent state; omit it to run the
+    /// previous memory-only behavior.
+    #[arg(long = "state-file", value_name = "PATH")]
+    pub state_file: Option<PathBuf>,
+
+    /// How often a configured snapshot file is rewritten while the service
+    /// runs, in milliseconds.
+    #[arg(long, default_value_t = DEFAULT_SNAPSHOT_MS)]
+    pub snapshot_ms: u64,
 
     /// SHA-256 hash of a bearer token. Repeat once per demo character.
     #[arg(long = "token-hash", value_name = "SHA256")]
@@ -81,6 +96,22 @@ impl ServeArgs {
     #[must_use]
     pub const fn tick_interval(&self) -> Duration {
         Duration::from_millis(self.tick_ms)
+    }
+
+    /// The snapshot write interval for the authority loop.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the interval is zero or the tick interval is
+    /// faster than the snapshot interval can divide into.
+    pub fn snapshot_interval(&self) -> Result<Duration> {
+        if self.snapshot_ms == 0 {
+            bail!("--snapshot-ms must be positive");
+        }
+        if self.tick_ms > self.snapshot_ms {
+            bail!("--snapshot-ms must be at least the tick interval");
+        }
+        Ok(Duration::from_millis(self.snapshot_ms))
     }
 
     /// Token hashes from the command line plus the environment, parsed and
@@ -127,8 +158,34 @@ mod tests {
             view_radius_m: 60.0,
             max_sessions: 1_024,
             staff: false,
+            state_file: None,
+            snapshot_ms: DEFAULT_SNAPSHOT_MS,
             token_hashes: vec![crate::auth::hash_hex("token")],
         }
+    }
+
+    #[test]
+    fn snapshot_interval_follows_the_tick_interval() {
+        assert_eq!(
+            sample().snapshot_interval().unwrap(),
+            Duration::from_millis(10_000)
+        );
+
+        let mut tight = sample();
+        tight.tick_ms = 1_000;
+        tight.snapshot_ms = 2_000;
+        assert_eq!(
+            tight.snapshot_interval().unwrap(),
+            Duration::from_millis(2_000)
+        );
+
+        let mut faster_than_ticks = sample();
+        faster_than_ticks.snapshot_ms = 10;
+        assert!(faster_than_ticks.snapshot_interval().is_err());
+
+        let mut zero = sample();
+        zero.snapshot_ms = 0;
+        assert!(zero.snapshot_interval().is_err());
     }
 
     #[test]
