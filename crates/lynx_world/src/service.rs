@@ -202,19 +202,24 @@ impl Service {
                         && ticks_since_save >= persistence.interval_ticks
                     {
                         ticks_since_save = 0;
-                        self.save_world();
+                        self.save_snapshot();
                     }
                 }
             }
         }
 
-        self.save_world();
+        self.save_snapshot();
         self.close_all();
         tracing::debug!("world service loop stopped");
     }
 
-    /// Capture and write one world snapshot, recording failures in the log.
-    fn save_world(&mut self) {
+    /// Capture and write one world snapshot now.
+    ///
+    /// Failures are recorded in the log and never stop the loop: the
+    /// in-memory world stays authoritative. The authority loop calls this on
+    /// its save cadence and at shutdown; startup calls it once so the baseline
+    /// world survives even a crash before the first interval save.
+    pub fn save_snapshot(&mut self) {
         let Some(persistence) = &self.persistence else {
             return;
         };

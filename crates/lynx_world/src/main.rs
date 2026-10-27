@@ -100,11 +100,23 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .state_file
         .as_ref()
         .map(|path| Arc::new(FileSnapshotStore::new(path.clone())) as _);
-    let saved: Option<WorldSnapshot> = match &store {
-        Some(store) => store
-            .load()
-            .context("failed to read the world snapshot file")?,
-        None => None,
+    args.validate_snapshot_args()
+        .context("invalid snapshot configuration")?;
+    let saved: Option<WorldSnapshot> = if args.fresh {
+        if let Some(path) = &args.state_file {
+            tracing::info!(
+                path = %path.display(),
+                "--fresh: the played world is ignored and a freshly authored world is saved over the snapshot at startup"
+            );
+        }
+        None
+    } else {
+        match &store {
+            Some(store) => store
+                .load()
+                .context("failed to read the world snapshot file")?,
+            None => None,
+        }
     };
 
     let zone = match saved.as_ref() {
@@ -152,11 +164,17 @@ async fn serve(args: ServeArgs) -> Result<()> {
         backend_memory::MemoryBackend::new(),
     )));
     let server = WorldServer::new(gateway);
-    let service = match &store {
+    let mut service = match &store {
         Some(store) => Service::new(server, args.tick_interval())
             .with_persistence(Arc::clone(store), snapshot_interval),
         None => Service::new(server, args.tick_interval()),
     };
+    // Establish the baseline snapshot before the loop starts, so the authored
+    // world (or the freshly reset one under --fresh) is durable from the very
+    // first second instead of waiting for the first interval save.
+    if store.is_some() {
+        service.save_snapshot();
+    }
 
     let (events, receivers) = transport::event_channel();
     let (shutdown, shutdown_rx) = watch::channel(false);

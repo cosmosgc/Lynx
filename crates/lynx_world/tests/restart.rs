@@ -160,3 +160,72 @@ fn a_broken_snapshot_file_is_rejected_with_a_stable_code() -> anyhow::Result<()>
     );
     Ok(())
 }
+
+#[test]
+fn a_fresh_start_replaces_the_played_world_with_the_authored_one() -> anyhow::Result<()> {
+    // Simulates what `--fresh` does in main: keep the store, ignore the
+    // played file, rebuild the demo world, and save it over the snapshot.
+    let grants = characters(1);
+    let dir = std::env::temp_dir().join("lynx-world-restart-tests");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("fresh-world.json");
+    let store = FileSnapshotStore::new(&path);
+
+    // A "played" world: time moved, doors were opened by a link activation.
+    let mut played_gateway = WorldGateway::new(
+        demo::build_zone(&grants)?,
+        demo::handshake()?,
+        GatewayConfig::new(DurationMs::new(30_000)),
+        SystemResumeTokens::new(),
+    )?;
+    for _ in 0..7 {
+        played_gateway.tick(Millis::new(0))?;
+    }
+    let played_server = WorldServer::new(played_gateway);
+    let played = WorldSnapshot::capture(
+        &WorldSnapshotInputs {
+            zone: played_server.gateway().zone().snapshot(),
+            calendar_factions: None,
+        },
+        1_000,
+    );
+    store.save(&played)?;
+    assert_eq!(store.load()?.unwrap().zone.tick.0, 7);
+
+    // --fresh: ignore the played file, rebuild, and save the authored world.
+    let authored_gateway = WorldGateway::new(
+        demo::build_zone(&grants)?,
+        demo::handshake()?,
+        GatewayConfig::new(DurationMs::new(30_000)),
+        SystemResumeTokens::new(),
+    )?;
+    let authored_server = WorldServer::new(authored_gateway);
+    let authored = WorldSnapshot::capture(
+        &WorldSnapshotInputs {
+            zone: authored_server.gateway().zone().snapshot(),
+            calendar_factions: None,
+        },
+        2_000,
+    );
+    store.save(&authored)?;
+
+    let reset = store.load()?.unwrap();
+    assert_eq!(reset.zone.tick.0, 0, "the auth world is back at tick zero");
+    // Entities match the authored placement exactly; the server-held
+    // minigame seed is re-rolled from entropy, which is not a state change.
+    let playback_positions: Vec<_> = authored
+        .zone
+        .entities
+        .iter()
+        .map(|entity| (entity.id, entity.transform))
+        .collect();
+    let restored_positions: Vec<_> = reset
+        .zone
+        .entities
+        .iter()
+        .map(|entity| (entity.id, entity.transform))
+        .collect();
+    assert_eq!(restored_positions, playback_positions);
+    std::fs::remove_file(&path).unwrap_or(());
+    Ok(())
+}

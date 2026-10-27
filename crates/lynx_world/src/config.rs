@@ -56,6 +56,12 @@ pub struct ServeArgs {
     #[arg(long = "state-file", value_name = "PATH")]
     pub state_file: Option<PathBuf>,
 
+    /// Ignore the existing snapshot file and re-save the freshly authored
+    /// demo world over it at startup. The played world is discarded. Requires
+    /// `--state-file`.
+    #[arg(long)]
+    pub fresh: bool,
+
     /// How often a configured snapshot file is rewritten while the service
     /// runs, in milliseconds.
     #[arg(long, default_value_t = DEFAULT_SNAPSHOT_MS)]
@@ -114,6 +120,18 @@ impl ServeArgs {
         Ok(Duration::from_millis(self.snapshot_ms))
     }
 
+    /// Combine consistency checks for the snapshot configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `--fresh` is set without `--state-file`.
+    pub fn validate_snapshot_args(&self) -> Result<()> {
+        if self.fresh && self.state_file.is_none() {
+            bail!("--fresh requires --state-file: there is nothing to overwrite");
+        }
+        Ok(())
+    }
+
     /// Token hashes from the command line plus the environment, parsed and
     /// deduplicated.
     ///
@@ -159,9 +177,25 @@ mod tests {
             max_sessions: 1_024,
             staff: false,
             state_file: None,
+            fresh: false,
             snapshot_ms: DEFAULT_SNAPSHOT_MS,
             token_hashes: vec![crate::auth::hash_hex("token")],
         }
+    }
+
+    #[test]
+    fn fresh_requires_a_state_file() {
+        let mut sample = sample();
+        assert!(sample.validate_snapshot_args().is_ok());
+
+        sample.state_file = Some(std::path::PathBuf::from("world.json"));
+        sample.fresh = true;
+        assert!(sample.validate_snapshot_args().is_ok());
+
+        let mut reset_without_file = sample.clone();
+        reset_without_file.state_file = None;
+        reset_without_file.fresh = true;
+        assert!(reset_without_file.validate_snapshot_args().is_err());
     }
 
     #[test]
