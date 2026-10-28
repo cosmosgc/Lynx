@@ -11,6 +11,31 @@ is a fixed distance per update, so its speed depends on frame rate. There is no
 content loading, collision, UI, or gameplay authority. The 2D camera follows the rig's target rather than its 3D offset.
 Visual verification on Windows is still required.
 
+## Planned server browser
+
+The client is intended to provide a server browser, similar to those in Valve
+games. Players will be able to add multiple servers by IP address or hostname
+and port, connect to a server, and revisit servers from connection history or a
+pinned list.
+
+Multiple client instances will be supported. Each instance has its own server
+connection, so several instances may connect to the same server and account
+subject to that server's session policy. Servers may choose whether to limit
+concurrent sessions per character or per account. Under the per-character
+policy, different characters on the same account can be played from separate
+instances; under the per-account policy, only one character from that account
+can be connected at a time. A duplicate connection receives an error rather
+than disconnecting or replacing the existing session. This is a planned flow,
+not a feature of the current demo; the current gateway policy is per-character.
+
+Login credentials will be remembered per server for faster connections. Saving
+them must be opt-in and use the operating system's secure credential store;
+passwords must not be written in plaintext to client configuration or logs.
+Remote servers must use `wss://`; plain `ws://` is for trusted local networks
+only. This browser and credential storage are planned features and are not
+implemented yet. The initial scope is user-added servers, history, and pins;
+public server discovery is not specified.
+
 ## Development-only online demo
 
 Start the demo world server with a configured static token hash (see the server
@@ -21,6 +46,10 @@ Do not put tokens on the command line or in committed files. Environment values
 can still be visible to processes or diagnostics; use only disposable development
 credentials. Use local `ws://` only on a trusted network; remote use requires
 `wss://` with a trusted certificate. This is not production authentication.
+
+The static-token demo maps each configured token to one fixed demo character.
+It does not yet support logging in to an account and selecting different
+characters across multiple client instances.
 
 The window title shows connection status. Blue squares represent the server's
 bounded public interest set; the camera follows the authoritative player position.

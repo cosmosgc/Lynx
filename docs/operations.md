@@ -73,6 +73,7 @@ flags:
 | `--resume-ttl-ms` | `30000` | reconnect window |
 | `--view-radius-m` | `60` | server-chosen interest radius |
 | `--max-sessions` | `1024` | connected plus retained sessions |
+| Concurrent-session policy | per character (current fixed behavior) | planned server setting: limit sessions per character or per account |
 | `--staff` | off | mark every demo grant as staff; enables calendar lifecycle commands (loopback development only) |
 | `--token-hash` | — | repeat once per demo character |
 | `--state-file <path>` | off | write durable world snapshots to this JSON file and load it at startup |
@@ -181,6 +182,9 @@ Target minimum metrics (export is not implemented; `OPS-001`):
 - A character has at most one connected session. Opening a second connection
   with the same static token returns `Conflict` until the first detaches or its
   resume window expires; do not work around it by duplicating hashes.
+- The production server is intended to configure whether this uniqueness limit
+  is per character or per account. The current demo and gateway enforce the
+  per-character policy; account-wide enforcement is not implemented yet.
 - A client that cannot drain its bounded outbound queue is detached instead of
   slowing the authoritative tick. Alert on repeated detaches; they usually mean
   a stuck client or a network path with insufficient throughput.

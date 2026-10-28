@@ -71,16 +71,36 @@ blocked by unrelated `backend_nakama` test lint errors; client clippy passes.
 
 **Scope**
 
-- Server URL configuration and a login screen for the supported identity flow.
+- Server browser that supports multiple saved servers, each configured with an
+  IP address or hostname and port.
+- Show recent servers in connection history and let players pin servers for
+  quick access.
+- Provide login for the supported identity flow and remember credentials per
+  server for fast reconnection. Saving credentials is opt-in and uses the
+  operating system's secure credential store; never persist passwords in
+  plaintext client configuration or logs.
+- Allow multiple client processes to run at once, each with its own server
+  connection; do not impose a client-wide single-instance lock. Respect the
+  server's configured concurrency policy: per character or per account.
 - Acquire a session, send `session.hello` with the negotiated handshake, and
   surface protocol/auth/capacity errors in the player's locale.
 - Store tokens only as long as needed; never log them.
 - Handle token expiry/refresh and a clear logout path.
 - Distinguish "server unreachable", "auth failed", "version mismatch", and
   "world full" in the UI.
+- Require `wss://` for remote servers; allow `ws://` only for trusted local
+  networks. Public server-directory discovery is outside this initial scope.
 
 **Acceptance criteria**
 
+- [ ] Players can add and connect to multiple servers using an IP/hostname and
+      port.
+- [ ] Recent connections appear in history, and pinned servers remain easy to
+      find across restarts.
+- [ ] Remembered credentials are isolated per server and stored only in the
+      operating system's secure credential store.
+- [ ] Multiple client instances connect according to the server's selected
+      per-character or per-account session policy.
 - [ ] A valid session reaches `world.ready` and renders the zone.
 - [ ] Invalid/expired credentials show a localized, actionable error.
 - [ ] A version mismatch is blocked before world entry with the supported range.
@@ -100,9 +120,14 @@ blocked by unrelated `backend_nakama` test lint errors; client clippy passes.
 
 - List characters owned by the account, select one, and create a new one within
   the configured limits.
+- Allow separate client instances to select different characters owned by the
+  same account on the same server when its policy is per-character. The server
+  may instead configure one connected session per account.
 - Validate names and appearance choices client-side for UX, then re-validate on
   the server.
 - Show creation/selection failures without leaking other accounts' data.
+- If another instance already has the selected character connected, show an
+  actionable conflict; never silently replace or disconnect that session.
 - Enter the world with the selected character and resume the last safe position
   per persistence policy.
 
@@ -112,6 +137,9 @@ blocked by unrelated `backend_nakama` test lint errors; client clippy passes.
 - [ ] The client cannot select a character it does not own.
 - [ ] Name/appearance validation matches server rules.
 - [ ] The selected character is clearly identified in the UI.
+- [ ] Two instances can play different characters from one account when the
+      server uses per-character limits; per-account limits reject a second
+      session without affecting the first.
 
 ---
 

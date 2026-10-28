@@ -53,6 +53,9 @@ development authentication path rather than a client-chosen identity.
   hash maps to one deterministic demo account and character. The client cannot
   choose an account, principal, staff flag, session ID, view radius, or token.
   A duplicate login for a character already connected returns `Conflict`.
+  This fixed token-to-character mapping is development-only and does not
+  provide the multi-character account login flow needed for multiple client
+  instances to use different characters under one account.
 - **Backpressure is explicit.** Each connection has a bounded outbound queue.
   A client that cannot drain it is detached rather than stalling the authority
   loop. The global inbound event channel applies socket backpressure.

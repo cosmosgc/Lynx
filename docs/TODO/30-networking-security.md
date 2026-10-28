@@ -40,6 +40,10 @@ characters the account may control.
   including expiry, revocation, and refresh semantics.
 - Resolve account → owned characters → selected character; reject sessions that
   try to control a character they do not own.
+- Add a server-side concurrent-session policy with `per_character` and
+  `per_account` options. Keep the current per-character behavior as the
+  default; enforce per-account limits using only authenticated account claims,
+  including retained resume sessions, without replacing an existing session.
 - Keep static token mode explicitly development-only: require loopback binding
   or an opt-in flag and log a startup warning.
 - Map identity failures to stable error codes without leaking backend details.
@@ -65,6 +69,9 @@ the synchronous seam does not settle production I/O architecture.
 - [ ] An expired, revoked, malformed, or unknown session is rejected before a
       gateway session is created.
 - [ ] Selecting a character owned by another account is rejected and audited.
+- [ ] The configured session policy rejects a duplicate character or account
+      session as appropriate, including during resume windows, without
+      disconnecting the existing session.
 - [x] Static-token mode cannot be enabled on a non-loopback listener without an
       explicit development flag.
 - [ ] An integration test with a fake identity backend covers login, expiry, and

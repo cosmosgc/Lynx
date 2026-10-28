@@ -48,8 +48,11 @@ servers.
 - `world_gateway` accepts claims only from trusted code that has already
   authenticated the player. A client cannot construct a session for another
   account or character, claim a staff role, or choose its own session ID.
-- A character has at most one connected session. Retained sessions count
-  against the session cap, so reconnect windows cannot bypass admission limits.
+- The current gateway permits at most one connected session per character.
+  The planned server configuration can enforce uniqueness per character or per
+  account; the account-wide policy must use the authenticated account identity,
+  never a client-supplied account value. Retained sessions count against the
+  session cap, so reconnect windows cannot bypass admission limits.
 - Resume tokens are opaque, server-issued, short-lived (default 30 s),
   single-use, and rotated on every resume. They are redacted from `Debug` and
   must never be logged or embedded in error details. The transport delivers the

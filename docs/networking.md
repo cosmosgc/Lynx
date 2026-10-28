@@ -197,8 +197,14 @@ connection and the authoritative zone. It adds no socket and no runtime.
 - **Connect.** Trusted transport code authenticates the player, then calls
   `WorldGateway::connect` with `SessionClaims` (account, character principal,
   staff flag) and the client handshake. The server issues the session ID and
-  the resume token. A character may have one connected session; a second
-  connect returns `Conflict`. An incompatible handshake creates no session.
+  the resume token. The server's configured concurrent-session policy is
+  either per character or per account; a duplicate under that policy returns
+  `Conflict` and does not replace the existing session. Per-character policy
+  allows separate clients to connect under one account using different
+  characters; per-account policy allows only one active character session for
+  that account. The current gateway implementation enforces per-character
+  uniqueness; per-account enforcement is planned. An incompatible handshake
+  creates no session.
 - **Action bodies are intent only.** `action.request` accepts `verb`, optional
   `target`, optional `params`, and optional `client_tick`. Unknown fields —
   including `actor`, `principal`, or `session` — are rejected with
