@@ -29,10 +29,10 @@ that authority end to end.
   [networking §Reconnect and recovery](../networking.md#reconnect-and-recovery),
   ADR 0010, `crates/engine_sim/src/nav.rs`
 
-**Why:** There is no movement verb. `EntityRecord` has a transform and the
-engine has navigation primitives, but a client cannot ask to move, and the
-server has no per-tick movement budget to validate. Every client milestone
-depends on this contract.
+**Why:** The gateway accepts queued movement intents and the server applies a
+fixed per-tick speed budget, but occupancy, fine collision, status effects, and
+full integration coverage remain open. Client movement depends on completing
+this authority contract.
 
 **Scope**
 
@@ -106,7 +106,7 @@ remain outstanding.
 ## SIM-002 — Client prediction and reconciliation contract
 
 - **Priority:** P0
-- **Status:** In progress — server reconciliation foundation; client work blocked on `SIM-001` and `CLT-005`
+- **Status:** In progress — server foundation and isolated client reconciliation; integration outstanding
 - **Depends on:** `SIM-001`, `CLT-005`
 - **References:** ADR 0014, `SIM-001`
 
@@ -139,6 +139,17 @@ Processed inputs carry a tick-stamped applied/rejected result and position for
 that exact session only. Disconnect and delivery failure recover via a baseline,
 not replay of per-input results. Exhausting u64 requires a new session. Client
 replay/smoothing, velocity and non-reconnect reset policies remain open.
+
+The pure client reconciliation module predicts at most one absolute endpoint,
+bounded by a caller-configured presentation distance, and snaps to the private
+processed result or a fresh baseline. Queue acceptance is not processing; a
+definitive correlated queue rejection clears prediction, whereas ambiguous loss
+requires reconnect and a baseline. Resume preserves the highest locally issued
+or server-consumed sequence; a new session starts a new sequence domain. It is
+not connected to networking or rendering, does not smooth or replay multiple
+inputs, and does not implement teleport, death or zone-transfer integration.
+The local distance bound is not server movement validation. The caller must
+discard messages from old connections and distinguish resumed from new sessions.
 
 ---
 

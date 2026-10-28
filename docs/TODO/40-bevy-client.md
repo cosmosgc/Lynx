@@ -20,7 +20,7 @@ client/editor crates. Phases 1, 2, 4, and 7 still require further client work.
 ## CLT-001 — Client workspace and crate layout
 
 - **Priority:** P0
-- **Status:** In progress — headless CI and visual smoke verification remain
+- **Status:** In progress — hosted headless CI and visual smoke verification remain
 - **Depends on:** —
 - **References:** ADR 0001, [architecture §What is deliberately not here yet](../architecture.md#what-is-deliberately-not-here-yet)
 
@@ -42,20 +42,22 @@ client/editor crates. Phases 1, 2, 4, and 7 still require further client work.
 **Acceptance criteria**
 
 - [x] `cargo build --workspace` and `cargo test --workspace` include the client.
-- [ ] A headless CI job builds and tests the client without a display/GPU.
+- [ ] A hosted CI run verifies the configured headless client build and test
+      without a display/GPU.
 - [x] No engine domain crate depends on Bevy.
 - [x] The Bevy pin is recorded and an upgrade note exists.
-- [ ] `cargo run -p lynx_client` opens a window on a developer machine.
+- [ ] Visually verify that `cargo run -p lynx_client` opens a window on a
+      developer machine.
 
 **Progress:** Bevy 0.20.0 is available on crates.io and pinned in the workspace.
 The client provides a shared plugin and deterministic headless update test; see
 [`clients/lynx_client/README.md`](../../clients/lynx_client/README.md) for run,
 headless build/test, and upgrade instructions. On Windows, workspace build and
 tests and the no-default-features client test passed; the default executable
-created a window handle, but a visual smoke test is still needed. The existing
-workspace CI runs client tests without opening a window, but an explicit
-no-default-features headless CI build/test has not been added or verified. No
-offline/replay UI harness or renderer exists yet. Workspace clippy is currently
+created a window handle, but a visual smoke test is still needed. Ubuntu and
+Windows CI jobs configure explicit no-default-features headless client build and
+test steps; a hosted run verifying them remains outstanding. No offline/replay
+UI harness exists yet. Workspace clippy is currently
 blocked by unrelated `backend_nakama` test lint errors; client clippy passes.
 
 ---

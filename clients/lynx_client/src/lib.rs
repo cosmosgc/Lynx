@@ -3,8 +3,11 @@
 use bevy::prelude::*;
 
 pub mod offline;
+pub mod online;
+pub mod reconciliation;
 #[cfg(feature = "window")]
 pub mod windowed;
+pub mod world_state;
 
 /// Shared client state used to verify that the application schedule is running.
 #[derive(Debug, Default, Resource)]
@@ -18,6 +21,7 @@ impl Plugin for LynxClientPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ClientFrameCount>()
             .add_systems(Update, count_frame)
+            .add_systems(Update, online::poll_online)
             .add_plugins(offline::OfflineFoundationPlugin);
     }
 }

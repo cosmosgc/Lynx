@@ -10,10 +10,25 @@ repository.workspace = true
 
 [features]
 default = ["window"]
-window = ["bevy/bevy_window", "bevy/bevy_winit", "bevy/x11", "bevy/2d_bevy_render"]
+window = ["bevy/bevy_window", "bevy/bevy_winit", "bevy/x11", "bevy/2d_bevy_render", "dep:tokio", "dep:semver"]
 
 [dependencies]
 bevy = { workspace = true, features = ["std", "async_executor"] }
+engine_core.workspace = true
+engine_net.workspace = true
+lynx_client_net = { path = "../lynx_client_net" }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, optional = true }
+semver = { workspace = true, optional = true }
+
+[dev-dependencies]
+futures-util = "0.3.31"
+lynx-world = { path = "../../crates/lynx_world" }
+world_gateway.workspace = true
+world_server.workspace = true
+tokio.workspace = true
+tokio-tungstenite = "0.30.0"
 
 [lints]
 workspace = true

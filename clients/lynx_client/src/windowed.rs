@@ -3,8 +3,86 @@
 use bevy::prelude::*;
 
 use crate::offline::{CameraPose, Control, OfflineScene, OfflineSet, PressedControls};
+use crate::online::{OnlineClient, OnlineStatus};
+use engine_core::id::StableId;
+use std::collections::{BTreeMap, BTreeSet};
 
 const SCALE: f32 = 32.0;
+
+/// Read-only presentation of the current server-owned public interest set.
+#[derive(Debug)]
+pub struct OnlineWindowPlugin;
+
+impl Plugin for OnlineWindowPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, setup_online)
+            .add_systems(Update, present_online);
+    }
+}
+
+#[derive(Component)]
+struct OnlineEntity(StableId);
+
+fn setup_online(mut commands: Commands) {
+    commands.spawn((Camera2d, SceneCamera));
+}
+
+// Clamp before scaling so even a finite but extreme server coordinate cannot
+// produce an infinite Bevy transform.
+fn screen_position(x: f32, z: f32) -> Vec3 {
+    Vec3::new(
+        x.clamp(-1_000_000.0, 1_000_000.0) * SCALE,
+        -z.clamp(-1_000_000.0, 1_000_000.0) * SCALE,
+        1.0,
+    )
+}
+
+fn present_online(
+    mut commands: Commands,
+    client: Res<OnlineClient>,
+    mut entities: Query<(Entity, &OnlineEntity, &mut Transform), Without<SceneCamera>>,
+    mut cameras: Query<&mut Transform, (With<SceneCamera>, Without<OnlineEntity>)>,
+    mut windows: Query<&mut Window>,
+) {
+    let state = client.world();
+    let public: BTreeMap<_, _> = state
+        .entities()
+        .map(|entity| (entity.entity, entity))
+        .collect();
+    let mut missing: BTreeSet<_> = public.keys().copied().collect();
+    for (entity, id, mut transform) in &mut entities {
+        if let Some(public) = public.get(&id.0) {
+            transform.translation = screen_position(public.position.x, public.position.z);
+            missing.remove(&id.0);
+        } else {
+            commands.entity(entity).despawn();
+        }
+    }
+    for public in missing.iter().filter_map(|id| public.get(id)) {
+        commands.spawn((
+            Sprite::from_color(Color::srgb(0.3, 0.7, 1.0), Vec2::splat(24.0)),
+            Transform::from_translation(screen_position(public.position.x, public.position.z)),
+            OnlineEntity(public.entity),
+        ));
+    }
+    if let Some(position) = state.reconciliation().authoritative_position() {
+        for mut camera in &mut cameras {
+            let position = screen_position(position.x, position.z);
+            camera.translation.x = position.x;
+            camera.translation.y = position.y;
+        }
+    }
+    let status = match client.status() {
+        OnlineStatus::Disconnected => "disconnected",
+        OnlineStatus::Connecting => "connecting",
+        OnlineStatus::AwaitingSnapshot => "awaiting snapshot",
+        OnlineStatus::Active => "active (read-only)",
+        OnlineStatus::Failed(_) => "connection failed",
+    };
+    for mut window in &mut windows {
+        window.title = format!("Lynx demo online - {status}");
+    }
+}
 
 #[derive(Debug)]
 pub struct OfflineWindowPlugin;
