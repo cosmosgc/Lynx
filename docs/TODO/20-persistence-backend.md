@@ -10,8 +10,8 @@ bundles, zone leases/snapshots/events, factions, the world calendar, and
 whole-world snapshots. `lynx-world` can persist a whole world to a JSON file or
 to `lynx.world_snapshots` through `PostgresSnapshotStore`. `backend_memory`
 implements every `game_api` service; `backend_nakama` implements only health and
-authentication. Most normalized tables are defined but not yet used by the
-runtime.
+authentication services, with separate, unwired character and identity SQL
+repositories. Most normalized tables are defined but not yet used by the runtime.
 
 **Related design:** [architecture §Persistence model](../architecture.md#persistence-model),
 [ADR 0003](../adr/0003-native-nakama-and-postgresql.md),
@@ -28,6 +28,21 @@ runtime.
 - **Depends on:** —
 - **References:** migration `0001_core.sql`, `crates/game_api/src/service.rs`,
   `character.rs`, `crates/backend_memory`
+
+**Partial progress:** `backend_nakama::PostgresCharacterStore` provides
+account-scoped list, active-character lookup, and transactional character creation
+against `lynx.characters`. Creation serializes on the account row, enforces an
+eight-character limit, and writes a retry receipt and audit event atomically;
+other writers must follow the same locking protocol. It is a repository, not a
+`CharacterService` implementation: callers must authenticate the session and
+supply a non-secret retry key. `PostgresIdentityStore` looks up an existing
+account by its unique Nakama user ID, rejects malformed or unmapped IDs, and does
+not provision accounts. It is unwired: a future caller must obtain the ID from
+validated Nakama authentication, never client input. The current Nakama adapter's
+account ID is the Nakama user ID, not necessarily the Lynx account ID. Account
+provisioning, authenticated integration, creation through the API, deletion,
+world entry, and shared adapter contract tests remain outstanding. PostgreSQL
+integration tests require a configured migrated database.
 
 **Why:** The durable world snapshot restores zones, calendar, and factions, but
 accounts and characters still live in the in-memory backend. A restart loses
