@@ -155,6 +155,87 @@ fn fixture() -> Fixture {
     fixture_with_ttl(30_000)
 }
 
+fn add_large_view(server: &mut WorldServer) {
+    for seed in 100..500 {
+        server
+            .gateway_mut()
+            .zone_mut()
+            .spawn(EntityRecord::new(
+                id(IdKind::Entity, seed),
+                text("prop.snapshot_padding"),
+                Vec3::new(10.0, 0.0, 10.0),
+            ))
+            .unwrap();
+    }
+}
+
+#[test]
+fn oversized_snapshot_rejects_admission_and_cleans_up() {
+    let mut fixture = fixture();
+    let bob = open(&mut fixture.server, "bob", fixture.bob_principal);
+    add_large_view(&mut fixture.server);
+    let error = fixture
+        .server
+        .open(
+            claims("alice", fixture.alice_principal),
+            &handshake(),
+            Millis::new(1_000),
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), ErrorCode::CapacityExceeded);
+    assert!(
+        error.details().contains_key("bytes"),
+        "must exceed the encoded wire limit"
+    );
+    assert_eq!(fixture.server.connection_count(), 1);
+    assert_eq!(fixture.server.gateway().retained_sessions(), 1);
+    assert_eq!(
+        fixture.server.connection_for(&bob.session),
+        Some(bob.connection)
+    );
+    for seed in 100..500 {
+        fixture
+            .server
+            .gateway_mut()
+            .zone_mut()
+            .despawn(id(IdKind::Entity, seed))
+            .unwrap();
+    }
+    let alice = open(&mut fixture.server, "alice", fixture.alice_principal);
+    assert!(envelope_with_kind(&alice, SNAPSHOT_KIND).encode().is_ok());
+}
+
+#[test]
+fn oversized_resume_snapshot_revokes_rotated_session() {
+    let mut fixture = fixture();
+    let opened = open(&mut fixture.server, "alice", fixture.alice_principal);
+    assert!(envelope_with_kind(&opened, SNAPSHOT_KIND).encode().is_ok());
+    fixture
+        .server
+        .disconnect(opened.connection, Tick(0), Millis::new(1_100))
+        .unwrap();
+    add_large_view(&mut fixture.server);
+    let error = fixture
+        .server
+        .resume(&opened.token, &handshake(), Tick(0), Millis::new(1_200))
+        .unwrap_err();
+    assert_eq!(error.code(), ErrorCode::CapacityExceeded);
+    assert!(
+        error.details().contains_key("bytes"),
+        "must exceed the encoded wire limit"
+    );
+    assert_eq!(fixture.server.connection_count(), 0);
+    assert_eq!(fixture.server.gateway().retained_sessions(), 0);
+    assert_eq!(
+        fixture
+            .server
+            .resume(&opened.token, &handshake(), Tick(0), Millis::new(1_300))
+            .unwrap_err()
+            .code(),
+        ErrorCode::SessionExpired
+    );
+}
+
 fn open(server: &mut WorldServer, account: &str, principal: StableId) -> Opened {
     server
         .open(claims(account, principal), &handshake(), Millis::new(1_000))

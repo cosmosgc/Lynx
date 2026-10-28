@@ -233,7 +233,8 @@ impl WorldServer {
     ///
     /// Returns the same handshake, authority, capacity, and conflict errors as
     /// [`WorldGateway::connect`]. No connection or session is retained on
-    /// failure.
+    /// failure. An initial snapshot that cannot be encoded within the wire
+    /// limits also fails admission with no retained session.
     pub fn open(
         &mut self,
         claims: SessionClaims,
@@ -251,7 +252,9 @@ impl WorldServer {
     ///
     /// Returns the same errors as [`WorldGateway::resume`]: `SessionExpired`
     /// for an unknown, expired, or replayed token, `Conflict` while the session
-    /// is still attached, and handshake errors for an incompatible client.
+    /// is still attached, and handshake errors for an incompatible client. If
+    /// the replacement snapshot cannot be encoded within the wire limits, the
+    /// resumed session is revoked; the rotated token cannot be delivered.
     pub fn resume(
         &mut self,
         token: &ResumeToken,
@@ -415,6 +418,10 @@ impl WorldServer {
             serde_json::to_value(ready).map_err(|error| internal_error(&error))?,
         );
         let snapshot = self.delivery_envelope(SNAPSHOT_KIND, &established.snapshot)?;
+        // Check the complete wire envelope before reporting successful admission.
+        // The transport must never receive a ready message without a sendable
+        // snapshot, and attach() revokes the session if this check fails.
+        snapshot.encode()?;
         Ok(Opened {
             connection,
             session: established.session,

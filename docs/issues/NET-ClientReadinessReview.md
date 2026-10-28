@@ -7,8 +7,9 @@
 ## Findings requiring verification and follow-up
 
 - A full snapshot or delta can exceed the 64 KiB envelope limit; the current
-  transport has no chunking protocol. Test the boundary over WebSocket and
-  define bounded delivery or explicit admission failure.
+  transport has no chunking protocol. Initial snapshots are now checked before
+  admission, and oversized snapshots reject and clean up the session. Oversized
+  deltas and WebSocket boundary tests remain open.
 - Resume tokens rotate before the replacement reaches the client. A dropped
   connection before `world.token` delivery can strand the old token. Test
   delivery failures and define a safe recovery protocol.
