@@ -129,9 +129,8 @@ impl OnlineClient {
                 self.fail(OnlineError::Closed);
                 return;
             }
-            Status::Connecting => {}
             Status::AwaitingReady | Status::Ready if self.status == OnlineStatus::Connecting => {
-                self.status = OnlineStatus::AwaitingSnapshot
+                self.status = OnlineStatus::AwaitingSnapshot;
             }
             _ => {}
         }

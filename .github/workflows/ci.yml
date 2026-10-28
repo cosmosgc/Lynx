@@ -55,6 +55,14 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
+      # Keep this focused, GPU-free client verification ahead of the broad
+      # workspace lint so unrelated crates cannot mask a client regression.
+      - name: Test headless client (no default features)
+        run: cargo test -p lynx_client --no-default-features
+
+      - name: Build headless client (no default features)
+        run: cargo build -p lynx_client --no-default-features
+
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -67,12 +75,6 @@ jobs:
 
       - name: Run workspace tests
         run: cargo test --workspace
-
-      - name: Test headless client (no default features)
-        run: cargo test -p lynx_client --no-default-features
-
-      - name: Build headless client (no default features)
-        run: cargo build -p lynx_client --no-default-features
 
       - name: Build workspace
         run: cargo build --workspace
@@ -106,17 +108,19 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
-      - name: Run Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Run workspace tests
-        run: cargo test --workspace
-
+      # Keep this focused, GPU-free client verification ahead of the broad
+      # workspace lint so unrelated crates cannot mask a client regression.
       - name: Test headless client (no default features)
         run: cargo test -p lynx_client --no-default-features
 
       - name: Build headless client (no default features)
         run: cargo build -p lynx_client --no-default-features
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run workspace tests
+        run: cargo test --workspace
 
       - name: Build workspace
         run: cargo build --workspace

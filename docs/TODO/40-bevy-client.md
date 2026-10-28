@@ -55,10 +55,12 @@ The client provides a shared plugin and deterministic headless update test; see
 headless build/test, and upgrade instructions. On Windows, workspace build and
 tests and the no-default-features client test passed; the default executable
 created a window handle, but a visual smoke test is still needed. Ubuntu and
-Windows CI jobs configure explicit no-default-features headless client build and
-test steps; a hosted run verifying them remains outstanding. No offline/replay
-UI harness exists yet. Workspace clippy is currently
-blocked by unrelated `backend_nakama` test lint errors; client clippy passes.
+Windows CI jobs run explicit no-default-features headless client build and test
+steps before workspace Clippy, so unrelated lint failures cannot suppress the
+focused GPU-free verification; a hosted run verifying them remains outstanding.
+No offline/replay UI harness exists yet. Workspace Clippy remains blocked by
+unrelated `lynx_world` test-dependency lint errors; the client library and binary pass
+their focused lint check.
 
 ---
 

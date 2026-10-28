@@ -179,7 +179,10 @@ impl Reconciliation {
         position: Position,
         _applied: bool,
     ) -> Result<(), Error> {
-        if !self.pending.is_some_and(|p| p.request.sequence == sequence) {
+        if self
+            .pending
+            .is_none_or(|pending| pending.request.sequence != sequence)
+        {
             return Err(Error::UnexpectedMessage);
         }
         if !position.finite() {
