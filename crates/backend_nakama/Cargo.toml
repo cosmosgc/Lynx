@@ -19,5 +19,8 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 ureq = { workspace = true }
 
+[dev-dependencies]
+backend_contract_tests = { path = "../backend_contract_tests" }
+
 [lints]
 workspace = true

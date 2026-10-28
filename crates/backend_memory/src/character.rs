@@ -199,6 +199,7 @@ impl CharacterWorldService for MemoryBackend {
 
 #[cfg(test)]
 mod tests {
+    use backend_contract_tests::{CharacterContract, assert_character_contract};
     use game_api::{AuthService, CharacterWorldService, InventoryService, Zone};
 
     use super::*;
@@ -212,6 +213,57 @@ mod tests {
         backend
             .create_character(token, &CreateCharacter { name: name.into() })
             .unwrap()
+    }
+
+    struct ContractBackend<'a> {
+        backend: &'a MemoryBackend,
+    }
+
+    impl CharacterContract for ContractBackend<'_> {
+        type Credential = SessionToken;
+
+        fn create(
+            &self,
+            credential: &Self::Credential,
+            key: &CharacterCreationKey,
+            request: &CreateCharacter,
+        ) -> Result<CharacterCreationReceipt, ApiError> {
+            self.backend
+                .create_character_idempotent(credential, key, request)
+        }
+
+        fn select(
+            &self,
+            credential: &Self::Credential,
+            character: CharacterId,
+        ) -> Result<Character, ApiError> {
+            self.backend.select_character(credential, character)
+        }
+
+        fn delete(
+            &self,
+            credential: &Self::Credential,
+            character: CharacterId,
+        ) -> Result<(), ApiError> {
+            self.backend.delete_character(credential, character)
+        }
+
+        fn enter(
+            &self,
+            credential: &Self::Credential,
+            character: CharacterId,
+            zone_id: &str,
+        ) -> Result<Character, ApiError> {
+            self.backend.enter_character(credential, character, zone_id)
+        }
+
+        fn leave(
+            &self,
+            credential: &Self::Credential,
+            character: CharacterId,
+        ) -> Result<Character, ApiError> {
+            self.backend.leave_character(credential, character)
+        }
     }
 
     #[test]
@@ -312,6 +364,26 @@ mod tests {
         ));
         let left = backend.leave_character(&owner.token, character.id).unwrap();
         assert_eq!(left.zone_id, None);
+    }
+
+    #[test]
+    fn shared_character_contract_passes_for_memory() {
+        let backend = MemoryBackend::with_zones([Zone {
+            id: "adventure".into(),
+            name: "Adventure".into(),
+            player_count: 0,
+            capacity: None,
+        }])
+        .unwrap();
+        let owner = session(&backend, "contract-owner");
+        let other = session(&backend, "contract-other");
+        assert_character_contract(
+            &ContractBackend { backend: &backend },
+            &owner.token,
+            &other.token,
+            "adventure",
+            "Aria",
+        );
     }
 
     #[test]

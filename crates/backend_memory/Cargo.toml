@@ -12,5 +12,8 @@ repository.workspace = true
 game_api = { workspace = true }
 engine_core = { workspace = true }
 
+[dev-dependencies]
+backend_contract_tests = { path = "../backend_contract_tests" }
+
 [lints]
 workspace = true

@@ -5,12 +5,17 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use backend_contract_tests::{CharacterContract, assert_character_contract};
 use backend_nakama::{PostgresCharacterStore, PostgresIdentityStore};
 use engine_core::{IdKind, Locale, StableId};
-use game_api::{AccountId, ApiError, CharacterId, CharacterStatus, CreateCharacter};
+use game_api::{
+    AccountId, ApiError, Character, CharacterCreationKey, CharacterCreationReceipt, CharacterId,
+    CharacterStatus, CreateCharacter,
+};
 use postgres::{Config, NoTls};
 
 #[test]
+#[allow(clippy::too_many_lines)] // One transaction-scoped fixture verifies restart behavior.
 fn account_scoped_reads_survive_reconnection() {
     let required = ["LYNX_PG_DATABASE", "LYNX_PG_USER", "LYNX_PG_PASSWORD"];
     if required.iter().any(|name| std::env::var_os(name).is_none()) {
@@ -156,6 +161,7 @@ fn account_scoped_reads_survive_reconnection() {
     let reopened = PostgresCharacterStore::new(config.connect(NoTls).unwrap());
     assert_eq!(reopened.select_character(&owner, id).unwrap(), selected);
     check_world_entry(&config, &owner, &other, id, nonce);
+    check_shared_contract(&config, &owner, &other, nonce);
     check_creation(&config, &mut db, &owner, &other, nonce);
     check_deletion(&config, &mut db, &owner, &other, id, suspended, deleted);
     db.execute(
@@ -179,6 +185,73 @@ fn account_scoped_reads_survive_reconnection() {
         &[&owner.as_str(), &other.as_str(), &provisioned.as_str()],
     )
     .unwrap();
+}
+
+struct ContractBackend<'a> {
+    store: &'a PostgresCharacterStore,
+}
+
+impl CharacterContract for ContractBackend<'_> {
+    type Credential = AccountId;
+
+    fn create(
+        &self,
+        credential: &Self::Credential,
+        key: &CharacterCreationKey,
+        request: &CreateCharacter,
+    ) -> Result<CharacterCreationReceipt, ApiError> {
+        let character = self
+            .store
+            .create_character(credential, key.as_str(), request)?;
+        Ok(CharacterCreationReceipt {
+            character_id: character.id,
+        })
+    }
+
+    fn select(
+        &self,
+        credential: &Self::Credential,
+        character: CharacterId,
+    ) -> Result<Character, ApiError> {
+        self.store.select_character(credential, character)
+    }
+
+    fn delete(
+        &self,
+        credential: &Self::Credential,
+        character: CharacterId,
+    ) -> Result<(), ApiError> {
+        self.store.delete_character(credential, character)
+    }
+
+    fn enter(
+        &self,
+        credential: &Self::Credential,
+        character: CharacterId,
+        zone_id: &str,
+    ) -> Result<Character, ApiError> {
+        self.store.enter_character(credential, character, zone_id)
+    }
+
+    fn leave(
+        &self,
+        credential: &Self::Credential,
+        character: CharacterId,
+    ) -> Result<Character, ApiError> {
+        self.store.leave_character(credential, character)
+    }
+}
+
+fn check_shared_contract(config: &Config, owner: &AccountId, other: &AccountId, nonce: u128) {
+    let store = PostgresCharacterStore::new(config.connect(NoTls).unwrap());
+    let zone = StableId::from_parts(IdKind::Zone, 0, nonce + 10).to_string();
+    assert_character_contract(
+        &ContractBackend { store: &store },
+        owner,
+        other,
+        &zone,
+        &format!("contract{nonce}"),
+    );
 }
 
 fn check_world_entry(

@@ -9,6 +9,7 @@ members = [
     "crates/engine_net",
     "crates/backend_nakama",
     "crates/backend_memory",
+    "crates/backend_contract_tests",
     "crates/game_api",
     "crates/world_gateway",
     "crates/world_server",
