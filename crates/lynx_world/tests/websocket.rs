@@ -14,7 +14,7 @@ use futures_util::{SinkExt, StreamExt};
 use lynx_world::auth::{Authenticator, digest};
 use lynx_world::demo;
 use lynx_world::service::{HELLO_KIND, Hello, Service, TOKEN_KIND};
-use lynx_world::transport::{self, AppState, OriginPolicy};
+use lynx_world::transport::{self, AppState, MessageBudgetConfig, OriginPolicy};
 use serde_json::json;
 use tokio::sync::{oneshot, watch};
 use tokio_tungstenite::tungstenite::Message;
@@ -136,7 +136,10 @@ async fn a_client_can_authenticate_play_and_receive_correlated_errors() {
 
         let (events, receivers) = transport::event_channel();
         let (shutdown, shutdown_rx) = watch::channel(false);
-        let state = Arc::new(AppState::new(events, authenticator));
+        let state = Arc::new(
+            AppState::new(events, authenticator)
+                .with_message_budget(MessageBudgetConfig::new(2, Duration::from_secs(60)).unwrap()),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
 
@@ -195,6 +198,32 @@ async fn a_client_can_authenticate_play_and_receive_correlated_errors() {
         assert_eq!(error.kind.as_str(), "protocol.error");
         assert_eq!(error.correlation.as_ref().unwrap().as_str(), "req_bad_0001");
         assert_eq!(error.body["code"], json!("unsupported"));
+
+        // Text and binary messages share the same post-admission budget.
+        socket
+            .send(Message::Text(unsupported.encode().unwrap().into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_envelope(&mut socket).await.body["code"],
+            json!("unsupported")
+        );
+        send_envelope(&mut socket, &unsupported).await;
+        let limited = next_envelope(&mut socket).await;
+        assert_eq!(limited.kind.as_str(), "protocol.error");
+        assert_eq!(limited.body["code"], json!("budget_exhausted"));
+        assert!(
+            limited.body["params"]["retry_after_ms"]
+                .as_str()
+                .unwrap()
+                .parse::<u64>()
+                .unwrap()
+                > 0
+        );
+        assert!(matches!(
+            socket.next().await.unwrap().unwrap(),
+            Message::Close(_)
+        ));
 
         drop(socket);
         let _ = shutdown.send(true);

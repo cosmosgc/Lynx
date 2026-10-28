@@ -9,7 +9,9 @@
 
 ## Resolution
 
-Rate limiting and per-session message budgets are documented as a requirement in the security model but are not yet implemented. Without them, clients can exhaust server resources through flood attacks, excessive request rates, or malformed protocol frames.
+Partial mitigation: the WebSocket transport enforces a post-admission, per-connection fixed-window budget before decoding text or binary messages and before forwarding them to the authority loop. The default is 100 messages per second; embedders can configure 1–10,000 messages per window of 1 ms–60 seconds via `MessageBudgetConfig`. A rejected message produces `protocol.error` with code `budget_exhausted` and a `retry_after_ms` parameter, then closes the connection. A warning records the code without message contents or credentials.
+
+This is not a per-session or per-IP limit: reconnecting or resuming creates a fresh budget, and fixed windows permit bursts across window boundaries. Ping/pong frames, the handshake, and HTTP admission are outside this budget. There are no per-action budgets, rejection counters, or HTTP retry-after headers. Rate limiting remains incomplete and this issue stays open.
 
 The world gateway and engine net layer must enforce:
 - Per-session message count limits with configurable windows (e.g., 100 messages per second)
@@ -19,15 +21,15 @@ The world gateway and engine net layer must enforce:
 
 ## Defect
 
-The current implementation has no rate limiting or message budget enforcement. The `engine_net` crate documents that "length-prefixed frames are size-bounded" (line 46 of security.md), but there is no limit on how many such frames a single connection can send, nor any per-session or per-IP throttling. This leaves the server vulnerable to:
+The WebSocket connection budget is a partial mitigation; there is still no persistent per-session or per-IP throttling. This leaves the server vulnerable to:
 - Connection exhaustion attacks
 - Resource denial through excessive requests
 - Protocol frame flooding that could impact the authority loop
 
 ## Impact
 
-- No protection against network-level abuse that could degrade service for all users
-- The security model explicitly requires rate limits and budgets but they are not enforced
+- Protection against network-level abuse is incomplete and can be bypassed by reconnecting
+- The security model requires additional rate limits and budgets
 - This is a P1 risk: without rate limiting, a compromised or misbehaving client can exhaust server resources
 - Affects network admission and message handling at the world edge; backend
   storage adapters are not protocol transports.
@@ -36,10 +38,10 @@ The current implementation has no rate limiting or message budget enforcement. T
 
 - [ ] Per-session message budget configurable per action type with expiry window
 - [ ] Per-IP rate limits for unauthenticated connections (e.g., 10 requests/second)
-- [ ] Payload size caps enforced at the framing layer (not just JSON parsing)
+- [x] Payload size caps enforced at the framing layer (not just JSON parsing)
 - [ ] Rate limit exceeded errors returned as `protocol.error` with retry-after headers
 - [ ] Diagnostics emitted for rate-limit rejections without leaking sensitive data
-- [ ] Integration tests simulate flood conditions and verify enforcement
+- [ ] Integration tests simulate flood conditions and verify enforcement across sessions, reconnects, and admission (a WebSocket test covers exceeding the per-connection budget)
 
 ## Notes
 

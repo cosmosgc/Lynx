@@ -7,7 +7,7 @@
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::extract::State;
@@ -49,6 +49,68 @@ pub struct AppState {
     authenticator: Authenticator,
     ready: AtomicBool,
     origins: OriginPolicy,
+    message_budget: MessageBudgetConfig,
+}
+
+/// Fixed-window limit for binary and text messages on an admitted connection.
+#[derive(Debug, Clone, Copy)]
+pub struct MessageBudgetConfig {
+    limit: u32,
+    window: Duration,
+}
+
+impl MessageBudgetConfig {
+    /// Construct a bounded budget (1–10,000 messages, 1 ms–60 seconds).
+    ///
+    /// # Errors
+    /// Returns an error if either value is outside the supported range.
+    pub fn new(limit: u32, window: Duration) -> anyhow::Result<Self> {
+        anyhow::ensure!((1..=10_000).contains(&limit), "message limit out of range");
+        anyhow::ensure!(
+            (Duration::from_millis(1)..=Duration::from_secs(60)).contains(&window),
+            "message window out of range"
+        );
+        Ok(Self { limit, window })
+    }
+}
+
+impl Default for MessageBudgetConfig {
+    fn default() -> Self {
+        Self {
+            limit: 100,
+            window: Duration::from_secs(1),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct MessageBudget {
+    config: MessageBudgetConfig,
+    start: Instant,
+    used: u32,
+}
+
+impl MessageBudget {
+    fn new(config: MessageBudgetConfig, now: Instant) -> Self {
+        Self {
+            config,
+            start: now,
+            used: 0,
+        }
+    }
+
+    fn check(&mut self, now: Instant) -> Result<(), Duration> {
+        let elapsed = now.saturating_duration_since(self.start);
+        if elapsed >= self.config.window {
+            self.start = now;
+            self.used = 0;
+        }
+        if self.used >= self.config.limit {
+            return Err(self.config.window.saturating_sub(elapsed));
+        }
+        self.used += 1;
+        Ok(())
+    }
 }
 
 /// Optional exact-match browser Origin allowlist. Requests without Origin are
@@ -115,6 +177,7 @@ impl AppState {
             authenticator,
             ready: AtomicBool::new(true),
             origins: OriginPolicy::default(),
+            message_budget: MessageBudgetConfig::default(),
         }
     }
 
@@ -122,6 +185,13 @@ impl AppState {
     #[must_use]
     pub fn with_origin_policy(mut self, origins: OriginPolicy) -> Self {
         self.origins = origins;
+        self
+    }
+
+    /// Set the post-admission per-connection message budget.
+    #[must_use]
+    pub fn with_message_budget(mut self, budget: MessageBudgetConfig) -> Self {
+        self.message_budget = budget;
         self
     }
 
@@ -297,11 +367,15 @@ async fn pump(
     connection: world_server::ConnectionId,
     out_rx: &mut mpsc::Receiver<ServerFrame>,
 ) -> End {
+    let mut budget = MessageBudget::new(state.message_budget, Instant::now());
     loop {
         tokio::select! {
             incoming = socket.recv() => {
                 match incoming {
                     Some(Ok(Message::Binary(bytes))) => {
+                        if let Err(retry) = budget.check(Instant::now()) {
+                            return rate_limit_end(retry);
+                        }
                         match decode_frame(&bytes) {
                             Ok(envelope) => {
                                 if state
@@ -317,6 +391,9 @@ async fn pump(
                         }
                     }
                     Some(Ok(Message::Text(text))) => {
+                        if let Err(retry) = budget.check(Instant::now()) {
+                            return rate_limit_end(retry);
+                        }
                         match Envelope::decode(text.as_str()) {
                             Ok(envelope) => {
                                 if state
@@ -350,6 +427,21 @@ async fn pump(
             }
         }
     }
+}
+
+fn rate_limit_end(retry: Duration) -> End {
+    tracing::warn!(
+        code = "budget_exhausted",
+        "websocket message budget exceeded"
+    );
+    let retry_ms = retry.as_millis().saturating_add(1);
+    End::Protocol(
+        EngineError::new(
+            ErrorCode::BudgetExhausted,
+            "connection message budget exceeded",
+        )
+        .with_detail("retry_after_ms", retry_ms.to_string()),
+    )
 }
 
 async fn read_hello(socket: &mut WebSocket) -> Result<Hello, EngineError> {
@@ -428,6 +520,23 @@ fn error_envelope(error: &EngineError) -> Result<Envelope, EngineError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn message_budget_bounds_burst_and_refills_independently() {
+        assert!(MessageBudgetConfig::new(0, Duration::from_secs(1)).is_err());
+        assert!(MessageBudgetConfig::new(10_001, Duration::from_secs(1)).is_err());
+        assert!(MessageBudgetConfig::new(1, Duration::ZERO).is_err());
+        assert!(MessageBudgetConfig::new(1, Duration::from_secs(61)).is_err());
+        let config = MessageBudgetConfig::new(2, Duration::from_secs(1)).unwrap();
+        let now = Instant::now();
+        let mut first = MessageBudget::new(config, now);
+        let mut second = MessageBudget::new(config, now);
+        assert!(first.check(now).is_ok());
+        assert!(first.check(now).is_ok());
+        assert_eq!(first.check(now), Err(Duration::from_secs(1)));
+        assert!(second.check(now).is_ok());
+        assert!(first.check(now + Duration::from_secs(1)).is_ok());
+    }
 
     fn headers(value: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
