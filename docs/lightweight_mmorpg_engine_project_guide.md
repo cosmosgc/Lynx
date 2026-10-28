@@ -1229,7 +1229,9 @@ upgrade/rollback procedures.
 The roadmap below defines the scope and exit criteria for each phase; it is
 the source of truth for *what to build*. Current delivery progress against
 these phases, with per-phase task lists and progress bars, is tracked in the
-[Progress section of `README.md`](../README.md#progress).
+[Progress section of `README.md`](../README.md#progress). The forward-looking
+task breakdown, dependencies, and acceptance criteria live in
+[`docs/TODO/`](TODO/README.md).
 
 ### Phase 0 --- Architecture proof
 

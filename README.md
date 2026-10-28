@@ -67,7 +67,9 @@ The roadmap in the project guide ([§23 — Suggested implementation
 roadmap](docs/lightweight_mmorpg_engine_project_guide.md#23-suggested-implementation-roadmap))
 is the source of truth for phase scope and exit criteria; this section tracks
 perceived progress against it. Percentages are engineering estimates; the
-detailed record of what shipped is [`CHANGELOG.md`](CHANGELOG.md).
+detailed record of what shipped is [`CHANGELOG.md`](CHANGELOG.md), and the
+forward-looking backlog with task IDs, dependencies, and acceptance criteria is
+[`docs/TODO/`](docs/TODO/README.md).
 
 ### Overview
 
@@ -334,7 +336,8 @@ root.
 | [`docs/internationalization.md`](docs/internationalization.md) | `pt-BR` defaults, key-based catalogs, locale negotiation. |
 | [`docs/platforms.md`](docs/platforms.md) | Which targets are supported and how they are CI-tested. |
 | [`docs/ai-tooling.md`](docs/ai-tooling.md) | Optional MCP tooling policy and shell-execution rules. |
-| [`docs/adr/`](docs/adr/) | 21 architecture decision records (0001–0021). |
+| [`docs/TODO/`](docs/TODO/README.md) | Forward-looking backlog: milestones, priorities, tasks, and known gaps. |
+| [`docs/adr/`](docs/adr/) | 21 accepted architecture decision records (0001–0021) plus proposed ADR 0022. |
 
 ## Contributing
 

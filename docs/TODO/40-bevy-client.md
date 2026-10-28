@@ -1,0 +1,386 @@
+# Bevy client backlog
+
+Scope: the graphical client that turns the headless world service into a playable
+game — workspace layout, login, character selection, scene, input/camera,
+rendering, prediction, UI, localization, packaging, and client-side tests.
+
+**What exists today:** no client crates. `Cargo.toml` has no Bevy dependency or
+pin yet, although [ADR 0001](../adr/0001-rust-and-bevy-version-policy.md)
+declares Bevy 0.20 as the target and restricts Bevy to client/editor crates.
+Phases 1, 2, 4, and 7 are blocked on this work.
+
+**Related design:** [project guide §24](../lightweight_mmorpg_engine_project_guide.md#24-initial-vertical-slice-keep-it-small),
+[platforms](../platforms.md), [networking](../networking.md),
+[content authoring](../content-authoring.md),
+[ADR 0001](../adr/0001-rust-and-bevy-version-policy.md),
+[ADR 0015](../adr/0015-ui-panel-session-state.md).
+
+---
+
+## CLT-001 — Client workspace and crate layout
+
+- **Priority:** P0
+- **Status:** Ready
+- **Depends on:** —
+- **References:** ADR 0001, [architecture §What is deliberately not here yet](../architecture.md#what-is-deliberately-not-here-yet)
+
+**Why:** There is nothing to build a scene on. The crate boundary also matters:
+`engine_core`, `engine_sim`, and `engine_content` must never depend on Bevy.
+
+**Scope**
+
+- Add client crates (for example `clients/lynx_client` for the app plus
+  `crates/client_*` for reusable presentation/networking helpers).
+- Pin Bevy 0.20 in `[workspace.dependencies]` as ADR 0001 requires; keep the
+  dependency out of engine domain crates.
+- Provide a headless feature/test mode so CI can build and test the client
+  without a GPU or window.
+- Wire the client into workspace fmt/clippy/test and document how to run it.
+- Add an `--offline`/replay harness for UI work without a live server if that
+  keeps iteration fast.
+
+**Acceptance criteria**
+
+- [ ] `cargo build --workspace` and `cargo test --workspace` include the client.
+- [ ] A headless CI job builds and tests the client without a display/GPU.
+- [ ] No engine domain crate depends on Bevy.
+- [ ] The Bevy pin is recorded and an upgrade note exists.
+- [ ] `cargo run -p lynx_client` opens a window on a developer machine.
+
+---
+
+## CLT-002 — Login and session bootstrap
+
+- **Priority:** P0
+- **Status:** Blocked — `NET-001`
+- **Depends on:** `NET-001`, `CLT-001`
+- **References:** [networking §Transport](../networking.md#transport)
+
+**Scope**
+
+- Server URL configuration and a login screen for the supported identity flow.
+- Acquire a session, send `session.hello` with the negotiated handshake, and
+  surface protocol/auth/capacity errors in the player's locale.
+- Store tokens only as long as needed; never log them.
+- Handle token expiry/refresh and a clear logout path.
+- Distinguish "server unreachable", "auth failed", "version mismatch", and
+  "world full" in the UI.
+
+**Acceptance criteria**
+
+- [ ] A valid session reaches `world.ready` and renders the zone.
+- [ ] Invalid/expired credentials show a localized, actionable error.
+- [ ] A version mismatch is blocked before world entry with the supported range.
+- [ ] Tokens do not appear in logs, crash reports, or screenshots.
+- [ ] Logout/close releases the session promptly.
+
+---
+
+## CLT-003 — Character selection and creation
+
+- **Priority:** P0
+- **Status:** Blocked — `PST-001`
+- **Depends on:** `PST-001`, `CLT-002`
+- **References:** `game_api::CharacterService`, `PST-001`
+
+**Scope**
+
+- List characters owned by the account, select one, and create a new one within
+  the configured limits.
+- Validate names and appearance choices client-side for UX, then re-validate on
+  the server.
+- Show creation/selection failures without leaking other accounts' data.
+- Enter the world with the selected character and resume the last safe position
+  per persistence policy.
+
+**Acceptance criteria**
+
+- [ ] A new account can create a character and enter the world after restart.
+- [ ] The client cannot select a character it does not own.
+- [ ] Name/appearance validation matches server rules.
+- [ ] The selected character is clearly identified in the UI.
+
+---
+
+## CLT-004 — Scene, camera, and input abstraction
+
+- **Priority:** P0
+- **Status:** Blocked — `CLT-001`
+- **Depends on:** `CLT-001`
+- **References:** [project guide §24](../lightweight_mmorpg_engine_project_guide.md#24-initial-vertical-slice-keep-it-small),
+  `QUA-017` (camera/input ADR)
+
+**Scope**
+
+- Load a zone/content bundle and render terrain, props, characters, and
+  interactables.
+- One camera mode for the slice, behind an abstraction that allows more modes
+  later; support a 2D billboard alternative as the guide requires.
+- Input mapping with rebinding-friendly actions (move, interact, chat,
+  inventory, camera).
+- Asset import/loading policy and placeholder assets for early work.
+- Graceful handling of missing assets and content-version mismatches.
+
+**Acceptance criteria**
+
+- [ ] A generated `mmorpg` project opens a playable scene with the demo zone.
+- [ ] Camera and input are replaceable without touching gameplay systems.
+- [ ] Missing/incompatible assets produce a clear error, not a panic.
+- [ ] The 2D billboard presentation path is selectable or documented as the
+      fallback.
+
+---
+
+## CLT-005 — Network client loop
+
+- **Priority:** P0
+- **Status:** Blocked — `CLT-001`, `CLT-002`
+- **Depends on:** `CLT-001`, `CLT-002`
+- **References:** [networking](../networking.md), `engine_net`
+
+**Scope**
+
+- Connect, perform the handshake, read/write framed envelopes on a background
+  task, and feed snapshots/deltas into the presentation layer.
+- Track server tick acknowledgements and send them on resume.
+- Reconnect with exponential backoff and the rotated resume token; distinguish
+  resumable from terminal failures.
+- Bound queues and surface telemetry (RTT, loss, queue depth) in a debug overlay.
+- Never block the render thread on network I/O.
+
+**Acceptance criteria**
+
+- [ ] The client applies a full snapshot and subsequent deltas correctly.
+- [ ] A dropped connection reconnects and resumes within the server window.
+- [ ] Terminal errors (expired/revoked/conflict) show a clear path forward.
+- [ ] A stalled server does not freeze the client.
+- [ ] Debug telemetry exposes tick, RTT, and queue depth.
+
+---
+
+## CLT-006 — Entity presentation and interpolation
+
+- **Priority:** P0
+- **Status:** Blocked — `CLT-004`, `CLT-005`
+- **Depends on:** `CLT-004`, `CLT-005`
+- **References:** ADR 0012, `SIM-002`
+
+**Scope**
+
+- Spawn/despawn/update visuals from authoritative snapshots and deltas.
+- Interpolate remote entities between server ticks; never extrapolate beyond a
+  documented bound.
+- Present facing, animation state, nameplates, health/status, and interaction
+  affordances from server data only.
+- Handle visibility enter/leave and entity caps without popping or leaking.
+- Provide a debug view of authoritative vs. rendered position.
+
+**Acceptance criteria**
+
+- [ ] Remote movement looks smooth at the target tick rate.
+- [ ] A teleport/correction does not cause unbounded extrapolation.
+- [ ] Despawned entities disappear immediately and do not linger in UI.
+- [ ] Rendered state never feeds back into authoritative decisions.
+
+---
+
+## CLT-007 — Local movement and prediction
+
+- **Priority:** P0
+- **Status:** Blocked — `SIM-001`, `SIM-002`, `CLT-005`
+- **Depends on:** `SIM-001`, `SIM-002`, `CLT-005`
+- **References:** `SIM-001`, `SIM-002`
+
+**Scope**
+
+- Sample input, assign sequence numbers, and send movement intents at a bounded
+  rate.
+- Predict locally, reconcile against server acknowledgements/corrections, and
+  replay pending inputs.
+- Snap/reset prediction on teleport, death, zone change, and reconnect.
+- Tune smoothing so corrections are visible only when they matter.
+- Keep an input log for reproducing desyncs.
+
+**Acceptance criteria**
+
+- [ ] Local movement feels responsive at 100–200 ms simulated latency.
+- [ ] The client converges to the server position after corrections.
+- [ ] Invalid movement is rejected and visibly corrected, not accepted locally.
+- [ ] A desync report includes input sequence and server tick evidence.
+
+---
+
+## CLT-008 — Interaction, inventory, and UI panels
+
+- **Priority:** P1
+- **Status:** Blocked — `CLT-006`, `SIM-008`
+- **Depends on:** `CLT-006`, `SIM-008`
+- **References:** ADR 0015, [content authoring §UI panels](../content-authoring.md#ui-panels)
+
+**Scope**
+
+- Target selection and verb affordances derived from server-provided
+  interactables.
+- Render entity-provided panels from their namespaced schema, localized labels,
+  and allowed actions.
+- Inventory/container UI with server-validated moves, equip, and split/merge.
+- UI session lifecycle: open/action/close, permission/range revalidation, and
+  stale-panel handling.
+- Keyboard/gamepad navigation for the common flows.
+
+**Acceptance criteria**
+
+- [ ] Different entity types open different panels through one protocol.
+- [ ] A panel action rejected by the server does not change local state.
+- [ ] Inventory moves match server results after reconnect.
+- [ ] Stale/closed panels cannot send actions for a different target.
+
+---
+
+## CLT-009 — Chat and presence UI
+
+- **Priority:** P1
+- **Status:** Blocked — `SIM-008`
+- **Depends on:** `SIM-008`, `CLT-008`
+- **References:** `SIM-008`, [security §Abuse prevention](../security.md#abuse-prevention)
+
+**Scope**
+
+- Channel tabs/list, history pagination, unread indicators, and presence roster.
+- Send/receive with server-resolved identity; show system messages and errors.
+- Mute/ignore/report controls wired to the moderation backend.
+- Localized timestamps and channel names; no embedded English strings.
+- Bounded history/scrollback and sane behavior on reconnect.
+
+**Acceptance criteria**
+
+- [ ] Two clients in one zone exchange messages in real time.
+- [ ] History pagination works and does not duplicate messages.
+- [ ] Mute/ignore/report actions have visible, server-confirmed effects.
+- [ ] Chat cannot spoof another sender or channel.
+
+---
+
+## CLT-010 — Localization and accessibility
+
+- **Priority:** P1
+- **Status:** Blocked — `CLT-008`
+- **Depends on:** `CLT-008`
+- **References:** [internationalization](../internationalization.md), ADR 0011
+
+**Scope**
+
+- Load locale catalogs, negotiate the player's locale, and fall back to `pt-BR`.
+- Render all player-facing text from message keys and parameters.
+- Missing-key reporting in development and a release gate for zero missing keys.
+- Text scaling, colorblind-safe indicators, remappable keys, and reduced motion.
+- Locale-aware number/date/time formatting for the calendar.
+
+**Acceptance criteria**
+
+- [ ] No player-facing string is hardcoded in a client widget.
+- [ ] `pt-BR` is the default; an alternate locale can be selected and persists.
+- [ ] Missing keys are visible in development and fail the release check.
+- [ ] Core flows are usable with keyboard only and at increased text size.
+
+---
+
+## CLT-011 — Settings, diagnostics, and recovery UX
+
+- **Priority:** P2
+- **Status:** Blocked — `CLT-005`
+- **Depends on:** `CLT-005`, `CLT-007`
+- **References:** [operations](../operations.md), `CLT-005`
+
+**Scope**
+
+- Graphics/audio/network settings with safe defaults and validation.
+- Connection diagnostics: server, protocol version, RTT, packet loss, tick,
+  reconnect count.
+- Exportable logs/crash reports with secrets and private chat redacted.
+- Recovery flows: reconnect, return to character select, quit safely.
+- A "copy diagnostic report" action that operators can request.
+
+**Acceptance criteria**
+
+- [ ] Settings persist and invalid combinations are prevented.
+- [ ] A diagnostic report contains versions and network state but no secrets.
+- [ ] The user can recover from a terminal session error without restarting the
+      process.
+- [ ] Crash/exit paths do not corrupt local settings or assets.
+
+---
+
+## CLT-012 — Packaging and platform builds
+
+- **Priority:** P2
+- **Status:** Blocked — `OPS-005`
+- **Depends on:** `OPS-005`, `CLT-004`
+- **References:** [platforms](../platforms.md), `OPS-006`
+
+**Scope**
+
+- Windows x86-64 first, then Linux; macOS only after CI smoke coverage.
+- Reproducible build stamp (engine/content/protocol versions) and checksums.
+- Asset packaging/loading from a bundle or install directory.
+- Installer/portable archive and an uninstall/cleanup path.
+- Crash reporting and update-check hooks that respect privacy settings.
+
+**Acceptance criteria**
+
+- [ ] A clean machine installs and launches the client with no dev toolchain.
+- [ ] The build stamp matches the server/content versions it targets.
+- [ ] Assets load from the packaged layout, not a developer path.
+- [ ] A documented uninstall leaves no unexpected user data.
+
+---
+
+## CLT-013 — Client performance profiling
+
+- **Priority:** P2
+- **Status:** Blocked — `CLT-006`
+- **Depends on:** `CLT-006`, `SIM-018`
+- **References:** [project guide §24](../lightweight_mmorpg_engine_project_guide.md#24-initial-vertical-slice-keep-it-small),
+  `OPS-007`
+
+**Scope**
+
+- Measure frame time, draw calls, memory, load time, and network bytes on target
+  hardware.
+- Define budgets for the vertical slice and track regressions.
+- Profile the worst case: crowded zone, many nameplates, open panels, chat.
+- On-screen profiler and capture instructions for reports.
+- Optimize only after measuring; document the baseline.
+
+**Acceptance criteria**
+
+- [ ] The slice holds the target frame rate on the reference machine.
+- [ ] Load time and memory budgets are documented and measured.
+- [ ] Network bytes per session are reported alongside server metrics.
+- [ ] A regression beyond the budget fails a nightly check or is explicitly
+      accepted.
+
+---
+
+## CLT-014 — Client integration and protocol tests
+
+- **Priority:** P1
+- **Status:** Blocked — `CLT-005`, `QUA-014`
+- **Depends on:** `CLT-005`, `QUA-014`
+- **References:** `QUA-014`, `NET-004`
+
+**Scope**
+
+- Headless client harness that connects, authenticates, selects a character,
+  moves, chats, and reconnects against a real or in-process server.
+- Replay fixtures for snapshots/deltas and protocol errors.
+- Simulated latency/loss and correction tests for `CLT-007`.
+- UI smoke tests that do not require a GPU where possible.
+- A small multi-client test proving consistent observation.
+
+**Acceptance criteria**
+
+- [ ] CI runs a headless login → move → chat → reconnect scenario.
+- [ ] Protocol fixtures catch accidental wire changes.
+- [ ] Prediction/reconciliation tests run under simulated latency/loss.
+- [ ] Two clients observe the same authoritative state in one test.
