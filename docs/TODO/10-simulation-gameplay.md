@@ -23,7 +23,7 @@ that authority end to end.
 ## SIM-001 — Server-authoritative movement
 
 - **Priority:** P0
-- **Status:** In progress — navigation step validation foundation only
+- **Status:** In progress — bounded displacement validation foundation only
 - **Depends on:** —
 - **References:** [architecture §Simulation model](../architecture.md#simulation-model),
   [networking §Reconnect and recovery](../networking.md#reconnect-and-recovery),
@@ -58,11 +58,16 @@ depends on this contract.
 - [ ] A slow or spamming client cannot stall the authority loop.
 - [ ] Protocol and tick-budget documentation is updated.
 
-**First slice:** `NavGrid::can_step` checks a single adjacent cell transition,
+**Foundation:** `NavGrid::can_step` checks a single adjacent cell transition,
 including blocked endpoints, bounds, and both diagonal corner cells; A* uses
-the same rule. This is not continuous collision detection or occupancy, and it
-does not expose movement requests or mutate transforms. Authority checks, tick
-advancement, speed limits, replication, and the acceptance tests remain open.
+the same rule. `NavGrid::allows_displacement` adds a finite horizontal position
+and distance check against a caller-supplied speed and elapsed time, and permits
+only same-cell or adjacent-cell moves. Diagonals conservatively require both
+corner cells open. Its budget inputs must come from trusted server state; it is
+not itself a per-tick budget or an authority boundary. It does not check zone
+bounds, occupancy, or fine collision, expose requests, or mutate transforms.
+Authority checks, tick advancement, budget enforcement, replication, and the
+acceptance tests remain open.
 
 ---
 

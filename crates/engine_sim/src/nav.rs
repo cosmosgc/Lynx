@@ -209,6 +209,54 @@ impl NavGrid {
         dx == 0 || dy == 0 || (!self.is_blocked(next_x, y) && !self.is_blocked(x, next_y))
     }
 
+    /// Validate one proposed horizontal displacement against a server-owned budget.
+    ///
+    /// Both positions must be finite, at the same height, and in open cells.
+    /// A displacement may stay within one cell or enter an adjacent cell; for
+    /// diagonals both corner cells must be open, even if the segment does not
+    /// touch the corner. This conservative rule bounds work independently of
+    /// distance. Speed is in meters/second and elapsed time in milliseconds;
+    /// callers must supply both from trusted server state, not a client claim.
+    ///
+    /// This does not check zone bounds, actor control, status, entity occupancy,
+    /// or collision against geometry finer than the grid, and does not move an
+    /// entity. A false result deliberately does not reveal the rejection reason.
+    #[must_use]
+    pub fn allows_displacement(
+        &self,
+        from: Vec3,
+        to: Vec3,
+        speed_m_per_s: f32,
+        elapsed_ms: u32,
+    ) -> bool {
+        if !from.x.is_finite()
+            || !from.y.is_finite()
+            || !from.z.is_finite()
+            || !to.x.is_finite()
+            || !to.y.is_finite()
+            || !to.z.is_finite()
+            || !speed_m_per_s.is_finite()
+            || speed_m_per_s < 0.0
+            || from.y != to.y
+        {
+            return false;
+        }
+        let dx = f64::from(to.x) - f64::from(from.x);
+        let dz = f64::from(to.z) - f64::from(from.z);
+        let budget = f64::from(speed_m_per_s) * f64::from(elapsed_ms) / 1_000.0;
+        if dx * dx + dz * dz > budget * budget {
+            return false;
+        }
+        let (Some(start), Some(end)) = (self.cell_of(from), self.cell_of(to)) else {
+            return false;
+        };
+        if start == end {
+            !self.is_blocked(start.0, start.1)
+        } else {
+            self.can_step(start, end)
+        }
+    }
+
     /// Block or unblock a cell.
     ///
     /// # Errors
@@ -621,6 +669,37 @@ mod tests {
         room.set_blocked(0, 1, false);
         room.set_blocked(1, 1, true);
         assert!(!room.can_step((0, 0), (1, 1)));
+    }
+
+    #[test]
+    fn displacement_enforces_budget_and_adjacent_open_cells() {
+        let mut room = grid(4, 4);
+        let start = at(0.5, 0.5);
+        assert!(room.allows_displacement(start, at(1.5, 0.5), 2.0, 500));
+        assert!(!room.allows_displacement(start, at(1.5, 0.5), 2.0, 499));
+        assert!(!room.allows_displacement(start, at(1.5, 1.5), 1.0, 1000));
+        assert!(!room.allows_displacement(start, at(2.5, 0.5), 10.0, 1000));
+        assert!(!room.allows_displacement(start, at(-0.1, 0.5), 10.0, 1000));
+        assert!(room.allows_displacement(start, start, 0.0, 0));
+        assert!(!room.allows_displacement(start, at(0.6, 0.5), 10.0, 0));
+        room.set_blocked(1, 0, true);
+        assert!(!room.allows_displacement(start, at(1.5, 0.5), 10.0, 1000));
+        assert!(!room.allows_displacement(start, at(1.5, 1.5), 10.0, 1000));
+        assert!(!room.allows_displacement(at(1.5, 0.5), start, 10.0, 1000));
+        assert!(!room.allows_displacement(at(1.5, 0.5), at(1.6, 0.5), 10.0, 1000));
+    }
+
+    #[test]
+    fn displacement_rejects_nonfinite_values_and_vertical_motion() {
+        let room = grid(2, 2);
+        let start = at(0.5, 0.5);
+        for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(!room.allows_displacement(start, Vec3::new(invalid, 0.0, 0.5), 1.0, 1000));
+            assert!(!room.allows_displacement(Vec3::new(0.5, invalid, 0.5), start, 1.0, 1000));
+            assert!(!room.allows_displacement(start, start, invalid, 1000));
+        }
+        assert!(!room.allows_displacement(start, start, -1.0, 1000));
+        assert!(!room.allows_displacement(start, Vec3::new(0.5, 1.0, 0.5), 10.0, 1000));
     }
 
     #[test]
