@@ -102,7 +102,7 @@ the quick audit; update it when a gap is found or closed.
 | No staging publish, rollout, rollback, or upgrade workflow | [operations](../operations.md) | `OPS-004`, `OPS-010` |
 | No backup/restore drills | [security](../security.md#abuse-prevention) | `OPS-003` |
 | Platform matrix is build-supported, not CI-smoke-tested | [platforms](../platforms.md) | `OPS-006` |
-| CI asserts five applied migrations and skips the live PostgreSQL test | [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) | `OPS-006`, `QUA-009` |
+| CI asserts five applied migrations and skips the live PostgreSQL test | [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml), [issue detail](../issues/OPS-006-ci-migration-count-and-live-postgres-test.md) | `OPS-006`, `QUA-009` |
 | ADR 0022 (dynamic classes and Treat targeting) is Proposed | [ADR 0022](../adr/0022-dynamic-character-classes-and-combat-targeting.md) | `SIM-004` |
 | Guilds, quests, progression, economy, trading, parties | [README](../../README.md#phase-8--expand-and-stabilize--selected-systems-delivered-early) | `SIM-009`–`SIM-013` |
 | Docs still describe the snapshot seam as file-only | [architecture](../architecture.md#persistence-model) | `QUA-009` |
