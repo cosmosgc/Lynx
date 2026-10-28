@@ -8,9 +8,17 @@
 ## Defect
 
 An earlier version of this record incorrectly closed the issue, claiming that
-`docs/SECURITY.md` existed. Neither that file nor a repository-root `SECURITY.md`
-is present. `docs/security.md` advises private reporting but does not provide a
-private contact or a response policy.
+`docs/SECURITY.md` existed. At that time neither that file nor a repository-root
+`SECURITY.md` was present. The new root [security guidance](../../SECURITY.md)
+provides interim reporting advice, but no verified private contact or response
+policy. `docs/security.md` links to that guidance.
+
+## Remaining decisions
+
+Maintainers need to establish and verify a private reporting channel and decide
+the response and disclosure expectations, including supported versions and any
+acknowledgement or remediation targets. The interim guidance does not make
+those decisions or satisfy the acceptance criteria below.
 
 ## Acceptance criteria
 
