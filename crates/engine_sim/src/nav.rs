@@ -187,6 +187,28 @@ impl NavGrid {
         self.blocked[self.index(x, y)]
     }
 
+    /// Whether a single step between adjacent grid cells is walkable.
+    ///
+    /// Both endpoints must be in bounds and open. Diagonal steps also require
+    /// both orthogonal neighbours to be open. This is a cell-level primitive,
+    /// not a continuous collision or entity-occupancy check.
+    #[must_use]
+    pub fn can_step(&self, from: (usize, usize), to: (usize, usize)) -> bool {
+        let (x, y) = from;
+        let (next_x, next_y) = to;
+        let dx = x.abs_diff(next_x);
+        let dy = y.abs_diff(next_y);
+        if dx > 1
+            || dy > 1
+            || (dx == 0 && dy == 0)
+            || self.is_blocked(x, y)
+            || self.is_blocked(next_x, next_y)
+        {
+            return false;
+        }
+        dx == 0 || dy == 0 || (!self.is_blocked(next_x, y) && !self.is_blocked(x, next_y))
+    }
+
     /// Block or unblock a cell.
     ///
     /// # Errors
@@ -404,18 +426,10 @@ impl NavGrid {
                 let Some(ny) = cy.checked_add_signed(dy as isize) else {
                     continue;
                 };
-                if !self.in_bounds(nx, ny) || self.is_blocked(nx, ny) {
+                if !self.can_step((cx, cy), (nx, ny)) {
                     continue;
                 }
                 let diagonal = dx != 0 && dy != 0;
-                if diagonal {
-                    // Do not cut corners through blocked orthogonal cells.
-                    let ox = cx.checked_add_signed(dx as isize).unwrap_or(cx);
-                    let oy = cy.checked_add_signed(dy as isize).unwrap_or(cy);
-                    if self.is_blocked(ox, cy) || self.is_blocked(cx, oy) {
-                        continue;
-                    }
-                }
                 let multiplier = u64::from(self.cost_at(nx, ny));
                 let step = multiplier * if diagonal { 14 } else { 10 };
                 let tentative = current.g.saturating_add(step);
@@ -585,6 +599,28 @@ mod tests {
             .unwrap();
         // A diagonal corner cut would cost 14; the legal route costs 20.
         assert_eq!(path.cost, 20);
+    }
+
+    #[test]
+    fn cell_steps_fail_closed_and_cannot_cut_either_corner() {
+        let mut room = grid(3, 3);
+        assert!(room.can_step((0, 0), (1, 0)));
+        assert!(room.can_step((0, 0), (1, 1)));
+        assert!(!room.can_step((0, 0), (0, 0)));
+        assert!(!room.can_step((0, 0), (2, 0)));
+        assert!(!room.can_step((0, 0), (3, 0)));
+        assert!(!room.can_step((usize::MAX, 0), (0, 0)));
+
+        room.set_blocked(1, 0, true);
+        assert!(!room.can_step((0, 0), (1, 0)));
+        assert!(!room.can_step((1, 0), (0, 0)));
+        assert!(!room.can_step((0, 0), (1, 1)));
+        room.set_blocked(1, 0, false);
+        room.set_blocked(0, 1, true);
+        assert!(!room.can_step((0, 0), (1, 1)));
+        room.set_blocked(0, 1, false);
+        room.set_blocked(1, 1, true);
+        assert!(!room.can_step((0, 0), (1, 1)));
     }
 
     #[test]

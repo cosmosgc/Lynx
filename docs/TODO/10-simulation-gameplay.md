@@ -23,7 +23,7 @@ that authority end to end.
 ## SIM-001 — Server-authoritative movement
 
 - **Priority:** P0
-- **Status:** Ready
+- **Status:** In progress — navigation step validation foundation only
 - **Depends on:** —
 - **References:** [architecture §Simulation model](../architecture.md#simulation-model),
   [networking §Reconnect and recovery](../networking.md#reconnect-and-recovery),
@@ -57,6 +57,12 @@ depends on this contract.
 - [ ] Movement is deterministic across repeated runs with identical inputs.
 - [ ] A slow or spamming client cannot stall the authority loop.
 - [ ] Protocol and tick-budget documentation is updated.
+
+**First slice:** `NavGrid::can_step` checks a single adjacent cell transition,
+including blocked endpoints, bounds, and both diagonal corner cells; A* uses
+the same rule. This is not continuous collision detection or occupancy, and it
+does not expose movement requests or mutate transforms. Authority checks, tick
+advancement, speed limits, replication, and the acceptance tests remain open.
 
 ---
 
