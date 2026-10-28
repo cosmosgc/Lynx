@@ -26,6 +26,7 @@
     .task input { margin:4px 0 0; }
     .task-title strong { margin-right:5px; }
     .task-meta { color:var(--muted); font-size:12px; text-align:right; }
+    .task-timestamp { color:var(--muted); font-size:11px; }
     .badge { display:inline-block; border:1px solid var(--line); border-radius:99px; padding:2px 7px; white-space:nowrap; font-size:12px; }
     .done { color:var(--green); }.in_progress { color:var(--blue); }.blocked { color:var(--red); }
     .ready { color:#b3bfce; }.proposed,.icebox { color:var(--yellow); }
@@ -52,13 +53,14 @@
 <main>
   <header>
     <h1>Task order and prompt builder</h1>
-    <p class="muted">Tasks are listed in prerequisite-first order. Among equally available tasks, P0/P1 priorities are preferred.</p>
-    <a href="/">← Back to backlog dashboard</a> · <a href="/dependencies">Dependency graph</a>
+    <p class="muted">Tasks are listed in prerequisite-first order. Status is read from the backlog Markdown and cannot be changed here.</p>
+    <a href="/">← Back to backlog dashboard</a> · <a href="/dependencies">Dependency graph</a> · <a href="/history">State change history</a>
   </header>
   <div class="layout">
     <section class="panel">
       <h2>Choose tasks</h2>
       <p class="section-note">Select one or more items. “Add prerequisites” includes every tracked dependency needed by your selection.</p>
+      <p class="section-note">Status changes made in the backlog Markdown are recorded on the next dashboard refresh.</p>
       <div class="filters">
         <input id="search" type="search" placeholder="Search ID or title">
         <select id="category"><option value="">All categories</option></select>
@@ -72,11 +74,13 @@
       </div>
       <div class="task-list" id="task-list">
         {% for item in items %}
-        <label class="task" data-id="{{ item.id }}" data-search="{{ (item.id ~ ' ' ~ item.title)|lower }}" data-category="{{ item.category }}" data-status="{{ item.status_label }}">
+        <div class="task" data-id="{{ item.id }}" data-search="{{ (item.id ~ ' ' ~ item.title)|lower }}" data-category="{{ item.category }}" data-status="{{ item.status_label }}">
           <input type="checkbox" value="{{ item.id }}" aria-label="Select {{ item.id }} {{ item.title }}">
           <span class="task-title"><strong>{{ item.id }}</strong>{{ item.title }}</span>
-          <span class="task-meta">{{ item.priority }} · <span class="{{ item.status }}">{{ item.status_label }}</span></span>
-        </label>
+          <span class="task-meta">{{ item.priority }} · <span class="task-status {{ item.status }}">{{ item.status_label }}</span>
+            <span class="task-timestamp">{% if item.state_has_changed %}Last changed <time datetime="{{ item.state_updated_at }}">{{ item.state_updated_at }}</time>{% else %}No status changes observed{% endif %}</span>
+          </span>
+        </div>
         {% endfor %}
       </div>
     </section>

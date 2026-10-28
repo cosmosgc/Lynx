@@ -28,8 +28,12 @@ visible as text.
 
 Completion percentage is completed tasks divided by all parsed task sections.
 Statuses not recognized by the parser are counted as unspecified rather than
-silently treated as incomplete. This is a reporting view of the Markdown
-backlog; it does not edit project tasks or infer status from code.
+silently treated as incomplete. This is a read-only view of the Markdown
+backlog: task statuses are changed in `docs/TODO/`, never in the Flask app.
+When the dashboard next reads the backlog, it records status transitions in
+`_backlog_dashboard/.data/task-state.sqlite3` and shows their UTC timestamps in
+the state history. The first read establishes a baseline; changes made between
+dashboard reads are detected as a transition to the latest status.
 
 Run the focused tests:
 

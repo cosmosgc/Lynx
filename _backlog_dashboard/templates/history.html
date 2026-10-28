@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Task state history · Lynx backlog</title>
+  <style>
+    :root { color-scheme:dark; --bg:#11151b; --panel:#1a2029; --line:#303a47; --muted:#a3afbd; --text:#edf2f7; --blue:#76b7ff; --green:#66d19e; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 system-ui,sans-serif; }
+    main { max-width:1200px; margin:auto; padding:24px 20px 50px; }
+    h1,h2,p { margin-top:0; }
+    h1 { font-size:clamp(24px,4vw,34px); margin-bottom:5px; }
+    a { color:var(--blue); }
+    .muted { color:var(--muted); }
+    .panel { margin-top:18px; padding:16px; background:var(--panel); border:1px solid var(--line); border-radius:9px; }
+    .table-wrap { overflow:auto; }
+    table { width:100%; border-collapse:collapse; }
+    th,td { padding:10px 8px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    .change { white-space:nowrap; }
+    .arrow { color:var(--green); padding:0 6px; }
+    @media (max-width:650px) { main { padding:18px 10px 35px; } th,td { padding:8px 5px; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Task state change history</h1>
+    <p class="muted">The latest 500 status changes observed in the backlog Markdown. This app does not edit task status.</p>
+    <a href="/">← Back to backlog dashboard</a> · <a href="/task-order">View task order</a>
+  </header>
+  <section class="panel">
+    {% if changes %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Changed</th><th>Task</th><th>Status change</th><th>What changed</th></tr></thead>
+        <tbody>
+          {% for change in changes %}
+          <tr>
+            <td><time datetime="{{ change.changed_at }}">{{ change.changed_at }}</time></td>
+            <td><strong>{{ change.task_id }}</strong><br>{{ change.title }}</td>
+            <td class="change">{{ change.old_status_label }}<span class="arrow">→</span>{{ change.new_status_label }}</td>
+            <td>{{ change.description }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="muted">No task status changes have been saved yet.</p>
+    {% endif %}
+  </section>
+</main>
+</body>
+</html>

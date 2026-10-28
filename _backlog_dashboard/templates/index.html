@@ -98,9 +98,10 @@
 <main>
   <header>
     <h1>Lynx backlog progress</h1>
-    <p class="subtle">Live summary parsed from task sections under <code>docs/TODO/</code>.</p>
+    <p class="subtle">Live summary parsed from task sections under <code>docs/TODO/</code>, with any locally saved status overrides applied.</p>
     <p><a href="/dependencies">View the full dependency graph →</a></p>
     <p><a href="/task-order">Plan a task route and copy an implementation prompt →</a></p>
+    <p><a href="/history">View task state change history →</a></p>
   </header>
 
   <section class="section" aria-labelledby="phase-heading">
@@ -271,6 +272,7 @@
       <a href="/source?file=${encodeURIComponent(item.file)}#L${item.line}">${escapeHtml(item.file)}:${item.line}</a>
       ${statusNote}
       <div class="meta"><span class="badge status-${item.status}">${escapeHtml(item.status_label)}</span><span class="badge">${escapeHtml(item.priority)}</span></div>
+      <div class="detail-block"><h3>Last observed status change</h3>${item.state_has_changed ? `<time datetime="${escapeHtml(item.state_updated_at)}">${escapeHtml(new Date(item.state_updated_at).toLocaleString())}</time>` : `<span class="muted">No status changes observed yet</span>`}</div>
       <div class="detail-block"><h3>Depends on</h3><div class="link-list">${linkList(item.dependency_ids, "No linked task dependencies.")}${item.external_dependencies.map(dependency => `<span class="badge">${escapeHtml(dependency)}</span>`).join("")}</div></div>
       <div class="detail-block"><h3>Blocked by / dependents</h3><div class="link-list">${linkList(item.dependent_ids, "No listed tasks depend on this item.")}</div></div>
       <div class="detail-block"><h3>References</h3>${references}

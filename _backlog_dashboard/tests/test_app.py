@@ -69,6 +69,10 @@ Phase 1  Engine skeleton             [██████████████
 """,
             encoding="utf-8",
         )
+        self.state_db = self.root / "state.sqlite3"
+
+    def make_app(self):
+        return create_app(self.todo, self.state_db)
 
     def tearDown(self):
         self.temp_dir.cleanup()
@@ -134,7 +138,7 @@ Phase 1  Engine skeleton             [██████████████
         self.assertEqual(phases[0]["status"], "Complete")
 
     def test_home_and_api_routes(self):
-        client = create_app(self.todo).test_client()
+        client = self.make_app().test_client()
 
         page = client.get("/")
         self.assertEqual(page.status_code, 200)
@@ -152,7 +156,7 @@ Phase 1  Engine skeleton             [██████████████
         self.assertEqual(client.get("/source?file=../../outside.md").status_code, 404)
 
     def test_full_dependency_graph_view_includes_all_tasks_and_links(self):
-        response = create_app(self.todo).test_client().get("/dependencies")
+        response = self.make_app().test_client().get("/dependencies")
 
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Full dependency graph", response.data)
@@ -163,7 +167,7 @@ Phase 1  Engine skeleton             [██████████████
         self.assertIn(b"Arrows point from prerequisite to dependent task", response.data)
 
     def test_task_order_view_includes_prompt_builder(self):
-        response = create_app(self.todo).test_client().get("/task-order")
+        response = self.make_app().test_client().get("/task-order")
 
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Add prerequisites", response.data)
@@ -174,6 +178,57 @@ Phase 1  Engine skeleton             [██████████████
         self.assertIn(b"commit-policy", response.data)
         self.assertIn(b"per-task", response.data)
         self.assertIn(b"crates/engine_sim/src/nav.rs", response.data)
+        self.assertIn(b"Status is read from the backlog Markdown", response.data)
+        self.assertNotIn(b"data-status-for", response.data)
+        self.assertNotIn(b"Change status for", response.data)
+        self.assertIn(b"State change history", response.data)
+
+    def test_markdown_status_changes_are_observed_and_logged(self):
+        client = self.make_app().test_client()
+        initial = client.get("/api/items")
+        movement = next(item for item in initial.json["items"] if item["id"] == "SIM-001")
+        self.assertEqual(movement["status"], "in_progress")
+        self.assertFalse(movement["state_has_changed"])
+        self.assertIsNone(movement["state_updated_at"])
+        self.assertNotIn(b"Status changed from", client.get("/history").data)
+
+        source = self.todo / "10-sample.md"
+        markdown = source.read_text(encoding="utf-8").replace(
+            "- **Status:** In progress — basic slice",
+            "- **Status:** Done",
+        )
+        source.write_text(markdown, encoding="utf-8")
+
+        changed = client.get("/api/items")
+        self.assertEqual(changed.json["summary"]["done"], 1)
+        self.assertEqual(changed.json["summary"]["in_progress"], 0)
+        movement = next(item for item in changed.json["items"] if item["id"] == "SIM-001")
+        changed_at = movement["state_updated_at"]
+        self.assertTrue(changed_at.endswith("Z"))
+        self.assertTrue(movement["state_has_changed"])
+
+        reloaded = self.make_app().test_client()
+        items = reloaded.get("/api/items").json["items"]
+        movement = next(item for item in items if item["id"] == "SIM-001")
+        self.assertEqual(movement["status"], "done")
+        self.assertEqual(movement["state_updated_at"], changed_at)
+        history = reloaded.get("/history")
+        self.assertEqual(history.status_code, 200)
+        self.assertIn(b"Status changed from In progress to Done", history.data)
+        self.assertEqual(history.data.count(b"SIM-001"), 1)
+
+    def test_flask_app_does_not_expose_a_status_update_endpoint(self):
+        client = self.make_app().test_client()
+        response = client.post(
+            "/api/task-state",
+            json={"task_id": "SIM-001", "status": "done"},
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(
+            next(item for item in client.get("/api/items").json["items"] if item["id"] == "SIM-001")["status"],
+            "in_progress",
+        )
 
 
 if __name__ == "__main__":

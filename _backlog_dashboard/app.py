@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 from collections import Counter
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from heapq import heappop, heappush
 from pathlib import Path
 from typing import Any
@@ -39,6 +42,96 @@ PHASE_LINE = re.compile(
     r"^Phase\s+(\d+)\s+(.+?)\s+\[([█░]+)\]\s+(\d+)%\s+(.+?)\s*$",
     re.MULTILINE,
 )
+
+
+@contextmanager
+def _state_connection(database_path: Path):
+    database_path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(database_path, timeout=5)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA busy_timeout = 5000")
+    try:
+        yield connection
+    finally:
+        connection.close()
+
+
+def _initialize_state_store(database_path: Path) -> None:
+    with _state_connection(database_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS observed_task_states (
+                task_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                changed_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS observed_task_state_changes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                old_status TEXT NOT NULL,
+                new_status TEXT NOT NULL,
+                description TEXT NOT NULL,
+                changed_at TEXT NOT NULL
+            );
+            """
+        )
+        connection.commit()
+
+
+def observe_task_states(
+    items: list[dict[str, Any]],
+    database_path: Path,
+) -> list[dict[str, Any]]:
+    timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    with _state_connection(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        for item in items:
+            previous = connection.execute(
+                "SELECT status, changed_at FROM observed_task_states WHERE task_id = ?",
+                (item["id"],),
+            ).fetchone()
+            if previous is None:
+                changed_at = None
+                connection.execute(
+                    """
+                    INSERT INTO observed_task_states
+                        (task_id, status, changed_at)
+                    VALUES (?, ?, NULL)
+                    """,
+                    (item["id"], item["status"]),
+                )
+            else:
+                changed_at = previous["changed_at"]
+                if previous["status"] != item["status"]:
+                    changed_at = timestamp
+                    connection.execute(
+                        """
+                        INSERT INTO observed_task_state_changes
+                            (task_id, old_status, new_status, description, changed_at)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            item["id"],
+                            previous["status"],
+                            item["status"],
+                            f"Status changed from {STATUS_LABELS[previous['status']]} to {STATUS_LABELS[item['status']]}",
+                            timestamp,
+                        ),
+                    )
+                    connection.execute(
+                        """
+                        UPDATE observed_task_states
+                        SET status = ?, changed_at = ?
+                        WHERE task_id = ?
+                        """,
+                        (item["status"], timestamp, item["id"]),
+                    )
+
+            item["state_updated_at"] = changed_at
+            item["state_has_changed"] = changed_at is not None
+            item["status_label"] = STATUS_LABELS[item["status"]]
+        connection.commit()
+    return items
 
 
 def _metadata(section: str) -> dict[str, str]:
@@ -361,22 +454,50 @@ def load_phase_progress(readme_path: Path) -> list[dict[str, Any]]:
     ]
 
 
-def create_app(todo_dir: Path | None = None) -> Flask:
+def create_app(
+    todo_dir: Path | None = None,
+    state_db_path: Path | None = None,
+) -> Flask:
     app = Flask(__name__)
     source_todo_dir = todo_dir or Path(__file__).resolve().parents[1] / "docs" / "TODO"
+    database_path = state_db_path or Path(__file__).resolve().parent / ".data" / "task-state.sqlite3"
+    _initialize_state_store(database_path)
 
     def get_items() -> list[dict[str, Any]]:
-        return load_backlog(source_todo_dir)
+        return observe_task_states(load_backlog(source_todo_dir), database_path)
 
     def get_readme_path() -> Path:
         return source_todo_dir.resolve().parents[1] / "README.md"
+
+    def get_history() -> list[dict[str, Any]]:
+        items_by_id = {item["id"]: item for item in get_items()}
+        with _state_connection(database_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT task_id, old_status, new_status, description, changed_at
+                FROM observed_task_state_changes
+                ORDER BY id DESC
+                LIMIT 500
+                """
+            )
+            changes = [dict(row) for row in rows]
+        for change in changes:
+            task = items_by_id.get(change["task_id"])
+            change["title"] = task["title"] if task else "Task no longer in backlog"
+            change["old_status_label"] = STATUS_LABELS.get(
+                change["old_status"], change["old_status"]
+            )
+            change["new_status_label"] = STATUS_LABELS.get(
+                change["new_status"], change["new_status"]
+            )
+        return changes
 
     @app.get("/")
     def index():
         try:
             items = get_items()
             phases = load_phase_progress(get_readme_path())
-        except (OSError, UnicodeError, ValueError) as error:
+        except (OSError, sqlite3.Error, UnicodeError, ValueError) as error:
             return render_template("error.html", error=str(error)), 500
         return render_template(
             "index.html",
@@ -390,7 +511,7 @@ def create_app(todo_dir: Path | None = None) -> Flask:
     def dependencies():
         try:
             items = get_items()
-        except (OSError, UnicodeError, ValueError) as error:
+        except (OSError, sqlite3.Error, UnicodeError, ValueError) as error:
             return render_template("error.html", error=str(error)), 500
         return render_template("dependencies.html", items=items)
 
@@ -398,16 +519,24 @@ def create_app(todo_dir: Path | None = None) -> Flask:
     def task_order():
         try:
             items = order_tasks(get_items())
-        except (OSError, UnicodeError, ValueError) as error:
+        except (OSError, sqlite3.Error, UnicodeError, ValueError) as error:
             return render_template("error.html", error=str(error)), 500
         return render_template("task_order.html", items=items)
+
+    @app.get("/history")
+    def history():
+        try:
+            changes = get_history()
+        except (OSError, sqlite3.Error, UnicodeError, ValueError) as error:
+            return render_template("error.html", error=str(error)), 500
+        return render_template("history.html", changes=changes)
 
     @app.get("/api/items")
     def api_items():
         try:
             items = get_items()
             phases = load_phase_progress(get_readme_path())
-        except (OSError, UnicodeError, ValueError) as error:
+        except (OSError, sqlite3.Error, UnicodeError, ValueError) as error:
             return jsonify({"error": str(error)}), 500
         return jsonify(
             {
