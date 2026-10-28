@@ -139,7 +139,7 @@ impl PostgresSnapshotStore {
                 "DELETE FROM lynx.world_snapshots WHERE world_id = $1",
                 &[&self.world_id],
             )
-            .map_err(write_error)?;
+            .map_err(|error| write_error(&error))?;
         Ok(deleted > 0)
     }
 
@@ -158,7 +158,7 @@ impl SnapshotStore for PostgresSnapshotStore {
         let mut client = self.client()?;
         let row = client
             .query_opt(SELECT_SNAPSHOT, &[&self.world_id])
-            .map_err(query_error)?;
+            .map_err(|error| query_error(&error))?;
         let Some(row) = row else {
             return Ok(None);
         };
@@ -182,7 +182,7 @@ impl SnapshotStore for PostgresSnapshotStore {
 
     fn save(&self, snapshot: &WorldSnapshot) -> Result<(), EngineError> {
         snapshot.validate()?;
-        let payload = serde_json::to_value(snapshot).map_err(encode_error)?;
+        let payload = serde_json::to_value(snapshot).map_err(|error| encode_error(&error))?;
         let canonical = canonical_json(&payload)?;
         let payload_hash = crate::auth::hash_hex(&canonical);
         let schema_major = i32::from(snapshot.schema_version.major);
@@ -201,7 +201,7 @@ impl SnapshotStore for PostgresSnapshotStore {
                     &payload_hash,
                 ],
             )
-            .map_err(write_error)?;
+            .map_err(|error| write_error(&error))?;
         Ok(())
     }
 }
@@ -234,10 +234,10 @@ fn valid_world_id(value: &str) -> bool {
 /// `serde_json`'s map is a `BTreeMap` by default, so key order does not depend
 /// on the order PostgreSQL returned from JSONB.
 fn canonical_json(value: &Value) -> Result<String, EngineError> {
-    serde_json::to_string(value).map_err(encode_error)
+    serde_json::to_string(value).map_err(|error| encode_error(&error))
 }
 
-fn encode_error(error: serde_json::Error) -> EngineError {
+fn encode_error(error: &serde_json::Error) -> EngineError {
     EngineError::new(
         ErrorCode::Internal,
         "the world snapshot could not be encoded",
@@ -249,7 +249,7 @@ fn snapshot_error(message: &'static str) -> EngineError {
     EngineError::new(ErrorCode::InvalidRequest, message)
 }
 
-fn query_error(error: postgres::Error) -> EngineError {
+fn query_error(error: &postgres::Error) -> EngineError {
     EngineError::new(
         ErrorCode::Internal,
         "the world snapshot could not be read from PostgreSQL",
@@ -257,7 +257,7 @@ fn query_error(error: postgres::Error) -> EngineError {
     .with_detail("error", error.to_string())
 }
 
-fn write_error(error: postgres::Error) -> EngineError {
+fn write_error(error: &postgres::Error) -> EngineError {
     EngineError::new(
         ErrorCode::Internal,
         "the world snapshot could not be written to PostgreSQL",

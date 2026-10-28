@@ -13,10 +13,11 @@ or an OS secret store, never from the repository.
 
 For native PostgreSQL/Nakama development, copy `.env.example` to `.env` in the
 repository root and fill in local values. The `scripts/*.ps1` and
-`scripts/*.sh` entry points load that file without overriding variables
-already present in the process environment. They accept simple `KEY=VALUE`
-entries and matching quotes, but do not perform shell expansion. Keep `.env`
-local and untracked; do not use it as a production secret store.
+`scripts/*.sh` entry points and the `lynx-world` binary load that file without
+overriding variables already present in the process environment. They accept
+simple `KEY=VALUE` entries and matching quotes, but do not perform shell
+expansion. Keep `.env` local and untracked; do not use it as a production
+secret store.
 
 `LYNX_PG_PASSWORD` is the application database role's password.
 `setup-postgres.*` separately connects as `LYNX_PG_SUPERUSER` (default
@@ -75,7 +76,8 @@ flags:
 | `--staff` | off | mark every demo grant as staff; enables calendar lifecycle commands (loopback development only) |
 | `--token-hash` | — | repeat once per demo character |
 | `--state-file <path>` | off | write durable world snapshots to this JSON file and load it at startup |
-| `--fresh` | off | ignore any saved snapshot, rebuild the authored demo, and overwrite the file at startup; requires `--state-file` (development reset) |
+| `--state-postgres` | off | store durable world snapshots in PostgreSQL instead; reads `LYNX_PG_HOST`, `LYNX_PG_PORT`, `LYNX_PG_DATABASE`, `LYNX_PG_USER`, `LYNX_PG_PASSWORD` (mutually exclusive with `--state-file`) |
+| `--fresh` | off | ignore any saved snapshot, rebuild the authored demo, and overwrite it at startup; requires `--state-file` or `--state-postgres` (development reset) |
 | `--snapshot-ms <ms>` | 10000 | how often a configured snapshot file is rewritten (must be at least the tick interval) |
 
 At startup the service also publishes one open faction conflict over the demo
@@ -84,24 +86,33 @@ calendar with `calendar.query`; lifecycle transitions (schedule, activate,
 resolve, …) are accepted only from `--staff` sessions. Applied commands are
 committed to the in-memory backend together with the faction snapshot.
 
-With `--state-file` configured, the service loads that snapshot at startup —
-zone entities, links, calendar, and faction state — writes a baseline snapshot
-before the authority loop begins, rewrites it on the snapshot interval and once
-more at shutdown, and resumes the saved tick. Snapshots follow each entity's
-explicit persistence policy; sessions, resume tokens, and minigame replication
-stay in memory as before. Without the flag, state is in memory and a restart
-logs everyone out and resets the zone.
+With `--state-file` or `--state-postgres` configured, the service loads that
+snapshot at startup — zone entities, links, calendar, and faction state —
+writes a baseline snapshot before the authority loop begins, rewrites it on
+the snapshot interval and once more at shutdown, and resumes the saved tick.
+Snapshots follow each entity's explicit persistence policy; sessions, resume
+tokens, and minigame replication stay in memory as before. Without a store,
+state is in memory and a restart logs everyone out and resets the zone.
+
+With `--state-postgres`, the whole-world snapshot lives in
+`lynx.world_snapshots` (one row per world, written atomically by an upsert, so
+a failed write keeps the previous world) and the connection comes from the
+same `LYNX_PG_*` variables the setup scripts use. Plain TCP only: keep the
+database on loopback or a trusted private network and terminate TLS in front
+of it; a remote, unencrypted database is not supported.
 
 A snapshot is a whole-world overwrite, so falling back to the authored demo
-would otherwise mean deleting the file by hand. `--fresh` does that explicitly:
-it requires `--state-file`, ignores the existing file (even a corrupt one),
-rebuilds the demo from authored content, and writes that pristine world over
-the snapshot before serving. If that overwrite fails, startup aborts rather
-than serving a world the old file would replace on the next restart. Use it to
-reset a development world after play testing:
+would otherwise mean deleting the snapshot by hand. `--fresh` does that
+explicitly: it requires `--state-file` or `--state-postgres`, ignores the
+existing snapshot (even a corrupt one), rebuilds the demo from authored
+content, and writes that pristine world over it before serving. If that
+overwrite fails, startup aborts rather than serving a world the old snapshot
+would replace on the next restart. Use it to reset a development world after
+play testing:
 
 ```text
 lynx-world serve --state-file world.json --fresh --token-hash <sha256-hex>
+lynx-world serve --state-postgres --fresh --token-hash <sha256-hex>
 ```
 
 The reset affects durable state only. Held connections, resume tokens, and

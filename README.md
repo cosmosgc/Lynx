@@ -27,7 +27,7 @@ localization model is described in
 | Workspace crates | 11 (10 crates + the `lynx` CLI) |
 | Rust edition / toolchain | 2024 edition, pinned to Rust **1.99** via `rust-toolchain.toml` |
 | Source code | ~33,000 LOC across 81 `.rs` files |
-| Tests | 393 test functions (unit + integration), zero unsafe code (`unsafe_code = "forbid"`) |
+| Tests | 396 test functions (unit + integration), zero unsafe code (`unsafe_code = "forbid"`) |
 | ADRs | 21 accepted architecture decision records |
 | Platform database | 6 SQL migrations (Nakama/PostgreSQL) |
 | Docs | 11 design docs + full ADR index (see [Documentation](#documentation)) |
@@ -76,7 +76,7 @@ Engine project · 9 phases · last reviewed: October 2026
 
 Phase 0  Architecture proof          [██████████████████] 100%  Complete
 Phase 1  Engine skeleton             [███████████████░░░]  85%  In progress — Bevy client work pending
-Phase 2  Authoritative simulation    [███████████████░░░]  85%  In progress — SQL persistence adapter pending
+Phase 2  Authoritative simulation    [███████████████░░░]  85%  In progress — account persistence pending
 Phase 3  Interaction & minds         [█████████████░░░░░]  75%  In progress
 Phase 4  UI & minigames              [███████████░░░░░░░]  65%  In progress
 Phase 5  Editor & content pipeline   [█████░░░░░░░░░░░░░]  30%  In progress
@@ -234,10 +234,10 @@ cargo run -p project_cli -- doctor --project ../my-world
 # Run the world service. Configure a hash, not a plaintext token.
 printf '%s' 'replace-with-a-long-random-token' | cargo run -p lynx-world -- token-hash
 cargo run -p lynx-world -- serve --bind 127.0.0.1:8090 --token-hash <sha256-hex>
-# Add --state-file world.json for durable world state, and --staff on loopback
-# to drive calendar lifecycle commands (demo only).
-# Reset the played world to the authored demo:
-# cargo run -p lynx-world -- serve --state-file world.json --fresh --token-hash <sha256-hex>
+# Add --state-file world.json for durable world state (or --state-postgres to
+# keep it in the local database), and --staff on loopback to drive calendar
+# lifecycle commands (demo only).
+# Reset the played world to the authored demo: append --fresh.
 ```
 
 The service exposes `GET /healthz`, `GET /readyz`, and the WebSocket endpoint
@@ -245,9 +245,11 @@ The service exposes `GET /healthz`, `GET /readyz`, and the WebSocket endpoint
 `session.hello` envelope. The demo publishes one open faction conflict over
 the demo zone; player sessions enroll through `calendar.command` and inspect
 it with `calendar.query` (lifecycle transitions require `--staff`). With
-`--state-file <path>` the zone, calendar, and faction state survive restarts;
-sessions still do not. `--fresh` discards that saved world and restores the
-authored demo. Wire kinds and reconnection rules are documented in
+`--state-file <path>` (or `--state-postgres`, which stores the snapshot in the
+migrated `lynx.world_snapshots` table) the zone, calendar, and faction state
+survive restarts; sessions still do not. `--fresh` discards that saved world
+and restores the authored demo. Wire kinds and reconnection rules are
+documented in
 [`docs/networking.md`](docs/networking.md); operation flags and shutdown
 behavior are in [`docs/operations.md`](docs/operations.md). There is no client
 crate yet.
