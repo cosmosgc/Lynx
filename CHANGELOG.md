@@ -33,6 +33,18 @@ semantic versioning for engine releases and content bundles.
 - `docs` updates for the snapshot path (architecture, operations, README
   progress) and an end-to-end restart integration test that drives save →
   restart → reconnect against the real gateway.
+- `lynx_world`: `--fresh` reset. With `--state-file`, it ignores the played
+  snapshot (even a corrupt one), rebuilds the authored demo, and writes that
+  pristine world over the file before serving, so resetting a development
+  world no longer means deleting the file by hand. The rule lives in
+  `lynx_world::startup::load` and is covered by a test that first resumes a
+  played world and then proves `--fresh` returns it to tick zero and the
+  authored entity placement.
+- `lynx_world`: the startup baseline snapshot is written before the authority
+  loop starts, so the authored world (or a `--fresh` reset) survives a crash
+  during the first save interval instead of existing only in memory. Under
+  `--fresh` a failed overwrite aborts startup rather than silently serving from
+  a world the played file would replace on the next restart.
 
 - `engine_core`: durable world calendar and bounded faction conflicts. Events
   have an audited `Draft -> Scheduled -> Open -> Active` lifecycle with

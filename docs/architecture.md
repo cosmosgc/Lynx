@@ -76,8 +76,11 @@ Rules:
   at shutdown: `engine_sim`'s versioned `ZoneSnapshot` carries persistent
   entities, links, cooldowns, idempotency caches, and transfer receipts, and
   `lynx_world::persistence` pairs it with the calendar and faction snapshots
-  behind a trusted `SnapshotStore` seam. All gameplay authority stays in the
-  crates below it.
+  behind a trusted `SnapshotStore` seam. `lynx_world::startup` selects between
+  a saved world and the authored demo; `--fresh` always selects the authored
+  demo and writes it over the snapshot, giving operators a one-flag reset that
+  play can never contaminate. All gameplay authority stays in the crates below
+  it.
 - `backend_nakama` is the only crate that knows Nakama's HTTP API.
 - Client/editor crates (introduced with Bevy) depend on the crates above and
   never the reverse.

@@ -1,27 +1,45 @@
-# ⚠️ TODO: World Persistence - Implement `--fresh` Restart Mode
+# World Persistence — `--fresh` Restart Mode
 
-This document outlines a necessary improvement to world state persistence and loading, currently tested in `crates/lynx_world/tests/restart.rs`.
+**Status: implemented.** This note remains as the design record for the reset
+switch and its boundaries.
 
-## The Problem
-Currently, when restarting or resuming the world simulation, the system relies on the latest written snapshot file (the "played" state). If the intended authoritative source of truth is the **authored** state (e.g., what was defined in content files and represents a 'pristine' setup), manually restoring this authored state requires deleting the saved snapshot file entirely. This process is fragile:
+## The problem
 
-1.  It relies on manual intervention (deleting the file).
-2.  There is a small, non-deterministic window (`~10s` before first interval save) where the initial state has not been written, potentially causing crashes or inconsistent data if recovery logic isn't perfect.
+Durable snapshots hold the *played* world: time has advanced, doors are open,
+inventories moved. Restarting normally resumes that state by design. Returning
+to the *authored* demo (the pristine setup built from content) therefore used
+to require deleting the snapshot file by hand, which is fragile and easy to
+forget.
 
-## Desired Behavior: The `--fresh` Switch
-A new command-line switch, tentatively named `--fresh`, should be implemented in the primary world loading sequence (`main`).
+## Behavior
 
-When activated, the system must:
-1.  **Ignore** the existing persisted snapshot file (the "played" state).
-2.  Rebuild the authoritative *authored* world from scratch using standard content sources.
-3.  Save this newly constructed authored world back to the snapshot store, effectively overwriting the played state with a guaranteed pristine version.
+`lynx-world serve --state-file world.json --fresh --token-hash <sha256-hex>`
 
-This provides an explicit, recoverable way for developers or operators to reset the running world simulation to its defined base state without data loss due to incomplete saves, and without needing manual file system manipulation.
+1. **Ignores** the existing snapshot file. It is not read, so an unreadable or
+   corrupt file cannot block a reset.
+2. Rebuilds the authored demo from content, exactly as a first run does.
+3. Writes the rebuilt world over the snapshot **before** the authority loop
+   starts, so the reset is durable immediately.
+4. Serves normally from that authored world.
 
-## Technical Notes & References
-*   **Test Coverage:** The logic for this desired behavior is already validated within `crates/lynx_world/tests/restart.rs` in the test function `a_fresh_start_replaces_the_played_world_with_the_authored_one`. This test serves as an excellent reference for the required functionality.
-*   **Scope:** The implementation must ensure that saving the authored state does not break any existing persistence contract or introduce new race conditions during world initialization.
+`--fresh` requires `--state-file`; without a file there is nothing to reset.
+The choice lives in `lynx_world::startup::load`, which is also what normal
+startup uses, so the test exercises the real path rather than a copy.
 
-## Action Items (TODO)
-- Implement `--fresh` switch handling in the main entry point (`lynx-world`).
-- Update documentation (e.g., `docs/getting-started.md`) to explain the existence and usage of the `--fresh` flag.
+## Deliberate boundaries
+
+- Sessions, resume tokens, and already-open connections are process-local and
+  simply do not survive the restart.
+- Fresh demo minigame seeds come from server entropy on every build. They are
+  server-held runtime values, not authored or played state.
+- `--fresh` resets the durable world only. It does not delete unrelated files,
+  migrate schemas, or change configured tokens.
+
+## Tests
+
+- `crates/lynx_world/tests/restart.rs`:
+  `a_fresh_start_replaces_the_played_world_with_the_authored_one` saves a
+  played world at tick 7, proves a normal start resumes it, then proves
+  `--fresh` returns tick zero and the authored entity placement.
+- `crates/lynx_world/src/config.rs`:
+  `fresh_requires_a_state_file` covers the flag validation.

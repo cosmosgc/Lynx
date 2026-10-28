@@ -6,6 +6,7 @@
 //! - [`backend`] commits calendar and faction snapshots for the demo;
 //! - [`demo`] builds the in-memory zone, calendar, and server handshake;
 //! - [`persistence`] writes and loads durable whole-world snapshot files;
+//! - [`startup`] chooses between a saved world and the authored demo;
 //! - [`service`] serializes admission, input, and ticks on one authority loop;
 //! - [`transport`] exposes health endpoints and moves length-prefixed
 //!   envelopes over WebSocket connections.
@@ -21,4 +22,5 @@ pub mod config;
 pub mod demo;
 pub mod persistence;
 pub mod service;
+pub mod startup;
 pub mod transport;

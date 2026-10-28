@@ -217,21 +217,34 @@ impl Service {
     ///
     /// Failures are recorded in the log and never stop the loop: the
     /// in-memory world stays authoritative. The authority loop calls this on
-    /// its save cadence and at shutdown; startup calls it once so the baseline
-    /// world survives even a crash before the first interval save.
+    /// its save cadence and at shutdown.
     pub fn save_snapshot(&mut self) {
-        let Some(persistence) = &self.persistence else {
-            return;
-        };
-        let store = Arc::clone(&persistence.store);
-        let world = WorldSnapshot::capture(&self.snapshot_inputs(), clock().value());
-        if let Err(error) = store.save(&world) {
+        if let Err(error) = self.try_save_snapshot() {
             tracing::warn!(
                 code = ?error.code(),
                 details = %error,
                 "the world snapshot could not be written"
             );
         }
+    }
+
+    /// Capture and write one world snapshot, returning write failures.
+    ///
+    /// Startup uses this to make the authored baseline — or a `--fresh` reset —
+    /// durable before serving, where a failed write must be handled by the
+    /// caller instead of only logged.
+    ///
+    /// # Errors
+    ///
+    /// Returns the store's error when the snapshot could not be written. A
+    /// service without persistence succeeds without writing anything.
+    pub fn try_save_snapshot(&mut self) -> Result<(), EngineError> {
+        let Some(persistence) = &self.persistence else {
+            return Ok(());
+        };
+        let store = Arc::clone(&persistence.store);
+        let world = WorldSnapshot::capture(&self.snapshot_inputs(), clock().value());
+        store.save(&world)
     }
 
     /// The authoritative state a snapshot is built from.
@@ -648,6 +661,39 @@ mod tests {
             state.last = Some(snapshot.clone());
             Ok(())
         }
+    }
+
+    /// Rejects every write so startup can prove it handles the failure.
+    #[derive(Debug)]
+    struct FailingStore;
+
+    impl crate::persistence::SnapshotStore for FailingStore {
+        fn load(&self) -> Result<Option<crate::persistence::WorldSnapshot>, EngineError> {
+            Ok(None)
+        }
+
+        fn save(&self, _snapshot: &crate::persistence::WorldSnapshot) -> Result<(), EngineError> {
+            Err(EngineError::new(
+                ErrorCode::Internal,
+                "the test store rejects every write",
+            ))
+        }
+    }
+
+    #[test]
+    fn a_rejected_snapshot_write_surfaces_to_the_caller() {
+        let (service, _, _) = service();
+        let store: Arc<dyn crate::persistence::SnapshotStore + Send + Sync> =
+            Arc::new(FailingStore);
+        let mut service = service.with_persistence(store, Duration::from_millis(1));
+
+        let error = service
+            .try_save_snapshot()
+            .expect_err("a failed write must reach startup");
+        assert_eq!(error.code(), ErrorCode::Internal);
+
+        // The cadence path stays best-effort and never panics.
+        service.save_snapshot();
     }
 
     #[tokio::test]

@@ -75,6 +75,7 @@ flags:
 | `--staff` | off | mark every demo grant as staff; enables calendar lifecycle commands (loopback development only) |
 | `--token-hash` | — | repeat once per demo character |
 | `--state-file <path>` | off | write durable world snapshots to this JSON file and load it at startup |
+| `--fresh` | off | ignore any saved snapshot, rebuild the authored demo, and overwrite the file at startup; requires `--state-file` (development reset) |
 | `--snapshot-ms <ms>` | 10000 | how often a configured snapshot file is rewritten (must be at least the tick interval) |
 
 At startup the service also publishes one open faction conflict over the demo
@@ -84,11 +85,29 @@ resolve, …) are accepted only from `--staff` sessions. Applied commands are
 committed to the in-memory backend together with the faction snapshot.
 
 With `--state-file` configured, the service loads that snapshot at startup —
-zone entities, links, calendar, and faction state — rewrites it on the
-snapshot interval and once more at shutdown, and resumes the saved tick.
-Snapshots follow each entity's explicit persistence policy; sessions, resume
-tokens, and minigame replication stay in memory as before. Without the flag,
-state is in memory and a restart logs everyone out and resets the zone.
+zone entities, links, calendar, and faction state — writes a baseline snapshot
+before the authority loop begins, rewrites it on the snapshot interval and once
+more at shutdown, and resumes the saved tick. Snapshots follow each entity's
+explicit persistence policy; sessions, resume tokens, and minigame replication
+stay in memory as before. Without the flag, state is in memory and a restart
+logs everyone out and resets the zone.
+
+A snapshot is a whole-world overwrite, so falling back to the authored demo
+would otherwise mean deleting the file by hand. `--fresh` does that explicitly:
+it requires `--state-file`, ignores the existing file (even a corrupt one),
+rebuilds the demo from authored content, and writes that pristine world over
+the snapshot before serving. If that overwrite fails, startup aborts rather
+than serving a world the old file would replace on the next restart. Use it to
+reset a development world after play testing:
+
+```text
+lynx-world serve --state-file world.json --fresh --token-hash <sha256-hex>
+```
+
+The reset affects durable state only. Held connections, resume tokens, and
+pending minigame seeds are process-local and already disappear on restart. Fresh
+demo minigame seeds are drawn from server entropy on every build, which is not
+a player-visible state change.
 
 The process logs through `RUST_LOG` (`info` by default) and shuts down on
 `Ctrl+C`: readiness turns false, the listener stops accepting, a final world

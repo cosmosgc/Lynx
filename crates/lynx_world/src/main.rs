@@ -13,21 +13,22 @@
 //!
 //! Add `--state-file world.json` for durable state: the service loads that
 //! snapshot at startup and rewrites it on a fixed interval and at shutdown.
-//! Without it, sessions, characters, and world state are transient.
+//! Add `--fresh` with it to discard the played world and restore the authored
+//! demo. Without `--state-file`, sessions, characters, and world state are
+//! transient.
 
 use std::io::Read;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use engine_core::faction::FactionWorld;
-use engine_core::world_event::WorldCalendar;
 use lynx_world::auth::{self, Authenticator, Grant};
 use lynx_world::backend;
 use lynx_world::config::ServeArgs;
 use lynx_world::demo;
-use lynx_world::persistence::{FileSnapshotStore, SnapshotStore, WorldSnapshot};
+use lynx_world::persistence::{FileSnapshotStore, SnapshotStore};
 use lynx_world::service::Service;
+use lynx_world::startup;
 use lynx_world::transport::{self, AppState};
 use tokio::sync::watch;
 use world_gateway::{SystemResumeTokens, WorldGateway};
@@ -102,54 +103,29 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .map(|path| Arc::new(FileSnapshotStore::new(path.clone())) as _);
     args.validate_snapshot_args()
         .context("invalid snapshot configuration")?;
-    let saved: Option<WorldSnapshot> = if args.fresh {
-        if let Some(path) = &args.state_file {
-            tracing::info!(
-                path = %path.display(),
-                "--fresh: the played world is ignored and a freshly authored world is saved over the snapshot at startup"
-            );
-        }
-        None
-    } else {
-        match &store {
-            Some(store) => store
-                .load()
-                .context("failed to read the world snapshot file")?,
-            None => None,
-        }
-    };
-
-    let zone = match saved.as_ref() {
-        Some(world) => {
-            tracing::info!(
-                saved_at_ms = world.saved_at_ms,
-                entities = world.zone.entities.len(),
-                "restoring the world from the snapshot file"
-            );
-            demo::restore_zone(&world.zone).context("failed to restore the demo zone")?
-        }
-        None => demo::build_zone(&grants).context("failed to build the demo zone")?,
-    };
+    if args.fresh
+        && let Some(path) = &args.state_file
+    {
+        tracing::info!(
+            path = %path.display(),
+            "--fresh: the played world is ignored and a freshly authored world is saved over the snapshot at startup"
+        );
+    }
 
     let now_ms = demo::now_ms();
-    let (calendar, factions) = if let Some(world) = saved.as_ref()
-        && world.calendar.is_some()
-    {
-        // Calendar and faction state are restored together: a conflict
-        // resolution mutates both aggregates.
-        (
-            WorldCalendar::from_snapshot(world.calendar.clone().expect("checked above"))
-                .context("failed to restore the demo calendar")?,
-            FactionWorld::from_snapshot(world.factions.clone().expect("paired with the calendar"))
-                .context("failed to restore faction state")?,
-        )
-    } else {
-        let mut factions =
-            demo::build_faction_world(now_ms).context("failed to build the demo faction world")?;
-        let calendar = demo::build_calendar(&mut factions, now_ms)
-            .context("failed to build the demo calendar")?;
-        (calendar, factions)
-    };
+    let startup::StartupWorld {
+        zone,
+        calendar,
+        factions,
+    } = startup::load(
+        store
+            .as_ref()
+            .map(|store| store.as_ref() as &dyn SnapshotStore),
+        args.fresh,
+        &grants,
+        now_ms,
+    )
+    .context("failed to start the demo world")?;
     let mut gateway = WorldGateway::new(
         zone,
         demo::handshake().context("failed to build the server handshake")?,
@@ -171,9 +147,14 @@ async fn serve(args: ServeArgs) -> Result<()> {
     };
     // Establish the baseline snapshot before the loop starts, so the authored
     // world (or the freshly reset one under --fresh) is durable from the very
-    // first second instead of waiting for the first interval save.
-    if store.is_some() {
-        service.save_snapshot();
+    // first second instead of waiting for the first interval save. Under
+    // --fresh a failed write aborts startup: serving would otherwise hide that
+    // the played snapshot is still on disk.
+    let baseline = service.try_save_snapshot();
+    if args.fresh {
+        baseline.context("--fresh could not overwrite the world snapshot")?;
+    } else if let Err(error) = baseline {
+        tracing::warn!(%error, "the startup world snapshot could not be written");
     }
 
     let (events, receivers) = transport::event_channel();

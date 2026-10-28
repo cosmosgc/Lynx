@@ -15,6 +15,7 @@ use lynx_world::demo;
 use lynx_world::persistence::{
     FileSnapshotStore, SnapshotStore, WorldSnapshot, WorldSnapshotInputs,
 };
+use lynx_world::startup;
 use world_gateway::{
     CalendarPersistence, GatewayConfig, SessionClaims, SystemResumeTokens, WorldGateway,
 };
@@ -163,15 +164,15 @@ fn a_broken_snapshot_file_is_rejected_with_a_stable_code() -> anyhow::Result<()>
 
 #[test]
 fn a_fresh_start_replaces_the_played_world_with_the_authored_one() -> anyhow::Result<()> {
-    // Simulates what `--fresh` does in main: keep the store, ignore the
-    // played file, rebuild the demo world, and save it over the snapshot.
+    // `startup::load` is the exact function `--fresh` selects, so this test
+    // proves the reset path, not a copy of it.
     let grants = characters(1);
     let dir = std::env::temp_dir().join("lynx-world-restart-tests");
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("fresh-world.json");
     let store = FileSnapshotStore::new(&path);
 
-    // A "played" world: time moved, doors were opened by a link activation.
+    // A "played" world: the tick moved before it was saved.
     let mut played_gateway = WorldGateway::new(
         demo::build_zone(&grants)?,
         demo::handshake()?,
@@ -192,40 +193,34 @@ fn a_fresh_start_replaces_the_played_world_with_the_authored_one() -> anyhow::Re
     store.save(&played)?;
     assert_eq!(store.load()?.unwrap().zone.tick.0, 7);
 
-    // --fresh: ignore the played file, rebuild, and save the authored world.
-    let authored_gateway = WorldGateway::new(
-        demo::build_zone(&grants)?,
-        demo::handshake()?,
-        GatewayConfig::new(DurationMs::new(30_000)),
-        SystemResumeTokens::new(),
-    )?;
-    let authored_server = WorldServer::new(authored_gateway);
-    let authored = WorldSnapshot::capture(
-        &WorldSnapshotInputs {
-            zone: authored_server.gateway().zone().snapshot(),
-            calendar_factions: None,
-        },
-        2_000,
-    );
-    store.save(&authored)?;
+    // Without --fresh, startup resumes the played world.
+    let resumed = startup::load(Some(&store as &dyn SnapshotStore), false, &grants, 2_000)?;
+    assert_eq!(resumed.zone.tick().0, 7);
 
-    let reset = store.load()?.unwrap();
-    assert_eq!(reset.zone.tick.0, 0, "the auth world is back at tick zero");
+    // With --fresh, startup ignores the file and authors the world again.
+    let reset = startup::load(Some(&store as &dyn SnapshotStore), true, &grants, 2_000)?;
+    assert_eq!(
+        reset.zone.tick().0,
+        0,
+        "the authored world is back at tick zero"
+    );
+
     // Entities match the authored placement exactly; the server-held
     // minigame seed is re-rolled from entropy, which is not a state change.
-    let playback_positions: Vec<_> = authored
-        .zone
-        .entities
-        .iter()
+    let authored = demo::build_zone(&grants)?;
+    let authored_positions: Vec<_> = authored
+        .entities()
         .map(|entity| (entity.id, entity.transform))
         .collect();
-    let restored_positions: Vec<_> = reset
+    let reset_positions: Vec<_> = reset
         .zone
-        .entities
-        .iter()
+        .entities()
         .map(|entity| (entity.id, entity.transform))
         .collect();
-    assert_eq!(restored_positions, playback_positions);
+    assert_eq!(reset_positions, authored_positions);
+
+    // The fresh world also authors a new calendar for the demo conflict.
+    assert_eq!(reset.calendar.snapshot().events.len(), 1);
     std::fs::remove_file(&path).unwrap_or(());
     Ok(())
 }
