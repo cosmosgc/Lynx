@@ -23,7 +23,7 @@ moderation surface.
 ## NET-001 — Production authentication at the world edge
 
 - **Priority:** P0
-- **Status:** In progress
+- **Status:** Blocked — production account provisioning and character world-entry boundary
 - **Depends on:** —
 - **References:** [networking §Transport](../networking.md#transport),
   [architecture §What is deliberately not here yet](../architecture.md#what-is-deliberately-not-here-yet),
@@ -63,6 +63,17 @@ startup warnings; proxies and tunnels can still expose a loopback listener.
 Provider integration, refresh/revalidation, audit, and lifetime/skew policy
 remain open. Backend implementations and callers must avoid logging credentials or backend details;
 the synchronous seam does not settle production I/O architecture.
+
+**Execution blocker:** ADR 0018 selects Nakama, but the production account and
+character entry path is not implemented. `PostgresIdentityStore` only resolves
+already-provisioned account mappings; `PostgresCharacterStore` checks owned
+records but does not enter characters into the world. Startup still restores a
+demo snapshot or spawns characters from static-token grants. Provisioning and
+authenticated world entry are outstanding `PST-001` work, outside this selected
+task set. Before wiring production admission, decide whether NET-001 targets
+only pre-provisioned accounts and characters already present in an authoritative
+snapshot, or authorize the prerequisite provisioning/world-entry work. Do not
+substitute demo characters or in-memory ownership for production ownership.
 
 **Acceptance criteria**
 
