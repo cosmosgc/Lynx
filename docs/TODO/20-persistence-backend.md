@@ -24,7 +24,7 @@ repositories. Most normalized tables are defined but not yet used by the runtime
 ## PST-001 — Account and character persistence
 
 - **Priority:** P0
-- **Status:** Ready
+- **Status:** In progress
 - **Depends on:** —
 - **References:** migration `0001_core.sql`, `crates/game_api/src/service.rs`,
   `character.rs`, `crates/backend_memory`
@@ -45,6 +45,19 @@ world entry, and shared adapter contract tests remain outstanding. Tombstoning
 retains related records and does not coordinate live-world removal or property
 release. PostgreSQL integration tests require a configured, migrated, isolated
 test database.
+
+**Implemented slice:** A validated Nakama UUID is now the canonical ID for a
+new Lynx account; `PostgresIdentityStore::provision_account` creates or resolves
+that mapping without accepting a client account field. `NakamaPostgresBackend`
+composes Nakama session validation with the identity and character stores, so
+its character operations resolve the authenticated account before accessing
+PostgreSQL. `CharacterWorldService` is character-bound rather than overloading
+the legacy zone-only `WorldService`: entry/leave persist a selected owned,
+active character's server-routed zone with an audit event. `backend_memory`
+implements the same non-durable contract for offline tests. The live world
+runtime still uses demo grants, and a complete shared contract suite plus a
+migrated PostgreSQL/Nakama integration run remain required before this task is
+done.
 
 **Why:** The durable world snapshot restores zones, calendar, and factions, but
 accounts and characters still live in the in-memory backend. A restart loses

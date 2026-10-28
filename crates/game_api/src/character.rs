@@ -137,6 +137,32 @@ pub trait CharacterService {
     ) -> Result<(), ApiError>;
 }
 
+/// Character-bound world-presence operations.
+///
+/// A routing service resolves the destination zone from trusted server state
+/// before calling this interface. The client cannot choose an account or infer
+/// a character from its account: every operation authenticates the token and
+/// checks that the supplied character is currently owned and playable.
+pub trait CharacterWorldService: CharacterService {
+    /// Record entry of an owned, playable character into a server-resolved zone.
+    ///
+    /// This durable selection/presence seam does not create a gateway session;
+    /// the world edge owns live session admission and capacity.
+    fn enter_character(
+        &self,
+        token: &SessionToken,
+        character_id: CharacterId,
+        zone_id: &str,
+    ) -> Result<Character, ApiError>;
+
+    /// Clear the recorded zone for an owned character leaving the world.
+    fn leave_character(
+        &self,
+        token: &SessionToken,
+        character_id: CharacterId,
+    ) -> Result<Character, ApiError>;
+}
+
 /// A non-secret client-generated key identifying one character creation intent.
 ///
 /// Use a fresh, sufficiently unique key for each intent and reuse it only when

@@ -7,7 +7,7 @@
 use std::sync::Mutex;
 
 use engine_core::IdKind;
-use engine_core::id::{IdGenerator, SystemIdGenerator};
+use engine_core::id::{IdGenerator, StableId, SystemIdGenerator};
 use engine_core::time::Millis;
 use game_api::{AccountId, ApiError, Character, CharacterId, CharacterStatus, CreateCharacter};
 use postgres::{Client, Row};
@@ -119,6 +119,29 @@ impl PostgresCharacterStore {
         Ok(())
     }
 
+    /// Record entry of an owned, active character into a server-resolved zone.
+    ///
+    /// The caller must route the character before calling this method. It does
+    /// not create a live world session or accept a client-selected account.
+    pub fn enter_character(
+        &self,
+        account: &AccountId,
+        id: CharacterId,
+        zone_id: &str,
+    ) -> Result<Character, ApiError> {
+        validate_zone_id(zone_id)?;
+        self.update_character_zone(account, id, Some(zone_id), "character.enter_world")
+    }
+
+    /// Clear the recorded zone for an owned, active character.
+    pub fn leave_character(
+        &self,
+        account: &AccountId,
+        id: CharacterId,
+    ) -> Result<Character, ApiError> {
+        self.update_character_zone(account, id, None, "character.leave_world")
+    }
+
     /// Create a character for a trusted account, or return the original receipt.
     ///
     /// `key` is a non-secret, account-scoped retry identifier, not a session
@@ -200,6 +223,66 @@ impl PostgresCharacterStore {
         tx.commit().map_err(|_| unavailable())?;
         Ok(character)
     }
+
+    fn update_character_zone(
+        &self,
+        account: &AccountId,
+        id: CharacterId,
+        zone_id: Option<&str>,
+        action: &str,
+    ) -> Result<Character, ApiError> {
+        let mut client = self.client.lock().map_err(|_| unavailable())?;
+        let mut tx = client.transaction().map_err(|_| unavailable())?;
+        if tx
+            .query_opt(
+                "SELECT account_id FROM lynx.accounts WHERE account_id = $1 FOR UPDATE",
+                &[&account.as_str()],
+            )
+            .map_err(|_| unavailable())?
+            .is_none()
+        {
+            return Err(ApiError::NotFound("character not found".into()));
+        }
+        let id_text = id.to_string();
+        let sql = format!(
+            "SELECT {COLUMNS} FROM lynx.characters \
+             WHERE account_id = $1 AND character_id = $2 AND deleted_at IS NULL FOR UPDATE"
+        );
+        let row = tx
+            .query_opt(&sql, &[&account.as_str(), &id_text])
+            .map_err(|_| unavailable())?
+            .ok_or_else(|| ApiError::NotFound("character not found".into()))?;
+        let current = decode(&row, account)?;
+        if !current.is_playable() {
+            return Err(ApiError::NotFound("character not found".into()));
+        }
+        if current.zone_id.as_deref() == zone_id {
+            tx.commit().map_err(|_| unavailable())?;
+            return Ok(current);
+        }
+        let sql = format!(
+            "UPDATE lynx.characters SET zone_id = $3 WHERE account_id = $1 AND character_id = $2 \
+             RETURNING {COLUMNS}"
+        );
+        let row = tx
+            .query_one(&sql, &[&account.as_str(), &id_text, &zone_id])
+            .map_err(|_| unavailable())?;
+        let character = decode(&row, account)?;
+        tx.execute(
+            "INSERT INTO lynx.audit_events (occurred_at, actor_kind, actor_id, action, target_id, outcome, correlation_id) VALUES (now(), 'character', $1, $2, $1, 'succeeded', $3)",
+            &[&id_text, &action, &format!("{action}:{id_text}")],
+        )
+        .map_err(|_| unavailable())?;
+        tx.commit().map_err(|_| unavailable())?;
+        Ok(character)
+    }
+}
+
+fn validate_zone_id(zone_id: &str) -> Result<(), ApiError> {
+    StableId::parse(zone_id)
+        .and_then(|id| id.expect_kind(IdKind::Zone))
+        .map_err(|_| ApiError::InvalidRequest("invalid zone identifier".into()))?;
+    Ok(())
 }
 
 fn unavailable() -> ApiError {

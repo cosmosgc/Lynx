@@ -3,8 +3,8 @@
 use engine_core::{IdKind, StableId};
 use game_api::{
     AccountId, ApiError, Character, CharacterCreationKey, CharacterCreationReceipt, CharacterId,
-    CharacterService, CharacterStatus, CreateCharacter, EphemeralCharacterIntentService,
-    SessionToken,
+    CharacterService, CharacterStatus, CharacterWorldService, CreateCharacter,
+    EphemeralCharacterIntentService, SessionToken,
 };
 
 use crate::{MemoryBackend, State};
@@ -159,9 +159,47 @@ impl EphemeralCharacterIntentService for MemoryBackend {
     }
 }
 
+impl CharacterWorldService for MemoryBackend {
+    fn enter_character(
+        &self,
+        token: &SessionToken,
+        character_id: CharacterId,
+        zone_id: &str,
+    ) -> Result<Character, ApiError> {
+        if !self.zones.contains_key(zone_id) {
+            return Err(ApiError::NotFound("zone not found".into()));
+        }
+        let mut state = self.lock_state()?;
+        let account_id = Self::account_for_token(&state, token)?;
+        let character = state
+            .characters
+            .get_mut(&character_id)
+            .filter(|character| character.account_id == account_id && character.is_playable())
+            .ok_or_else(|| ApiError::NotFound("character not found".into()))?;
+        character.zone_id = Some(zone_id.to_owned());
+        Ok(character.clone())
+    }
+
+    fn leave_character(
+        &self,
+        token: &SessionToken,
+        character_id: CharacterId,
+    ) -> Result<Character, ApiError> {
+        let mut state = self.lock_state()?;
+        let account_id = Self::account_for_token(&state, token)?;
+        let character = state
+            .characters
+            .get_mut(&character_id)
+            .filter(|character| character.account_id == account_id && character.is_playable())
+            .ok_or_else(|| ApiError::NotFound("character not found".into()))?;
+        character.zone_id = None;
+        Ok(character.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use game_api::{AuthService, InventoryService};
+    use game_api::{AuthService, CharacterWorldService, InventoryService, Zone};
 
     use super::*;
     use crate::test_support::login;
@@ -245,6 +283,35 @@ mod tests {
             Err(ApiError::NotFound(_))
         ));
         assert_eq!(backend.characters(&owner.token).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn character_bound_world_entry_checks_ownership_and_clears_on_leave() {
+        let backend = MemoryBackend::with_zones([Zone {
+            id: "adventure".into(),
+            name: "Adventure".into(),
+            player_count: 0,
+            capacity: None,
+        }])
+        .unwrap();
+        let owner = session(&backend, "device-owner");
+        let other = session(&backend, "device-other");
+        let character = create(&backend, &owner.token, "Aria");
+
+        let entered = backend
+            .enter_character(&owner.token, character.id, "adventure")
+            .unwrap();
+        assert_eq!(entered.zone_id.as_deref(), Some("adventure"));
+        assert!(matches!(
+            backend.enter_character(&other.token, character.id, "adventure"),
+            Err(ApiError::NotFound(_))
+        ));
+        assert!(matches!(
+            backend.enter_character(&owner.token, character.id, "missing"),
+            Err(ApiError::NotFound(_))
+        ));
+        let left = backend.leave_character(&owner.token, character.id).unwrap();
+        assert_eq!(left.zone_id, None);
     }
 
     #[test]

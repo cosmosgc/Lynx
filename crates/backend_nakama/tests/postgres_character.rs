@@ -6,7 +6,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use backend_nakama::{PostgresCharacterStore, PostgresIdentityStore};
-use engine_core::{IdKind, StableId};
+use engine_core::{IdKind, Locale, StableId};
 use game_api::{AccountId, ApiError, CharacterId, CharacterStatus, CreateCharacter};
 use postgres::{Config, NoTls};
 
@@ -78,6 +78,18 @@ fn account_scoped_reads_survive_reconnection() {
         identities.resolve_account("' OR true--"),
         Err(ApiError::Unauthenticated)
     ));
+    let new_nakama_user: String = db
+        .query_one("SELECT md5($1)::uuid::text", &[&format!("new-{nonce}")])
+        .unwrap()
+        .get(0);
+    let provisioned = identities
+        .provision_account(&new_nakama_user, &Locale::default())
+        .unwrap();
+    assert_eq!(provisioned.as_str(), new_nakama_user);
+    assert_eq!(
+        identities.resolve_account(&new_nakama_user).unwrap(),
+        provisioned
+    );
     for (character, status) in [
         (id, "active"),
         (suspended, "suspended"),
@@ -143,6 +155,7 @@ fn account_scoped_reads_survive_reconnection() {
     drop(store);
     let reopened = PostgresCharacterStore::new(config.connect(NoTls).unwrap());
     assert_eq!(reopened.select_character(&owner, id).unwrap(), selected);
+    check_world_entry(&config, &owner, &other, id, nonce);
     check_creation(&config, &mut db, &owner, &other, nonce);
     check_deletion(&config, &mut db, &owner, &other, id, suspended, deleted);
     db.execute(
@@ -162,10 +175,38 @@ fn account_scoped_reads_survive_reconnection() {
         .unwrap();
     cleanup.commit().unwrap();
     db.execute(
-        "DELETE FROM lynx.accounts WHERE account_id = $1 OR account_id = $2",
-        &[&owner.as_str(), &other.as_str()],
+        "DELETE FROM lynx.accounts WHERE account_id = $1 OR account_id = $2 OR account_id = $3",
+        &[&owner.as_str(), &other.as_str(), &provisioned.as_str()],
     )
     .unwrap();
+}
+
+fn check_world_entry(
+    config: &Config,
+    owner: &AccountId,
+    other: &AccountId,
+    character: CharacterId,
+    nonce: u128,
+) {
+    let zone = StableId::from_parts(IdKind::Zone, 0, nonce).to_string();
+    let store = PostgresCharacterStore::new(config.connect(NoTls).unwrap());
+    let entered = store.enter_character(owner, character, &zone).unwrap();
+    assert_eq!(entered.zone_id.as_deref(), Some(zone.as_str()));
+    assert!(matches!(
+        store.enter_character(other, character, &zone),
+        Err(ApiError::NotFound(_))
+    ));
+    drop(store);
+
+    let reopened = PostgresCharacterStore::new(config.connect(NoTls).unwrap());
+    assert_eq!(
+        reopened.select_character(owner, character).unwrap().zone_id,
+        Some(zone)
+    );
+    assert_eq!(
+        reopened.leave_character(owner, character).unwrap().zone_id,
+        None
+    );
 }
 
 fn check_deletion(

@@ -19,7 +19,7 @@ pub use calendar::{
 };
 pub use character::{
     Character, CharacterCreationKey, CharacterCreationReceipt, CharacterId, CharacterIntentService,
-    CharacterService, CharacterStatus, EphemeralCharacterIntentService,
+    CharacterService, CharacterStatus, CharacterWorldService, EphemeralCharacterIntentService,
 };
 pub use chat::{
     ChatChannel, ChatChannelKind, ChatMessage, ChatService, MAX_MESSAGE_CHARS, MAX_MESSAGE_PAGE,

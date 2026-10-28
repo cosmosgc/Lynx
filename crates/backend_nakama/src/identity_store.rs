@@ -2,6 +2,7 @@
 
 use std::sync::Mutex;
 
+use engine_core::Locale;
 use game_api::{AccountId, ApiError};
 use postgres::Client;
 
@@ -47,6 +48,36 @@ impl PostgresIdentityStore {
             )
             .map_err(|_| unavailable())?
             .ok_or(ApiError::Unauthenticated)?;
+        let account: String = row.try_get(0).map_err(|_| unavailable())?;
+        AccountId::new(account).map_err(|_| unavailable())
+    }
+
+    /// Provision or resolve the Lynx account for a validated Nakama user.
+    ///
+    /// New records use the canonical Nakama UUID as their Lynx `account_id`.
+    /// The supplied identity must have come from a trusted Nakama response, not
+    /// a client field. Existing mappings are retained to avoid changing the
+    /// owner of durable character rows during this migration.
+    pub fn provision_account(
+        &self,
+        nakama_user_id: &str,
+        locale: &Locale,
+    ) -> Result<AccountId, ApiError> {
+        if !is_uuid(nakama_user_id) {
+            return Err(ApiError::Unauthenticated);
+        }
+        let account_id = AccountId::new(nakama_user_id.to_ascii_lowercase())
+            .map_err(|_| ApiError::Unauthenticated)?;
+        let mut client = self.client.lock().map_err(|_| unavailable())?;
+        let row = client
+            .query_one(
+                "INSERT INTO lynx.accounts (account_id, nakama_user_id, locale) \
+                 VALUES ($1, $2::text::uuid, $3) \
+                 ON CONFLICT (nakama_user_id) DO UPDATE SET locale = EXCLUDED.locale \
+                 RETURNING account_id",
+                &[&account_id.as_str(), &nakama_user_id, &locale.as_str()],
+            )
+            .map_err(|_| unavailable())?;
         let account: String = row.try_get(0).map_err(|_| unavailable())?;
         AccountId::new(account).map_err(|_| unavailable())
     }
