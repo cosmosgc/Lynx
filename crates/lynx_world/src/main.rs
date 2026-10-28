@@ -29,7 +29,7 @@ use lynx_world::demo;
 use lynx_world::persistence::{FileSnapshotStore, PostgresSnapshotStore, SnapshotStore};
 use lynx_world::service::Service;
 use lynx_world::startup;
-use lynx_world::transport::{self, AppState};
+use lynx_world::transport::{self, AppState, OriginPolicy};
 use tokio::sync::watch;
 use world_gateway::{SystemResumeTokens, WorldGateway};
 use world_server::WorldServer;
@@ -91,6 +91,8 @@ fn token_hash() -> Result<()> {
 }
 
 async fn serve(args: ServeArgs) -> Result<()> {
+    let origins = OriginPolicy::new(args.allowed_origins.clone())
+        .context("invalid --allow-origin configuration")?;
     let gateway_config = args.gateway_config()?;
     let authenticator = Authenticator::new(&args.token_hashes()?)?.with_staff(args.staff);
     let grants: Vec<Grant> = authenticator.grants().cloned().collect();
@@ -98,20 +100,9 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .snapshot_interval()
         .context("invalid snapshot interval")?;
 
-    // Durable state: behind the optional snapshot store, the service resumes
-    // the world it wrote last; without one, the demo world starts fresh.
-    let store: Option<Arc<dyn SnapshotStore + Send + Sync>> = if args.state_postgres {
-        Some(Arc::new(
-            PostgresSnapshotStore::from_env(demo::DEMO_WORLD_ID)
-                .context("failed to open the PostgreSQL snapshot store")?,
-        ))
-    } else {
-        args.state_file
-            .as_ref()
-            .map(|path| Arc::new(FileSnapshotStore::new(path.clone())) as _)
-    };
     args.validate_snapshot_args()
         .context("invalid snapshot configuration")?;
+    let store = snapshot_store(&args)?;
     if args.fresh
         && let Some(path) = &args.state_file
     {
@@ -168,7 +159,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
 
     let (events, receivers) = transport::event_channel();
     let (shutdown, shutdown_rx) = watch::channel(false);
-    let state = Arc::new(AppState::new(events, authenticator));
+    let state = Arc::new(AppState::new(events, authenticator).with_origin_policy(origins));
 
     let listener = tokio::net::TcpListener::bind(args.bind)
         .await
@@ -203,4 +194,18 @@ async fn serve(args: ServeArgs) -> Result<()> {
         Err(error) => tracing::error!(%error, "authority loop panicked"),
     }
     result.context("the HTTP server stopped with an error")
+}
+
+fn snapshot_store(args: &ServeArgs) -> Result<Option<Arc<dyn SnapshotStore + Send + Sync>>> {
+    if args.state_postgres {
+        Ok(Some(Arc::new(
+            PostgresSnapshotStore::from_env(demo::DEMO_WORLD_ID)
+                .context("failed to open the PostgreSQL snapshot store")?,
+        )))
+    } else {
+        Ok(args
+            .state_file
+            .as_ref()
+            .map(|path| Arc::new(FileSnapshotStore::new(path.clone())) as _))
+    }
 }

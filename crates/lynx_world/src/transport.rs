@@ -48,6 +48,62 @@ pub struct AppState {
     events: mpsc::Sender<ServerEvent>,
     authenticator: Authenticator,
     ready: AtomicBool,
+    origins: OriginPolicy,
+}
+
+/// Optional exact-match browser Origin allowlist. Requests without Origin are
+/// permitted for native clients; this policy is not authentication.
+#[derive(Debug, Default)]
+pub struct OriginPolicy {
+    allowed: Vec<String>,
+}
+
+impl OriginPolicy {
+    /// Validate serialized HTTP(S) origins. An empty list disables the policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an origin with a path, credentials, or an invalid
+    /// scheme or authority.
+    pub fn new(allowed: Vec<String>) -> anyhow::Result<Self> {
+        for origin in &allowed {
+            let uri: axum::http::Uri = origin
+                .parse()
+                .map_err(|_| anyhow::anyhow!("invalid origin: {origin}"))?;
+            let valid = uri
+                .scheme_str()
+                .is_some_and(|scheme| scheme == "http" || scheme == "https")
+                && uri.authority().is_some_and(|authority| {
+                    !authority.host().is_empty()
+                        && !authority.as_str().contains('@')
+                        && !authority.as_str().contains('*')
+                        && authority
+                            .as_str()
+                            .strip_prefix(authority.host())
+                            .is_some_and(|suffix| {
+                                suffix.is_empty()
+                                    || (suffix.starts_with(':') && authority.port_u16().is_some())
+                            })
+                        && format!("{}://{}", uri.scheme_str().unwrap(), authority) == *origin
+                });
+            anyhow::ensure!(valid, "invalid origin: {origin}");
+        }
+        Ok(Self { allowed })
+    }
+
+    fn permits(&self, headers: &HeaderMap) -> bool {
+        if self.allowed.is_empty() {
+            return true;
+        }
+        let mut origins = headers.get_all(header::ORIGIN).iter();
+        let Some(origin) = origins.next() else {
+            return true;
+        };
+        origins.next().is_none()
+            && origin
+                .to_str()
+                .is_ok_and(|value| self.allowed.iter().any(|allowed| allowed == value))
+    }
 }
 
 impl AppState {
@@ -58,7 +114,15 @@ impl AppState {
             events,
             authenticator,
             ready: AtomicBool::new(true),
+            origins: OriginPolicy::default(),
         }
+    }
+
+    /// Set the browser Origin policy before sharing the state with the router.
+    #[must_use]
+    pub fn with_origin_policy(mut self, origins: OriginPolicy) -> Self {
+        self.origins = origins;
+        self
     }
 
     /// Mark readiness for load balancers and operators.
@@ -118,6 +182,14 @@ async fn world(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
+    if !state.origins.permits(&headers) {
+        tracing::info!(reason = "origin_forbidden", "websocket admission rejected");
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "origin_forbidden" })),
+        )
+            .into_response();
+    }
     let Some(presented) = bearer(&headers) else {
         return unauthorized();
     };
@@ -377,5 +449,39 @@ mod tests {
         assert!(bearer(&headers("Bearer   ")).is_none());
         assert!(bearer(&headers("Bearer two words")).is_none());
         assert!(bearer(&HeaderMap::new()).is_none());
+    }
+
+    #[test]
+    fn origin_policy_validates_configuration_and_headers() {
+        for invalid in [
+            "null",
+            "*",
+            "https://example.com/",
+            "https://example.com/path",
+            "https://user@example.com",
+            "https://example.com:bad",
+            "ftp://example.com",
+            "https://example.com?x=1",
+        ] {
+            assert!(
+                OriginPolicy::new(vec![invalid.into()]).is_err(),
+                "{invalid}"
+            );
+        }
+        let policy = OriginPolicy::new(vec![
+            "https://example.com".into(),
+            "http://[::1]:8080".into(),
+        ])
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        assert!(policy.permits(&headers));
+        headers.insert(header::ORIGIN, "https://example.com".parse().unwrap());
+        assert!(policy.permits(&headers));
+        headers.insert(header::ORIGIN, "https://example.com.evil".parse().unwrap());
+        assert!(!policy.permits(&headers));
+        headers.insert(header::ORIGIN, "https://example.com".parse().unwrap());
+        headers.append(header::ORIGIN, "https://example.com".parse().unwrap());
+        assert!(!policy.permits(&headers));
+        assert!(OriginPolicy::default().permits(&headers));
     }
 }

@@ -363,7 +363,7 @@ behavior rather than only rejecting individual malformed messages.
 ## NET-012 — Connection admission and origin policy
 
 - **Priority:** P1
-- **Status:** Ready
+- **Status:** In progress
 - **Depends on:** —
 - **References:** [networking §Transport](../networking.md#transport),
   `crates/lynx_world/src/transport.rs`
@@ -382,10 +382,17 @@ add before a client is published.
 - Readiness/draining behavior: stop accepting, finish or reject in-flight
   handshakes, and close cleanly.
 
+**Implemented slice:** `lynx-world serve --allow-origin https://example.com`
+enables an exact-match Origin allowlist; repeat the option for additional
+origins. Unlisted, malformed, and multiple Origin headers receive HTTP 403
+`origin_forbidden` before upgrade. Requests without Origin remain allowed for
+native clients; Origin is not authentication. With no options, origin checking
+is disabled. Connection caps, draining, and rejection metrics remain open.
+
 **Acceptance criteria**
 
 - [ ] A connection flood cannot exhaust memory or file descriptors.
-- [ ] Browser clients from unlisted origins are rejected when origin policy is
+- [x] Browser clients from unlisted origins are rejected when origin policy is
       enabled.
 - [ ] Draining stops new admissions while existing sessions complete or close
       predictably.

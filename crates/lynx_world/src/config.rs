@@ -46,6 +46,11 @@ pub struct ServeArgs {
     #[arg(long, default_value_t = 1_024)]
     pub max_sessions: usize,
 
+    /// Allowed browser Origin, exactly as serialized (repeatable). If omitted,
+    /// Origin checking is disabled; requests without Origin are always allowed.
+    #[arg(long = "allow-origin", value_name = "ORIGIN")]
+    pub allowed_origins: Vec<String>,
+
     /// Grant every demo session a staff role. Development aid only.
     #[arg(long)]
     pub staff: bool,
@@ -188,6 +193,7 @@ mod tests {
             resume_ttl_ms: 30_000,
             view_radius_m: 60.0,
             max_sessions: 1_024,
+            allowed_origins: Vec::new(),
             staff: false,
             state_file: None,
             state_postgres: false,

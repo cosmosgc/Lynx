@@ -14,7 +14,7 @@ use futures_util::{SinkExt, StreamExt};
 use lynx_world::auth::{Authenticator, digest};
 use lynx_world::demo;
 use lynx_world::service::{HELLO_KIND, Hello, Service, TOKEN_KIND};
-use lynx_world::transport::{self, AppState};
+use lynx_world::transport::{self, AppState, OriginPolicy};
 use serde_json::json;
 use tokio::sync::{oneshot, watch};
 use tokio_tungstenite::tungstenite::Message;
@@ -25,6 +25,62 @@ use world_gateway::{GatewayConfig, SystemResumeTokens, WorldGateway};
 use world_server::{READY_KIND, SNAPSHOT_KIND, WorldServer};
 
 const TOKEN: &str = "websocket-integration-token";
+
+#[tokio::test]
+async fn origin_allowlist_rejects_before_websocket_upgrade() {
+    let authenticator = Authenticator::new(&[digest(TOKEN)]).unwrap();
+    let (events, mut receiver) = transport::event_channel();
+    let state = Arc::new(
+        AppState::new(events, authenticator)
+            .with_origin_policy(OriginPolicy::new(vec!["https://game.example".into()]).unwrap()),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (shutdown, shutdown_rx) = oneshot::channel();
+    let server = tokio::spawn(transport::serve_with_shutdown(listener, state, async {
+        let _ = shutdown_rx.await;
+    }));
+    let request = |origin: Option<&str>| {
+        let mut request = format!("ws://{address}/world")
+            .into_client_request()
+            .unwrap();
+        request.headers_mut().insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {TOKEN}")).unwrap(),
+        );
+        if let Some(origin) = origin {
+            request
+                .headers_mut()
+                .insert(header::ORIGIN, HeaderValue::from_str(origin).unwrap());
+        }
+        request
+    };
+    let error = connect_async(request(Some("https://evil.example")))
+        .await
+        .unwrap_err();
+    match error {
+        tokio_tungstenite::tungstenite::Error::Http(response) => {
+            assert_eq!(response.status(), 403);
+            assert_eq!(
+                response.body().as_deref(),
+                Some(&b"{\"error\":\"origin_forbidden\"}"[..])
+            );
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+    assert!(receiver.try_recv().is_err());
+    let (allowed, _) = connect_async(request(Some("https://game.example")))
+        .await
+        .unwrap();
+    let (native, _) = connect_async(request(None)).await.unwrap();
+    drop((allowed, native));
+    let _ = shutdown.send(());
+    tokio::time::timeout(Duration::from_secs(2), server)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
 
 fn envelope(id: &str, kind: &str, body: serde_json::Value) -> Envelope {
     Envelope::new(
