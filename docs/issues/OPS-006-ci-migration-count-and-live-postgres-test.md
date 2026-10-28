@@ -12,14 +12,16 @@
 The CI workflow was updated so the Ubuntu Rust job starts a PostgreSQL 17
 service, applies the migrations, and runs the workspace test suite with
 `LYNX_PG_*` configured. This allows the live PostgreSQL snapshot test to
-execute instead of skipping. The migration check now derives the expected head
-from `server/migrations` and compares it to `MAX(version)` in
-`lynx.schema_migrations`, so adding new migrations no longer breaks CI with a
-hardcoded count.
+execute instead of skipping. A dedicated CI step checks that the named test is
+present and runs it with the required configuration. The migration check now
+compares the complete set of versions from `server/migrations` with
+`lynx.schema_migrations`, so it detects missing versions without relying on a
+hardcoded count. It also checks that the migration history is unchanged after
+the second application.
 
 The Rust job additionally requires the PostgreSQL test configuration, so a
 missing password fails rather than silently skipping. The issue remains open
-until a CI run confirms the live test and migration checks pass.
+until a hosted CI run confirms the live test and migration checks pass.
 
 ## Defect
 
@@ -34,10 +36,10 @@ now configures the live path, but execution in hosted CI remains unconfirmed.
 
 ## Acceptance criteria
 
-- [x] CI derives the expected migration head from `server/migrations` instead
-  of asserting a fixed count.
+- [x] CI derives the expected migration versions, including the head, from
+  `server/migrations` instead of asserting a fixed count.
 - [x] CI configures the live PostgreSQL integration test and fails if its
   password is missing.
 - [ ] The integration test is confirmed to execute (not skip) in CI.
-- [ ] Applying migrations twice remains successful and the database reports
-  the expected migration head.
+- [ ] Hosted CI confirms applying migrations twice succeeds, leaves history
+  unchanged, and reports the expected migration versions and head.

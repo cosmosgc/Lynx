@@ -58,6 +58,13 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Run live PostgreSQL snapshot test
+        shell: bash
+        run: |
+          test_name=postgres_store_round_trips_and_fresh_start_resets_it
+          cargo test -p lynx-world --test postgres_snapshot -- --list | grep -Fx "$test_name: test"
+          cargo test -p lynx-world --test postgres_snapshot -- "$test_name" --exact --nocapture
+
       - name: Run workspace tests
         run: cargo test --workspace
 
@@ -141,10 +148,22 @@ jobs:
         run: ./scripts/setup-postgres.sh
 
       - name: Apply migrations twice and check migration head
+        shell: bash
         run: |
           ./scripts/db-migrate.sh
+          history_query="SELECT version, checksum, applied_at FROM lynx.schema_migrations ORDER BY version COLLATE \"C\";"
+          before="$(PGPASSWORD="$LYNX_PG_PASSWORD" psql -X -q -tA -v ON_ERROR_STOP=1 -h "$LYNX_PG_HOST" -p "$LYNX_PG_PORT" -U "$LYNX_PG_USER" -d "$LYNX_PG_DATABASE" -c "$history_query")"
           ./scripts/db-migrate.sh
+          after="$(PGPASSWORD="$LYNX_PG_PASSWORD" psql -X -q -tA -v ON_ERROR_STOP=1 -h "$LYNX_PG_HOST" -p "$LYNX_PG_PORT" -U "$LYNX_PG_USER" -d "$LYNX_PG_DATABASE" -c "$history_query")"
+          if [[ "$before" != "$after" ]]; then
+            echo "Migration history changed on the second run" >&2
+            exit 1
+          fi
           ./scripts/db-migrate.sh --status
-          expected="$(ls server/migrations/*.sql | sed 's#^.*/##; s#\.sql$##' | sort | tail -n 1)"
-          applied="$(PGPASSWORD="$LYNX_PG_PASSWORD" psql -X -q -tA -v ON_ERROR_STOP=1 -h "$LYNX_PG_HOST" -p "$LYNX_PG_PORT" -U "$LYNX_PG_USER" -d "$LYNX_PG_DATABASE" -c "SELECT COALESCE(MAX(version), '') FROM lynx.schema_migrations;")"
-          test "$applied" = "$expected"
+          expected="$(printf '%s\n' server/migrations/*.sql | sed 's#^.*/##; s#\.sql$##' | LC_ALL=C sort)"
+          applied="$(PGPASSWORD="$LYNX_PG_PASSWORD" psql -X -q -tA -v ON_ERROR_STOP=1 -h "$LYNX_PG_HOST" -p "$LYNX_PG_PORT" -U "$LYNX_PG_USER" -d "$LYNX_PG_DATABASE" -c 'SELECT version FROM lynx.schema_migrations ORDER BY version COLLATE "C";')"
+          if [[ "$applied" != "$expected" ]]; then
+            echo "Applied migrations do not match repository migrations:" >&2
+            diff -u <(printf '%s\n' "$expected") <(printf '%s\n' "$applied") >&2 || true
+            exit 1
+          fi
