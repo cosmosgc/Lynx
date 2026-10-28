@@ -10,7 +10,7 @@ fmt/Clippy/test gates, a generated-project CI check, and a PostgreSQL migration
 job. The Ubuntu Rust job configures the live PostgreSQL test and requires its
 configuration; local runs can skip it when unconfigured. CI run confirmation is
 still pending. There is no coverage report, fuzz target, load harness, or
-documentation link check.
+CI documentation link gate; a local Markdown link check is available.
 
 **Related design:** [project guide §26 definition of done](../lightweight_mmorpg_engine_project_guide.md#26-definition-of-done),
 [security](../security.md), [testing conventions](../../README.md#design-rules).
@@ -224,7 +224,7 @@ they need a reliable, non-flaky matrix.
 ## QUA-009 — Documentation and code consistency sweep
 
 - **Priority:** P1
-- **Status:** In progress — documentation sweep; link gate and CI confirmation remain
+- **Status:** In progress — local link check available; link gate and CI confirmation remain
 - **Depends on:** —
 - **References:** [architecture §Persistence model](../architecture.md#persistence-model),
   [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)
@@ -233,6 +233,14 @@ they need a reliable, non-flaky matrix.
 records have been corrected for the PostgreSQL snapshot store and current
 recovery gaps. CI derives the migration head and configures a live test, but a
 successful CI run is not yet confirmed. A Markdown link gate is still missing.
+Run `python scripts/check_markdown_links.py` locally and
+`python scripts/test_check_markdown_links.py` for its tests; both use only the
+Python standard library. The checker covers inline relative links and images,
+ATX heading anchors (including duplicates), and explicit HTML anchor IDs. It
+ignores code blocks and external URLs. It is not a full Markdown parser:
+reference-style links, setext headings, nested parentheses in destinations,
+and non-Markdown target anchors are not checked. It scans Markdown files under
+the repository except `.git`, `.lynx`, `target`, and `__pycache__`.
 
 **Scope**
 
