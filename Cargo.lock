@@ -425,9 +425,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend_contract_tests"
+version = "0.1.0"
+dependencies = [
+ "game_api",
+]
+
+[[package]]
 name = "backend_memory"
 version = "0.1.0"
 dependencies = [
+ "backend_contract_tests",
  "engine_core",
  "game_api",
 ]
@@ -436,6 +444,7 @@ dependencies = [
 name = "backend_nakama"
 version = "0.1.0"
 dependencies = [
+ "backend_contract_tests",
  "base64 0.23.1",
  "engine_core",
  "game_api",
