@@ -504,7 +504,7 @@ impl WorldGateway {
         };
         match envelope.kind.as_str() {
             "action.request" => self.handle_action(session, principal, actor, envelope, now),
-            "movement.request" => self.handle_movement(session, principal, actor, envelope),
+            "movement.request" => Ok(self.handle_movement(session, principal, actor, envelope)),
             CALENDAR_COMMAND_KIND => {
                 self.handle_calendar_command(session, principal, actor, envelope, now)
             }
@@ -646,13 +646,10 @@ impl WorldGateway {
         principal: StableId,
         actor: StableId,
         envelope: &Envelope,
-    ) -> Result<Vec<Envelope>, EngineError> {
-        let intent = match serde_json::from_value::<MovementBody>(envelope.body.clone()) {
-            Ok(intent) => intent,
-            Err(_) => {
-                let error = EngineError::new(ErrorCode::InvalidRequest, "movement intent rejected");
-                return Ok(vec![self.error_reply(envelope, &error)]);
-            }
+    ) -> Vec<Envelope> {
+        let Ok(intent) = serde_json::from_value::<MovementBody>(envelope.body.clone()) else {
+            let error = EngineError::new(ErrorCode::InvalidRequest, "movement intent rejected");
+            return vec![self.error_reply(envelope, &error)];
         };
         let sequence = intent.sequence;
         let intent = MovementIntent {
@@ -667,13 +664,13 @@ impl WorldGateway {
             ),
         };
         if let Err(error) = self.zone.queue_movement(intent) {
-            return Ok(vec![self.error_reply(envelope, &error)]);
+            return vec![self.error_reply(envelope, &error)];
         }
-        Ok(vec![envelope.reply(
+        vec![envelope.reply(
             self.reply_id(),
             message_kind("movement.queued"),
             json!({ "sequence": sequence }),
-        )])
+        )]
     }
 
     fn handle_action(

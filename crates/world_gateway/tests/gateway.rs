@@ -493,6 +493,19 @@ fn movement_protocol_is_session_bound_fixed_budget_and_replicated() {
         send(&mut f.gateway, body)[0].kind.as_str(),
         "protocol.error"
     );
+    assert_movement_budget_and_close(&mut f, &alice);
+}
+
+fn assert_movement_budget_and_close(f: &mut Fixture, alice: &Connection) {
+    let send = |gateway: &mut WorldGateway, body| {
+        gateway
+            .handle(
+                &alice.session,
+                &envelope("move", "movement.request", body),
+                Millis::new(1_002),
+            )
+            .unwrap()
+    };
     let too_far = json!({"sequence": 2, "destination": {"x": 11.0, "y": 0.0, "z": 10.0}});
     assert_eq!(
         send(&mut f.gateway, too_far.clone())[0].kind.as_str(),
@@ -833,6 +846,103 @@ fn reconnect_resumes_then_expires_and_rotates_the_token() {
         .unwrap_err();
     assert_eq!(expired.code(), ErrorCode::SessionExpired);
     assert!(fixture.gateway.session(&session).is_none());
+}
+
+#[test]
+fn lost_rotated_token_requires_fresh_authentication_without_reenabling_replay() {
+    let mut f = fixture();
+    let first = connect(&mut f.gateway, "account-alice", f.alice_principal);
+    let attack = action(
+        "uncertain-attack",
+        json!({"verb": "attack", "target": f.alice_barrel.to_string()}),
+    );
+    assert!(
+        result_of(
+            &f.gateway
+                .handle(&first.session, &attack, Millis::new(1_001))
+                .unwrap()
+        )
+        .is_applied()
+    );
+    f.gateway
+        .disconnect(&first.session, Tick::ZERO, Millis::new(1_100))
+        .unwrap();
+
+    // The gateway has committed rotation even if the transport loses its reply.
+    let resumed = f
+        .gateway
+        .resume(&first.token, &handshake(), Tick::ZERO, Millis::new(1_200))
+        .unwrap();
+    assert_eq!(
+        f.gateway
+            .resume(&first.token, &handshake(), Tick::ZERO, Millis::new(1_201))
+            .unwrap_err()
+            .code(),
+        ErrorCode::SessionExpired
+    );
+    assert_eq!(
+        f.gateway
+            .connect(
+                claims("account-alice", f.alice_principal),
+                &handshake(),
+                Millis::new(1_201)
+            )
+            .unwrap_err()
+            .code(),
+        ErrorCode::Conflict
+    );
+    f.gateway
+        .disconnect(&resumed.session, Tick::ZERO, Millis::new(1_300))
+        .unwrap();
+    assert_eq!(
+        f.gateway
+            .resume(&first.token, &handshake(), Tick::ZERO, Millis::new(1_301))
+            .unwrap_err()
+            .code(),
+        ErrorCode::SessionExpired
+    );
+
+    // A trusted fresh login replaces the detached session and revokes its token.
+    let fresh = f
+        .gateway
+        .connect(
+            claims("account-alice", f.alice_principal),
+            &handshake(),
+            Millis::new(1_302),
+        )
+        .unwrap();
+    assert_ne!(fresh.session, first.session);
+    assert!(!fresh.resumed);
+    assert_eq!(
+        f.gateway
+            .resume(&resumed.token, &handshake(), Tick::ZERO, Millis::new(1_303))
+            .unwrap_err()
+            .code(),
+        ErrorCode::SessionExpired
+    );
+    assert!(f.gateway.session(&first.session).is_none());
+    assert!(fresh.snapshot.interest.set.contains(&f.alice_actor));
+
+    // Idempotency is session-scoped: blindly retrying an uncertain action after
+    // fresh authentication can apply it again, even with the same request ID.
+    assert!(
+        result_of(
+            &f.gateway
+                .handle(&fresh.session, &attack, Millis::new(1_304))
+                .unwrap()
+        )
+        .is_applied()
+    );
+    assert_eq!(
+        f.gateway
+            .zone()
+            .entity(f.alice_barrel)
+            .unwrap()
+            .health
+            .unwrap()
+            .current,
+        98
+    );
 }
 
 #[test]
