@@ -125,5 +125,6 @@ mode for every admin client.
 ## Reporting a vulnerability
 
 Do not open a public issue for a vulnerability. Contact the maintainers
-privately with reproduction steps, affected version, and impact. See
-[SECURITY.md](SECURITY.md) for the current reporting and response policy.
+privately with reproduction steps, affected version, and impact. There is
+currently no checked-in `SECURITY.md` reporting and response policy or
+documented private contact; see [AUTH-001](issues/AUTH-SecurityDocumentationGap.md).

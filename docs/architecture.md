@@ -2,6 +2,8 @@
 
 This document describes the boundaries that the code is expected to respect.
 Decisions and their rationale live in [`adr/`](adr/).
+The system view and recovery model also include target capabilities; the
+implementation gaps are listed below and in the [backlog](TODO/README.md).
 
 ## System view
 
@@ -202,27 +204,30 @@ format, validation rules, and formatting policy are specified in
 
 ## Persistence model
 
-- Character, inventory, property, faction, and audit data live in PostgreSQL.
-- World snapshots store changed entities per zone; the event log captures
-  economy and ownership transitions. Today that seam is
-  `engine_sim::snapshot::ZoneSnapshot` plus the `lynx-world` file store; a SQL
-  adapter implements the same trusted boundaries later.
-- Writes that can be retried carry idempotency keys stored in a ledger table.
-  The zone snapshot persists transfer receipts so retries stay idempotent
-  across a restart.
+- The runnable service can persist a whole-world aggregate containing the zone,
+  calendar, and factions with either the file store or `PostgresSnapshotStore`
+  (`--state-postgres`). The file store remains available as an alternative; neither
+  store persists sessions or resume tokens.
+- PostgreSQL migrations define additional character, inventory, property,
+  faction, audit, and zone-event tables, but database-backed gameplay services
+  and event replay are still backlog work.
+- The zone snapshot persists transfer receipts so retries stay idempotent across
+  a restart. A general durable SQL idempotency ledger is not yet implemented.
 - Content definitions are versioned bundles; instances record the content
   version they were created from.
 
 ## Failure and recovery
 
 - Structured errors use `ErrorCode`, never free-form strings alone.
-- Missing or obsolete component data loads through the migration chain; if a
+- Target: missing or obsolete component data loads through the migration chain; if a
   migration is impossible, the entity is quarantined and reported instead of
   silently reset.
-- Zone restart: load last snapshot, replay events after the snapshot, validate
-  references, then accept sessions. Target recovery: 60 seconds.
-- Admin actions and reputation changes are appended to the audit log in the
-  same transaction as the mutation.
+- Today startup loads the configured whole-world snapshot; state since its last
+  successful write can be lost. Event replay and quarantine are not implemented.
+  The target is to replay events, validate references, and accept sessions within
+  60 seconds; this target is unverified.
+- Target: admin actions and reputation changes are appended to a durable audit
+  log in the same transaction as the mutation.
 
 ## What is deliberately not here yet
 
@@ -236,12 +241,11 @@ format, validation rules, and formatting policy are specified in
   termination. Plain WebSocket is intended for loopback development behind a
   trusted proxy.
 - A durable session store. Resume windows live in memory, so a zone restart
-  still requires players to log in again. Whole-world snapshots (`--state-file`)
+  still requires players to log in again. Whole-world snapshots (`--state-file`
+  or `--state-postgres`)
   are durable, but they restore the zone, calendar, and factions — not
   sessions.
-- A database-backed persistence adapter. The snapshot seam is engine-owned and
-  file-backed today; the Postgres migrations already cover calendar, faction,
-  and inventory categories, and a `backend_nakama`/SQL adapter behind the same
-  seams is the next persistence increment.
+- Database-backed account, character, and inventory services and event replay;
+  the PostgreSQL whole-world snapshot adapter does not implement those services.
 - The editor application, behavior graph editor, and admin spectator client.
 - WebAssembly scripting, which needs a sandbox design review before adoption.

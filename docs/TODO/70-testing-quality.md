@@ -5,10 +5,11 @@ true — authority/security tests, determinism, protocol fixtures, database
 integration, load/soak, fuzzing, coverage, accessibility, documentation drift,
 toolchain upgrades, and flaky-test control.
 
-**Current baseline:** 396 test functions across unit and integration targets, a
-zero-unsafe workspace, fmt/Clippy/test gates, a generated-project CI check, and a
-PostgreSQL migration job. The live PostgreSQL test skips when `LYNX_PG_*` is not
-configured. There is no coverage report, fuzz target, load harness, or
+**Current baseline:** unit and integration tests, a zero-unsafe workspace,
+fmt/Clippy/test gates, a generated-project CI check, and a PostgreSQL migration
+job. The Ubuntu Rust job configures the live PostgreSQL test and requires its
+configuration; local runs can skip it when unconfigured. CI run confirmation is
+still pending. There is no coverage report, fuzz target, load harness, or
 documentation link check.
 
 **Related design:** [project guide §26 definition of done](../lightweight_mmorpg_engine_project_guide.md#26-definition-of-done),
@@ -99,9 +100,9 @@ documentation link check.
 - **Depends on:** `PST-001`
 - **References:** `PST-001`, `PST-008`, `OPS-006`
 
-**Why:** The snapshot round-trip test is live but skipped in the default CI
-test job. Persistence work will add more live tests; they need a reliable,
-non-flaky matrix.
+**Why:** The Ubuntu CI test job is configured to run the live snapshot
+round-trip, pending run confirmation. Persistence work will add more live tests;
+they need a reliable, non-flaky matrix.
 
 **Scope**
 
@@ -223,15 +224,15 @@ non-flaky matrix.
 ## QUA-009 — Documentation and code consistency sweep
 
 - **Priority:** P1
-- **Status:** Ready
+- **Status:** In progress — documentation sweep; link gate and CI confirmation remain
 - **Depends on:** —
 - **References:** [architecture §Persistence model](../architecture.md#persistence-model),
   [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)
 
-**Why:** Several documents describe a pre-Postgres state. `architecture.md` still
-calls the snapshot seam file-backed and a SQL adapter "later"; the CI migration
-job asserts five applied migrations while `0006` exists; the ADR table does not
-mention the proposed 0022. Drift like this leads to wrong decisions.
+**Why:** Documentation drift leads to wrong decisions. Architecture and issue
+records have been corrected for the PostgreSQL snapshot store and current
+recovery gaps. CI derives the migration head and configures a live test, but a
+successful CI run is not yet confirmed. A Markdown link gate is still missing.
 
 **Scope**
 
@@ -248,7 +249,7 @@ mention the proposed 0022. Drift like this leads to wrong decisions.
 
 - [ ] No doc claims the SQL adapter is future work.
 - [ ] README counts/links and phase statements match the repository.
-- [ ] CI migration assertions derive from `server/migrations`.
+- [x] CI migration assertions derive from `server/migrations`.
 - [ ] Broken relative links/anchors fail CI.
 - [ ] The gap register in the TODO index is current.
 

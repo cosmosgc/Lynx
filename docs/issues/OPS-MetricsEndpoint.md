@@ -3,13 +3,13 @@
 - **Status:** Open
 - **Reported:** 2026-10-28
 - **Resolved:** —
-- **Related tasks:** [OPS-004](../TODO/60-operations-release.md#ops-004--staging-publish-rollout-and-upgrade-workflow), 
-  [QUA-005](..//TODO/70-testing-quality.md#qua-005--observability-and-health-metrics)
+- **Related tasks:** [OPS-001](../TODO/60-operations-release.md#ops-001--metrics-endpoint),
+  [OPS-002](../TODO/60-operations-release.md#ops-002--dashboards-and-alerts)
 - **Affected workflow:** `crates/world_server`, CI/CD pipelines, monitoring
 
 ## Resolution
 
-The project guide explicitly lists metrics and dashboards as a Phase 6 operation requirement (line 143 of README), yet no metrics endpoint or monitoring infrastructure exists. Operators cannot observe system health, performance bottlenecks, or abuse indicators without manual instrumentation.
+The project guide lists metrics and dashboards as a live-operations requirement, yet no metrics endpoint or monitoring infrastructure exists. Operators cannot observe system health, performance bottlenecks, or abuse indicators without manual instrumentation.
 
 A production-ready observability layer must be added:
 - Metrics collection for tick duration, entity counts, session counts, action processing rates
@@ -19,9 +19,9 @@ A production-ready observability layer must be added:
 
 ## Defect
 
-The current `world_gateway` binary exposes only:
+The current `lynx-world` binary exposes:
 - `GET /healthz` — basic liveness check
-- `GET /readyz` — dependency readiness check
+- `GET /readyz` - process readiness check (not continuous dependency health)
 - WebSocket `/world` endpoint
 
 There is no structured metrics endpoint, no performance monitoring for tick budgets, and no abuse detection dashboards. This violates the project's observability requirements in `docs/operations.md`.

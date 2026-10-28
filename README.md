@@ -26,8 +26,7 @@ localization model is described in
 | --- | --- |
 | Workspace crates | 11 (10 crates + the `lynx` CLI) |
 | Rust edition / toolchain | 2024 edition, pinned to Rust **1.99** via `rust-toolchain.toml` |
-| Source code | ~33,000 LOC across 81 `.rs` files |
-| Tests | 396 test functions (unit + integration), zero unsafe code (`unsafe_code = "forbid"`) |
+| Tests | Unit and integration tests; workspace forbids unsafe code (`unsafe_code = "forbid"`) |
 | ADRs | 21 accepted architecture decision records |
 | Platform database | 6 SQL migrations (Nakama/PostgreSQL) |
 | Docs | 11 design docs + full ADR index (see [Documentation](#documentation)) |

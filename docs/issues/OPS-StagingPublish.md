@@ -3,13 +3,13 @@
 - **Status:** Open
 - **Reported:** 2026-10-28
 - **Resolved:** —
-- **Related tasks:** [OPS-003](../TODO/60-operations-release.md#ops-003--backups-and-restore-drills), 
-  [OPS-005](..//TODO/60-operations-release.md#ops-005--content-publish-rollout-and-upgrade-workflow)
+- **Related tasks:** [OPS-004](../TODO/60-operations-release.md#ops-004--staging-publish-rollout-and-rollback),
+  [OPS-010](../TODO/60-operations-release.md#ops-010--engine-and-content-upgrade-workflow)
 - **Affected workflow:** CI/CD pipelines, deployment automation, `tools/project_cli`
 
 ## Resolution
 
-The project guide explicitly lists staging publish, rollout, and rollback automation as a Phase 8 stability requirement (line 217 of README), yet no such workflow exists. Content publishers need a staged release process that validates before production exposure and supports safe rollbacks.
+Staging publish, rollout, and rollback automation are live-operations goals, but no such workflow exists. Content publishers need a staged release process that validates before production exposure and supports safe rollbacks.
 
 A staging pipeline must be added:
 - Staging database isolation with content-only writes for validation
@@ -19,7 +19,7 @@ A staging pipeline must be added:
 
 ## Defect
 
-The `lynx` CLI has `content diff`, `content publish-check`, and `doctor` commands, but no staged publish workflow. Publishing content directly to production with no rollback path violates operational best practices and the project's deployment requirements. The documentation describes this capability (line 194 of README: "A staging publish, rollout, and rollback automation" under Phase 6), yet it does not exist in any form.
+The `lynx` CLI has `content diff`, `content publish-check`, and `doctor` commands, but no staged publish workflow. The README lists staging publish, rollout, and rollback automation as pending, not delivered.
 
 ## Impact
 

@@ -3,13 +3,13 @@
 - **Status:** Open
 - **Reported:** 2026-10-28
 - **Resolved:** —
-- **Related tasks:** [PST-004](../TODO/20-persistence-backend.md#pst-004--zone-leases-and-fencing-and-event-log), 
-  [OPS-003](..//TODO/60-operations-release.md#ops-003--backups-and-restore-drills)
+- **Related tasks:** [PST-005](../TODO/20-persistence-backend.md#pst-005--snapshot-and-event-replay),
+  [OPS-003](../TODO/60-operations-release.md#ops-003--backup-and-restore-automation)
 - **Affected workflow:** `crates/world_server`, `crates/backend_memory`, recovery procedures
 
 ## Resolution
 
-The architecture explicitly requires "load last snapshot, replay events after the snapshot, validate references, then accept sessions" with a 60-second recovery target (line 175 of README). However, the current implementation only loads a single whole-world snapshot and discards all subsequent state. There is no event-sourced recovery path for zones.
+The architecture targets snapshot loading, event replay, reference validation, and a 60-second recovery time. The current implementation restores a whole-world snapshot but has no event-sourced recovery path; changes since the last successful snapshot can be lost.
 
 The persistence layer must implement:
 - Deterministic replay of zone events against a snapshot baseline
@@ -20,15 +20,15 @@ The persistence layer must implement:
 ## Defect
 
 The `PostgresSnapshotStore` loads only one whole-world snapshot and provides no event sourcing or delta replay. This means:
-- Zone crashes cannot be recovered from snapshots alone; the entire world must restart from scratch
+- A process restart can restore a configured snapshot, but not changes made after it
 - There is no incremental recovery for specific zones or characters
-- The documented 60-second recovery target cannot be met for large worlds
+- The documented 60-second recovery target has not been demonstrated
 - Reconnect after a crash loses all session state even though the world survives
 
 ## Impact
 
 - Server crashes lose zone-specific state that should have been recoverable
-- Recovery time for large worlds would exceed acceptable bounds (hours vs. minutes)
+- Recovery time for large worlds is unmeasured
 - The documented failure-and-recovery model is not implementable with current code
 - This is a P1 risk: unrecoverable data loss on restart violates the authoritative simulation contract
 

@@ -3,8 +3,8 @@
 - **Status:** Open
 - **Reported:** 2026-10-28
 - **Resolved:** —
-- **Related tasks:** [NET-003](../TODO/30-networking-security.md#net-003--transport-agnostic-gateway-and-world-server), 
-  [OPS-007](..//TODO/60-operations-release.md#ops-007--metrics-and-logs)
+- **Related tasks:** [NET-002](../TODO/30-networking-security.md#net-002--rate-limiting-and-message-budgets),
+  [OPS-001](../TODO/60-operations-release.md#ops-001--metrics-endpoint)
 - **Affected workflow:** `crates/engine_net`, `crates/world_gateway`
 
 ## Resolution
@@ -29,7 +29,8 @@ The current implementation has no rate limiting or message budget enforcement. T
 - No protection against network-level abuse that could degrade service for all users
 - The security model explicitly requires rate limits and budgets but they are not enforced
 - This is a P1 risk: without rate limiting, a compromised or misbehaving client can exhaust server resources
-- Affects all protocol adapters (Nakama, memory, PostgreSQL)
+- Affects network admission and message handling at the world edge; backend
+  storage adapters are not protocol transports.
 
 ## Acceptance criteria
 

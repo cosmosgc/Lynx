@@ -78,7 +78,7 @@ flags:
 | `--state-file <path>` | off | write durable world snapshots to this JSON file and load it at startup |
 | `--state-postgres` | off | store durable world snapshots in PostgreSQL instead; reads `LYNX_PG_HOST`, `LYNX_PG_PORT`, `LYNX_PG_DATABASE`, `LYNX_PG_USER`, `LYNX_PG_PASSWORD` (mutually exclusive with `--state-file`) |
 | `--fresh` | off | ignore any saved snapshot, rebuild the authored demo, and overwrite it at startup; requires `--state-file` or `--state-postgres` (development reset) |
-| `--snapshot-ms <ms>` | 10000 | how often a configured snapshot file is rewritten (must be at least the tick interval) |
+| `--snapshot-ms <ms>` | 10000 | how often the configured snapshot store is rewritten (must be at least the tick interval) |
 
 At startup the service also publishes one open faction conflict over the demo
 zone. Player sessions may enroll through `calendar.command` and inspect the
@@ -132,23 +132,24 @@ Health checks:
 | Nakama liveness | `GET /healthcheck` |
 | World liveness | `GET /healthz` |
 | World readiness | `GET /readyz` |
-| Database connectivity | `lynx doctor --backend` |
+| Nakama connectivity | `lynx doctor --backend` (Nakama health only, not a database check) |
 | Content validity | `lynx validate --project <dir>` |
 | Content compatibility | `lynx content diff --base <manifest> --next <manifest>` |
 | Metrics | Prometheus text endpoint (planned) |
 
 Readiness is stricter than liveness: the current binary becomes ready after the
-zone is built and before it accepts connections, and turns not-ready as soon as
-shutdown begins. Durable migrations, content loading, and zone recovery will
-join that gate when they exist.
+zone is built or restored and before it accepts connections, and turns not-ready
+as soon as shutdown begins. A configured snapshot must load; a failed baseline
+write aborts startup only with `--fresh`, otherwise it logs a warning. Migration execution, ongoing database health,
+authored content loading, and event replay are not readiness checks.
 
 ## Metrics and logs
 
-Structured logs include timestamp, level, service, zone ID, entity ID where
-safe, correlation ID, action, outcome, and duration. Never log tokens,
-passwords, or full private chat.
+The service emits tracing logs; the comprehensive structured fields and
+correlation plumbing below are targets, not a guaranteed current log schema
+(`OPS-013`). Never log tokens, passwords, or full private chat.
 
-Minimum metrics:
+Target minimum metrics (export is not implemented; `OPS-001`):
 
 - Tick duration, missed deadlines, entity count per zone.
 - Connected sessions, retained reconnect windows, and zone population.
@@ -201,7 +202,9 @@ Minimum metrics:
 
 ## Deploy and rollback
 
-1. Build and test the exact artifact.
+1. Build and test the exact artifact. Review the changelog, migration notes,
+   README progress and counts, relevant docs and links, and backlog gap register
+   against the release (`OPS-014`; this review is not yet an enforced gate).
 2. Apply forward-compatible migrations.
 3. Deploy to staging; run smoke and load tests.
 4. Publish content as an immutable versioned bundle, including validated

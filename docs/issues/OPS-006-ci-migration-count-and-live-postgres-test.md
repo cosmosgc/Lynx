@@ -23,15 +23,14 @@ until a CI run confirms the live test and migration checks pass.
 
 ## Defect
 
-The PostgreSQL migration job asserts that exactly five migrations have been
-applied, but migration `0006` exists. The live PostgreSQL integration test is
-also skipped in CI because the workspace test job does not run with the
-PostgreSQL test configuration.
+Previously, the PostgreSQL migration job asserted exactly five migrations
+even though migration `0006` existed, and the workspace CI test job lacked the
+configuration needed to run the live PostgreSQL integration test.
 
 ## Impact
 
-The hardcoded migration count becomes stale as migrations are added, and CI
-does not verify the live PostgreSQL integration path.
+The former hardcoded count became stale as migrations were added. The workflow
+now configures the live path, but execution in hosted CI remains unconfirmed.
 
 ## Acceptance criteria
 

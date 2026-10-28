@@ -17,6 +17,7 @@ the task IDs below.
 | Status | Meaning |
 | --- | --- |
 | **Ready** | Actionable now; dependencies are met and the design is settled. |
+| **In progress** | Work has started; acceptance criteria remain open. |
 | **Blocked** | Actionable once the listed dependency lands. |
 | **Proposed** | Needs an ADR, design review, or scope decision before implementation. |
 | **Icebox** | Deliberately not scheduled; kept so the idea is not lost. |
@@ -105,7 +106,8 @@ the quick audit; update it when a gap is found or closed.
 | CI migration and live PostgreSQL checks await run confirmation; platform coverage remains incomplete | [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml), [issue detail](../issues/OPS-006-ci-migration-count-and-live-postgres-test.md) | `OPS-006`, `QUA-009` |
 | ADR 0022 (dynamic classes and Treat targeting) is Proposed | [ADR 0022](../adr/0022-dynamic-character-classes-and-combat-targeting.md) | `SIM-004` |
 | Guilds, quests, progression, economy, trading, parties | [README](../../README.md#phase-8--expand-and-stabilize--selected-systems-delivered-early) | `SIM-009`–`SIM-013` |
-| Docs still describe the snapshot seam as file-only | [architecture](../architecture.md#persistence-model) | `QUA-009` |
+| No automated relative Markdown link and anchor check | [quality backlog](70-testing-quality.md#qua-009--documentation-and-code-consistency-sweep) | `QUA-009` |
+| No checked-in vulnerability reporting policy or documented private contact | [issue](../issues/AUTH-SecurityDocumentationGap.md) | `QUA-009` |
 
 ## Working conventions
 
