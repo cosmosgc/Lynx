@@ -19,10 +19,10 @@ use std::sync::{Arc, Mutex};
 use engine_core::faction::{FactionSnapshot, FactionWorld};
 use engine_core::world_event::{CalendarSnapshot, WorldCalendar};
 use game_api::{
-    Account, AccountId, ApiError, AuditRecord, AuthService, Character, CharacterId, ChatChannel,
-    ChatChannelKind, ChatMessage, DeviceLogin, FriendState, HealthService, HealthStatus,
-    InventorySlot, Session, SessionToken, WorldService, WorldSession, Zone,
-    validate_calendar_snapshot,
+    Account, AccountId, ApiError, AuditRecord, AuthService, Character, CharacterCreationReceipt,
+    CharacterId, ChatChannel, ChatChannelKind, ChatMessage, CreateCharacter, DeviceLogin,
+    FriendState, HealthService, HealthStatus, InventorySlot, Session, SessionToken, WorldService,
+    WorldSession, Zone, validate_calendar_snapshot,
 };
 
 /// Default number of non-deleted characters one account may own.
@@ -35,6 +35,19 @@ const LOCAL_CHANNEL_ID: &str = "global";
 ///
 /// Cloned instances share their state. A new instance starts empty and does not
 /// persist state across process restarts.
+///
+/// It implements [`game_api::EphemeralCharacterIntentService`], not the durable
+/// [`game_api::CharacterIntentService`]. Receipts are retained without expiry
+/// while the shared state exists; when the last clone is dropped or the process
+/// restarts, all bindings are lost and a retry is not safe. A new instance starts
+/// with no receipts.
+///
+/// ```compile_fail
+/// use backend_memory::MemoryBackend;
+/// use game_api::CharacterIntentService;
+/// fn requires_durable<T: CharacterIntentService>() {}
+/// requires_durable::<MemoryBackend>();
+/// ```
 pub struct MemoryBackend {
     state: Arc<Mutex<State>>,
     zones: BTreeMap<String, Zone>,
@@ -69,6 +82,7 @@ struct State {
     refresh_access_tokens: BTreeMap<String, String>,
     world_sessions: BTreeMap<AccountId, WorldSession>,
     characters: BTreeMap<CharacterId, Character>,
+    character_receipts: BTreeMap<(AccountId, String), (CreateCharacter, CharacterCreationReceipt)>,
     inventory: BTreeMap<CharacterId, Vec<InventorySlot>>,
     friends: BTreeMap<AccountId, BTreeMap<AccountId, FriendState>>,
     blocked: BTreeMap<AccountId, BTreeSet<AccountId>>,

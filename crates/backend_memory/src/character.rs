@@ -2,7 +2,8 @@
 
 use engine_core::{IdKind, StableId};
 use game_api::{
-    ApiError, Character, CharacterId, CharacterService, CharacterStatus, CreateCharacter,
+    AccountId, ApiError, Character, CharacterCreationKey, CharacterCreationReceipt, CharacterId,
+    CharacterService, CharacterStatus, CreateCharacter, EphemeralCharacterIntentService,
     SessionToken,
 };
 
@@ -18,6 +19,47 @@ fn next_character_id(state: &mut State) -> Result<CharacterId, ApiError> {
         0,
         u128::from(state.next_id),
     ))
+}
+
+fn create_in_state(
+    state: &mut State,
+    account_id: AccountId,
+    request: &CreateCharacter,
+    character_limit: usize,
+) -> Result<Character, ApiError> {
+    request.validate()?;
+    let owned = state
+        .characters
+        .values()
+        .filter(|character| {
+            character.account_id == account_id && character.status != CharacterStatus::Deleted
+        })
+        .count();
+    if owned >= character_limit {
+        return Err(ApiError::Conflict(format!(
+            "character limit reached: {character_limit}"
+        )));
+    }
+    let folded_name = request.name.to_lowercase();
+    if state.characters.values().any(|character| {
+        character.status != CharacterStatus::Deleted && character.name.to_lowercase() == folded_name
+    }) {
+        return Err(ApiError::Conflict(format!(
+            "character name is already in use: {}",
+            request.name
+        )));
+    }
+    let id = next_character_id(state)?;
+    let character = Character {
+        id,
+        account_id,
+        name: request.name.clone(),
+        zone_id: None,
+        status: CharacterStatus::Active,
+        created_at: None,
+    };
+    state.characters.insert(id, character.clone());
+    Ok(character)
 }
 
 impl CharacterService for MemoryBackend {
@@ -43,42 +85,7 @@ impl CharacterService for MemoryBackend {
         let mut state = self.lock_state()?;
         let account_id = Self::account_for_token(&state, token)?;
 
-        let owned = state
-            .characters
-            .values()
-            .filter(|character| {
-                character.account_id == account_id && character.status != CharacterStatus::Deleted
-            })
-            .count();
-        if owned >= self.character_limit {
-            return Err(ApiError::Conflict(format!(
-                "character limit reached: {}",
-                self.character_limit
-            )));
-        }
-
-        let folded_name = request.name.to_lowercase();
-        if state.characters.values().any(|character| {
-            character.status != CharacterStatus::Deleted
-                && character.name.to_lowercase() == folded_name
-        }) {
-            return Err(ApiError::Conflict(format!(
-                "character name is already in use: {}",
-                request.name
-            )));
-        }
-
-        let id = next_character_id(&mut state)?;
-        let character = Character {
-            id,
-            account_id,
-            name: request.name.clone(),
-            zone_id: None,
-            status: CharacterStatus::Active,
-            created_at: None,
-        };
-        state.characters.insert(id, character.clone());
-        Ok(character)
+        create_in_state(&mut state, account_id, request, self.character_limit)
     }
 
     fn delete_character(
@@ -104,6 +111,51 @@ impl CharacterService for MemoryBackend {
         }
         state.inventory.remove(&character_id);
         Ok(())
+    }
+}
+
+impl EphemeralCharacterIntentService for MemoryBackend {
+    fn create_character_idempotent(
+        &self,
+        token: &SessionToken,
+        key: &CharacterCreationKey,
+        request: &CreateCharacter,
+    ) -> Result<CharacterCreationReceipt, ApiError> {
+        let mut state = self.lock_state()?;
+        let account_id = Self::account_for_token(&state, token)?;
+        let receipt_key = (account_id.clone(), key.as_str().to_owned());
+        if let Some((original, receipt)) = state.character_receipts.get(&receipt_key) {
+            return if original == request {
+                Ok(receipt.clone())
+            } else {
+                Err(ApiError::Conflict(
+                    "character creation key already used for a different request".into(),
+                ))
+            };
+        }
+        let character = create_in_state(&mut state, account_id, request, self.character_limit)?;
+        let receipt = CharacterCreationReceipt {
+            character_id: character.id,
+        };
+        state
+            .character_receipts
+            .insert(receipt_key, (request.clone(), receipt.clone()));
+        Ok(receipt)
+    }
+
+    fn select_character(
+        &self,
+        token: &SessionToken,
+        character_id: CharacterId,
+    ) -> Result<Character, ApiError> {
+        let state = self.lock_state()?;
+        let account_id = Self::account_for_token(&state, token)?;
+        state
+            .characters
+            .get(&character_id)
+            .filter(|character| character.account_id == account_id && character.is_playable())
+            .cloned()
+            .ok_or_else(|| ApiError::NotFound("character not found".into()))
     }
 }
 
@@ -193,5 +245,191 @@ mod tests {
             Err(ApiError::NotFound(_))
         ));
         assert_eq!(backend.characters(&owner.token).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn intents_are_account_scoped_replayed_and_survive_deletion() {
+        let backend = MemoryBackend::new().with_character_limit(1);
+        let owner = session(&backend, "device-1");
+        let other = session(&backend, "device-2");
+        let key = CharacterCreationKey::new("same-key").unwrap();
+        let request = CreateCharacter {
+            name: "Aria".into(),
+        };
+        let receipt = backend
+            .create_character_idempotent(&owner.token, &key, &request)
+            .unwrap();
+        let owner_again = session(&backend, "device-1");
+        assert_eq!(
+            backend
+                .create_character_idempotent(&owner_again.token, &key, &request)
+                .unwrap(),
+            receipt
+        );
+        assert!(matches!(
+            backend.create_character_idempotent(
+                &owner.token,
+                &key,
+                &CreateCharacter {
+                    name: "aria".into()
+                }
+            ),
+            Err(ApiError::Conflict(_))
+        ));
+        assert!(matches!(
+            backend.create_character_idempotent(
+                &owner.token,
+                &key,
+                &CreateCharacter { name: "".into() }
+            ),
+            Err(ApiError::Conflict(_))
+        ));
+        let other_receipt = backend
+            .create_character_idempotent(
+                &other.token,
+                &key,
+                &CreateCharacter {
+                    name: "Bram".into(),
+                },
+            )
+            .unwrap();
+        assert_ne!(receipt, other_receipt);
+        assert!(matches!(
+            backend.select_character(&other.token, receipt.character_id),
+            Err(ApiError::NotFound(_))
+        ));
+        assert_eq!(
+            backend
+                .select_character(&owner.token, receipt.character_id)
+                .unwrap()
+                .name,
+            "Aria"
+        );
+        backend
+            .delete_character(&owner.token, receipt.character_id)
+            .unwrap();
+        create(&backend, &owner.token, "Aria");
+        assert_eq!(
+            backend
+                .create_character_idempotent(&owner.token, &key, &request)
+                .unwrap(),
+            receipt
+        );
+        assert!(matches!(
+            backend.select_character(&owner.token, receipt.character_id),
+            Err(ApiError::NotFound(_))
+        ));
+        backend.logout(&owner.token).unwrap();
+        assert!(matches!(
+            backend.create_character_idempotent(&owner.token, &key, &request),
+            Err(ApiError::Unauthenticated)
+        ));
+        assert!(matches!(
+            backend.select_character(&owner.token, receipt.character_id),
+            Err(ApiError::Unauthenticated)
+        ));
+    }
+
+    #[test]
+    fn failed_creation_does_not_bind_key_and_selection_checks_current_status() {
+        let backend = MemoryBackend::new();
+        let owner = session(&backend, "device-1");
+        let key = CharacterCreationKey::new("key").unwrap();
+        assert!(matches!(
+            backend.create_character_idempotent(
+                &owner.token,
+                &key,
+                &CreateCharacter { name: "".into() }
+            ),
+            Err(ApiError::InvalidRequest(_))
+        ));
+        let request = CreateCharacter {
+            name: "Aria".into(),
+        };
+        let receipt = backend
+            .create_character_idempotent(&owner.token, &key, &request)
+            .unwrap();
+        backend
+            .lock_state()
+            .unwrap()
+            .characters
+            .get_mut(&receipt.character_id)
+            .unwrap()
+            .status = CharacterStatus::Suspended;
+        assert!(matches!(
+            backend.select_character(&owner.token, receipt.character_id),
+            Err(ApiError::NotFound(_))
+        ));
+        assert_eq!(
+            backend
+                .create_character_idempotent(&owner.token, &key, &request)
+                .unwrap(),
+            receipt
+        );
+    }
+
+    #[test]
+    fn concurrent_retries_create_only_once() {
+        let backend = MemoryBackend::new();
+        let owner = session(&backend, "device-1");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
+        let threads: Vec<_> = (0..16)
+            .map(|_| {
+                let backend = backend.clone();
+                let token = owner.token.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    backend
+                        .create_character_idempotent(
+                            &token,
+                            &CharacterCreationKey::new("concurrent").unwrap(),
+                            &CreateCharacter {
+                                name: "Aria".into(),
+                            },
+                        )
+                        .unwrap()
+                })
+            })
+            .collect();
+        let receipts: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
+        assert!(receipts.iter().all(|receipt| receipt == &receipts[0]));
+        assert_eq!(backend.characters(&owner.token).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn receipts_are_shared_by_clones_but_not_new_instances() {
+        let backend = MemoryBackend::new();
+        let clone = backend.clone();
+        let owner = session(&backend, "device-1");
+        let key = CharacterCreationKey::new("key").unwrap();
+        let request = CreateCharacter {
+            name: "Aria".into(),
+        };
+        let receipt = backend
+            .create_character_idempotent(&owner.token, &key, &request)
+            .unwrap();
+        drop(backend);
+        assert_eq!(
+            clone
+                .create_character_idempotent(&owner.token, &key, &request)
+                .unwrap(),
+            receipt
+        );
+
+        let fresh = MemoryBackend::new();
+        assert!(fresh.lock_state().unwrap().character_receipts.is_empty());
+        assert!(matches!(
+            fresh.create_character_idempotent(&owner.token, &key, &request),
+            Err(ApiError::Unauthenticated)
+        ));
+        let fresh_owner = session(&fresh, "device-1");
+        fresh
+            .create_character_idempotent(&fresh_owner.token, &key, &request)
+            .unwrap();
+        assert_eq!(fresh.characters(&fresh_owner.token).unwrap().len(), 1);
     }
 }
