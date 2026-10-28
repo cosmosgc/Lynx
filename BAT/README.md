@@ -10,6 +10,7 @@ pauses in the scripts it calls and waits once at the end.
 | `all-checks.bat` | Formatting check, Clippy, workspace tests, and build | `BAT\all-checks.bat` |
 | `build.bat` | Build the Rust workspace | `BAT\build.bat --release` |
 | `run-server.bat` | Start the local demo world server and show logs | `BAT\run-server.bat` |
+| `run-client.bat` | Launch the local demo client or offline placeholder | `BAT\run-client.bat` |
 | `check.bat` | Check all workspace targets without linking | `BAT\check.bat` |
 | `clippy.bat` | Run Clippy with warnings denied | `BAT\clippy.bat` |
 | `clean.bat` | Remove Cargo build artifacts | `BAT\clean.bat` |
@@ -30,8 +31,9 @@ pauses in the scripts it calls and waits once at the end.
 default `http://127.0.0.1:7350`. Other engine checks do not require Nakama or
 PostgreSQL.
 
-`run-server.bat` prompts for a demo token (the typed text is visible), hashes
-it, and listens only on `127.0.0.1:8090`. Reuse the same token on restart. The
+`run-server.bat` prompts for one or more demo tokens (the typed text is visible),
+hashes them, and listens only on `127.0.0.1:8090`. Enter a distinct token per
+simultaneous client and reuse the same tokens in the same order on restart. The
 server logs to the command window; press Ctrl+C to stop it. World snapshots
 are stored in the gitignored `.lynx/world.json`; sessions are not persisted.
 The launcher displays the health, readiness, and WebSocket addresses. It does
@@ -40,3 +42,20 @@ or use an authenticated protocol client for supported world commands.
 Extra arguments are passed to `lynx-world serve`. This static-token demo is not
 production authentication and must not be exposed publicly. Rust and PowerShell
 must be installed; Nakama and PostgreSQL are not needed for this launcher.
+
+For a separate multiplayer test world, run `BAT\run-server.bat --multiplayer`
+from Command Prompt and enter at least two different tokens. It saves to
+`.lynx/multiplayer-world.json`, leaving `.lynx/world.json` untouched. Each
+client must use a different token. This option does not accept extra arguments.
+Demo snapshots do not automatically gain characters when tokens are added later:
+choose all tokens on the first start of a given world. Existing saved worlds
+are not reset automatically.
+
+`run-client.bat` prompts for the same demo token as the server (typed text is
+visible) and opens the development-only online view. Start `run-server.bat`
+first. The online view is read-only; client movement and interactions are not
+yet available. The default address is `ws://127.0.0.1:8090/world`; set
+`LYNX_DEMO_URL` before launching to override it. Run
+`BAT\run-client.bat --offline` for the standalone placeholder with WASD movement.
+Use disposable credentials: environment variables can be visible to other local
+processes or diagnostics. Rust and a working graphical environment are required.
