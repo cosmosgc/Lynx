@@ -14,6 +14,7 @@ use engine_sim::action::{ActionEffect, ActionResult, Verb};
 use engine_sim::entity::{Door, EntityRecord, Interactable, InteractionPermission, UiProvider};
 use engine_sim::mind::Mind;
 use engine_sim::minigame::Minigame;
+use engine_sim::movement::MovementIntent;
 use engine_sim::nav::NavGrid;
 use engine_sim::zone::{Zone, ZoneConfig};
 use game_api::AccountId;
@@ -260,6 +261,129 @@ fn connect(gateway: &mut WorldGateway, account: &str, principal: StableId) -> Co
         .unwrap()
 }
 
+#[test]
+fn session_lifecycle_cancels_queued_movement() {
+    for lifecycle in ["close", "disconnect", "resume", "replace"] {
+        let mut f = fixture();
+        let alice = connect(&mut f.gateway, "alice", f.alice_principal);
+        let bob = connect(&mut f.gateway, "bob", f.bob_principal);
+        let movement = |connection: &Connection, principal, destination| MovementIntent {
+            actor: connection.actor,
+            principal,
+            session: connection.session.to_string(),
+            sequence: 1,
+            destination,
+        };
+        let alice_move = movement(&alice, f.alice_principal, Vec3::new(10.5, 0.0, 10.0));
+        f.gateway
+            .zone_mut()
+            .queue_movement(alice_move.clone())
+            .unwrap();
+        f.gateway
+            .zone_mut()
+            .queue_movement(movement(
+                &bob,
+                f.bob_principal,
+                Vec3::new(150.5, 0.0, 150.0),
+            ))
+            .unwrap();
+        let mut replacement = None;
+        if lifecycle == "close" {
+            f.gateway.close_session(&alice.session).unwrap();
+        } else {
+            f.gateway
+                .disconnect(&alice.session, Tick::ZERO, Millis::new(1_100))
+                .unwrap();
+            if lifecycle == "resume" {
+                f.gateway
+                    .resume(&alice.token, &handshake(), Tick::ZERO, Millis::new(1_200))
+                    .unwrap();
+                assert!(
+                    f.gateway
+                        .zone_mut()
+                        .queue_movement(alice_move.clone())
+                        .is_err()
+                );
+            } else if lifecycle == "replace" {
+                let next = connect(&mut f.gateway, "alice", f.alice_principal);
+                assert_ne!(alice.session, next.session);
+                replacement = Some(next);
+            }
+        }
+        let outcomes = f.gateway.zone_mut().advance_movement_tick(1000, 2.0).1;
+        assert_eq!(outcomes.len(), 1, "{lifecycle}");
+        assert_eq!(outcomes[0].actor, bob.actor);
+        assert!(outcomes[0].applied);
+        assert_eq!(
+            f.gateway.zone().entity(alice.actor).unwrap().position(),
+            Vec3::new(10.0, 0.0, 10.0)
+        );
+        if let Some(next) = replacement {
+            assert!(f.gateway.zone_mut().queue_movement(alice_move).is_err());
+            f.gateway
+                .zone_mut()
+                .queue_movement(movement(
+                    &next,
+                    f.alice_principal,
+                    Vec3::new(10.5, 0.0, 10.0),
+                ))
+                .unwrap();
+            // Closing the old, already replaced session must not cancel new work.
+            assert!(f.gateway.close_session(&alice.session).is_none());
+            assert!(f.gateway.zone_mut().advance_movement_tick(1000, 2.0).1[0].applied);
+        }
+    }
+}
+
+#[test]
+fn resume_baseline_includes_cancelled_sequence_but_new_session_does_not() {
+    let mut f = fixture();
+    let alice = connect(&mut f.gateway, "alice", f.alice_principal);
+    let request = envelope(
+        "move",
+        "movement.request",
+        json!({"sequence": u64::MAX, "destination": {"x": 10.1, "y": 0.0, "z": 10.0}}),
+    );
+    f.gateway
+        .handle(&alice.session, &request, Millis::new(1001))
+        .unwrap();
+    f.gateway
+        .disconnect(&alice.session, Tick::ZERO, Millis::new(1100))
+        .unwrap();
+    let resumed = f
+        .gateway
+        .resume(&alice.token, &handshake(), Tick::ZERO, Millis::new(1200))
+        .unwrap();
+    let baseline = resumed.snapshot.movement.as_ref().unwrap();
+    assert_eq!(baseline.last_consumed_sequence, Some(u64::MAX));
+    assert_eq!(baseline.applied, None);
+    assert_eq!(baseline.position, Vec3::new(10.0, 0.0, 10.0));
+    assert_eq!(
+        f.gateway
+            .handle(&resumed.session, &request, Millis::new(1201))
+            .unwrap()[0]
+            .kind
+            .as_str(),
+        "protocol.error"
+    );
+    f.gateway.close_session(&resumed.session);
+    let new = connect(&mut f.gateway, "alice", f.alice_principal);
+    assert_eq!(new.snapshot.movement.unwrap().last_consumed_sequence, None);
+    let fresh = envelope(
+        "fresh",
+        "movement.request",
+        json!({"sequence": 0, "destination": {"x": 10.05, "y": 0.0, "z": 10.0}}),
+    );
+    assert_eq!(
+        f.gateway
+            .handle(&new.session, &fresh, Millis::new(1300))
+            .unwrap()[0]
+            .kind
+            .as_str(),
+        "movement.queued"
+    );
+}
+
 fn envelope(id: &str, kind: &str, body: serde_json::Value) -> Envelope {
     Envelope::new(
         MessageId::parse(id).unwrap(),
@@ -284,6 +408,128 @@ fn batch_has_entity(batch: &ReplicationBatch, entity: StableId) -> bool {
         .updates
         .iter()
         .any(|update| update.entity == Some(entity))
+}
+
+#[test]
+fn movement_protocol_is_session_bound_fixed_budget_and_replicated() {
+    let mut f = fixture();
+    f.gateway
+        .zone_mut()
+        .entity_mut(f.bob_actor)
+        .unwrap()
+        .transform
+        .position = Vec3::new(11.0, 0.0, 10.0);
+    let alice = connect(&mut f.gateway, "alice", f.alice_principal);
+    let bob = connect(&mut f.gateway, "bob", f.bob_principal);
+    assert_eq!(
+        alice
+            .snapshot
+            .movement
+            .as_ref()
+            .unwrap()
+            .last_consumed_sequence,
+        None
+    );
+    f.gateway
+        .tick_with_interval(Millis::new(1_001), 100)
+        .unwrap();
+    let send = |gateway: &mut WorldGateway, body| {
+        gateway
+            .handle(
+                &alice.session,
+                &envelope("move", "movement.request", body),
+                Millis::new(1_002),
+            )
+            .unwrap()
+    };
+    for field in ["actor", "principal", "speed", "duration"] {
+        let mut body = json!({"sequence": 1, "destination": {"x": 10.1, "y": 0.0, "z": 10.0}});
+        body[field] = json!(f.bob_actor.to_string());
+        assert_eq!(
+            send(&mut f.gateway, body)[0].kind.as_str(),
+            "protocol.error"
+        );
+    }
+    let body = json!({"sequence": 1, "destination": {"x": 10.1, "y": 0.0, "z": 10.0}});
+    assert_eq!(
+        send(&mut f.gateway, body.clone())[0].kind.as_str(),
+        "movement.queued"
+    );
+    assert_eq!(
+        send(&mut f.gateway, body.clone())[0].kind.as_str(),
+        "protocol.error"
+    );
+    let before = f.gateway.zone().tick();
+    let updates = f
+        .gateway
+        .tick_with_interval(Millis::new(100_000), 100)
+        .unwrap();
+    assert_eq!(f.gateway.zone().tick().0, before.0 + 1);
+    assert_eq!(
+        f.gateway.zone().entity(alice.actor).unwrap().position(),
+        Vec3::new(10.1, 0.0, 10.0)
+    );
+    let snapshot = |s: &SessionId| {
+        delivery(&updates, s)
+            .batch
+            .updates
+            .iter()
+            .find(|u| u.entity == Some(alice.actor))
+            .unwrap()
+            .payload
+            .clone()
+    };
+    assert_eq!(snapshot(&alice.session), snapshot(&bob.session));
+    let result = delivery(&updates, &alice.session)
+        .movement
+        .as_ref()
+        .unwrap();
+    assert_eq!(result.tick, f.gateway.zone().tick());
+    assert_eq!(result.last_consumed_sequence, Some(1));
+    assert_eq!(result.applied, Some(true));
+    assert_eq!(result.position, Vec3::new(10.1, 0.0, 10.0));
+    assert!(delivery(&updates, &bob.session).movement.is_none());
+    assert_eq!(
+        send(&mut f.gateway, body)[0].kind.as_str(),
+        "protocol.error"
+    );
+    let too_far = json!({"sequence": 2, "destination": {"x": 11.0, "y": 0.0, "z": 10.0}});
+    assert_eq!(
+        send(&mut f.gateway, too_far.clone())[0].kind.as_str(),
+        "movement.queued"
+    );
+    let rejected = f
+        .gateway
+        .tick_with_interval(Millis::new(1_000_000), 100)
+        .unwrap();
+    let result = delivery(&rejected, &alice.session)
+        .movement
+        .as_ref()
+        .unwrap();
+    assert_eq!(result.applied, Some(false));
+    assert_eq!(result.last_consumed_sequence, Some(2));
+    assert_eq!(result.position, Vec3::new(10.1, 0.0, 10.0));
+    assert_eq!(
+        f.gateway.zone().entity(alice.actor).unwrap().position(),
+        Vec3::new(10.1, 0.0, 10.0)
+    );
+    assert_eq!(
+        send(&mut f.gateway, too_far)[0].kind.as_str(),
+        "protocol.error"
+    );
+    let pending = json!({"sequence": 3, "destination": {"x": 10.2, "y": 0.0, "z": 10.0}});
+    assert_eq!(
+        send(&mut f.gateway, pending)[0].kind.as_str(),
+        "movement.queued"
+    );
+    f.gateway.close_session(&alice.session).unwrap();
+    f.gateway
+        .tick_with_interval(Millis::new(1_000_001), 100)
+        .unwrap();
+    assert_eq!(
+        f.gateway.zone().entity(alice.actor).unwrap().position(),
+        Vec3::new(10.1, 0.0, 10.0)
+    );
 }
 
 #[test]

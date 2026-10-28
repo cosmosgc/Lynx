@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::action::{ActionEffect, ActionKey, ActionResult};
 use crate::entity::EntityRecord;
 use crate::link::{EntityLink, LinkEvent, LinkGraph};
+use crate::movement::{MovementIntent, MovementSequence};
 use crate::nav::{NavGrid, PathBudget};
 
 /// Maximum remembered action results for idempotent retries.
@@ -170,6 +171,8 @@ pub struct Zone {
     pub(crate) link_cooldowns: BTreeMap<(StableId, StableId, LinkEvent), Tick>,
     pub(crate) tick: Tick,
     pub(crate) stats: TickStats,
+    pub(crate) movement_pending: BTreeMap<StableId, MovementIntent>,
+    pub(crate) movement_sequences: BTreeMap<StableId, MovementSequence>,
 }
 
 impl fmt::Debug for Zone {
@@ -229,6 +232,8 @@ impl Zone {
             link_cooldowns: BTreeMap::new(),
             tick: Tick::ZERO,
             stats: TickStats::default(),
+            movement_pending: BTreeMap::new(),
+            movement_sequences: BTreeMap::new(),
         })
     }
 
@@ -329,6 +334,8 @@ impl Zone {
             .remove(&id)
             .ok_or_else(|| EngineError::not_found("entity", id))?;
         self.links.remove_for(id);
+        self.movement_pending.remove(&id);
+        self.movement_sequences.remove(&id);
         Ok(removed)
     }
 

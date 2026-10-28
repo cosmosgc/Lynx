@@ -117,6 +117,19 @@ pub struct OwnerState {
     pub inventory: Inventory,
 }
 
+/// Session-private movement reconciliation, never part of observer replication.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MovementReconciliation {
+    /// Authoritative tick of this baseline or processed outcome.
+    pub tick: engine_core::time::Tick,
+    /// Authoritative actor position.
+    pub position: Vec3,
+    /// Last queue-accepted sequence, including cancelled input.
+    pub last_consumed_sequence: Option<u64>,
+    /// Processing result; absent for an initial or resumed baseline.
+    pub applied: Option<bool>,
+}
+
 /// Everything the transport should send to one session for one tick.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionDelivery {
@@ -128,13 +141,15 @@ pub struct SessionDelivery {
     pub interest: InterestUpdate,
     /// Replication updates after audience filtering.
     pub batch: ReplicationBatch,
+    /// Private baseline or outcome for this exact control session.
+    pub movement: Option<MovementReconciliation>,
 }
 
 impl SessionDelivery {
     /// Whether there is anything to send.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.interest.is_empty() && self.batch.is_empty()
+        self.interest.is_empty() && self.batch.is_empty() && self.movement.is_none()
     }
 }
 

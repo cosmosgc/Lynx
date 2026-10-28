@@ -366,7 +366,10 @@ impl Service {
     }
 
     fn advance(&mut self) {
-        match self.server.tick(clock()) {
+        // This is the configured interval, not elapsed wall time: late ticks
+        // do not grant extra movement or bank unused time.
+        let interval_ms = u32::try_from(self.tick.as_millis()).unwrap_or(u32::MAX);
+        match self.server.tick_with_interval(clock(), interval_ms) {
             Ok(outbound) => self.dispatch(outbound),
             Err(error) => {
                 tracing::error!(
@@ -520,6 +523,62 @@ mod tests {
         (service, grants[0].clone(), grants)
     }
 
+    #[test]
+    fn service_uses_configured_interval_for_each_movement_tick() {
+        let (mut service, grant, _) = service();
+        let (outbound, _receiver) = mpsc::channel(16);
+        let admitted = service
+            .admit(
+                &Credential::Static(grant),
+                &Hello {
+                    handshake: demo::handshake().unwrap(),
+                    last_ack_tick: Tick::ZERO,
+                },
+                &outbound,
+            )
+            .unwrap();
+        let start = service
+            .server
+            .gateway()
+            .zone()
+            .entity(admitted.actor)
+            .unwrap()
+            .position();
+        let request = |sequence, dx| {
+            Envelope::new(
+                MessageId::parse("movement-test").unwrap(),
+                message_kind("movement.request"),
+                serde_json::json!({"sequence": sequence, "destination": {"x": start.x + dx, "y": start.y, "z": start.z}}),
+            )
+        };
+        service.receive(admitted.connection, &request(1, 0.05));
+        service.advance();
+        assert_eq!(
+            service
+                .server
+                .gateway()
+                .zone()
+                .entity(admitted.actor)
+                .unwrap()
+                .position(),
+            start
+        );
+        service.receive(admitted.connection, &request(2, 0.02));
+        service.advance();
+        assert_eq!(
+            service
+                .server
+                .gateway()
+                .zone()
+                .entity(admitted.actor)
+                .unwrap()
+                .position()
+                .x,
+            start.x + 0.02
+        );
+        assert_eq!(service.server.gateway().zone().tick(), Tick(2));
+    }
+
     async fn next(outbound: &mut mpsc::Receiver<ServerFrame>) -> Envelope {
         let frame = tokio::time::timeout(Duration::from_secs(2), outbound.recv())
             .await
@@ -638,6 +697,186 @@ mod tests {
         let zone: Zone = demo::build_zone(&grants).unwrap();
         assert_eq!(zone.entity_count(), grants.len() * 5);
         assert_eq!(zone.tick(), Tick::ZERO);
+    }
+
+    #[tokio::test]
+    async fn oversized_delta_closes_websocket_and_resume_depends_on_snapshot_size() {
+        use engine_core::id::DefinitionId;
+        use engine_core::math::Vec3;
+        use engine_net::framing::{decode_frame, encode_frame};
+        use engine_sim::entity::EntityRecord;
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::connect_async;
+        use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest, http::header};
+
+        let authenticator = Authenticator::new(&[digest(TOKEN), digest("other-token")]).unwrap();
+        let grants: Vec<_> = authenticator.grants().cloned().collect();
+        let zone = demo::build_zone(&grants).unwrap();
+        let gateway = WorldGateway::new(
+            zone,
+            demo::handshake().unwrap(),
+            GatewayConfig::new(DurationMs::new(30_000)),
+            SystemResumeTokens::new(),
+        )
+        .unwrap();
+        let mut service = Service::new(WorldServer::new(gateway), Duration::from_secs(60));
+        let (events, mut receiver) = crate::transport::event_channel();
+        let state = Arc::new(crate::transport::AppState::new(events, authenticator));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (server_shutdown, server_shutdown_rx) = oneshot::channel();
+        let server_task = tokio::spawn(crate::transport::serve_with_shutdown(
+            listener,
+            state,
+            async {
+                let _ = server_shutdown_rx.await;
+            },
+        ));
+
+        // Commands are serialized with transport events just like normal service work.
+        let (commands, mut command_rx) = mpsc::channel::<(bool, oneshot::Sender<()>)>(4);
+        let authority = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    Some(event) = receiver.recv() => service.handle(event),
+                    Some((add, done)) = command_rx.recv() => {
+                        for seed in 100..500 {
+                            let id = StableId::from_parts(IdKind::Entity, 9, seed);
+                            if add {
+                                service.server.gateway_mut().zone_mut().spawn(EntityRecord::new(
+                                    id,
+                                    DefinitionId::new("prop.snapshot_padding").unwrap(),
+                                    Vec3::new(60.0, 0.0, 60.0),
+                                )).unwrap();
+                            } else {
+                                service.server.gateway_mut().zone_mut().despawn(id).unwrap();
+                            }
+                        }
+                        if add { service.advance(); }
+                        let _ = done.send(());
+                    }
+                    else => break,
+                }
+            }
+        });
+
+        async fn connect(
+            address: std::net::SocketAddr,
+            token: &str,
+        ) -> tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        > {
+            let mut request = format!("ws://{address}/world")
+                .into_client_request()
+                .unwrap();
+            request.headers_mut().insert(
+                header::AUTHORIZATION,
+                format!("Bearer {token}").parse().unwrap(),
+            );
+            let (mut socket, _) = connect_async(request).await.unwrap();
+            let hello = Envelope::new(
+                MessageId::parse("hello").unwrap(),
+                message_kind(HELLO_KIND),
+                serde_json::to_value(Hello {
+                    handshake: demo::handshake().unwrap(),
+                    last_ack_tick: Tick::ZERO,
+                })
+                .unwrap(),
+            );
+            socket
+                .send(Message::Binary(encode_frame(&hello).unwrap().into()))
+                .await
+                .unwrap();
+            socket
+        }
+        async fn frame(
+            socket: &mut tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+        ) -> Message {
+            tokio::time::timeout(Duration::from_secs(5), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+        }
+        async fn envelope(
+            socket: &mut tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+        ) -> Envelope {
+            match frame(socket).await {
+                Message::Binary(bytes) => decode_frame(&bytes).unwrap(),
+                other => panic!("expected envelope, got {other:?}"),
+            }
+        }
+        async fn admitted(
+            socket: &mut tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            resumed: bool,
+        ) -> String {
+            let ready = envelope(socket).await;
+            assert_eq!(ready.kind.as_str(), READY_KIND);
+            assert_eq!(ready.body["resumed"], resumed);
+            assert_eq!(envelope(socket).await.kind.as_str(), SNAPSHOT_KIND);
+            let token = envelope(socket).await;
+            assert_eq!(token.kind.as_str(), TOKEN_KIND);
+            token.body["resume"].as_str().unwrap().to_owned()
+        }
+        async fn change(commands: &mpsc::Sender<(bool, oneshot::Sender<()>)>, add: bool) {
+            let (done, wait) = oneshot::channel();
+            commands.send((add, done)).await.unwrap();
+            wait.await.unwrap();
+        }
+
+        // Grants are ordered by configured token, matching the demo's positions.
+        let mut affected = connect(address, TOKEN).await;
+        let token = admitted(&mut affected, false).await;
+        let mut other = connect(address, "other-token").await;
+        let _other_token = admitted(&mut other, false).await;
+        change(&commands, true).await;
+        assert!(matches!(frame(&mut affected).await, Message::Close(_)));
+        // The other observer remains connected and can still submit requests.
+        let request = Envelope::new(
+            MessageId::parse("other-request").unwrap(),
+            message_kind("bogus.kind"),
+            serde_json::json!({}),
+        );
+        other
+            .send(Message::Binary(encode_frame(&request).unwrap().into()))
+            .await
+            .unwrap();
+        assert_eq!(envelope(&mut other).await.kind.as_str(), ERROR_KIND);
+
+        change(&commands, false).await;
+        let mut resumed = connect(address, &token).await;
+        let rotated = admitted(&mut resumed, true).await;
+        assert_ne!(token, rotated);
+
+        change(&commands, true).await;
+        assert!(matches!(frame(&mut resumed).await, Message::Close(_)));
+        // The retained view is still too large: resume rejects and revokes the
+        // rotated session rather than delivering a usable snapshot or token.
+        let mut failed = connect(address, &rotated).await;
+        assert_eq!(
+            envelope(&mut failed).await.body["code"],
+            "capacity_exceeded"
+        );
+        assert!(matches!(frame(&mut failed).await, Message::Close(_)));
+        change(&commands, false).await;
+        let mut replay = connect(address, &rotated).await;
+        assert_eq!(envelope(&mut replay).await.body["code"], "session_expired");
+        assert!(matches!(frame(&mut replay).await, Message::Close(_)));
+
+        drop((affected, other, resumed, failed, replay, commands));
+        authority.abort();
+        let _ = server_shutdown.send(());
+        tokio::time::timeout(Duration::from_secs(5), server_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 
     /// Counts saves and keeps the latest world snapshot.

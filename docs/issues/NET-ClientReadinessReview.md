@@ -8,8 +8,12 @@
 
 - A full snapshot or delta can exceed the 64 KiB envelope limit; the current
   transport has no chunking protocol. Initial snapshots are now checked before
-  admission, and oversized snapshots reject and clean up the session. Oversized
-  deltas and WebSocket boundary tests remain open.
+  admission, and oversized snapshots reject and clean up the session. An
+  unencodable delta now detaches the affected connection rather than silently
+  losing replication state; other connections can still receive their deltas.
+  Resume requires a fresh snapshot, which can itself be oversized and revoke
+  the session. Chunking, transport-level close/recovery, and WebSocket boundary
+  tests remain open.
 - Resume tokens rotate before the replacement reaches the client. A dropped
   connection before `world.token` delivery can strand the old token. Test
   delivery failures and define a safe recovery protocol.

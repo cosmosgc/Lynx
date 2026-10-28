@@ -22,7 +22,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::{HeaderValue, header};
 use tokio_tungstenite::{WebSocketStream, connect_async};
 use world_gateway::{GatewayConfig, SystemResumeTokens, WorldGateway};
-use world_server::{READY_KIND, SNAPSHOT_KIND, WorldServer};
+use world_server::{DELTA_KIND, READY_KIND, SNAPSHOT_KIND, WorldServer};
 
 const TOKEN: &str = "websocket-integration-token";
 
@@ -233,4 +233,132 @@ async fn a_client_can_authenticate_play_and_receive_correlated_errors() {
     })
     .await
     .expect("the websocket integration test timed out");
+}
+
+#[tokio::test]
+async fn movement_is_session_bound_ticked_replicated_and_cancelled_on_disconnect() {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let authenticator = Authenticator::new(&[digest(TOKEN)]).unwrap();
+        let grants: Vec<_> = authenticator.grants().cloned().collect();
+        let gateway = WorldGateway::new(
+            demo::build_zone(&grants).unwrap(),
+            demo::handshake().unwrap(),
+            GatewayConfig::default(),
+            SystemResumeTokens::new(),
+        )
+        .unwrap();
+        let service = Service::new(WorldServer::new(gateway), Duration::from_secs(1));
+        let (events, receiver) = transport::event_channel();
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let service_task = tokio::spawn(service.run(receiver, shutdown_rx));
+        let (server_shutdown, server_shutdown_rx) = oneshot::channel();
+        let server_task = tokio::spawn(transport::serve_with_shutdown(
+            listener,
+            Arc::new(AppState::new(events, authenticator)),
+            async { let _ = server_shutdown_rx.await; },
+        ));
+
+        async fn connect(address: std::net::SocketAddr, token: &str) -> WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+            let mut request = format!("ws://{address}/world").into_client_request().unwrap();
+            request.headers_mut().insert(header::AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {token}")).unwrap());
+            let (mut socket, _) = connect_async(request).await.unwrap();
+            send_envelope(&mut socket, &envelope("hello", HELLO_KIND, serde_json::to_value(Hello {
+                handshake: demo::handshake().unwrap(), last_ack_tick: Tick::ZERO,
+            }).unwrap())).await;
+            socket
+        }
+
+        let mut socket = connect(address, TOKEN).await;
+        let ready = next_envelope(&mut socket).await;
+        assert_eq!(ready.kind.as_str(), READY_KIND);
+        let actor = ready.body["actor"].as_str().unwrap().to_owned();
+        let snapshot = next_envelope(&mut socket).await;
+        assert_eq!(snapshot.kind.as_str(), SNAPSHOT_KIND);
+        let token = next_envelope(&mut socket).await.body["resume"].as_str().unwrap().to_owned();
+        let initial = snapshot.body["batch"]["updates"].as_array().unwrap().iter()
+            .find(|update| update["entity"] == actor).unwrap()["payload"]["position"].clone();
+        let x = initial["x"].as_f64().unwrap();
+        let destination = json!({"x": x + 0.5, "y": initial["y"], "z": initial["z"]});
+
+        // Authority, timing and actor identity are never client-supplied.
+        for field in ["actor", "principal", "session", "speed", "duration"] {
+            let mut body = json!({"sequence": 1, "destination": destination});
+            body[field] = json!("forged");
+            let id = format!("forged-{field}");
+            send_envelope(&mut socket, &envelope(&id, "movement.request", body)).await;
+            let error = next_envelope(&mut socket).await;
+            assert_eq!(error.kind.as_str(), "protocol.error");
+            assert_eq!(error.correlation.unwrap().as_str(), id);
+            assert_eq!(error.body["code"], "invalid_request");
+        }
+
+        let request = envelope("move-1", "movement.request", json!({"sequence": 1, "destination": destination}));
+        send_envelope(&mut socket, &request).await;
+        let queued = next_envelope(&mut socket).await;
+        assert_eq!(queued.kind.as_str(), "movement.queued");
+        assert_eq!(queued.correlation.unwrap().as_str(), "move-1");
+        assert_eq!(queued.body["sequence"], 1);
+        let delta = next_envelope(&mut socket).await;
+        assert_eq!(delta.kind.as_str(), DELTA_KIND);
+        assert!(delta.body["tick"].as_u64().unwrap() > snapshot.body["tick"].as_u64().unwrap());
+        let update = delta.body["batch"]["updates"].as_array().unwrap().iter()
+            .find(|update| update["entity"] == actor).unwrap();
+        assert_eq!(update["category"], "state_snapshot");
+        assert_eq!(update["payload"]["position"], destination);
+
+        send_envelope(&mut socket, &request).await;
+        let stale = next_envelope(&mut socket).await;
+        assert_eq!(stale.kind.as_str(), "protocol.error");
+        assert_eq!(stale.body["code"], "invalid_request");
+
+        // Queueing is not an acceptance of the endpoint: the tick must reject
+        // an endpoint beyond its fixed two-metre movement budget.
+        let too_far = envelope("move-far", "movement.request", json!({"sequence": 2, "destination": {"x": x + 10.0, "y": initial["y"], "z": initial["z"]}}));
+        send_envelope(&mut socket, &too_far).await;
+        assert_eq!(next_envelope(&mut socket).await.kind.as_str(), "movement.queued");
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        send_envelope(&mut socket, &too_far).await;
+        let rejected = loop {
+            let message = next_envelope(&mut socket).await;
+            if message.kind.as_str() != DELTA_KIND {
+                break message;
+            }
+            // Unrelated deltas may race the reply, but the rejected endpoint
+            // must never appear as this actor's authoritative position.
+            for update in message.body["batch"]["updates"].as_array().unwrap() {
+                if update["entity"] == actor && update["payload"]["position"].is_object() {
+                    assert_eq!(update["payload"]["position"], destination);
+                }
+            }
+        };
+        assert_eq!(rejected.kind.as_str(), "protocol.error");
+        assert_eq!(rejected.body["code"], "invalid_request");
+
+        // Queue a second move and detach before the next tick. Resuming after
+        // that tick must still show the first authoritative position.
+        let pending = envelope("move-3", "movement.request", json!({"sequence": 3, "destination": {"x": x + 1.0, "y": initial["y"], "z": initial["z"]}}));
+        send_envelope(&mut socket, &pending).await;
+        assert_eq!(next_envelope(&mut socket).await.kind.as_str(), "movement.queued");
+        socket.close(None).await.unwrap();
+        drop(socket);
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        let mut resumed = connect(address, &token).await;
+        let ready = next_envelope(&mut resumed).await;
+        assert_eq!(ready.kind.as_str(), READY_KIND);
+        assert_eq!(ready.body["resumed"], true);
+        let snapshot = next_envelope(&mut resumed).await;
+        assert_eq!(snapshot.kind.as_str(), SNAPSHOT_KIND);
+        let position = &snapshot.body["batch"]["updates"].as_array().unwrap().iter()
+            .find(|update| update["entity"] == actor).unwrap()["payload"]["position"];
+        assert_eq!(*position, destination);
+        assert_eq!(next_envelope(&mut resumed).await.kind.as_str(), TOKEN_KIND);
+
+        drop(resumed);
+        shutdown.send(true).unwrap();
+        server_shutdown.send(()).unwrap();
+        service_task.await.unwrap();
+        server_task.await.unwrap().unwrap();
+    }).await.expect("movement websocket test timed out");
 }

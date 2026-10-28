@@ -23,7 +23,7 @@ that authority end to end.
 ## SIM-001 — Server-authoritative movement
 
 - **Priority:** P0
-- **Status:** In progress — bounded displacement validation foundation only
+- **Status:** In progress — gateway-routed queued movement slice
 - **Depends on:** —
 - **References:** [architecture §Simulation model](../architecture.md#simulation-model),
   [networking §Reconnect and recovery](../networking.md#reconnect-and-recovery),
@@ -66,15 +66,47 @@ only same-cell or adjacent-cell moves. Diagonals conservatively require both
 corner cells open. Its budget inputs must come from trusted server state; it is
 not itself a per-tick budget or an authority boundary. It does not check zone
 bounds, occupancy, or fine collision, expose requests, or mutate transforms.
-Authority checks, tick advancement, budget enforcement, replication, and the
+`Zone::queue_movement` accepts a player intent only from a server-resolved
+principal and session with Move capability, one pending input per actor and at
+most `max_actions` pending inputs per tick. Sequences increase per actor and
+control session; accepted queue entries consume their sequence even on failure.
+`advance_movement_tick` rechecks control and liveness, applies one endpoint
+against a trusted caller-supplied speed and elapsed time, and advances the tick;
+ordinary `advance_tick` does not process movement. Outcomes are generic and
+processing is in stable entity order. Sequence and pending state are runtime
+only and reset on despawn or restore. Facing is unchanged. Engine tests cover
+budget, walls, control and repeated inputs. Occupancy and fine collision are
+absent, status effects are not modeled, and diagnostics, fairness and full
 acceptance tests remain open.
+
+**Gateway contract:** `movement.request` carries only `sequence` (u64) and
+`destination: {x, y, z}` in world meters. Unknown fields, including actor,
+principal, speed and duration, are rejected. Actor, principal and session come
+from the active authenticated connection. `movement.queued` echoes the sequence
+and means only that the intent was queued, not that it was applied. Queue
+rejections use a generic `protocol.error`; processed inputs produce a private
+tick-stamped applied/rejected result and authoritative position without revealing
+geometry. The authoritative position is also
+replicated through the existing interest-filtered snapshot/delta path; facing
+is not changed. A queue-accepted sequence is consumed even if processing fails
+or the session disconnects. Queue-rejected sequences are not consumed. Sequences
+are strictly increasing for the same actor/control session, including resume;
+new sessions use their own sequence domain. This state is not persisted.
+
+The service uses its configured `--tick-ms` as a fixed budget for each processed
+tick, with a provisional server-owned speed of 2 m/s. A delayed tick does not
+bank elapsed time or provide extra distance; a tick advances the zone once.
+Direct gateway/server callers using `tick` use a 50 ms default; trusted callers
+may supply their fixed interval with `tick_with_interval`. Client reconciliation, processing rejection
+diagnostics, occupancy/fine collision, status effects and overload fairness
+remain outstanding.
 
 ---
 
 ## SIM-002 — Client prediction and reconciliation contract
 
 - **Priority:** P0
-- **Status:** Blocked — `SIM-001`
+- **Status:** In progress — server reconciliation foundation; client work blocked on `SIM-001` and `CLT-005`
 - **Depends on:** `SIM-001`, `CLT-005`
 - **References:** ADR 0014, `SIM-001`
 
@@ -100,6 +132,13 @@ input sequences and send bounded corrections the client can replay.
       collision.
 - [ ] Reconnect and zone-transfer paths reset prediction state explicitly.
 - [ ] The contract is documented in `docs/networking.md`.
+
+**Foundation:** Initial and resumed snapshots carry the session-private current
+position and optional last queue-consumed sequence (including cancelled input).
+Processed inputs carry a tick-stamped applied/rejected result and position for
+that exact session only. Disconnect and delivery failure recover via a baseline,
+not replay of per-input results. Exhausting u64 requires a new session. Client
+replay/smoothing, velocity and non-reconnect reset policies remain open.
 
 ---
 

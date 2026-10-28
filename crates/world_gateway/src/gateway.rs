@@ -27,6 +27,7 @@ use std::fmt;
 use engine_core::error::{EngineError, ErrorCode};
 use engine_core::faction::FactionWorld;
 use engine_core::id::{DefinitionId, StableId};
+use engine_core::math::Vec3;
 use engine_core::time::{DurationMs, Millis, Tick};
 use engine_core::world_event::WorldCalendar;
 use engine_net::envelope::{Envelope, MessageId, MessageKind};
@@ -41,6 +42,7 @@ use engine_net::replication::{
 use engine_sim::action::{ActionEffect, ActionRequest, ActionResult, Verb};
 use engine_sim::calendar::CalendarActionRequest;
 use engine_sim::mind::Controller;
+use engine_sim::movement::MovementIntent;
 use engine_sim::zone::Zone;
 use serde::Deserialize;
 use serde_json::json;
@@ -49,7 +51,9 @@ use crate::calendar::{
     CALENDAR_COMMAND_KIND, CALENDAR_QUERY_KIND, CALENDAR_RESULT_KIND, CALENDAR_STATE_KIND,
     CalendarCommandIntent, CalendarPersistence, CalendarQuery, CalendarStage,
 };
-use crate::replication::{EntitySnapshot, OwnerState, SessionDelivery, interest_entity};
+use crate::replication::{
+    EntitySnapshot, MovementReconciliation, OwnerState, SessionDelivery, interest_entity,
+};
 use crate::session::{
     GatewaySession, OpenPanel, ResumeToken, ResumeTokenSource, SessionClaims, SessionRegistry,
 };
@@ -361,6 +365,9 @@ impl WorldGateway {
     /// [`WorldGateway::disconnect`] instead so the player can reconnect.
     pub fn close_session(&mut self, session: &SessionId) -> Option<GatewaySession> {
         let removed = self.sessions.remove(session);
+        if let Some(removed) = &removed {
+            self.cancel_session_movement(removed);
+        }
         let _ = self.interest.remove_session(session);
         removed
     }
@@ -389,7 +396,7 @@ impl WorldGateway {
         let snapshot = match self.initial_delivery(&session) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                let _ = self.sessions.remove(&session.id);
+                let _ = self.close_session(&session.id);
                 return Err(error);
             }
         };
@@ -418,7 +425,8 @@ impl WorldGateway {
         now: Millis,
     ) -> Result<(), EngineError> {
         let last_ack = clamp_tick(last_ack_tick, self.zone.tick());
-        let _ = self.sessions.disconnect(session, last_ack, now)?;
+        let detached = self.sessions.disconnect(session, last_ack, now)?;
+        self.cancel_session_movement(&detached);
         let _ = self.interest.remove_session(session);
         Ok(())
     }
@@ -447,7 +455,7 @@ impl WorldGateway {
         self.sessions
             .update_negotiated(&session.id, negotiated.clone())?;
         if self.zone.entity(session.actor).is_none() {
-            let _ = self.sessions.remove(&session.id);
+            let _ = self.close_session(&session.id);
             return Err(EngineError::new(
                 ErrorCode::SessionExpired,
                 "the session's character is no longer in the zone",
@@ -459,7 +467,7 @@ impl WorldGateway {
         let snapshot = match self.initial_delivery(&session) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                let _ = self.sessions.remove(&session.id);
+                let _ = self.close_session(&session.id);
                 return Err(error);
             }
         };
@@ -496,6 +504,7 @@ impl WorldGateway {
         };
         match envelope.kind.as_str() {
             "action.request" => self.handle_action(session, principal, actor, envelope, now),
+            "movement.request" => self.handle_movement(session, principal, actor, envelope),
             CALENDAR_COMMAND_KIND => {
                 self.handle_calendar_command(session, principal, actor, envelope, now)
             }
@@ -523,11 +532,42 @@ impl WorldGateway {
     /// Returns an error only when the configured interest or batch limits are
     /// violated; those indicate a server configuration fault.
     pub fn tick(&mut self, now: Millis) -> Result<Vec<SessionDelivery>, EngineError> {
+        self.tick_with_interval(now, 50)
+    }
+
+    /// Advance exactly one tick using a trusted, fixed interval in milliseconds.
+    /// Delays and unused movement budget are never accumulated.
+    ///
+    /// # Errors
+    /// Returns an error if interest or replication limits are violated.
+    pub fn tick_with_interval(
+        &mut self,
+        now: Millis,
+        interval_ms: u32,
+    ) -> Result<Vec<SessionDelivery>, EngineError> {
+        let result = self.tick_inner(now, interval_ms);
+        if result.is_err() {
+            // Interest and movement may already have advanced. Force every
+            // affected client to recover from a fresh baseline, not a stale view.
+            let sessions: Vec<_> = self.sessions.connected().cloned().collect();
+            for session in sessions {
+                let _ = self.disconnect(&session.id, session.last_ack_tick, now);
+            }
+        }
+        result
+    }
+
+    fn tick_inner(
+        &mut self,
+        now: Millis,
+        interval_ms: u32,
+    ) -> Result<Vec<SessionDelivery>, EngineError> {
         for id in self.sessions.sweep(now) {
             let _ = self.interest.remove_session(&id);
         }
 
-        self.zone.advance_tick();
+        // Provisional server-owned movement speed; no client controls this budget.
+        let (_, outcomes) = self.zone.advance_movement_tick(interval_ms, 2.0);
         let changes = self.sync_world();
         self.pending_changes.extend(changes);
         let changes = std::mem::take(&mut self.pending_changes);
@@ -536,8 +576,7 @@ impl WorldGateway {
         let mut refreshed = Vec::with_capacity(sessions.len());
         for session in sessions {
             let Some(observer) = self.observer_for(&session) else {
-                let _ = self.sessions.remove(&session.id);
-                let _ = self.interest.remove_session(&session.id);
+                let _ = self.close_session(&session.id);
                 continue;
             };
             let update = self.interest.refresh(&observer, &self.world)?;
@@ -574,7 +613,20 @@ impl WorldGateway {
                     .with_staff(session.staff);
                 filter_batch(&batch, &audience)
             };
-            if filtered.is_empty() && update.is_empty() {
+            let movement = outcomes
+                .iter()
+                .find(|outcome| {
+                    outcome.actor == session.actor
+                        && outcome.principal == session.principal
+                        && outcome.session == session.id.as_str()
+                })
+                .map(|outcome| MovementReconciliation {
+                    tick: outcome.tick,
+                    position: outcome.position,
+                    last_consumed_sequence: Some(outcome.sequence),
+                    applied: Some(outcome.applied),
+                });
+            if filtered.is_empty() && update.is_empty() && movement.is_none() {
                 continue;
             }
             deliveries.push(SessionDelivery {
@@ -582,9 +634,46 @@ impl WorldGateway {
                 tick,
                 interest: update,
                 batch: filtered,
+                movement,
             });
         }
         Ok(deliveries)
+    }
+
+    fn handle_movement(
+        &mut self,
+        session: &SessionId,
+        principal: StableId,
+        actor: StableId,
+        envelope: &Envelope,
+    ) -> Result<Vec<Envelope>, EngineError> {
+        let intent = match serde_json::from_value::<MovementBody>(envelope.body.clone()) {
+            Ok(intent) => intent,
+            Err(_) => {
+                let error = EngineError::new(ErrorCode::InvalidRequest, "movement intent rejected");
+                return Ok(vec![self.error_reply(envelope, &error)]);
+            }
+        };
+        let sequence = intent.sequence;
+        let intent = MovementIntent {
+            actor,
+            principal,
+            session: session.to_string(),
+            sequence: intent.sequence,
+            destination: Vec3::new(
+                intent.destination.x,
+                intent.destination.y,
+                intent.destination.z,
+            ),
+        };
+        if let Err(error) = self.zone.queue_movement(intent) {
+            return Ok(vec![self.error_reply(envelope, &error)]);
+        }
+        Ok(vec![envelope.reply(
+            self.reply_id(),
+            message_kind("movement.queued"),
+            json!({ "sequence": sequence }),
+        )])
     }
 
     fn handle_action(
@@ -905,6 +994,22 @@ impl WorldGateway {
     }
 
     fn bind_actor(&mut self, session: &GatewaySession) {
+        // A retained binding may belong to an earlier session. Invalidate its
+        // queued work before replacing (or restoring) the controller.
+        if let Some(Controller::Player {
+            character,
+            session: previous,
+        }) = self
+            .zone
+            .entity(session.actor)
+            .and_then(|entity| entity.mind.as_ref())
+            .map(|mind| &mind.controller)
+        {
+            let character = *character;
+            let previous = previous.clone();
+            self.zone
+                .cancel_movement(session.actor, character, &previous);
+        }
         if let Some(entity) = self.zone.entity_mut(session.actor)
             && let Some(mind) = entity.mind.as_mut()
         {
@@ -913,6 +1018,11 @@ impl WorldGateway {
                 session: session.id.to_string(),
             };
         }
+    }
+
+    fn cancel_session_movement(&mut self, session: &GatewaySession) {
+        self.zone
+            .cancel_movement(session.actor, session.principal, session.id.as_str());
     }
 
     fn observer_for(&self, session: &GatewaySession) -> Option<InterestObserver> {
@@ -958,6 +1068,16 @@ impl WorldGateway {
             tick,
             interest: update,
             batch: filtered,
+            movement: Some(MovementReconciliation {
+                tick,
+                position: observer.position,
+                last_consumed_sequence: self.zone.last_movement_sequence(
+                    session.actor,
+                    session.principal,
+                    session.id.as_str(),
+                ),
+                applied: None,
+            }),
         })
     }
 
@@ -1082,6 +1202,21 @@ struct ActionIntent {
     params: BTreeMap<String, String>,
     #[serde(default)]
     client_tick: Tick,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MovementBody {
+    sequence: u64,
+    destination: MovementDestination,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MovementDestination {
+    x: f32,
+    y: f32,
+    z: f32,
 }
 
 #[derive(Debug, Deserialize)]

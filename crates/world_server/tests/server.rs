@@ -236,6 +236,189 @@ fn oversized_resume_snapshot_revokes_rotated_session() {
     );
 }
 
+#[test]
+fn oversized_delta_detaches_only_affected_connection_and_can_resume() {
+    let mut fixture = fixture();
+    let alice = open(&mut fixture.server, "alice", fixture.alice_principal);
+    let bob = open(&mut fixture.server, "bob", fixture.bob_principal);
+    let request = Envelope::new(
+        MessageId::parse("move").unwrap(),
+        MessageKind::parse("movement.request").unwrap(),
+        json!({"sequence": 7, "destination": {"x": 10.05, "y": 0.0, "z": 10.0}}),
+    );
+    fixture
+        .server
+        .receive(alice.connection, &request, Millis::new(1001))
+        .unwrap();
+    add_large_view(&mut fixture.server);
+    fixture
+        .server
+        .gateway_mut()
+        .zone_mut()
+        .spawn(EntityRecord::new(
+            id(IdKind::Entity, 501),
+            text("prop.bob_padding"),
+            Vec3::new(150.0, 0.0, 150.0),
+        ))
+        .unwrap();
+
+    let outbound = fixture.server.tick(Millis::new(1_100)).unwrap();
+    assert!(outbound.iter().any(|output| matches!(output,
+        Outbound::Closed { connection, session, reason: CloseReason::ClientDisconnected }
+        if *connection == alice.connection && *session == alice.session
+    )));
+    assert!(message_for(&outbound, alice.connection).is_none());
+    let bob_delta = message_for(&outbound, bob.connection).unwrap();
+    assert_eq!(bob_delta.kind.as_str(), DELTA_KIND);
+    assert!(bob_delta.encode().is_ok());
+    assert_eq!(fixture.server.connection_count(), 1);
+    assert_eq!(fixture.server.gateway().retained_sessions(), 2);
+
+    for seed in 100..500 {
+        fixture
+            .server
+            .gateway_mut()
+            .zone_mut()
+            .despawn(id(IdKind::Entity, seed))
+            .unwrap();
+    }
+    let resumed = fixture
+        .server
+        .resume(&alice.token, &handshake(), Tick::ZERO, Millis::new(1_200))
+        .unwrap();
+    assert!(resumed.resumed);
+    let movement = update(envelope_with_kind(&resumed, SNAPSHOT_KIND))
+        .movement
+        .unwrap();
+    assert_eq!(movement.last_consumed_sequence, Some(7));
+    assert_eq!(movement.position, Vec3::new(10.05, 0.0, 10.0));
+    assert_eq!(movement.applied, None);
+    assert!(envelope_with_kind(&resumed, SNAPSHOT_KIND).encode().is_ok());
+    assert_eq!(fixture.server.connection_count(), 2);
+}
+
+#[test]
+fn movement_outcome_is_sent_only_to_the_control_session() {
+    let mut f = fixture();
+    f.server
+        .gateway_mut()
+        .zone_mut()
+        .entity_mut(f.bob_actor)
+        .unwrap()
+        .transform
+        .position = Vec3::new(11.0, 0.0, 10.0);
+    let alice = open(&mut f.server, "alice", f.alice_principal);
+    let bob = open(&mut f.server, "bob", f.bob_principal);
+    assert_eq!(
+        update(envelope_with_kind(&alice, SNAPSHOT_KIND))
+            .movement
+            .unwrap()
+            .last_consumed_sequence,
+        None
+    );
+    f.server.tick(Millis::new(1001)).unwrap();
+    let request = Envelope::new(
+        MessageId::parse("move").unwrap(),
+        MessageKind::parse("movement.request").unwrap(),
+        json!({"sequence": 0, "destination": {"x": 10.05, "y": 0.0, "z": 10.0}}),
+    );
+    f.server
+        .receive(alice.connection, &request, Millis::new(1002))
+        .unwrap();
+    let output = f.server.tick(Millis::new(1003)).unwrap();
+    let alice_delta = update(message_for(&output, alice.connection).unwrap());
+    let movement = alice_delta.movement.unwrap();
+    assert_eq!(movement.tick, alice_delta.tick);
+    assert_eq!(movement.last_consumed_sequence, Some(0));
+    assert_eq!(movement.applied, Some(true));
+    assert_eq!(movement.position, Vec3::new(10.05, 0.0, 10.0));
+    let bob_delta = update(message_for(&output, bob.connection).unwrap());
+    assert!(bob_delta.movement.is_none());
+    assert!(
+        bob_delta
+            .batch
+            .updates
+            .iter()
+            .any(|u| u.entity == Some(alice.actor))
+    );
+}
+
+#[test]
+fn failed_tick_detaches_and_resume_recovers_consumed_movement() {
+    let config = ZoneConfig::new(
+        text("zone.fault"),
+        id(IdKind::Zone, 5),
+        Vec3::ZERO,
+        Vec3::new(200.0, 4.0, 200.0),
+    )
+    .unwrap()
+    .with_max_entities(5000);
+    let nav = NavGrid::new(200, 200, 1.0, Vec3::ZERO).unwrap();
+    let mut zone = Zone::new(config, nav, Arc::new(UniformItemRules::new(99))).unwrap();
+    let principal = id(IdKind::Character, 1);
+    zone.spawn(
+        EntityRecord::new(
+            id(IdKind::Entity, 1),
+            text("character.player"),
+            Vec3::new(10.0, 0.0, 10.0),
+        )
+        .with_mind(Mind::player(principal, "unbound")),
+    )
+    .unwrap();
+    let gateway = WorldGateway::new(
+        zone,
+        handshake(),
+        GatewayConfig::default(),
+        SequentialResumeTokens::new(1),
+    )
+    .unwrap();
+    let mut server = WorldServer::new(gateway);
+    let alice = open(&mut server, "alice", principal);
+    let request = Envelope::new(
+        MessageId::parse("move").unwrap(),
+        MessageKind::parse("movement.request").unwrap(),
+        json!({"sequence": 5, "destination": {"x": 10.05, "y": 0.0, "z": 10.0}}),
+    );
+    server
+        .receive(alice.connection, &request, Millis::new(1001))
+        .unwrap();
+    for seed in 100..4200 {
+        server
+            .gateway_mut()
+            .zone_mut()
+            .spawn(EntityRecord::new(
+                id(IdKind::Entity, seed),
+                text("prop.padding"),
+                Vec3::new(100.0, 0.0, 100.0),
+            ))
+            .unwrap();
+    }
+    let outputs = server.tick(Millis::new(1100)).unwrap();
+    assert!(matches!(
+        &outputs[..],
+        [Outbound::Closed {
+            reason: CloseReason::ClientDisconnected,
+            ..
+        }]
+    ));
+    assert_eq!(server.connection_count(), 0);
+    for seed in 100..4200 {
+        server
+            .gateway_mut()
+            .zone_mut()
+            .despawn(id(IdKind::Entity, seed))
+            .unwrap();
+    }
+    let resumed = server
+        .resume(&alice.token, &handshake(), Tick::ZERO, Millis::new(1200))
+        .unwrap();
+    let movement = update(envelope_with_kind(&resumed, SNAPSHOT_KIND))
+        .movement
+        .unwrap();
+    assert_eq!(movement.last_consumed_sequence, Some(5));
+    assert_eq!(movement.position, Vec3::new(10.05, 0.0, 10.0));
+}
+
 fn open(server: &mut WorldServer, account: &str, principal: StableId) -> Opened {
     server
         .open(claims(account, principal), &handshake(), Millis::new(1_000))
@@ -724,6 +907,7 @@ fn world_updates_round_trip_through_the_wire_body() {
         tick: snapshot.tick,
         interest: snapshot.interest.clone(),
         batch: snapshot.batch.clone(),
+        movement: snapshot.movement.clone(),
     };
     assert_eq!(WorldUpdate::from_delivery(&delivery), snapshot);
 }

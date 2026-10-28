@@ -59,6 +59,7 @@ Every message is a JSON object:
 | `world.ready` | server → client | session ID, actor, resumed flag, negotiated protocol |
 | `world.snapshot` | server → client | tick, full interest view delta, filtered replication |
 | `world.delta` | server → client | tick, interest delta, filtered replication |
+| `movement.request` / `movement.queued` | client → server / server → client | endpoint intent and queue admission (not processing) |
 | `world.token` | server → client | the session's current resume secret |
 | `action.request` / `action.result` | both | gameplay intent and its outcome |
 | `calendar.command` / `calendar.result` | both | world calendar intent (enroll; staff lifecycle) and its correlated outcome |
@@ -271,12 +272,38 @@ See [ADR 0013](adr/0013-world-gateway-and-reconnect.md).
 
 - Local prediction is optional per action and limited to movement and
   presentation.
-- The server snapshot includes the authoritative tick and the last accepted
-  input sequence for the actor.
-- On rejection, the client rolls back predicted state and displays the
-  structured error. No reward is ever granted from predicted state.
+- Movement requests contain only `sequence` (u64) and `destination` (`x`, `y`,
+  `z` in meters). The server resolves actor and session, permits one pending
+  input per actor and at most the tick action budget in total, and validates
+  using a fixed server interval and provisional 2 m/s speed. A correlated
+  `movement.queued` means admission only; malformed, stale, unauthorized or
+  over-budget requests return `protocol.error` and do not consume the sequence.
+- `world.snapshot` includes a private `movement` baseline with `tick`,
+  authoritative `position`, `last_consumed_sequence` (number or null), and
+  `applied: null`. A `world.delta` includes this field for a processed input,
+  with its tick, resulting position, sequence and `applied: true` or `false`.
+  Rejections do not explain geometry. This field goes only to the exact control
+  session, never to other observers or staff; ordinary public position updates
+  still use interest filtering. No movement field is sent on unrelated deltas.
+- Every queue-accepted sequence is consumed, even if processing rejects it or a
+  disconnect cancels it. Resume resets prediction from the baseline, including
+  cancelled input. Sequences must strictly increase within a session, may start
+  at zero, and never wrap: after `u64::MAX`, a new session is required. New
+  sessions and zone restarts have independent, non-persistent sequence state.
+  Sequence values are JSON integers; clients must preserve the full u64 range
+  rather than round them through an IEEE-754 number.
+- The movement field is bounded to one result per session per tick. Batch and
+  envelope limits still apply. An unsendable delta detaches that connection; a
+  tick construction failure detaches affected sessions. Resume provides a new
+  baseline rather than replaying individual results. The transport must detach
+  on outbound backpressure. This is not an acknowledged reliable event stream.
+- On a processing rejection, a client should correct from the supplied position;
+  admission errors are structured protocol errors. No reward is ever granted
+  from predicted state.
 - Remote entities interpolate; the client never extrapolates authoritative
   outcomes such as damage or loot.
+- Client replay buffers, smoothing, velocity, teleports and zone-transfer reset
+  policy are not yet implemented by this server foundation.
 
 ## Reconnect and recovery
 
@@ -329,9 +356,14 @@ See [ADR 0013](adr/0013-world-gateway-and-reconnect.md).
 - Immediate revocation uses `WorldGateway::close_session`, which removes the
   session and its interest set without a resume window.
 - Static tokens are hashed with SHA-256 in configuration; plaintext tokens are
-  never stored by the service. This is a development and controlled-deployment
-  mechanism. Production authentication must validate a Nakama session and look
-  up character ownership before opening a gateway session.
+  never stored by the service. This is a development-only mechanism, not
+  production authentication. The service warns at startup and rejects
+  non-loopback binds unless `--dangerous-allow-non-loopback-demo-auth` is
+  explicitly supplied for controlled development. This opt-in does not secure
+  credentials or provide account ownership, expiry, or revocation. A loopback
+  listener can still be exposed through a proxy or tunnel; operators must
+  control access to those too. Production authentication must validate a real
+  session and look up character ownership before opening a gateway session.
 - The binary carries no TLS. Terminate TLS at a reverse proxy or equivalent
   transport, and keep the listener on loopback while developing.
 

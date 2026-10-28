@@ -26,6 +26,7 @@ use engine_net::interest::InterestUpdate;
 use engine_net::protocol::{Handshake, Negotiated};
 use engine_net::replication::{ReplicationBatch, SessionId};
 use serde::{Deserialize, Serialize};
+use world_gateway::replication::MovementReconciliation;
 use world_gateway::{Connection, ResumeToken, SessionClaims, SessionDelivery, WorldGateway};
 
 /// Sent once per successful open or resume.
@@ -72,6 +73,9 @@ pub struct WorldUpdate {
     pub interest: InterestUpdate,
     /// Replication updates after audience filtering.
     pub batch: ReplicationBatch,
+    /// Session-private movement baseline or processing result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub movement: Option<MovementReconciliation>,
 }
 
 impl WorldUpdate {
@@ -82,6 +86,7 @@ impl WorldUpdate {
             tick: delivery.tick,
             interest: delivery.interest.clone(),
             batch: delivery.batch.clone(),
+            movement: delivery.movement.clone(),
         }
     }
 }
@@ -125,7 +130,7 @@ pub struct Opened {
 /// Why the server loop closed a connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloseReason {
-    /// The transport reported an ordinary disconnect.
+    /// The transport disconnected or was detached after an unsendable update.
     ClientDisconnected,
     /// The session expired, disappeared, or lost its actor.
     SessionExpired,
@@ -347,23 +352,63 @@ impl WorldServer {
     ///
     /// Only sessions with a live connection receive messages. A connection
     /// whose session disappeared during the tick (for example because its actor
-    /// left the zone) is closed with [`CloseReason::SessionExpired`].
+    /// left the zone) is closed with [`CloseReason::SessionExpired`]. An
+    /// unsendable delta detaches only its connection with
+    /// [`CloseReason::ClientDisconnected`]; resume sends a fresh snapshot.
     ///
     /// # Errors
     ///
-    /// Returns an error when the gateway reports an interest or replication
-    /// limit violation; those indicate a server configuration fault.
+    /// Returns an error for a detach or encoding fault. A gateway tick fault
+    /// detaches all connections with [`CloseReason::ClientDisconnected`].
     pub fn tick(&mut self, now: Millis) -> Result<Vec<Outbound>, EngineError> {
-        let deliveries = self.gateway.tick(now)?;
+        self.tick_with_interval(now, 50)
+    }
+
+    /// Process one tick with the server-owned fixed movement interval.
+    ///
+    /// # Errors
+    /// Returns detach or encoding errors. Gateway tick faults detach all
+    /// connections so that they can recover from fresh snapshots.
+    pub fn tick_with_interval(
+        &mut self,
+        now: Millis,
+        interval_ms: u32,
+    ) -> Result<Vec<Outbound>, EngineError> {
+        let deliveries = match self.gateway.tick_with_interval(now, interval_ms) {
+            Ok(deliveries) => deliveries,
+            Err(_) => {
+                // A tick may already have consumed movement and advanced interest.
+                // Detach every connection so recovery uses a fresh baseline.
+                return self.detach_all(now);
+            }
+        };
         let mut outbound = Vec::with_capacity(deliveries.len());
         for delivery in deliveries {
             let Some(connection) = self.connection_for(&delivery.session) else {
                 continue;
             };
-            outbound.push(Outbound::Message {
-                connection,
-                envelope: self.delivery_envelope(DELTA_KIND, &delivery)?,
-            });
+            let envelope = match self.delivery_envelope(DELTA_KIND, &delivery) {
+                Ok(envelope) => envelope,
+                Err(_) => {
+                    outbound.retain(|output| matches!(output, Outbound::Closed { .. }));
+                    outbound.extend(self.detach_all(now)?);
+                    return Ok(outbound);
+                }
+            };
+            if envelope.encode().is_err() {
+                // The gateway has advanced this observer's state, so silently
+                // dropping the update would leave the client permanently stale.
+                let last_ack = self
+                    .gateway
+                    .session(&delivery.session)
+                    .map_or(Tick::ZERO, |session| session.last_ack_tick);
+                outbound.extend(self.disconnect(connection, last_ack, now)?);
+            } else {
+                outbound.push(Outbound::Message {
+                    connection,
+                    envelope,
+                });
+            }
         }
 
         let gateway = &self.gateway;
@@ -382,6 +427,20 @@ impl WorldServer {
             });
         }
         Ok(outbound)
+    }
+
+    fn detach_all(&mut self, now: Millis) -> Result<Vec<Outbound>, EngineError> {
+        let connections: Vec<_> = self.connections.keys().copied().collect();
+        let mut closed = Vec::with_capacity(connections.len());
+        for connection in connections {
+            let session = &self.connections[&connection];
+            let ack = self
+                .gateway
+                .session(session)
+                .map_or(Tick::ZERO, |s| s.last_ack_tick);
+            closed.extend(self.disconnect(connection, ack, now)?);
+        }
+        Ok(closed)
     }
 
     fn attach(
