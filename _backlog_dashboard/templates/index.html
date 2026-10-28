@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lynx backlog progress</title>
+  <style>
+    :root { color-scheme: dark; --bg:#11151b; --panel:#1a2029; --line:#303a47; --muted:#a3afbd; --text:#edf2f7; --blue:#76b7ff; --green:#66d19e; --yellow:#f0c674; --red:#ff8585; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui,sans-serif; }
+    main { max-width:1440px; margin:auto; padding:28px 22px 60px; }
+    h1,h2,h3,p { margin-top:0; }
+    h1 { margin-bottom:4px; font-size:clamp(25px,4vw,36px); }
+    a { color:var(--blue); }
+    .subtle,.muted { color:var(--muted); }
+    .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(145px,1fr)); gap:12px; margin:24px 0; }
+    .card,.panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; }
+    .card { padding:16px; }
+    .card strong { display:block; font-size:28px; line-height:1.2; }
+    .card span { color:var(--muted); }
+    .progress { display:flex; height:12px; background:#303a47; border-radius:8px; overflow:hidden; margin-top:12px; }
+    .progress-segment { display:block; height:100%; min-width:0; }
+    .progress-segment + .progress-segment { box-shadow:inset 1px 0 rgba(17,21,27,.7); }
+    .progress .status-done { background:#43b581; }
+    .progress .status-in_progress { background:#4d9de0; }
+    .progress .status-blocked { background:#e05d5d; }
+    .progress .status-ready { background:#8a98a8; }
+    .progress .status-proposed { background:#d6a84f; }
+    .progress .status-icebox { background:#9a78c7; }
+    .progress .status-unspecified { background:#596575; }
+    .progress-legend { display:flex; flex-wrap:wrap; gap:7px 14px; margin-top:10px; }
+    .progress-legend span { display:inline-flex; align-items:center; gap:6px; color:var(--muted); font-size:12px; }
+    .legend-swatch { display:inline-block; width:10px; height:10px; border-radius:2px; }
+    .legend-swatch.status-done { background:#43b581; }
+    .legend-swatch.status-in_progress { background:#4d9de0; }
+    .legend-swatch.status-blocked { background:#e05d5d; }
+    .legend-swatch.status-ready { background:#8a98a8; }
+    .legend-swatch.status-proposed { background:#d6a84f; }
+    .legend-swatch.status-icebox { background:#9a78c7; }
+    .legend-swatch.status-unspecified { background:#596575; }
+    .section { margin:28px 0; }
+    .section-heading { display:flex; align-items:baseline; gap:10px; }
+    .section-heading p { margin:0; color:var(--muted); }
+    .phase-list { display:grid; gap:9px; }
+    .phase-row { display:grid; grid-template-columns:minmax(210px,1fr) minmax(190px,1.2fr) 48px minmax(190px,1fr); align-items:center; gap:14px; padding:11px 14px; background:var(--panel); border:1px solid var(--line); border-radius:8px; }
+    .phase-name strong { margin-right:6px; }
+    .phase-bar { color:var(--green); font-size:14px; white-space:pre; }
+    .phase-status { color:var(--muted); font-size:13px; }
+    .category-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(270px,1fr)); gap:12px; }
+    .category-card { text-align:left; color:var(--text); cursor:pointer; padding:15px; }
+    .category-card:hover { border-color:var(--blue); }
+    .category-title { display:flex; justify-content:space-between; gap:10px; align-items:baseline; }
+    .category-title strong { font-size:16px; }
+    .category-title span { color:var(--muted); font-size:13px; }
+    .category-progress-label { display:flex; justify-content:space-between; margin-top:9px; color:var(--muted); font-size:12px; }
+    .category-stats { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
+    .category-stats .badge { color:var(--muted); }
+    .category-stats .status-done { color:var(--green); }
+    .category-stats .status-in_progress { color:var(--blue); }
+    .category-stats .status-blocked { color:var(--red); }
+    .layout { display:grid; grid-template-columns:minmax(0,1.3fr) minmax(330px,.9fr); gap:16px; align-items:start; }
+    .panel { padding:18px; min-width:0; }
+    .filters { display:grid; grid-template-columns:2fr 1fr 1fr 1fr; gap:9px; margin-bottom:12px; }
+    input,select,button { border:1px solid var(--line); background:#11151b; color:var(--text); padding:10px 11px; border-radius:7px; font:inherit; }
+    input,select { width:100%; }
+    button { cursor:pointer; }
+    button:hover { border-color:var(--blue); }
+    .table-wrap { overflow:auto; max-height:72vh; }
+    table { border-collapse:collapse; width:100%; font-size:14px; }
+    th { text-align:left; color:var(--muted); font-weight:600; position:sticky; top:0; background:var(--panel); }
+    th,td { border-bottom:1px solid var(--line); padding:9px 7px; vertical-align:top; }
+    tr[data-id] { cursor:pointer; }
+    tr[data-id]:hover,tr.selected { background:#252e39; }
+    .badge { display:inline-block; padding:2px 8px; border:1px solid var(--line); border-radius:99px; white-space:nowrap; font-size:12px; }
+    .status-done { color:var(--green); }.status-in_progress { color:var(--blue); }.status-blocked { color:var(--red); }
+    .status-ready { color:var(--muted); }.status-proposed,.status-icebox { color:var(--yellow); }
+    .details h2 { margin:0 0 4px; }
+    .meta { display:flex; flex-wrap:wrap; gap:7px; margin:10px 0 18px; }
+    .detail-block { border-top:1px solid var(--line); padding-top:14px; margin-top:14px; }
+    .detail-block h3 { font-size:14px; margin-bottom:8px; }
+    .link-list { display:flex; flex-wrap:wrap; gap:7px; }
+    .link-list a { border:1px solid var(--line); border-radius:6px; padding:3px 7px; text-decoration:none; }
+    .acceptance { padding-left:20px; }
+    .acceptance li { margin:6px 0; }.acceptance .complete { color:var(--green); }
+    #graph { width:100%; min-height:270px; overflow:auto; }
+    #graph svg { display:block; width:100%; min-width:560px; }
+    .edge { stroke:#647487; stroke-width:1.7; marker-end:url(#arrow); }
+    .node rect { fill:#222b36; stroke:#526274; rx:7; cursor:pointer; }
+    .node.active rect { fill:#17334b; stroke:var(--blue); stroke-width:2; }
+    .node text { fill:var(--text); font-size:13px; pointer-events:none; }
+    .graph-legend { color:var(--muted); font-size:12px; margin-top:3px; }
+    @media (max-width:900px) { .layout { grid-template-columns:1fr; } .table-wrap { max-height:60vh; } }
+    @media (max-width:800px) { .phase-row { grid-template-columns:1fr 1fr; } }
+    @media (max-width:600px) { main { padding:20px 12px 40px; }.filters { grid-template-columns:1fr 1fr; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Lynx backlog progress</h1>
+    <p class="subtle">Live summary parsed from task sections under <code>docs/TODO/</code>.</p>
+    <p><a href="/dependencies">View the full dependency graph →</a></p>
+    <p><a href="/task-order">Plan a task route and copy an implementation prompt →</a></p>
+  </header>
+
+  <section class="section" aria-labelledby="phase-heading">
+    <div class="section-heading">
+      <h2 id="phase-heading">Roadmap phases</h2>
+      <p>Estimated phase progress copied from the repository README.</p>
+    </div>
+    <div class="phase-list">
+      {% for phase in phases %}
+      <div class="phase-row">
+        <div class="phase-name"><strong>Phase {{ phase.number }}</strong>{{ phase.title }}</div>
+        <code class="phase-bar">[{{ phase.bar }}]</code>
+        <strong>{{ phase.percent }}%</strong>
+        <span class="phase-status">{{ phase.status }}</span>
+      </div>
+      {% else %}
+      <p class="subtle">No phase progress lines found in README.md.</p>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="category-heading">
+    <div class="section-heading">
+      <h2 id="category-heading">Backlog categories</h2>
+      <p>Completion here counts only items marked Done.</p>
+    </div>
+    <div class="category-grid">
+      {% for category in categories %}
+      <button class="card category-card" type="button" data-category-file="{{ category.file }}">
+        <div class="category-title"><strong>{{ category.title }}</strong><span>{{ category.total }} items</span></div>
+        <div class="progress" role="img" aria-label="{% for segment in category.status_segments %}{{ segment.count }} {{ segment.label }}{% if not loop.last %}, {% endif %}{% endfor %}">
+          {% for segment in category.status_segments %}<i class="progress-segment status-{{ segment.status }}" style="width:{{ segment.percent }}%" title="{{ segment.count }} {{ segment.label }}"></i>{% endfor %}
+        </div>
+        <div class="category-progress-label"><span>{{ category.done }} done</span><strong>{{ category.completion_percent }}%</strong></div>
+        <div class="category-stats">
+          {% if category.in_progress %}<span class="badge status-in_progress">{{ category.in_progress }} in progress</span>{% endif %}
+          {% if category.blocked %}<span class="badge status-blocked">{{ category.blocked }} blocked</span>{% endif %}
+          {% if category.ready %}<span class="badge status-ready">{{ category.ready }} ready</span>{% endif %}
+        </div>
+      </button>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="cards" aria-label="Progress summary">
+    <div class="card"><strong>{{ summary.total }}</strong><span>Tracked items</span></div>
+    <div class="card"><strong>{{ summary.done }}</strong><span>Marked Done · {{ summary.completion_percent }}%</span></div>
+    <div class="card"><strong>{{ summary.in_progress }}</strong><span>In progress</span></div>
+    <div class="card"><strong>{{ summary.blocked }}</strong><span>Blocked</span></div>
+    <div class="card"><strong>{{ summary.ready }}</strong><span>Ready</span></div>
+    <div class="card"><strong>{{ summary.proposed + summary.icebox + summary.unspecified }}</strong><span>Other / unspecified</span></div>
+  </section>
+  <section class="panel section" aria-labelledby="status-mix-heading">
+    <div class="section-heading">
+      <h2 id="status-mix-heading">Task status distribution</h2>
+      <p>Each color represents its share of tracked tasks.</p>
+    </div>
+    <div class="progress" role="img" aria-label="{% for segment in summary.status_segments %}{{ segment.count }} {{ segment.label }}{% if not loop.last %}, {% endif %}{% endfor %}">
+      {% for segment in summary.status_segments %}<i class="progress-segment status-{{ segment.status }}" style="width:{{ segment.percent }}%" title="{{ segment.count }} {{ segment.label }}"></i>{% endfor %}
+    </div>
+    <div class="progress-legend">
+      {% for segment in summary.status_segments %}<span><i class="legend-swatch status-{{ segment.status }}"></i>{{ segment.label }}: {{ segment.count }}</span>{% endfor %}
+    </div>
+  </section>
+  <p class="subtle">Ready means the task can be started; it does not mean completed. Task completion is counted only when its status is explicitly marked Done. The phase estimates above are separate, manually maintained README progress.</p>
+
+  <div class="layout">
+    <section class="panel">
+      <h2>Tasks <small class="muted" id="visible-count"></small></h2>
+      <div class="filters">
+        <input id="search" type="search" placeholder="Search ID, title, references…">
+        <select id="status-filter"><option value="">All statuses</option></select>
+        <select id="priority-filter"><option value="">All priorities</option></select>
+        <select id="file-filter"><option value="">All documents</option></select>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Item</th><th>Priority</th><th>Status</th><th>Depends on</th></tr></thead>
+          <tbody id="tasks">
+          {% for item in items %}
+            <tr data-id="{{ item.id }}" data-search="{{ (item.id ~ ' ' ~ item.title ~ ' ' ~ item.references ~ ' ' ~ item.file)|lower }}" data-status="{{ item.status }}" data-priority="{{ item.priority }}" data-file="{{ item.file }}">
+              <td><strong>{{ item.id }}</strong><br>{{ item.title }}</td>
+              <td>{{ item.priority }}</td>
+              <td><span class="badge status-{{ item.status }}">{{ item.status_label }}</span></td>
+              <td class="dependency-cell">
+                {% for dependency in item.dependency_ids %}<a href="#{{ dependency }}" data-task-link="{{ dependency }}">{{ dependency }}</a>{% if not loop.last %}, {% endif %}{% endfor %}
+                {% for dependency in item.external_dependencies %}<span class="badge">{{ dependency }}</span>{% endfor %}
+                {% if not item.dependency_ids and not item.external_dependencies %}<span class="muted">—</span>{% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <aside>
+      <section class="panel details" id="details" aria-live="polite">
+        <h2>Select a task</h2>
+        <p class="subtle">Task metadata, acceptance criteria, references, and connected dependencies will appear here.</p>
+      </section>
+      <section class="panel" style="margin-top:16px">
+        <h2>Dependency graph</h2>
+        <div id="graph" class="subtle">Select a task to view its direct dependencies and dependents.</div>
+        <p class="graph-legend">Dependencies → selected task → tasks that depend on it. Select a node to inspect it.</p>
+      </section>
+    </aside>
+  </div>
+</main>
+<script>
+  const items = {{ items|tojson }};
+  const byId = new Map(items.map(item => [item.id, item]));
+  const rows = [...document.querySelectorAll("#tasks tr")];
+  const filters = ["search", "status-filter", "priority-filter", "file-filter"].map(id => document.getElementById(id));
+
+  function populateFilter(id, values) {
+    const select = document.getElementById(id);
+    [...new Set(values)].sort().forEach(value => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = value;
+      select.append(option);
+    });
+  }
+  populateFilter("status-filter", items.map(item => item.status_label));
+  populateFilter("priority-filter", items.map(item => item.priority));
+  populateFilter("file-filter", items.map(item => item.file));
+  document.getElementById("status-filter").addEventListener("change", event => {
+    const wanted = items.find(item => item.status_label === event.target.value)?.status ?? "";
+    event.target.dataset.normalized = wanted;
+    filterRows();
+  });
+  filters.forEach(filter => filter.addEventListener(filter.tagName === "INPUT" ? "input" : "change", filterRows));
+
+  function filterRows() {
+    const query = document.getElementById("search").value.trim().toLowerCase();
+    const status = document.getElementById("status-filter").dataset.normalized || "";
+    const priority = document.getElementById("priority-filter").value;
+    const file = document.getElementById("file-filter").value;
+    let visible = 0;
+    rows.forEach(row => {
+      const show = (!query || row.dataset.search.includes(query))
+        && (!status || row.dataset.status === status)
+        && (!priority || row.dataset.priority === priority)
+        && (!file || row.dataset.file === file);
+      row.hidden = !show;
+      if (show) visible++;
+    });
+    document.getElementById("visible-count").textContent = `(${visible} shown)`;
+  }
+
+  function linkList(ids, emptyText) {
+    if (!ids.length) return `<span class="muted">${emptyText}</span>`;
+    return ids.map(id => `<a href="#${id}" data-task-link="${id}">${id}</a>`).join("");
+  }
+
+  function selectTask(id) {
+    const item = byId.get(id);
+    if (!item) return;
+    rows.forEach(row => row.classList.toggle("selected", row.dataset.id === id));
+    const details = document.getElementById("details");
+    const statusNote = item.status_detail ? `<p class="subtle">${escapeHtml(item.status_detail)}</p>` : "";
+    const references = item.references ? `<p>${escapeHtml(item.references)}</p>` : `<span class="muted">No references listed.</span>`;
+    const criteria = item.acceptance.length
+      ? `<ul class="acceptance">${item.acceptance.map(entry => `<li class="${entry.complete ? "complete" : ""}">${entry.complete ? "✓ " : "○ "}${escapeHtml(entry.text)}</li>`).join("")}</ul>`
+      : `<span class="muted">No acceptance criteria found.</span>`;
+    details.innerHTML = `<h2>${escapeHtml(item.id)} — ${escapeHtml(item.title)}</h2>
+      <a href="/source?file=${encodeURIComponent(item.file)}#L${item.line}">${escapeHtml(item.file)}:${item.line}</a>
+      ${statusNote}
+      <div class="meta"><span class="badge status-${item.status}">${escapeHtml(item.status_label)}</span><span class="badge">${escapeHtml(item.priority)}</span></div>
+      <div class="detail-block"><h3>Depends on</h3><div class="link-list">${linkList(item.dependency_ids, "No linked task dependencies.")}${item.external_dependencies.map(dependency => `<span class="badge">${escapeHtml(dependency)}</span>`).join("")}</div></div>
+      <div class="detail-block"><h3>Blocked by / dependents</h3><div class="link-list">${linkList(item.dependent_ids, "No listed tasks depend on this item.")}</div></div>
+      <div class="detail-block"><h3>References</h3>${references}
+        ${item.reference_ids.length ? `<div class="link-list">${linkList(item.reference_ids, "")}</div>` : ""}</div>
+      <div class="detail-block"><h3>Acceptance criteria</h3>${criteria}</div>`;
+    drawGraph(item);
+  }
+
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[char]));
+  }
+
+  function drawGraph(item) {
+    const deps = item.dependency_ids.map(id => byId.get(id)).filter(Boolean);
+    const dependents = item.dependent_ids.map(id => byId.get(id)).filter(Boolean);
+    const height = Math.max(270, Math.max(deps.length, dependents.length, 1) * 62 + 45);
+    const centerY = height / 2;
+    const layout = [
+      ...deps.map((task, index) => ({task, x:20, y:(index + 1) * height / (deps.length + 1), side:"left"})),
+      {task:item, x:220, y:centerY, side:"center"},
+      ...dependents.map((task, index) => ({task, x:420, y:(index + 1) * height / (dependents.length + 1), side:"right"}))
+    ];
+    const positions = new Map(layout.map(node => [node.task.id, node]));
+    const edges = [
+      ...deps.map(task => [task.id, item.id]),
+      ...dependents.map(task => [item.id, task.id])
+    ];
+    const edgeSvg = edges.map(([from,to]) => {
+      const a = positions.get(from), b = positions.get(to);
+      return `<line class="edge" x1="${a.x + 150}" y1="${a.y}" x2="${b.x}" y2="${b.y}"/>`;
+    }).join("");
+    const nodeSvg = layout.map(({task,x,y}) => `
+      <g class="node ${task.id === item.id ? "active" : ""}" data-node="${task.id}" tabindex="0" role="button" aria-label="Open ${task.id}">
+        <rect x="${x}" y="${y - 21}" width="150" height="42"></rect>
+        <text x="${x + 75}" y="${y + 4}" text-anchor="middle">${escapeHtml(task.id)}</text>
+      </g>`).join("");
+    document.getElementById("graph").innerHTML = `<svg viewBox="0 0 590 ${height}" role="img" aria-label="Dependencies for ${item.id}">
+      <defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#647487"/></marker></defs>
+      ${edgeSvg}${nodeSvg}</svg>`;
+    document.querySelectorAll("[data-node]").forEach(node => {
+      node.addEventListener("click", () => selectTask(node.dataset.node));
+      node.addEventListener("keydown", event => {
+        if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectTask(node.dataset.node); }
+      });
+    });
+  }
+
+  rows.forEach(row => row.addEventListener("click", () => selectTask(row.dataset.id)));
+  document.querySelectorAll("[data-category-file]").forEach(card => card.addEventListener("click", () => {
+    document.getElementById("file-filter").value = card.dataset.categoryFile;
+    filterRows();
+    document.querySelector(".layout").scrollIntoView({behavior: "smooth", block: "start"});
+  }));
+  document.addEventListener("click", event => {
+    const link = event.target.closest("[data-task-link]");
+    if (!link) return;
+    event.preventDefault();
+    event.stopPropagation();
+    selectTask(link.dataset.taskLink);
+  });
+  filterRows();
+  const initialId = new URLSearchParams(location.search).get("task");
+  if (initialId && byId.has(initialId)) selectTask(initialId);
+  else if (items.length) selectTask(items[0].id);
+</script>
+</body>
+</html>

@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Full dependency graph · Lynx backlog</title>
+  <style>
+    :root { color-scheme:dark; --bg:#11151b; --panel:#1a2029; --line:#303a47; --muted:#a3afbd; --text:#edf2f7; --blue:#76b7ff; --green:#66d19e; --yellow:#f0c674; --red:#ff8585; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 system-ui,sans-serif; }
+    main { max-width:1800px; margin:auto; padding:24px 20px 50px; }
+    h1,h2,p { margin-top:0; }
+    h1 { margin-bottom:4px; font-size:clamp(24px,4vw,34px); }
+    a { color:var(--blue); }
+    .muted { color:var(--muted); }
+    .toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:9px; margin:18px 0 12px; }
+    input,select,button { color:var(--text); background:#11151b; border:1px solid var(--line); border-radius:7px; padding:9px 11px; font:inherit; }
+    input { min-width:230px; flex:1; }
+    button,select { cursor:pointer; }
+    button:hover,select:hover { border-color:var(--blue); }
+    .count { color:var(--muted); margin-left:auto; }
+    .legend { display:flex; flex-wrap:wrap; gap:8px 14px; margin:10px 0 15px; color:var(--muted); }
+    .legend span { display:inline-flex; align-items:center; gap:6px; }
+    .swatch { width:11px; height:11px; border-radius:3px; display:inline-block; }
+    .done { background:#43b581; }.in_progress { background:#4d9de0; }.blocked { background:#e05d5d; }
+    .ready { background:#8a98a8; }.proposed { background:#d6a84f; }.icebox { background:#9a78c7; }.unspecified { background:#596575; }
+    .layout { display:grid; grid-template-columns:minmax(0,1fr) 300px; gap:14px; align-items:start; }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:9px; min-width:0; }
+    .graph-wrap { overflow:auto; height:min(72vh,900px); min-height:420px; }
+    #graph { display:block; }
+    .edge { fill:none; stroke:#536172; stroke-width:1.5; opacity:.65; marker-end:url(#arrow); }
+    .edge.highlight { stroke:var(--blue); stroke-width:2.5; opacity:1; }
+    .edge.dimmed { opacity:.1; }
+    .node { cursor:pointer; }
+    .node .node-body { stroke-width:1.6; rx:8; }
+    .node .stripe { stroke:none; rx:5; }
+    .node .id { fill:#fff; font-size:13px; font-weight:700; pointer-events:none; }
+    .node .title { fill:#c6d0dc; font-size:11px; pointer-events:none; }
+    .node.selected .node-body { stroke:#fff; stroke-width:2.5; }
+    .node.related .node-body { stroke:var(--blue); stroke-width:2; }
+    .node.dimmed { opacity:.25; }
+    .details { position:sticky; top:12px; padding:16px; max-height:72vh; overflow:auto; }
+    .details h2 { font-size:18px; margin-bottom:4px; }
+    .badge { display:inline-block; border:1px solid var(--line); border-radius:99px; padding:2px 8px; margin:3px 4px 3px 0; white-space:nowrap; }
+    .status { color:var(--muted); }.status.done { color:var(--green); }.status.in_progress { color:var(--blue); }.status.blocked { color:var(--red); }.status.proposed,.status.icebox { color:var(--yellow); }
+    .detail-block { border-top:1px solid var(--line); margin-top:14px; padding-top:12px; }
+    .detail-block h3 { font-size:13px; margin:0 0 7px; }
+    .task-links { display:flex; flex-wrap:wrap; gap:5px; }
+    .task-links button { color:var(--blue); padding:3px 7px; }
+    .source { color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
+    .graph-note { margin:12px 0 0; color:var(--muted); font-size:12px; }
+    @media (max-width:900px) { .layout { grid-template-columns:1fr; }.details { position:static; max-height:none; }.graph-wrap { height:65vh; } }
+    @media (max-width:550px) { main { padding:18px 10px 35px; }.count { margin-left:0; }.toolbar > * { min-width:0; flex:1; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Full dependency graph</h1>
+    <p class="muted">Every tracked task is shown. Arrows point from prerequisite to dependent task.</p>
+    <a href="/">← Back to backlog dashboard</a> · <a href="/task-order">Plan task order and copy prompt</a>
+  </header>
+  <div class="toolbar">
+    <input id="search" type="search" placeholder="Find task ID or title">
+    <select id="category"><option value="">All categories</option></select>
+    <select id="status"><option value="">All statuses</option></select>
+    <button id="zoom-in" type="button" aria-label="Zoom in">Zoom +</button>
+    <button id="zoom-out" type="button" aria-label="Zoom out">Zoom −</button>
+    <button id="fit" type="button">Fit graph</button>
+    <span class="count" id="count"></span>
+  </div>
+  <div class="legend" aria-label="Status legend">
+    <span><i class="swatch done"></i>Done</span><span><i class="swatch in_progress"></i>In progress</span>
+    <span><i class="swatch blocked"></i>Blocked</span><span><i class="swatch ready"></i>Ready</span>
+    <span><i class="swatch proposed"></i>Proposed</span><span><i class="swatch icebox"></i>Icebox</span>
+    <span><i class="swatch unspecified"></i>Unspecified</span>
+  </div>
+  <div class="layout">
+    <section class="panel graph-wrap" id="graph-wrap" aria-label="Scrollable dependency graph">
+      <svg id="graph" role="img" aria-label="Full task dependency graph"></svg>
+    </section>
+    <aside class="panel details" id="details" aria-live="polite">
+      <p class="muted">Select a task node to inspect it and highlight its direct connections.</p>
+    </aside>
+  </div>
+  <p class="graph-note">Use the filters to focus the graph. Filtering hides unrelated nodes; select a task to highlight its direct prerequisites and dependents.</p>
+</main>
+<script>
+  const items = {{ items|tojson }};
+  const byId = new Map(items.map(item => [item.id, item]));
+  const statusColors = {
+    done:"#43b581", in_progress:"#4d9de0", blocked:"#e05d5d", ready:"#8a98a8",
+    proposed:"#d6a84f", icebox:"#9a78c7", unspecified:"#596575"
+  };
+  const statusFills = {
+    done:"#163a2d", in_progress:"#19324a", blocked:"#452428", ready:"#2a313b",
+    proposed:"#40351d", icebox:"#352747", unspecified:"#292e35"
+  };
+  const nodeWidth = 210, nodeHeight = 58, columnGap = 110, rowGap = 20;
+  let selectedId = null, scale = 1, graphWidth = 0, graphHeight = 0;
+
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[char]));
+  }
+  function populate(id, values) {
+    const select = document.getElementById(id);
+    [...new Set(values)].sort().forEach(value => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = value;
+      select.append(option);
+    });
+  }
+  populate("category", items.map(item => item.category));
+  populate("status", items.map(item => item.status_label));
+
+  function visibleItems() {
+    const category = document.getElementById("category").value;
+    const status = document.getElementById("status").value;
+    return items.filter(item =>
+      (!category || item.category === category)
+      && (!status || item.status_label === status)
+    );
+  }
+
+  function calculateRanks(nodes) {
+    const ids = new Set(nodes.map(item => item.id));
+    const indegree = new Map(nodes.map(item => [item.id, item.dependency_ids.filter(id => ids.has(id)).length]));
+    const dependents = new Map(nodes.map(item => [item.id, []]));
+    const ranks = new Map(nodes.map(item => [item.id, 0]));
+    nodes.forEach(item => item.dependency_ids.forEach(id => {
+      if (ids.has(id)) dependents.get(id).push(item.id);
+    }));
+    const queue = nodes.filter(item => indegree.get(item.id) === 0).map(item => item.id);
+    let visited = 0;
+    for (let cursor = 0; cursor < queue.length; cursor++) {
+      const id = queue[cursor];
+      visited++;
+      for (const dependent of dependents.get(id)) {
+        ranks.set(dependent, Math.max(ranks.get(dependent), ranks.get(id) + 1));
+        indegree.set(dependent, indegree.get(dependent) - 1);
+        if (indegree.get(dependent) === 0) queue.push(dependent);
+      }
+    }
+    const cyclicIds = nodes.filter(item => indegree.get(item.id) > 0).map(item => item.id);
+    if (cyclicIds.length) {
+      const cycleRank = Math.max(0, ...ranks.values()) + 1;
+      cyclicIds.forEach(id => ranks.set(id, cycleRank));
+    }
+    return {ranks, cyclicIds, visited};
+  }
+
+  function renderGraph() {
+    const nodes = visibleItems();
+    const nodeIds = new Set(nodes.map(item => item.id));
+    const {ranks, cyclicIds, visited} = calculateRanks(nodes);
+    const maxRank = Math.max(0, ...ranks.values());
+    const columns = Array.from({length:maxRank + 1}, () => []);
+    nodes.forEach(item => columns[ranks.get(item.id)].push(item));
+    columns.forEach(column => column.sort((a,b) => a.category.localeCompare(b.category) || a.id.localeCompare(b.id)));
+    const positions = new Map();
+    columns.forEach((column, rank) => column.forEach((item, row) => {
+      positions.set(item.id, {x:30 + rank * (nodeWidth + columnGap), y:38 + row * (nodeHeight + rowGap)});
+    }));
+    graphWidth = 60 + (maxRank + 1) * (nodeWidth + columnGap);
+    graphHeight = Math.max(180, ...columns.map(column => 76 + column.length * (nodeHeight + rowGap)));
+    const edges = [];
+    nodes.forEach(item => item.dependency_ids.forEach(id => {
+      if (!nodeIds.has(id)) return;
+      const from = positions.get(id), to = positions.get(item.id);
+      const midX = from.x + nodeWidth + (to.x - from.x - nodeWidth) / 2;
+      edges.push(`<path class="edge" data-from="${id}" data-to="${item.id}" d="M ${from.x + nodeWidth} ${from.y + nodeHeight/2} H ${midX} V ${to.y + nodeHeight/2} H ${to.x}"/>`);
+    }));
+    const nodeMarkup = nodes.map(item => {
+      const {x,y} = positions.get(item.id);
+      const title = `${item.id} — ${item.title} (${item.status_label})`;
+      return `<g class="node" data-id="${item.id}" tabindex="0" role="button" aria-label="${escapeHtml(title)}">
+        <title>${escapeHtml(title)}</title>
+        <rect class="node-body" x="${x}" y="${y}" width="${nodeWidth}" height="${nodeHeight}" fill="${statusFills[item.status]}" stroke="${statusColors[item.status]}"></rect>
+        <rect class="stripe" x="${x}" y="${y}" width="6" height="${nodeHeight}" fill="${statusColors[item.status]}"></rect>
+        <text class="id" x="${x+17}" y="${y+23}">${escapeHtml(item.id)} · ${escapeHtml(item.priority)}</text>
+        <text class="title" x="${x+17}" y="${y+43}">${escapeHtml(item.title.length > 27 ? item.title.slice(0,26) + "…" : item.title)}</text>
+      </g>`;
+    }).join("");
+    const graph = document.getElementById("graph");
+    graph.setAttribute("viewBox", `0 0 ${graphWidth} ${graphHeight}`);
+    graph.style.width = `${graphWidth * scale}px`;
+    graph.style.height = `${graphHeight * scale}px`;
+    graph.innerHTML = `<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#718196"/></marker></defs>${edges.join("")}${nodeMarkup}`;
+    document.getElementById("count").textContent = `${nodes.length} tasks · ${edges.length} dependency links${cyclicIds.length ? ` · ${cyclicIds.length} in dependency cycle(s)` : ""}`;
+    graph.querySelectorAll(".node").forEach(node => {
+      node.addEventListener("click", () => selectTask(node.dataset.id));
+      node.addEventListener("keydown", event => {
+        if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectTask(node.dataset.id); }
+      });
+    });
+    if (visited === nodes.length) document.getElementById("count").dataset.graph = "acyclic";
+    if (selectedId && !nodeIds.has(selectedId)) {
+      selectedId = null;
+      document.getElementById("details").innerHTML =
+        '<p class="muted">Select a task node to inspect it and highlight its direct connections.</p>';
+    }
+    applySelection();
+    return {nodes, edges:edges.length, cyclicIds};
+  }
+
+  function selectTask(id) {
+    if (!byId.has(id)) return;
+    selectedId = id;
+    applySelection();
+    const item = byId.get(id);
+    const details = document.getElementById("details");
+    const linkButtons = ids => ids.length
+      ? `<div class="task-links">${ids.map(taskId => `<button type="button" data-open-task="${taskId}">${taskId}</button>`).join("")}</div>`
+      : `<span class="muted">None</span>`;
+    details.innerHTML = `<h2>${escapeHtml(item.id)} — ${escapeHtml(item.title)}</h2>
+      <p class="source"><a href="/source?file=${encodeURIComponent(item.file)}#L${item.line}">${escapeHtml(item.file)}:${item.line}</a></p>
+      <span class="badge status ${item.status}">${escapeHtml(item.status_label)}</span><span class="badge">${escapeHtml(item.priority)}</span>
+      ${item.status_detail ? `<p class="muted">${escapeHtml(item.status_detail)}</p>` : ""}
+      <div class="detail-block"><h3>Depends on</h3>${linkButtons(item.dependency_ids)}${item.external_dependencies.map(value => `<span class="badge">${escapeHtml(value)}</span>`).join("")}</div>
+      <div class="detail-block"><h3>Dependents</h3>${linkButtons(item.dependent_ids)}</div>
+      <div class="detail-block"><h3>References</h3><span>${escapeHtml(item.references || "None")}</span></div>`;
+    details.querySelectorAll("[data-open-task]").forEach(button => button.addEventListener("click", () => selectTask(button.dataset.openTask)));
+  }
+
+  function applySelection() {
+    const item = byId.get(selectedId);
+    const related = new Set(item ? [item.id, ...item.dependency_ids, ...item.dependent_ids] : []);
+    const query = document.getElementById("search").value.trim().toLowerCase();
+    document.querySelectorAll("#graph .node").forEach(node => {
+      const task = byId.get(node.dataset.id);
+      const matchesSearch = !query || `${task.id} ${task.title}`.toLowerCase().includes(query);
+      node.classList.toggle("selected", node.dataset.id === selectedId);
+      node.classList.toggle("related", node.dataset.id !== selectedId && related.has(node.dataset.id));
+      node.classList.toggle("search-match", Boolean(query) && matchesSearch);
+      node.classList.toggle("dimmed", !matchesSearch || (Boolean(item) && !related.has(node.dataset.id)));
+    });
+    document.querySelectorAll("#graph .edge").forEach(edge => {
+      const connected = item && (edge.dataset.from === item.id || edge.dataset.to === item.id);
+      edge.classList.toggle("highlight", Boolean(connected));
+      edge.classList.toggle("dimmed", Boolean(item) && !connected);
+    });
+  }
+
+  document.getElementById("search").addEventListener("input", event => {
+    applySelection();
+  });
+  ["category", "status"].forEach(id => document.getElementById(id).addEventListener("change", renderGraph));
+  document.getElementById("zoom-in").addEventListener("click", () => { scale = Math.min(2, scale + .15); renderGraph(); });
+  document.getElementById("zoom-out").addEventListener("click", () => { scale = Math.max(.45, scale - .15); renderGraph(); });
+  document.getElementById("fit").addEventListener("click", () => {
+    scale = Math.min(1, (document.getElementById("graph-wrap").clientWidth - 20) / graphWidth);
+    renderGraph();
+    document.getElementById("graph-wrap").scrollTo({left:0, top:0});
+  });
+  renderGraph();
+  const initialId = new URLSearchParams(location.search).get("task");
+  if (initialId && byId.has(initialId)) selectTask(initialId);
+</script>
+</body>
+</html>

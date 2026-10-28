@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Task order and prompt builder · Lynx backlog</title>
+  <style>
+    :root { color-scheme:dark; --bg:#11151b; --panel:#1a2029; --line:#303a47; --muted:#a3afbd; --text:#edf2f7; --blue:#76b7ff; --green:#66d19e; --yellow:#f0c674; --red:#ff8585; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 system-ui,sans-serif; }
+    main { max-width:1500px; margin:auto; padding:24px 20px 50px; }
+    h1,h2,h3,p { margin-top:0; }
+    h1 { font-size:clamp(24px,4vw,34px); margin-bottom:5px; }
+    a { color:var(--blue); }
+    .muted { color:var(--muted); }
+    .layout { display:grid; grid-template-columns:minmax(0,1.1fr) minmax(380px,.9fr); gap:15px; align-items:start; margin-top:20px; }
+    .panel { min-width:0; background:var(--panel); border:1px solid var(--line); border-radius:9px; padding:16px; }
+    .filters,.actions { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; align-items:center; }
+    input,select,button,textarea { color:var(--text); background:#11151b; border:1px solid var(--line); border-radius:7px; padding:9px 10px; font:inherit; }
+    input[type=search] { flex:1; min-width:180px; }
+    select,button { cursor:pointer; }
+    button:hover { border-color:var(--blue); }
+    button.primary { background:#17334b; border-color:#35618a; }
+    .task-list { max-height:72vh; overflow:auto; }
+    .task { display:grid; grid-template-columns:22px 1fr auto; gap:9px; align-items:start; border-top:1px solid var(--line); padding:10px 3px; }
+    .task input { margin:4px 0 0; }
+    .task-title strong { margin-right:5px; }
+    .task-meta { color:var(--muted); font-size:12px; text-align:right; }
+    .badge { display:inline-block; border:1px solid var(--line); border-radius:99px; padding:2px 7px; white-space:nowrap; font-size:12px; }
+    .done { color:var(--green); }.in_progress { color:var(--blue); }.blocked { color:var(--red); }
+    .ready { color:#b3bfce; }.proposed,.icebox { color:var(--yellow); }
+    .selected-route { list-style:none; padding:0; margin:10px 0; }
+    .selected-route li { padding:9px 10px; border-left:3px solid var(--blue); background:#202833; margin:6px 0; border-radius:4px; }
+    .warning { color:var(--yellow); font-size:12px; margin:4px 0 0; }
+    .prompt-options { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:8px; margin:14px 0; }
+    .prompt-option { display:flex; align-items:flex-start; gap:8px; padding:9px; border:1px solid var(--line); border-radius:7px; color:var(--text); }
+    .prompt-option input { margin:3px 0 0; accent-color:var(--blue); }
+    .prompt-option span { font-size:13px; }
+    .prompt-option small { display:block; color:var(--muted); font-size:11px; }
+    .option-select { display:grid; gap:5px; margin:12px 0; max-width:440px; }
+    .option-select label { color:var(--muted); font-size:12px; }
+    .option-select select { width:100%; }
+    textarea { display:block; width:100%; min-height:300px; resize:vertical; line-height:1.45; }
+    .copy-status { min-height:22px; color:var(--green); }
+    .section-note { color:var(--muted); font-size:12px; }
+    .files { overflow-wrap:anywhere; }
+    @media (max-width:950px) { .layout { grid-template-columns:1fr; } }
+    @media (max-width:550px) { main { padding:18px 10px 35px; }.task { grid-template-columns:22px 1fr; }.task-meta { grid-column:2; text-align:left; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Task order and prompt builder</h1>
+    <p class="muted">Tasks are listed in prerequisite-first order. Among equally available tasks, P0/P1 priorities are preferred.</p>
+    <a href="/">← Back to backlog dashboard</a> · <a href="/dependencies">Dependency graph</a>
+  </header>
+  <div class="layout">
+    <section class="panel">
+      <h2>Choose tasks</h2>
+      <p class="section-note">Select one or more items. “Add prerequisites” includes every tracked dependency needed by your selection.</p>
+      <div class="filters">
+        <input id="search" type="search" placeholder="Search ID or title">
+        <select id="category"><option value="">All categories</option></select>
+        <select id="status"><option value="">All statuses</option></select>
+      </div>
+      <div class="actions">
+        <button id="select-visible" type="button">Select visible</button>
+        <button id="clear" type="button">Clear selection</button>
+        <button id="add-prerequisites" type="button">Add prerequisites</button>
+        <span class="muted" id="selection-count"></span>
+      </div>
+      <div class="task-list" id="task-list">
+        {% for item in items %}
+        <label class="task" data-id="{{ item.id }}" data-search="{{ (item.id ~ ' ' ~ item.title)|lower }}" data-category="{{ item.category }}" data-status="{{ item.status_label }}">
+          <input type="checkbox" value="{{ item.id }}" aria-label="Select {{ item.id }} {{ item.title }}">
+          <span class="task-title"><strong>{{ item.id }}</strong>{{ item.title }}</span>
+          <span class="task-meta">{{ item.priority }} · <span class="{{ item.status }}">{{ item.status_label }}</span></span>
+        </label>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Recommended route</h2>
+      <p class="section-note">Selected tasks are ordered so tracked prerequisites come first. The route is a dependency-respecting suggestion, not an estimate of effort.</p>
+      <ol class="selected-route" id="route"><li class="muted">Select tasks to build a route.</li></ol>
+      <p id="missing-prerequisites" class="warning"></p>
+      <div class="detail-block">
+        <h3>Prompt management options</h3>
+        <div class="prompt-options">
+          <label class="prompt-option"><input id="opt-delegate" type="checkbox"><span>Delegate substantial independent tasks<small>Use agents only when appropriate; keep shared-file work coordinated.</small></span></label>
+          <label class="prompt-option"><input id="opt-parallel" type="checkbox"><span>Run independent tasks in parallel<small>Never parallelize tasks with unresolved dependencies or conflicting edits.</small></span></label>
+          <label class="prompt-option"><input id="opt-update-status" type="checkbox" checked><span>Track task status<small>Mark In progress when starting; mark Done only after acceptance criteria pass.</small></span></label>
+          <label class="prompt-option"><input id="opt-test" type="checkbox" checked><span>Run relevant validation<small>Run focused tests first, then broader checks when warranted.</small></span></label>
+          <label class="prompt-option"><input id="opt-stop-blockers" type="checkbox" checked><span>Stop on blockers or scope changes<small>Report missing prerequisites and ask before expanding scope.</small></span></label>
+        </div>
+        <div class="option-select">
+          <label for="commit-policy">Commit policy</label>
+          <select id="commit-policy">
+            <option value="none">Do not commit</option>
+            <option value="wip">Create WIP commits at task checkpoints</option>
+            <option value="per-task">Commit each task after it is complete and verified</option>
+            <option value="batch">One commit after all selected tasks are complete and verified</option>
+          </select>
+        </div>
+      </div>
+      <div class="actions">
+        <button id="copy-prompt" class="primary" type="button" disabled>Copy LLM prompt</button>
+      </div>
+      <label for="prompt"><strong>Prompt preview (editable)</strong></label>
+      <textarea id="prompt" spellcheck="false" placeholder="Select tasks to generate a prompt."></textarea>
+      <p id="copy-status" class="copy-status" role="status"></p>
+      <p class="section-note">Relevant files are inferred from paths mentioned in each task and existing repository files. Review the prompt and adjust it before sending.</p>
+    </section>
+  </div>
+</main>
+<script>
+  const tasks = {{ items|tojson }};
+  const byId = new Map(tasks.map(task => [task.id, task]));
+  const selected = new Set();
+  const rows = [...document.querySelectorAll(".task")];
+  const checkboxById = new Map(rows.map(row => [row.dataset.id, row.querySelector("input")]));
+
+  function populateFilter(id, values) {
+    const select = document.getElementById(id);
+    [...new Set(values)].sort().forEach(value => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = value;
+      select.append(option);
+    });
+  }
+  populateFilter("category", tasks.map(task => task.category));
+  populateFilter("status", tasks.map(task => task.status_label));
+
+  function visibleRows() {
+    const query = document.getElementById("search").value.trim().toLowerCase();
+    const category = document.getElementById("category").value;
+    const status = document.getElementById("status").value;
+    return rows.filter(row => {
+      const task = byId.get(row.dataset.id);
+      const visible = (!query || row.dataset.search.includes(query))
+        && (!category || task.category === category)
+        && (!status || task.status_label === status);
+      row.hidden = !visible;
+      return visible;
+    });
+  }
+
+  function getRoute() {
+    return tasks.filter(task => selected.has(task.id));
+  }
+
+  function render() {
+    const route = getRoute();
+    document.getElementById("selection-count").textContent = `${route.length} selected`;
+    document.getElementById("copy-prompt").disabled = route.length === 0;
+    const routeElement = document.getElementById("route");
+    const missing = new Set();
+    routeElement.innerHTML = route.length ? route.map((task, index) => {
+      const unselectedDeps = task.dependency_ids.filter(id => !selected.has(id));
+      unselectedDeps.forEach(id => missing.add(id));
+      const note = unselectedDeps.length
+        ? `<p class="warning">Prerequisites not selected: ${unselectedDeps.join(", ")}</p>` : "";
+      return `<li><strong>${index + 1}. ${task.id}</strong> — ${escapeHtml(task.title)}
+        <span class="badge ${task.status}">${escapeHtml(task.status_label)}</span>${note}</li>`;
+    }).join("") : '<li class="muted">Select tasks to build a route.</li>';
+    document.getElementById("missing-prerequisites").textContent = missing.size
+      ? `${missing.size} prerequisite task(s) are outside this selection. Add prerequisites to include them in the prompt.`
+      : "";
+    document.getElementById("prompt").value = route.length ? makePrompt(route) : "";
+    document.getElementById("copy-status").textContent = "";
+  }
+
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[char]));
+  }
+
+  function makePrompt(route) {
+    const options = {
+      delegate: document.getElementById("opt-delegate").checked,
+      parallel: document.getElementById("opt-parallel").checked,
+      updateStatus: document.getElementById("opt-update-status").checked,
+      test: document.getElementById("opt-test").checked,
+      stopOnBlockers: document.getElementById("opt-stop-blockers").checked,
+      commitPolicy: document.getElementById("commit-policy").value
+    };
+    const lines = [
+      "Implement the following Lynx backlog tasks in the recommended dependency order.",
+      "Work only on these selected tasks. Inspect the listed files and references before editing.",
+      "Respect existing architecture, server-authority boundaries, and project conventions.",
+      "",
+      "## Execution and management options",
+      `- Agent delegation: ${options.delegate ? "Allowed for substantial, self-contained tasks when useful. Give agents bounded tasks, integrate and review their work, and do not delegate trivial tasks." : "Do not spawn or delegate to agents."}`,
+      `- Parallel work: ${options.parallel ? "Allowed only for independent tasks with no unresolved dependencies or conflicting file edits." : "Work sequentially in the recommended route."}`,
+      `- Backlog status: ${options.updateStatus ? "Set a task In progress when starting it. Mark Done only when all of that task's acceptance criteria are met and verified; otherwise leave it In progress or Blocked." : "Do not edit backlog status metadata."}`,
+      `- Validation: ${options.test ? "Run focused relevant tests/checks after changes; broaden validation when warranted and report exact results." : "Do not run tests unless needed to diagnose an implementation issue; report this choice."}`,
+      `- Blockers and scope: ${options.stopOnBlockers ? "Do not bypass missing prerequisites or design decisions. Stop and report blockers; ask before expanding scope." : "Use engineering judgment for minor ambiguity, but document assumptions and do not bypass authority or security boundaries."}`,
+      `- Commit policy: ${commitPolicyText(options.commitPolicy)}`,
+      "",
+      "Do not mark unfinished work Done. Never include secrets in commits, logs, or generated output.",
+      "",
+      "## Selected tasks"
+    ];
+    route.forEach((task, index) => {
+      lines.push("", `### ${index + 1}. ${task.id} — ${task.title}`);
+      lines.push(`- Priority: ${task.priority}`);
+      lines.push(`- Status: ${task.status_label}${task.status_detail ? ` — ${task.status_detail}` : ""}`);
+      lines.push(`- Backlog source: ${task.file}:${task.line}`);
+      if (task.summary) lines.push(`- Why: ${task.summary}`);
+      if (task.dependency_ids.length) {
+        const external = task.dependency_ids.filter(id => !selected.has(id));
+        lines.push(`- Tracked prerequisites: ${task.dependency_ids.join(", ")}`);
+        if (external.length) lines.push(`- Not selected: ${external.join(", ")}; do not assume these are complete.`);
+      }
+      if (task.external_dependencies.length) lines.push(`- Other prerequisites/design gates: ${task.external_dependencies.join(", ")}`);
+      if (task.scope.length) lines.push("- Scope:", ...task.scope.map(scope => `  - ${scope}`));
+      if (task.acceptance.length) lines.push("- Acceptance criteria:", ...task.acceptance.map(item => `  - [${item.complete ? "x" : " "}] ${item.text}`));
+      if (task.references) lines.push(`- References: ${task.references}`);
+      const files = [...new Set([task.file, ...task.relevant_files])];
+      if (files.length) lines.push(`- Relevant files: ${files.join(", ")}`);
+    });
+    return lines.join("\n");
+  }
+
+  function commitPolicyText(policy) {
+    switch (policy) {
+      case "wip":
+        return "Create WIP checkpoint commits as useful while work is in progress. Do not mark those tasks Done until their acceptance criteria pass.";
+      case "per-task":
+        return "Create a separate commit for each selected task only after that task's acceptance criteria and relevant validation pass.";
+      case "batch":
+        return "Create one commit after all selected tasks and relevant validation are complete.";
+      default:
+        return "Do not create commits.";
+    }
+  }
+
+  rows.forEach(row => row.querySelector("input").addEventListener("change", event => {
+    if (event.target.checked) selected.add(row.dataset.id);
+    else selected.delete(row.dataset.id);
+    render();
+  }));
+  ["search", "category", "status"].forEach(id => document.getElementById(id).addEventListener(
+    id === "search" ? "input" : "change", visibleRows
+  ));
+  document.querySelectorAll(".prompt-options input, #commit-policy").forEach(control => {
+    control.addEventListener("change", render);
+  });
+  document.getElementById("select-visible").addEventListener("click", () => {
+    visibleRows().forEach(row => selected.add(row.dataset.id));
+    checkboxById.forEach((checkbox, id) => { checkbox.checked = selected.has(id); });
+    render();
+  });
+  document.getElementById("clear").addEventListener("click", () => {
+    selected.clear();
+    checkboxById.forEach(checkbox => { checkbox.checked = false; });
+    render();
+  });
+  document.getElementById("add-prerequisites").addEventListener("click", () => {
+    const pending = [...selected];
+    while (pending.length) {
+      const task = byId.get(pending.pop());
+      task.dependency_ids.forEach(id => {
+        if (!selected.has(id)) { selected.add(id); pending.push(id); }
+      });
+    }
+    checkboxById.forEach((checkbox, id) => { checkbox.checked = selected.has(id); });
+    render();
+  });
+  document.getElementById("copy-prompt").addEventListener("click", async () => {
+    const prompt = document.getElementById("prompt");
+    try {
+      await navigator.clipboard.writeText(prompt.value);
+      document.getElementById("copy-status").textContent = "Prompt copied to clipboard.";
+    } catch (error) {
+      prompt.focus();
+      prompt.select();
+      document.getElementById("copy-status").textContent = "Clipboard access was denied. The prompt is selected; copy it manually.";
+    }
+  });
+  visibleRows();
+  render();
+</script>
+</body>
+</html>

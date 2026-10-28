@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ file }}</title>
+  <style>
+    body { margin:0; background:#11151b; color:#edf2f7; font:14px/1.55 ui-monospace,monospace; }
+    header { position:sticky; top:0; padding:12px 20px; background:#1a2029; border-bottom:1px solid #303a47; }
+    a { color:#76b7ff; } pre { margin:0; padding:14px 0 40px; overflow:auto; }
+    .line { display:block; padding:0 20px; white-space:pre; color:#cbd5e1; }
+    .line:target { background:#273646; }
+    .number { display:inline-block; width:54px; margin-right:14px; text-align:right; color:#8090a1; user-select:none; }
+  </style>
+</head>
+<body>
+  <header><a href="/">← Back to dashboard</a> &nbsp; {{ file }}</header>
+  <pre>{% for line in lines %}<span class="line" id="L{{ loop.index }}"><span class="number">{{ loop.index }}</span>{{ line }}</span>{% endfor %}</pre>
+</body>
+</html>
