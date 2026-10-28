@@ -3,7 +3,8 @@
 //! These tests need a migrated local database and the same `LYNX_PG_*`
 //! variables the scripts use (a repository-root `.env` is picked up). They
 //! skip cleanly when no database is configured, so `cargo test --workspace`
-//! still passes on an offline workstation or in CI without PostgreSQL.
+//! still passes on an offline workstation or in CI without PostgreSQL. Set
+//! `LYNX_REQUIRE_POSTGRES_TEST=1` to fail instead of skipping when unconfigured.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -41,6 +42,10 @@ fn postgres_store_round_trips_and_fresh_start_resets_it() -> anyhow::Result<()> 
     // Integration tests do not inherit the scripts' environment loader.
     dotenvy::dotenv().ok();
     if std::env::var("LYNX_PG_PASSWORD").is_err() {
+        anyhow::ensure!(
+            std::env::var_os("LYNX_REQUIRE_POSTGRES_TEST").is_none(),
+            "PostgreSQL test required but LYNX_PG_PASSWORD is not configured"
+        );
         eprintln!("skipping PostgreSQL test: LYNX_PG_PASSWORD is not configured");
         return Ok(());
     }

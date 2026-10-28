@@ -7,7 +7,7 @@ correlation, docs, and capacity.
 **What exists today:** structured logs, health/readiness endpoints, graceful
 shutdown with a final snapshot, a checksummed migration runner, native
 setup/run scripts, and a CI workflow that runs formatting, Clippy, tests, a
-generated-project check, migrations on Ubuntu and Windows, and a PostgreSQL 17
+generated-project check, migrations on Ubuntu, and a PostgreSQL 17
 service. Metrics, dashboards, backup drills, staging/rollback automation, client
 packaging, load testing, and runbooks are still missing.
 
@@ -157,9 +157,9 @@ invisible until players complain.
   [platforms](../platforms.md)
 
 **Why:** CI covers Linux and Windows plus a PostgreSQL migration job, but the
-live PostgreSQL integration test does not run there, macOS is unverified, there
-is no client smoke test, and the migration-count assertion is hardcoded to the
-pre-`0006` count. These are concrete reliability gaps.
+live PostgreSQL integration test is configured but awaits CI run confirmation,
+macOS is unverified, and there is no client smoke test. The migration check
+derives its head from the migration files.
 
 **Scope**
 
@@ -176,7 +176,7 @@ pre-`0006` count. These are concrete reliability gaps.
 **Acceptance criteria**
 
 - [ ] The live PostgreSQL integration test runs and passes in CI.
-- [ ] Migration head is derived, not hardcoded; adding `0007` does not break CI
+- [x] Migration head is derived, not hardcoded; adding `0007` does not break CI
       by itself.
 - [ ] Linux, Windows, and (once enabled) macOS pass fmt/Clippy/tests.
 - [ ] Client smoke coverage runs on at least one platform.

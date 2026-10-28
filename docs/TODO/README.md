@@ -52,7 +52,7 @@ recommendation, not a commitment; re-order when a dependency or risk changes.
 
 | Order | Task | Why now |
 | --- | --- | --- |
-| 0 | [OPS-006](60-operations-release.md#ops-006--ci-matrix-and-live-integration-coverage) — CI migration head | The migration job still asserts five applied migrations while `0006` exists, so the gate can fail or mask missing coverage. |
+| 0 | [OPS-006](60-operations-release.md#ops-006--ci-matrix-and-live-integration-coverage) — CI integration coverage | The migration head check and live PostgreSQL test are configured; confirm them in CI and complete the remaining platform coverage. |
 | 1 | [SIM-001](10-simulation-gameplay.md#sim-001--server-authoritative-movement) — movement contract | There is no movement verb, so no client can exercise the authoritative loop end to end. |
 | 2 | [SIM-003](10-simulation-gameplay.md#sim-003--server-derived-combat-resolution) — server-derived damage | `attack` currently takes `damage` from the request, which violates the authority invariant. |
 | 3 | [CLT-001](40-bevy-client.md#clt-001--client-workspace-and-crate-layout) · [CLT-004](40-bevy-client.md#clt-004--scene-camera-and-input-abstraction) — client foundation | Phase 1/2 exit criteria and the Phase 7 vertical slice are client-blocked. |
@@ -102,7 +102,7 @@ the quick audit; update it when a gap is found or closed.
 | No staging publish, rollout, rollback, or upgrade workflow | [operations](../operations.md) | `OPS-004`, `OPS-010` |
 | No backup/restore drills | [security](../security.md#abuse-prevention) | `OPS-003` |
 | Platform matrix is build-supported, not CI-smoke-tested | [platforms](../platforms.md) | `OPS-006` |
-| CI asserts five applied migrations and skips the live PostgreSQL test | [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml), [issue detail](../issues/OPS-006-ci-migration-count-and-live-postgres-test.md) | `OPS-006`, `QUA-009` |
+| CI migration and live PostgreSQL checks await run confirmation; platform coverage remains incomplete | [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml), [issue detail](../issues/OPS-006-ci-migration-count-and-live-postgres-test.md) | `OPS-006`, `QUA-009` |
 | ADR 0022 (dynamic classes and Treat targeting) is Proposed | [ADR 0022](../adr/0022-dynamic-character-classes-and-combat-targeting.md) | `SIM-004` |
 | Guilds, quests, progression, economy, trading, parties | [README](../../README.md#phase-8--expand-and-stabilize--selected-systems-delivered-early) | `SIM-009`–`SIM-013` |
 | Docs still describe the snapshot seam as file-only | [architecture](../architecture.md#persistence-model) | `QUA-009` |

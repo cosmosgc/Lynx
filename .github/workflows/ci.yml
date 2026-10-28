@@ -33,6 +33,7 @@ jobs:
       LYNX_PG_DATABASE: lynx_ci
       LYNX_PG_USER: lynx_ci
       LYNX_PG_PASSWORD: ci-application-password
+      LYNX_REQUIRE_POSTGRES_TEST: '1'
       LYNX_PG_SUPERUSER: postgres
       LYNX_PG_MAINTENANCE_DB: postgres
       PGPASSWORD: ci-postgres-password
