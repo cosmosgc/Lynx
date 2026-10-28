@@ -30,8 +30,8 @@ repositories. Most normalized tables are defined but not yet used by the runtime
   `character.rs`, `crates/backend_memory`
 
 **Partial progress:** `backend_nakama::PostgresCharacterStore` provides
-account-scoped list, active-character lookup, and transactional character creation
-against `lynx.characters`. Creation serializes on the account row, enforces an
+account-scoped list, active-character lookup, transactional character creation,
+and idempotent tombstoning against `lynx.characters`. Creation serializes on the account row, enforces an
 eight-character limit, and writes a retry receipt and audit event atomically;
 other writers must follow the same locking protocol. It is a repository, not a
 `CharacterService` implementation: callers must authenticate the session and
@@ -40,9 +40,11 @@ account by its unique Nakama user ID, rejects malformed or unmapped IDs, and doe
 not provision accounts. It is unwired: a future caller must obtain the ID from
 validated Nakama authentication, never client input. The current Nakama adapter's
 account ID is the Nakama user ID, not necessarily the Lynx account ID. Account
-provisioning, authenticated integration, creation through the API, deletion,
-world entry, and shared adapter contract tests remain outstanding. PostgreSQL
-integration tests require a configured migrated database.
+provisioning, authenticated integration, creation and deletion through the API,
+world entry, and shared adapter contract tests remain outstanding. Tombstoning
+retains related records and does not coordinate live-world removal or property
+release. PostgreSQL integration tests require a configured, migrated, isolated
+test database.
 
 **Why:** The durable world snapshot restores zones, calendar, and factions, but
 accounts and characters still live in the in-memory backend. A restart loses

@@ -98,23 +98,53 @@ fn account_scoped_reads_survive_reconnection() {
     assert_eq!(selected.account_id, owner);
     assert!(selected.created_at.is_some());
     assert_eq!(store.select_character(&owner, id).unwrap(), selected);
-    assert!(matches!(
-        store.select_character(&other, id),
-        Err(ApiError::NotFound(_))
-    ));
-    assert!(matches!(
-        store.select_character(&owner, deleted),
-        Err(ApiError::NotFound(_))
-    ));
-    assert!(matches!(
-        store.select_character(&owner, suspended),
-        Err(ApiError::Conflict(_))
-    ));
+    let absent = CharacterId::new(StableId::from_parts(IdKind::Character, 0, 0)).unwrap();
+    let missing_error = store.select_character(&owner, absent).unwrap_err();
+    assert!(matches!(missing_error, ApiError::NotFound(_)));
+    for (account, character) in [
+        (&other, id),
+        (&other, suspended),
+        (&other, deleted),
+        (&owner, deleted),
+        (&owner, suspended),
+    ] {
+        assert_eq!(
+            store
+                .select_character(account, character)
+                .unwrap_err()
+                .to_string(),
+            missing_error.to_string()
+        );
+    }
+    db.execute(
+        "UPDATE lynx.characters SET status = 'active' WHERE character_id = $1",
+        &[&suspended.to_string()],
+    )
+    .unwrap();
+    assert!(
+        store
+            .select_character(&owner, suspended)
+            .unwrap()
+            .is_playable()
+    );
+    db.execute(
+        "UPDATE lynx.characters SET status = 'suspended' WHERE character_id = $1",
+        &[&suspended.to_string()],
+    )
+    .unwrap();
+    assert_eq!(
+        store
+            .select_character(&owner, suspended)
+            .unwrap_err()
+            .to_string(),
+        missing_error.to_string()
+    );
     assert_eq!(store.characters(&other).unwrap(), []);
     drop(store);
     let reopened = PostgresCharacterStore::new(config.connect(NoTls).unwrap());
     assert_eq!(reopened.select_character(&owner, id).unwrap(), selected);
     check_creation(&config, &mut db, &owner, &other, nonce);
+    check_deletion(&config, &mut db, &owner, &other, id, suspended, deleted);
     db.execute(
         "DELETE FROM lynx.idempotency_keys WHERE scope = $1 OR scope = $2",
         &[&owner.as_str(), &other.as_str()],
@@ -136,6 +166,79 @@ fn account_scoped_reads_survive_reconnection() {
         &[&owner.as_str(), &other.as_str()],
     )
     .unwrap();
+}
+
+fn check_deletion(
+    config: &Config,
+    db: &mut postgres::Client,
+    owner: &AccountId,
+    other: &AccountId,
+    id: CharacterId,
+    suspended: CharacterId,
+    deleted: CharacterId,
+) {
+    let store = PostgresCharacterStore::new(config.connect(NoTls).unwrap());
+    let missing = CharacterId::new(StableId::from_parts(IdKind::Character, 0, 0)).unwrap();
+    let foreign = store.delete_character(other, id).unwrap_err();
+    let absent = store.delete_character(other, missing).unwrap_err();
+    assert_eq!(foreign.to_string(), absent.to_string());
+    assert!(matches!(foreign, ApiError::NotFound(_)));
+    assert!(store.select_character(owner, id).is_ok());
+
+    let name = store.select_character(owner, id).unwrap().name;
+    let (first, second) = std::thread::scope(|scope| {
+        let run = || {
+            let store = PostgresCharacterStore::new(config.connect(NoTls).unwrap());
+            store.delete_character(owner, id)
+        };
+        let first = scope.spawn(run);
+        let second = scope.spawn(run);
+        (first.join().unwrap(), second.join().unwrap())
+    });
+    first.unwrap();
+    second.unwrap();
+    let before: String = db.query_one(
+        "SELECT deleted_at::text FROM lynx.characters WHERE character_id = $1 AND status = 'deleted'",
+        &[&id.to_string()],
+    ).unwrap().get(0);
+    drop(store);
+    let reopened = PostgresCharacterStore::new(config.connect(NoTls).unwrap());
+    reopened.delete_character(owner, id).unwrap();
+    reopened.delete_character(owner, deleted).unwrap();
+    reopened.delete_character(owner, suspended).unwrap();
+    let after: String = db
+        .query_one(
+            "SELECT deleted_at::text FROM lynx.characters WHERE character_id = $1",
+            &[&id.to_string()],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(before, after);
+    assert!(matches!(
+        reopened.select_character(owner, id),
+        Err(ApiError::NotFound(_))
+    ));
+    assert!(
+        !reopened
+            .characters(owner)
+            .unwrap()
+            .iter()
+            .any(|c| c.id == id || c.id == suspended)
+    );
+    let audits: i64 = db.query_one(
+        "SELECT count(*) FROM lynx.audit_events WHERE target_id = $1 AND action = 'character.delete' AND outcome = 'succeeded'",
+        &[&id.to_string()],
+    ).unwrap().get(0);
+    assert_eq!(audits, 1);
+    let audits: i64 = db.query_one(
+        "SELECT count(*) FROM lynx.audit_events WHERE target_id = $1 AND action = 'character.delete'",
+        &[&deleted.to_string()],
+    ).unwrap().get(0);
+    assert_eq!(audits, 0);
+    let replacement = reopened
+        .create_character(owner, "reuse-name", &CreateCharacter { name })
+        .unwrap();
+    assert_ne!(replacement.id, id);
 }
 
 fn check_creation(

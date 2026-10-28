@@ -369,6 +369,60 @@ mod tests {
     }
 
     #[test]
+    fn selection_hides_unavailable_characters_and_rechecks_status() {
+        let backend = MemoryBackend::new();
+        let owner = session(&backend, "selection-owner");
+        let other = session(&backend, "selection-other");
+        let active = create(&backend, &owner.token, "Aria");
+        let suspended = create(&backend, &owner.token, "Bram");
+        let deleted = create(&backend, &owner.token, "Cora");
+        backend
+            .lock_state()
+            .unwrap()
+            .characters
+            .get_mut(&suspended.id)
+            .unwrap()
+            .status = CharacterStatus::Suspended;
+        backend.delete_character(&owner.token, deleted.id).unwrap();
+        let missing = CharacterId::new(StableId::from_parts(IdKind::Character, 0, 0)).unwrap();
+        assert_eq!(
+            backend.select_character(&owner.token, active.id).unwrap(),
+            active
+        );
+        let missing_error = backend.select_character(&owner.token, missing).unwrap_err();
+        assert!(matches!(missing_error, ApiError::NotFound(_)));
+        for (token, id) in [
+            (&other.token, active.id),
+            (&other.token, suspended.id),
+            (&other.token, deleted.id),
+            (&owner.token, suspended.id),
+            (&owner.token, deleted.id),
+        ] {
+            assert_eq!(
+                backend.select_character(token, id).unwrap_err().to_string(),
+                missing_error.to_string()
+            );
+        }
+        backend
+            .lock_state()
+            .unwrap()
+            .characters
+            .get_mut(&suspended.id)
+            .unwrap()
+            .status = CharacterStatus::Active;
+        assert!(backend.select_character(&owner.token, suspended.id).is_ok());
+        backend.logout(&owner.token).unwrap();
+        assert!(matches!(
+            backend.select_character(&owner.token, missing),
+            Err(ApiError::Unauthenticated)
+        ));
+        assert!(matches!(
+            backend.select_character(&owner.token, active.id),
+            Err(ApiError::Unauthenticated)
+        ));
+    }
+
+    #[test]
     fn concurrent_retries_create_only_once() {
         let backend = MemoryBackend::new();
         let owner = session(&backend, "device-1");

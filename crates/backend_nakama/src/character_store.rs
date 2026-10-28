@@ -17,7 +17,7 @@ const COLUMNS: &str = "character_id, name, zone_id, status, \
 
 /// Character repository using a caller-provided PostgreSQL connection.
 ///
-/// This does not validate tokens, create accounts, delete characters, or enter
+/// This does not validate tokens, create accounts, or enter
 /// the world. Connections are serialized and are not automatically reconnected.
 pub struct PostgresCharacterStore {
     client: Mutex<Client>,
@@ -55,7 +55,7 @@ impl PostgresCharacterStore {
     }
 
     /// Resolve an owned, active character for selection without changing state.
-    /// Missing, deleted, and foreign characters are indistinguishable.
+    /// Missing, deleted, suspended, and foreign characters are indistinguishable.
     pub fn select_character(
         &self,
         account: &AccountId,
@@ -72,9 +72,51 @@ impl PostgresCharacterStore {
             .ok_or_else(|| ApiError::NotFound("character not found".into()))?;
         let character = decode(&row, account)?;
         if !character.is_playable() {
-            return Err(ApiError::Conflict("character is not playable".into()));
+            return Err(ApiError::NotFound("character not found".into()));
         }
         Ok(character)
+    }
+
+    /// Tombstone an owned character, including a suspended one.
+    ///
+    /// Repeating a deletion of an owned tombstone succeeds without changing it
+    /// or writing another audit event. Missing and foreign IDs are indistinguishable.
+    /// This retains related records; it does not remove a character from a live
+    /// world or release property. Callers must coordinate those operations.
+    /// All character writers must lock the account row before changing state.
+    pub fn delete_character(&self, account: &AccountId, id: CharacterId) -> Result<(), ApiError> {
+        let mut client = self.client.lock().map_err(|_| unavailable())?;
+        let mut tx = client.transaction().map_err(|_| unavailable())?;
+        if tx
+            .query_opt(
+                "SELECT account_id FROM lynx.accounts WHERE account_id = $1 FOR UPDATE",
+                &[&account.as_str()],
+            )
+            .map_err(|_| unavailable())?
+            .is_none()
+        {
+            return Err(ApiError::NotFound("character not found".into()));
+        }
+        let id = id.to_string();
+        let changed = tx.execute(
+            "UPDATE lynx.characters SET status = 'deleted', deleted_at = now() WHERE account_id = $1 AND character_id = $2 AND deleted_at IS NULL",
+            &[&account.as_str(), &id],
+        ).map_err(|_| unavailable())?;
+        if changed == 0 {
+            if tx.query_opt(
+                "SELECT 1 FROM lynx.characters WHERE account_id = $1 AND character_id = $2 AND deleted_at IS NOT NULL",
+                &[&account.as_str(), &id],
+            ).map_err(|_| unavailable())?.is_none() {
+                return Err(ApiError::NotFound("character not found".into()));
+            }
+        } else {
+            tx.execute(
+                "INSERT INTO lynx.audit_events (occurred_at, actor_kind, action, target_id, outcome, correlation_id) VALUES (now(), 'system', 'character.delete', $1, 'succeeded', $1)",
+                &[&id],
+            ).map_err(|_| unavailable())?;
+        }
+        tx.commit().map_err(|_| unavailable())?;
+        Ok(())
     }
 
     /// Create a character for a trusted account, or return the original receipt.

@@ -215,9 +215,12 @@ pub trait CharacterIntentService: CharacterService {
     /// Resolve a currently playable character owned by the authenticated account.
     ///
     /// This checks current ownership and status rather than trusting a creation
-    /// receipt. Missing, deleted, suspended, or foreign characters must not be
-    /// returned as playable. This operation does not itself enter the world or
-    /// promise to persist a selected-character preference.
+    /// receipt. Authenticate each call before resolving the character. Return
+    /// [`ApiError::NotFound`] with the same message for missing, deleted,
+    /// suspended, and foreign characters, so their existence and status are not
+    /// disclosed by selection. Return only an owned, active character. This
+    /// operation does not itself enter the world or promise to persist a
+    /// selected-character preference; its result is a point-in-time check.
     fn select_character(
         &self,
         token: &SessionToken,
