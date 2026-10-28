@@ -309,6 +309,12 @@ impl Service {
         let connection = opened.connection;
         self.writers.insert(connection, outbound.clone());
         self.push(&opened, connection);
+        if !self.writers.contains_key(&connection) {
+            return Err(EngineError::new(
+                ErrorCode::CapacityExceeded,
+                "the admission output could not be delivered",
+            ));
+        }
         let admitted = Admitted {
             connection,
             session: opened.session.clone(),
@@ -335,6 +341,11 @@ impl Service {
     }
 
     fn receive(&mut self, connection: ConnectionId, envelope: &Envelope) {
+        // A transport can have already queued input when its writer fails.
+        // Never let that input reach the authority after dropping the writer.
+        if !self.writers.contains_key(&connection) {
+            return;
+        }
         match self.server.receive(connection, envelope, clock()) {
             Ok(outbound) => self.dispatch(outbound),
             Err(error) => {
@@ -351,6 +362,7 @@ impl Service {
     }
 
     fn leave(&mut self, connection: ConnectionId) {
+        let _ = self.writers.remove(&connection);
         let last_ack = self.last_ack(connection);
         match self.server.disconnect(connection, last_ack, clock()) {
             Ok(outbound) => self.dispatch(outbound),
@@ -358,11 +370,26 @@ impl Service {
                 tracing::warn!(
                     connection = %connection,
                     code = ?error.code(),
-                    "disconnect did not complete"
+                    "disconnect did not complete; revoking session"
                 );
+                self.revoke_after_disconnect_error(connection);
             }
         }
-        let _ = self.writers.remove(&connection);
+    }
+
+    fn revoke_after_disconnect_error(&mut self, connection: ConnectionId) {
+        let session = self
+            .server
+            .connections()
+            .find_map(|(id, session)| (id == connection).then(|| session.clone()));
+        if let Some(session) = session {
+            // Revocation cancels queued movement and invalidates the token. A
+            // second disconnect removes the server's now-stale connection.
+            self.server.gateway_mut().close_session(&session);
+            if let Err(error) = self.server.disconnect(connection, Tick::ZERO, clock()) {
+                tracing::error!(connection = %connection, code = ?error.code(), "revoked connection could not be removed");
+            }
+        }
     }
 
     fn advance(&mut self) {
@@ -411,9 +438,11 @@ impl Service {
                     "outbound queue is full; dropping the connection"
                 );
                 self.writers.remove(&connection);
+                self.leave(connection);
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 self.writers.remove(&connection);
+                self.leave(connection);
             }
         }
     }
@@ -577,6 +606,199 @@ mod tests {
             start.x + 0.02
         );
         assert_eq!(service.server.gateway().zone().tick(), Tick(2));
+    }
+
+    #[test]
+    fn disconnect_error_recovery_revokes_session_and_cancels_movement() {
+        let (mut service, grant, _) = service();
+        let hello = Hello {
+            handshake: demo::handshake().unwrap(),
+            last_ack_tick: Tick::ZERO,
+        };
+        let (outbound, mut receiver) = mpsc::channel(16);
+        let admitted = service
+            .admit(&Credential::Static(grant), &hello, &outbound)
+            .unwrap();
+        receiver.try_recv().unwrap();
+        receiver.try_recv().unwrap();
+        let ServerFrame::Envelope(token) = receiver.try_recv().unwrap() else {
+            panic!("expected token");
+        };
+        let token = ResumeToken::new(token.body["resume"].as_str().unwrap()).unwrap();
+        let start = service
+            .server
+            .gateway()
+            .zone()
+            .entity(admitted.actor)
+            .unwrap()
+            .position();
+        service.receive(
+            admitted.connection,
+            &Envelope::new(
+                MessageId::parse("movement-test").unwrap(),
+                message_kind("movement.request"),
+                serde_json::json!({"sequence": 1, "destination": {"x": start.x + 0.02, "y": start.y, "z": start.z}}),
+            ),
+        );
+
+        // The current gateway cannot produce a non-NotFound disconnect error;
+        // exercise the recovery directly as if one occurred after writer removal.
+        service.writers.remove(&admitted.connection);
+        service.revoke_after_disconnect_error(admitted.connection);
+        assert_eq!(service.server.connections().count(), 0);
+        assert!(
+            service
+                .server
+                .gateway()
+                .session(&admitted.session)
+                .is_none()
+        );
+        service.advance();
+        assert_eq!(
+            service
+                .server
+                .gateway()
+                .zone()
+                .entity(admitted.actor)
+                .unwrap()
+                .position(),
+            start
+        );
+        assert!(
+            service
+                .admit(&Credential::Resume(token), &hello, &outbound)
+                .is_err()
+        );
+        service.revoke_after_disconnect_error(admitted.connection);
+    }
+
+    #[test]
+    fn full_outbound_detaches_and_cancels_movement_before_resume() {
+        let (mut service, grant, _) = service();
+        let hello = Hello {
+            handshake: demo::handshake().unwrap(),
+            last_ack_tick: Tick::ZERO,
+        };
+        let (outbound, mut receiver) = mpsc::channel(3);
+        let admitted = service
+            .admit(&Credential::Static(grant), &hello, &outbound)
+            .unwrap();
+        receiver.try_recv().unwrap();
+        receiver.try_recv().unwrap();
+        let ServerFrame::Envelope(token) = receiver.try_recv().unwrap() else {
+            panic!("expected token");
+        };
+        let token = ResumeToken::new(token.body["resume"].as_str().unwrap()).unwrap();
+        let start = service
+            .server
+            .gateway()
+            .zone()
+            .entity(admitted.actor)
+            .unwrap()
+            .position();
+        let movement = |sequence| {
+            Envelope::new(
+                MessageId::parse("movement-test").unwrap(),
+                message_kind("movement.request"),
+                serde_json::json!({"sequence": sequence, "destination": {"x": start.x + 0.02, "y": start.y, "z": start.z}}),
+            )
+        };
+        for _ in 0..3 {
+            outbound.try_send(ServerFrame::Close).unwrap();
+        }
+        // The movement is queued before its acknowledgement encounters backpressure.
+        service.receive(admitted.connection, &movement(1));
+        assert!(!service.writers.contains_key(&admitted.connection));
+        assert!(
+            service
+                .server
+                .connections()
+                .all(|(id, _)| id != admitted.connection)
+        );
+        // Stale transport input must not revive work while the queue drains.
+        service.receive(admitted.connection, &movement(2));
+        service.advance();
+        assert_eq!(
+            service
+                .server
+                .gateway()
+                .zone()
+                .entity(admitted.actor)
+                .unwrap()
+                .position(),
+            start
+        );
+
+        let (resume_tx, mut resume_rx) = mpsc::channel(16);
+        let resumed = service
+            .admit(&Credential::Resume(token), &hello, &resume_tx)
+            .unwrap();
+        assert!(resumed.resumed);
+        assert_ne!(resumed.connection, admitted.connection);
+        // A delayed Leave from the old pump cannot detach the resumed connection.
+        service.leave(admitted.connection);
+        for _ in 0..3 {
+            resume_rx.try_recv().unwrap();
+        }
+        service.receive(resumed.connection, &movement(2));
+        service.advance();
+        assert_eq!(
+            service
+                .server
+                .gateway()
+                .zone()
+                .entity(admitted.actor)
+                .unwrap()
+                .position()
+                .x,
+            start.x + 0.02
+        );
+    }
+
+    #[test]
+    fn failed_admission_delivery_does_not_leave_an_attached_connection() {
+        let (mut service, grant, _) = service();
+        let (outbound, _receiver) = mpsc::channel(1);
+        let error = service
+            .admit(
+                &Credential::Static(grant),
+                &Hello {
+                    handshake: demo::handshake().unwrap(),
+                    last_ack_tick: Tick::ZERO,
+                },
+                &outbound,
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), ErrorCode::CapacityExceeded);
+        assert!(service.writers.is_empty());
+        assert_eq!(service.server.connections().count(), 0);
+    }
+
+    #[test]
+    fn closed_outbound_detaches_immediately() {
+        let (mut service, grant, _) = service();
+        let (outbound, receiver) = mpsc::channel(16);
+        let admitted = service
+            .admit(
+                &Credential::Static(grant),
+                &Hello {
+                    handshake: demo::handshake().unwrap(),
+                    last_ack_tick: Tick::ZERO,
+                },
+                &outbound,
+            )
+            .unwrap();
+        drop(receiver);
+        service.receive(
+            admitted.connection,
+            &Envelope::new(
+                MessageId::parse("bad-kind").unwrap(),
+                message_kind("bogus.kind"),
+                serde_json::json!({}),
+            ),
+        );
+        assert!(service.writers.is_empty());
+        assert_eq!(service.server.connections().count(), 0);
     }
 
     async fn next(outbound: &mut mpsc::Receiver<ServerFrame>) -> Envelope {
