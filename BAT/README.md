@@ -9,6 +9,7 @@ pauses in the scripts it calls and waits once at the end.
 |---|---|---|
 | `all-checks.bat` | Formatting check, Clippy, workspace tests, and build | `BAT\all-checks.bat` |
 | `build.bat` | Build the Rust workspace | `BAT\build.bat --release` |
+| `run-server.bat` | Start the local demo world server and show logs | `BAT\run-server.bat` |
 | `check.bat` | Check all workspace targets without linking | `BAT\check.bat` |
 | `clippy.bat` | Run Clippy with warnings denied | `BAT\clippy.bat` |
 | `clean.bat` | Remove Cargo build artifacts | `BAT\clean.bat` |
@@ -28,3 +29,14 @@ pauses in the scripts it calls and waits once at the end.
 `LYNX_NAKAMA_URL` (or `NAKAMA_URL` / `NAKAMA_BASE_URL`) to override the
 default `http://127.0.0.1:7350`. Other engine checks do not require Nakama or
 PostgreSQL.
+
+`run-server.bat` prompts for a demo token (the typed text is visible), hashes
+it, and listens only on `127.0.0.1:8090`. Reuse the same token on restart. The
+server logs to the command window; press Ctrl+C to stop it. World snapshots
+are stored in the gitignored `.lynx/world.json`; sessions are not persisted.
+The launcher displays the health, readiness, and WebSocket addresses. It does
+not provide an interactive server console: query endpoints from another terminal
+or use an authenticated protocol client for supported world commands.
+Extra arguments are passed to `lynx-world serve`. This static-token demo is not
+production authentication and must not be exposed publicly. Rust and PowerShell
+must be installed; Nakama and PostgreSQL are not needed for this launcher.
