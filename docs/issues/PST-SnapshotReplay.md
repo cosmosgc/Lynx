@@ -11,6 +11,15 @@
 
 The architecture targets snapshot loading, event replay, reference validation, and a 60-second recovery time. The current implementation restores a whole-world snapshot but has no event-sourced recovery path; changes since the last successful snapshot can be lost.
 
+Partial hardening: `engine_sim::Zone::restore` now rejects duplicate action,
+link, and transfer idempotency keys, mismatched action cache keys, oversized
+action/link caches, and transfer receipts with an empty key, zero quantity, or
+non-entity endpoints. Tests cover corruption and a valid transfer round trip.
+This is fail-closed snapshot validation, not event replay or quarantine. Transfer
+endpoints may refer to historical entities, so their existence is not checked;
+receipt slot history and other inventory/ownership invariants remain unverified.
+The replay model and durable zone event log remain dependent on PST-004 and D4.
+
 The persistence layer must implement:
 - Deterministic replay of zone events against a snapshot baseline
 - Reference validation after replay (entity tombstones, links, inventories)

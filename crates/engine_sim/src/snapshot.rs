@@ -26,7 +26,7 @@ use crate::action::{ActionEffect, ActionKey, ActionResult};
 use crate::entity::EntityRecord;
 use crate::link::{EntityLink, LinkEvent};
 use crate::nav::NavGrid;
-use crate::zone::{Zone, ZoneConfig};
+use crate::zone::{ACTION_CACHE_LIMIT, LINK_CACHE_LIMIT, Zone, ZoneConfig};
 
 /// The schema version written by this engine release.
 pub const ZONE_SNAPSHOT_VERSION: SchemaVersion = SchemaVersion::new(1, 0);
@@ -156,7 +156,8 @@ impl Zone {
     ///
     /// Returns [`ErrorCode::InvalidRequest`] for an unsupported snapshot
     /// version or a non-zone instance ID, [`ErrorCode::NotFound`] when a link
-    /// or cooldown references a missing entity, and every error
+    /// or cooldown references a missing entity, [`ErrorCode::Conflict`] for
+    /// duplicate idempotency keys, and every error
     /// [`Zone::new`], [`Zone::spawn`], and [`Zone::add_link`] can produce.
     pub fn restore(
         snapshot: &ZoneSnapshot,
@@ -186,11 +187,37 @@ impl Zone {
             zone.add_link(link.clone())?;
         }
 
+        if snapshot.action_results.len() > ACTION_CACHE_LIMIT
+            || snapshot.link_results.len() > LINK_CACHE_LIMIT
+        {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "snapshot idempotency cache exceeds its limit",
+            ));
+        }
         for (request, result) in &snapshot.action_results {
+            if request != &result.request_id {
+                return Err(EngineError::new(
+                    ErrorCode::InvalidRequest,
+                    "snapshot action cache key does not match result",
+                ));
+            }
+            if zone.action_results.contains_key(request) {
+                return Err(EngineError::new(
+                    ErrorCode::Conflict,
+                    "duplicate snapshot action key",
+                ));
+            }
             zone.action_results.insert(request.clone(), result.clone());
             zone.action_order.push_back(request.clone());
         }
         for (request, effects) in &snapshot.link_results {
+            if zone.link_results.contains_key(request) {
+                return Err(EngineError::new(
+                    ErrorCode::Conflict,
+                    "duplicate snapshot link key",
+                ));
+            }
             zone.link_results.insert(request.clone(), effects.clone());
             zone.link_order.push_back(request.clone());
         }
@@ -217,6 +244,23 @@ impl Zone {
             zone.link_cooldowns.insert(*key, *until);
         }
 
+        let mut transfer_keys = BTreeSet::new();
+        for receipt in &snapshot.transfers {
+            if receipt.key.is_empty() || receipt.quantity == 0 {
+                return Err(EngineError::new(
+                    ErrorCode::InvalidRequest,
+                    "invalid snapshot transfer receipt",
+                ));
+            }
+            receipt.source.expect_kind(IdKind::Entity)?;
+            receipt.destination.expect_kind(IdKind::Entity)?;
+            if !transfer_keys.insert(&receipt.key) {
+                return Err(EngineError::new(
+                    ErrorCode::Conflict,
+                    "duplicate snapshot transfer key",
+                ));
+            }
+        }
         zone.transfers.adopt(snapshot.transfers.clone());
 
         zone.stats.entity_count = zone.entities.len();
@@ -384,6 +428,44 @@ mod tests {
     }
 
     #[test]
+    fn restore_rejects_corrupt_idempotency_caches() {
+        let mut snapshot = zone().snapshot();
+        let result = ActionResult {
+            request_id: "action-1".into(),
+            actor: StableId::from_parts(IdKind::Entity, 1, 1),
+            verb: crate::action::Verb::Open,
+            server_tick: Tick::ZERO,
+            outcome: crate::action::ActionOutcome::Applied { effects: vec![] },
+        };
+        snapshot
+            .action_results
+            .push(("action-1".into(), result.clone()));
+        snapshot.action_results.push(("action-1".into(), result));
+        assert_eq!(
+            Zone::restore(&snapshot, nav(), rules()).unwrap_err().code(),
+            ErrorCode::Conflict
+        );
+        snapshot.action_results.pop();
+        snapshot.action_results[0].0 = "different".into();
+        assert_eq!(
+            Zone::restore(&snapshot, nav(), rules()).unwrap_err().code(),
+            ErrorCode::InvalidRequest
+        );
+
+        snapshot.action_results.clear();
+        snapshot.link_results = vec![("link-1".into(), vec![]); 2];
+        assert_eq!(
+            Zone::restore(&snapshot, nav(), rules()).unwrap_err().code(),
+            ErrorCode::Conflict
+        );
+        snapshot.link_results = vec![("link-1".into(), vec![]); LINK_CACHE_LIMIT + 1];
+        assert_eq!(
+            Zone::restore(&snapshot, nav(), rules()).unwrap_err().code(),
+            ErrorCode::InvalidRequest
+        );
+    }
+
+    #[test]
     fn restore_validates_bounds_and_capacity() {
         let mut source = zone();
         source
@@ -479,5 +561,18 @@ mod tests {
         assert_eq!(restored.snapshot(), snapshot);
         assert_eq!(restored.transfers.receipt("move-1"), Some(&receipt));
         assert_eq!(restored.transfers.applied_count(), 1);
+
+        let mut corrupt = snapshot.clone();
+        corrupt.transfers.push(receipt);
+        assert_eq!(
+            Zone::restore(&corrupt, nav(), rules()).unwrap_err().code(),
+            ErrorCode::Conflict
+        );
+        corrupt.transfers.pop();
+        corrupt.transfers[0].quantity = 0;
+        assert_eq!(
+            Zone::restore(&corrupt, nav(), rules()).unwrap_err().code(),
+            ErrorCode::InvalidRequest
+        );
     }
 }
