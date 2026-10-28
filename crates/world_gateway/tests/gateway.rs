@@ -286,6 +286,55 @@ fn batch_has_entity(batch: &ReplicationBatch, entity: StableId) -> bool {
         .any(|update| update.entity == Some(entity))
 }
 
+#[test]
+fn admission_and_resume_preserve_pending_updates_for_existing_sessions() {
+    for resume in [false, true] {
+        let mut fixture = fixture();
+        let alice = connect(
+            &mut fixture.gateway,
+            "account-alice",
+            fixture.alice_principal,
+        );
+        let bob = if resume {
+            let bob = connect(&mut fixture.gateway, "account-bob", fixture.bob_principal);
+            fixture
+                .gateway
+                .disconnect(&bob.session, Tick(0), Millis::new(1_001))
+                .unwrap();
+            Some(bob)
+        } else {
+            None
+        };
+        fixture.gateway.tick(Millis::new(1_002)).unwrap();
+        let open = action(
+            "pending-door",
+            json!({
+                "verb": "open", "target": fixture.alice_door.to_string()
+            }),
+        );
+        fixture
+            .gateway
+            .handle(&alice.session, &open, Millis::new(1_003))
+            .unwrap();
+        if let Some(bob) = bob {
+            fixture
+                .gateway
+                .resume(&bob.token, &handshake(), Tick(0), Millis::new(1_004))
+                .unwrap();
+        } else {
+            connect(&mut fixture.gateway, "account-bob", fixture.bob_principal);
+        }
+        let updates = fixture.gateway.tick(Millis::new(1_005)).unwrap();
+        assert!(
+            batch_has_entity(
+                &delivery(&updates, &alice.session).batch,
+                fixture.alice_door
+            ),
+            "admission must not consume another session's pending change (resume={resume})"
+        );
+    }
+}
+
 fn ui_state(envelope: &Envelope) -> UiState {
     assert_eq!(envelope.kind.as_str(), UI_STATE_KIND);
     serde_json::from_value(envelope.body.clone()).unwrap()

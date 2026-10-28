@@ -204,7 +204,7 @@ struct TrackedEntity {
     sequence: u64,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Change {
     Appeared(StableId),
     Changed(StableId),
@@ -220,6 +220,7 @@ pub struct WorldGateway {
     interest: InterestManager,
     world: InterestWorld,
     tracked: BTreeMap<StableId, TrackedEntity>,
+    pending_changes: std::collections::BTreeSet<Change>,
     calendar: Option<CalendarStage>,
     calendar_store: Option<Box<dyn CalendarPersistence + Send>>,
     reply_sequence: u64,
@@ -260,6 +261,7 @@ impl WorldGateway {
             interest,
             world: InterestWorld::new(),
             tracked: BTreeMap::new(),
+            pending_changes: std::collections::BTreeSet::new(),
             calendar: None,
             calendar_store: None,
             reply_sequence: 0,
@@ -382,7 +384,8 @@ impl WorldGateway {
             .sessions
             .connect(claims, actor, negotiated.clone(), now)?;
         self.bind_actor(&session);
-        let _ = self.sync_world();
+        let changes = self.sync_world();
+        self.pending_changes.extend(changes);
         let snapshot = match self.initial_delivery(&session) {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -451,7 +454,8 @@ impl WorldGateway {
             ));
         }
         self.bind_actor(&session);
-        let _ = self.sync_world();
+        let changes = self.sync_world();
+        self.pending_changes.extend(changes);
         let snapshot = match self.initial_delivery(&session) {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -525,6 +529,8 @@ impl WorldGateway {
 
         self.zone.advance_tick();
         let changes = self.sync_world();
+        self.pending_changes.extend(changes);
+        let changes = std::mem::take(&mut self.pending_changes);
 
         let sessions: Vec<GatewaySession> = self.sessions.connected().cloned().collect();
         let mut refreshed = Vec::with_capacity(sessions.len());
