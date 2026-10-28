@@ -23,6 +23,10 @@ use engine_core::schema::SchemaVersion;
 use engine_core::world_event::CalendarSnapshot;
 use engine_sim::snapshot::ZoneSnapshot;
 
+mod postgres;
+
+pub use postgres::PostgresSnapshotStore;
+
 /// The schema version written by this service build.
 pub const WORLD_SNAPSHOT_VERSION: SchemaVersion = SchemaVersion::new(1, 0);
 

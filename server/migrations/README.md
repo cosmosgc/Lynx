@@ -44,6 +44,7 @@ mismatch is an error.
 | `0003_zone_state.sql` | Zone leases, snapshots, and the recovery event log. |
 | `0004_factions.sql` | Faction catalog, role permissions, membership, treasury ledger and transfers, territory ownership and history, and derived views. |
 | `0005_world_events.sql` | Calendar events, bounded conflict sides, append-only lifecycle transitions, enrollment, conflict results, consistency triggers, and calendar views. |
+| `0006_world_snapshots.sql` | One resumable whole-world snapshot per world: serialized zone, calendar, and faction state with a payload hash. |
 
 ## Audit retention
 

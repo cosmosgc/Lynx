@@ -29,7 +29,7 @@ localization model is described in
 | Source code | ~33,000 LOC across 81 `.rs` files |
 | Tests | 393 test functions (unit + integration), zero unsafe code (`unsafe_code = "forbid"`) |
 | ADRs | 21 accepted architecture decision records |
-| Platform database | 5 SQL migrations (Nakama/PostgreSQL) |
+| Platform database | 6 SQL migrations (Nakama/PostgreSQL) |
 | Docs | 11 design docs + full ADR index (see [Documentation](#documentation)) |
 
 ## Status
@@ -44,13 +44,14 @@ deterministic territory-changing results, inventory domain rules, a headless
 authoritative simulation with action validation, versioned protocol envelopes,
 per-session interest management, a transport-agnostic gateway with resumable
 sessions and interest-filtered replication, a framed connection loop, a
-WebSocket `lynx-world` binary, optional durable whole-world snapshots
-(zone, calendar, and faction state in one versioned file), and the `lynx`
-project CLI.
+WebSocket `lynx-world` binary, durable whole-world snapshots for file or
+PostgreSQL storage (zone, calendar, and faction state in one versioned
+aggregate), and the `lynx` project CLI.
 
 **Not started:** Bevy client crates (rendering, input, camera), the world
-editor, and a database-backed persistence adapter — `--state-file` snapshots
-are durable, sessions are still in memory.
+editor, and any final production hardening for the persisted world service;
+file-backed and PostgreSQL-backed snapshot stores are already in place, and
+sessions remain in memory.
 
 Brazilian Portuguese (`pt-BR`) is the default language for generated projects,
 templates, and player-facing content. See
@@ -117,11 +118,11 @@ Phase 8  Expand & stabilize          [██░░░░░░░░░░░░
       resume tokens, session-scoped idempotency (ADR 0013).
 - [x] Server-side action validation: range, permission, state, and cooldown
       checks proven by tests.
-- [~] Persistence: Postgres migrations 0001–0005 exist and backend adapters
+- [~] Persistence: Postgres migrations 0001–0006 exist and storage adapters
       are in place; `lynx-world` loads and writes durable whole-world snapshots
       behind a trusted, engine-owned seam, and `--fresh` restores the authored
-      demo over the played world. A SQL adapter behind the same seams is the
-      next persistence increment.
+      demo over the played world. The remaining work is operational hardening
+      and any additional database-backed features beyond the snapshot seam.
 - [ ] Exit criterion: two graphical clients observing consistent state
       (headless integration tests cover consistency; clients are pending).
 

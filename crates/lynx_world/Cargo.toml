@@ -13,11 +13,13 @@ anyhow = { workspace = true }
 axum = { workspace = true }
 backend_memory = { workspace = true }
 clap = { workspace = true }
+dotenvy = "0.15.7"
 engine_core = { workspace = true }
 engine_net = { workspace = true }
 engine_sim = { workspace = true }
 game_api = { workspace = true }
 getrandom = { workspace = true }
+postgres = { version = "0.19.14", features = ["with-serde_json-1"] }
 semver = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

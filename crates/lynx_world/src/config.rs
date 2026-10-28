@@ -56,9 +56,16 @@ pub struct ServeArgs {
     #[arg(long = "state-file", value_name = "PATH")]
     pub state_file: Option<PathBuf>,
 
-    /// Ignore the existing snapshot file and re-save the freshly authored
-    /// demo world over it at startup. The played world is discarded. Requires
-    /// `--state-file`.
+    /// Store durable world snapshots in PostgreSQL and load one at startup.
+    /// Reads `LYNX_PG_HOST`, `LYNX_PG_PORT`, `LYNX_PG_DATABASE`,
+    /// `LYNX_PG_USER`, and `LYNX_PG_PASSWORD`, the same variables the setup
+    /// scripts use. Mutually exclusive with `--state-file`.
+    #[arg(long = "state-postgres")]
+    pub state_postgres: bool,
+
+    /// Ignore the existing snapshot and re-save the freshly authored demo
+    /// world over it at startup. The played world is discarded. Requires
+    /// `--state-file` or `--state-postgres`.
     #[arg(long)]
     pub fresh: bool,
 
@@ -124,10 +131,16 @@ impl ServeArgs {
     ///
     /// # Errors
     ///
-    /// Returns an error when `--fresh` is set without `--state-file`.
+    /// Returns an error when both stores are configured, or when `--fresh` is
+    /// set without a store to restore into.
     pub fn validate_snapshot_args(&self) -> Result<()> {
-        if self.fresh && self.state_file.is_none() {
-            bail!("--fresh requires --state-file: there is nothing to overwrite");
+        if self.state_file.is_some() && self.state_postgres {
+            bail!("--state-file and --state-postgres are mutually exclusive");
+        }
+        if self.fresh && self.state_file.is_none() && !self.state_postgres {
+            bail!(
+                "--fresh requires --state-file or --state-postgres: there is nothing to overwrite"
+            );
         }
         Ok(())
     }
@@ -177,6 +190,7 @@ mod tests {
             max_sessions: 1_024,
             staff: false,
             state_file: None,
+            state_postgres: false,
             fresh: false,
             snapshot_ms: DEFAULT_SNAPSHOT_MS,
             token_hashes: vec![crate::auth::hash_hex("token")],
@@ -184,7 +198,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_requires_a_state_file() {
+    fn fresh_requires_a_durable_store() {
         let mut sample = sample();
         assert!(sample.validate_snapshot_args().is_ok());
 
@@ -196,6 +210,15 @@ mod tests {
         reset_without_file.state_file = None;
         reset_without_file.fresh = true;
         assert!(reset_without_file.validate_snapshot_args().is_err());
+
+        let mut reset_postgres = sample.clone();
+        reset_postgres.state_file = None;
+        reset_postgres.state_postgres = true;
+        assert!(reset_postgres.validate_snapshot_args().is_ok());
+
+        let mut both_stores = sample;
+        both_stores.state_postgres = true;
+        assert!(both_stores.validate_snapshot_args().is_err());
     }
 
     #[test]

@@ -26,7 +26,7 @@ use lynx_world::auth::{self, Authenticator, Grant};
 use lynx_world::backend;
 use lynx_world::config::ServeArgs;
 use lynx_world::demo;
-use lynx_world::persistence::{FileSnapshotStore, SnapshotStore};
+use lynx_world::persistence::{FileSnapshotStore, PostgresSnapshotStore, SnapshotStore};
 use lynx_world::service::Service;
 use lynx_world::startup;
 use lynx_world::transport::{self, AppState};
@@ -56,6 +56,9 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Native development convenience: pick up `.env` from the repository
+    // root. Variables already present in the process always win.
+    dotenvy::dotenv().ok();
     init_tracing();
     match Cli::parse().command {
         Command::Serve(args) => serve(args).await,
@@ -95,12 +98,18 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .snapshot_interval()
         .context("invalid snapshot interval")?;
 
-    // Durable state: behind the optional snapshot file, the service resumes
-    // the world it wrote last; without it, the demo world starts fresh.
-    let store: Option<Arc<dyn SnapshotStore + Send + Sync>> = args
-        .state_file
-        .as_ref()
-        .map(|path| Arc::new(FileSnapshotStore::new(path.clone())) as _);
+    // Durable state: behind the optional snapshot store, the service resumes
+    // the world it wrote last; without one, the demo world starts fresh.
+    let store: Option<Arc<dyn SnapshotStore + Send + Sync>> = if args.state_postgres {
+        Some(Arc::new(
+            PostgresSnapshotStore::from_env(demo::DEMO_WORLD_ID)
+                .context("failed to open the PostgreSQL snapshot store")?,
+        ))
+    } else {
+        args.state_file
+            .as_ref()
+            .map(|path| Arc::new(FileSnapshotStore::new(path.clone())) as _)
+    };
     args.validate_snapshot_args()
         .context("invalid snapshot configuration")?;
     if args.fresh

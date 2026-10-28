@@ -39,6 +39,9 @@ use world_gateway::VISIBILITY_OWNER_ONLY_TAG;
 
 use crate::auth::Grant;
 
+/// The stable row name the runnable service uses for its world snapshot.
+pub const DEMO_WORLD_ID: &str = "demo";
+
 const CHARACTER_SPACING_M: f32 = 120.0;
 const COLUMNS: usize = 6;
 const BASE_HEIGHT_M: u16 = 240;
