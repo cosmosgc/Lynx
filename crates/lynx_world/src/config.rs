@@ -30,6 +30,11 @@ pub struct ServeArgs {
     #[arg(long, default_value = DEFAULT_BIND)]
     pub bind: SocketAddr,
 
+    /// Allow static demo authentication on a non-loopback listener. Dangerous:
+    /// this is for controlled development only, not production authentication.
+    #[arg(long)]
+    pub dangerous_allow_non_loopback_demo_auth: bool,
+
     /// Authoritative tick interval, in milliseconds.
     #[arg(long, default_value_t = 50)]
     pub tick_ms: u64,
@@ -85,6 +90,21 @@ pub struct ServeArgs {
 }
 
 impl ServeArgs {
+    /// Reject network-exposed static demo authentication unless explicitly opted in.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-loopback bind without the dangerous opt-in.
+    pub fn validate_demo_auth_bind(&self) -> Result<()> {
+        if !self.bind.ip().is_loopback() && !self.dangerous_allow_non_loopback_demo_auth {
+            bail!(
+                "static demo authentication requires a loopback --bind; \
+                 use --dangerous-allow-non-loopback-demo-auth only for controlled development"
+            );
+        }
+        Ok(())
+    }
+
     /// Validate the arguments and produce gateway tuning.
     ///
     /// # Errors
@@ -189,6 +209,7 @@ mod tests {
     fn sample() -> ServeArgs {
         ServeArgs {
             bind: DEFAULT_BIND.parse().unwrap(),
+            dangerous_allow_non_loopback_demo_auth: false,
             tick_ms: 50,
             resume_ttl_ms: 30_000,
             view_radius_m: 60.0,
@@ -200,6 +221,29 @@ mod tests {
             fresh: false,
             snapshot_ms: DEFAULT_SNAPSHOT_MS,
             token_hashes: vec![crate::auth::hash_hex("token")],
+        }
+    }
+
+    #[test]
+    fn demo_auth_bind_requires_explicit_opt_in_for_non_loopback() {
+        let mut args = sample();
+        for address in ["127.0.0.1:8090", "127.2.3.4:8090", "[::1]:8090"] {
+            args.bind = address.parse().unwrap();
+            assert!(args.validate_demo_auth_bind().is_ok(), "{address}");
+        }
+        for address in [
+            "0.0.0.0:8090",
+            "192.168.1.2:8090",
+            "[::]:8090",
+            "[2001:db8::1]:8090",
+            "[::ffff:127.0.0.1]:8090",
+        ] {
+            args.bind = address.parse().unwrap();
+            let error = args.validate_demo_auth_bind().unwrap_err().to_string();
+            assert!(error.contains("--dangerous-allow-non-loopback-demo-auth"));
+            args.dangerous_allow_non_loopback_demo_auth = true;
+            assert!(args.validate_demo_auth_bind().is_ok(), "{address}");
+            args.dangerous_allow_non_loopback_demo_auth = false;
         }
     }
 

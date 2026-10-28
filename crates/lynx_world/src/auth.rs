@@ -16,6 +16,71 @@ use game_api::AccountId;
 use sha2::{Digest, Sha256};
 use world_gateway::SessionClaims;
 
+/// Failure categories at the identity boundary. They contain no backend details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityError {
+    /// The session is malformed, unknown, expired, or revoked.
+    InvalidSession,
+    /// The selected character is invalid or not owned by the account.
+    CharacterForbidden,
+    /// The identity or ownership service could not make a trustworthy decision.
+    Unavailable,
+}
+
+impl IdentityError {
+    /// Stable, non-sensitive category for callers to map to a protocol error.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::InvalidSession => "invalid_session",
+            Self::CharacterForbidden => "character_forbidden",
+            Self::Unavailable => "identity_unavailable",
+        }
+    }
+}
+
+/// Trusted identity and character ownership boundary, not a client interface.
+///
+/// Implementations must validate authenticity, expiry and revocation on every
+/// call, fail closed on uncertainty, and never log the presented credential.
+/// Ownership must be obtained from an authoritative source, not token claims or
+/// client input. Backend errors must be reduced to the categories above.
+/// This synchronous seam does not prescribe a production provider or runtime.
+pub trait IdentityBackend {
+    /// Validate a session and return its server-verified account.
+    fn validate_session(&self, credential: &str) -> Result<AccountId, IdentityError>;
+
+    /// Check current ownership of the selected character for that account.
+    fn owns_character(
+        &self,
+        account: &AccountId,
+        character: StableId,
+    ) -> Result<bool, IdentityError>;
+}
+
+/// Authenticate and authorize a selection before creating a gateway session.
+///
+/// The returned claims carry no staff authority. Refresh, ongoing revalidation,
+/// auditing, and admission wiring remain responsibilities of the caller.
+///
+/// # Errors
+///
+/// Rejects invalid sessions, invalid or unowned characters, and backend failures.
+pub fn authenticate_selection(
+    backend: &impl IdentityBackend,
+    credential: &str,
+    character: StableId,
+) -> Result<SessionClaims, IdentityError> {
+    if credential.is_empty() {
+        return Err(IdentityError::InvalidSession);
+    }
+    let account = backend.validate_session(credential)?;
+    if character.kind() != IdKind::Character || !backend.owns_character(&account, character)? {
+        return Err(IdentityError::CharacterForbidden);
+    }
+    SessionClaims::new(account, character).map_err(|_| IdentityError::CharacterForbidden)
+}
+
 /// A trusted identity granted by one configured token.
 #[derive(Debug, Clone)]
 pub struct Grant {
@@ -192,6 +257,92 @@ mod tests {
     use super::*;
 
     const TOKEN: &str = "correct horse battery staple";
+
+    struct FakeIdentity;
+
+    impl IdentityBackend for FakeIdentity {
+        fn validate_session(&self, credential: &str) -> Result<AccountId, IdentityError> {
+            match credential {
+                TOKEN => Ok(AccountId::new("verified-account").unwrap()),
+                "offline" => Err(IdentityError::Unavailable),
+                // Includes expired, revoked, malformed, and unknown credentials.
+                _ => Err(IdentityError::InvalidSession),
+            }
+        }
+
+        fn owns_character(
+            &self,
+            account: &AccountId,
+            character: StableId,
+        ) -> Result<bool, IdentityError> {
+            assert_eq!(account.as_str(), "verified-account");
+            if character == StableId::from_parts(IdKind::Character, 1, 3) {
+                return Err(IdentityError::Unavailable);
+            }
+            Ok(character == StableId::from_parts(IdKind::Character, 1, 1))
+        }
+    }
+
+    #[test]
+    fn identity_selection_fails_closed_and_returns_only_verified_claims() {
+        let owned = StableId::from_parts(IdKind::Character, 1, 1);
+        let other = StableId::from_parts(IdKind::Character, 1, 2);
+        let claims = authenticate_selection(&FakeIdentity, TOKEN, owned).unwrap();
+        assert_eq!(claims.account.as_str(), "verified-account");
+        assert_eq!(claims.principal, owned);
+        assert!(!claims.staff);
+
+        for token in ["", "expired", "revoked", "malformed", "unknown"] {
+            assert_eq!(
+                authenticate_selection(&FakeIdentity, token, owned).unwrap_err(),
+                IdentityError::InvalidSession
+            );
+        }
+        assert_eq!(
+            authenticate_selection(&FakeIdentity, TOKEN, other).unwrap_err(),
+            IdentityError::CharacterForbidden
+        );
+        assert_eq!(
+            authenticate_selection(
+                &FakeIdentity,
+                TOKEN,
+                StableId::from_parts(IdKind::Character, 1, 3)
+            )
+            .unwrap_err(),
+            IdentityError::Unavailable
+        );
+        assert_eq!(
+            authenticate_selection(&FakeIdentity, "offline", owned).unwrap_err(),
+            IdentityError::Unavailable
+        );
+        assert_eq!(
+            authenticate_selection(
+                &FakeIdentity,
+                TOKEN,
+                StableId::from_parts(IdKind::Entity, 1, 1)
+            )
+            .unwrap_err(),
+            IdentityError::CharacterForbidden
+        );
+    }
+
+    #[test]
+    fn identity_errors_have_stable_redacted_codes_and_debug_output() {
+        for error in [
+            IdentityError::InvalidSession,
+            IdentityError::CharacterForbidden,
+            IdentityError::Unavailable,
+        ] {
+            assert!(!error.code().contains(TOKEN));
+            assert!(!format!("{error:?}").contains(TOKEN));
+        }
+        assert_eq!(IdentityError::InvalidSession.code(), "invalid_session");
+        assert_eq!(
+            IdentityError::CharacterForbidden.code(),
+            "character_forbidden"
+        );
+        assert_eq!(IdentityError::Unavailable.code(), "identity_unavailable");
+    }
 
     #[test]
     fn hashes_round_trip_through_configuration_text() {

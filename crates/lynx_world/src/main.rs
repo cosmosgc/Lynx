@@ -91,6 +91,16 @@ fn token_hash() -> Result<()> {
 }
 
 async fn serve(args: ServeArgs) -> Result<()> {
+    args.validate_demo_auth_bind()?;
+    tracing::warn!(
+        "static bearer token authentication is for development only, not production authentication"
+    );
+    if !args.bind.ip().is_loopback() {
+        tracing::warn!(
+            address = %args.bind,
+            "dangerous development opt-in enabled: static demo authentication is exposed on a non-loopback listener; bearer tokens may be intercepted"
+        );
+    }
     let origins = OriginPolicy::new(args.allowed_origins.clone())
         .context("invalid --allow-origin configuration")?;
     let gateway_config = args.gateway_config()?;
@@ -207,5 +217,33 @@ fn snapshot_store(args: &ServeArgs) -> Result<Option<Arc<dyn SnapshotStore + Sen
             .state_file
             .as_ref()
             .map(|path| Arc::new(FileSnapshotStore::new(path.clone())) as _))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cli_rejects_exposed_demo_auth_before_other_startup_work() {
+        let cli = Cli::try_parse_from(["lynx-world", "serve", "--bind", "0.0.0.0:8090"]).unwrap();
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve")
+        };
+        let error = serve(args).await.unwrap_err().to_string();
+        assert!(error.contains("--dangerous-allow-non-loopback-demo-auth"));
+
+        let cli = Cli::try_parse_from([
+            "lynx-world",
+            "serve",
+            "--bind",
+            "0.0.0.0:8090",
+            "--dangerous-allow-non-loopback-demo-auth",
+        ])
+        .unwrap();
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve")
+        };
+        assert!(args.validate_demo_auth_bind().is_ok());
     }
 }

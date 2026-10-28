@@ -23,7 +23,7 @@ moderation surface.
 ## NET-001 — Production authentication at the world edge
 
 - **Priority:** P0
-- **Status:** Ready
+- **Status:** In progress
 - **Depends on:** —
 - **References:** [networking §Transport](../networking.md#transport),
   [architecture §What is deliberately not here yet](../architecture.md#what-is-deliberately-not-here-yet),
@@ -47,12 +47,25 @@ characters the account may control.
 - Keep the gateway free of identity-provider types; pass trusted claims across
   the seam.
 
+**Implemented prerequisite:** `auth::IdentityBackend` and
+`authenticate_selection` define a provider-neutral, fail-closed selection seam.
+A trusted backend must validate the session (including expiry and revocation)
+and check authoritative ownership; only then are non-staff gateway claims
+returned. Errors are limited to stable, detail-free categories. Unit tests use
+a fake backend; this seam is not wired into admission and is not a production
+identity implementation. Static demo auth now requires loopback binding or the
+explicit `--dangerous-allow-non-loopback-demo-auth` development opt-in and logs
+startup warnings; proxies and tunnels can still expose a loopback listener.
+Provider integration, refresh/revalidation, audit, and lifetime/skew policy
+remain open. Backend implementations and callers must avoid logging credentials or backend details;
+the synchronous seam does not settle production I/O architecture.
+
 **Acceptance criteria**
 
 - [ ] An expired, revoked, malformed, or unknown session is rejected before a
       gateway session is created.
 - [ ] Selecting a character owned by another account is rejected and audited.
-- [ ] Static-token mode cannot be enabled on a non-loopback listener without an
+- [x] Static-token mode cannot be enabled on a non-loopback listener without an
       explicit development flag.
 - [ ] An integration test with a fake identity backend covers login, expiry, and
       ownership failure.
