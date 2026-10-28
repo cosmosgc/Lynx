@@ -43,7 +43,7 @@ across domains when its tasks do not touch the same seam.
 
 | Task | Domain | Why it is here |
 | --- | --- | --- |
-| `SIM-003` | Simulation | `attack` currently trusts a `damage` parameter from the request. |
+| `SIM-003` | Simulation | Replace temporary fixed attack damage with server-owned combat rules. |
 | `NET-001` | Networking | The world edge must validate a real session and character ownership. |
 | `NET-002` | Networking | Add per-IP, per-session, and per-action budgets before exposing a client. |
 | `NET-012` | Networking | Handshake timeouts, connection caps, and origin policy. |

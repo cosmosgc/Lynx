@@ -593,7 +593,6 @@ fn duplicate_action_ids_are_idempotent_and_session_scoped() {
         json!({
             "verb": "attack",
             "target": fixture.alice_barrel.to_string(),
-            "params": { "damage": "10" },
         }),
     );
 
@@ -627,7 +626,7 @@ fn duplicate_action_ids_are_idempotent_and_session_scoped() {
             .health
             .unwrap()
             .current,
-        90,
+        99,
         "the action must apply exactly once"
     );
 
@@ -636,7 +635,6 @@ fn duplicate_action_ids_are_idempotent_and_session_scoped() {
         json!({
             "verb": "attack",
             "target": fixture.bob_barrel.to_string(),
-            "params": { "damage": "10" },
         }),
     );
     let bob_result: ActionResult = serde_json::from_value(
@@ -659,7 +657,7 @@ fn duplicate_action_ids_are_idempotent_and_session_scoped() {
             .health
             .unwrap()
             .current,
-        90,
+        99,
         "another session's identical request id must not reuse the cache"
     );
 }

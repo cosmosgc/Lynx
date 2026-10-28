@@ -829,11 +829,12 @@ impl Zone {
         target_id: StableId,
         health: Option<crate::entity::Health>,
     ) -> Result<Vec<ActionEffect>, EngineError> {
-        let damage = param_u32(request, "damage", 1)?;
-        if damage == 0 || damage > 1_000 {
+        // Until content-backed combat rules exist, the server applies one hit
+        // point per attack. Requests must never supply combat outcomes.
+        if !request.params.is_empty() {
             return Err(EngineError::new(
                 ErrorCode::InvalidRequest,
-                "damage must be between 1 and 1000",
+                "attack does not accept parameters",
             ));
         }
         if health.is_none() {
@@ -847,7 +848,7 @@ impl Zone {
         let mut died = false;
         if let Some(target) = self.entities.get_mut(&target_id) {
             if let Some(health) = target.health.as_mut() {
-                let applied = health.damage(damage.cast_signed());
+                let applied = health.damage(1);
                 effects.push(ActionEffect::Damaged {
                     target: target_id,
                     amount: applied,

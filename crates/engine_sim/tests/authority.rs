@@ -355,7 +355,7 @@ fn attacks_apply_damage_and_release_control_on_death() {
     let target = entity(2);
     zone.spawn(
         EntityRecord::new(target, text("npc.rat"), Vec3::new(1.0, 0.0, 0.0))
-            .with_health(3)
+            .with_health(1)
             .with_mind(Mind::ai(text("behavior.rat")))
             .with_interactable(Interactable::new(2.0, [Verb::Attack])),
     )
@@ -364,8 +364,7 @@ fn attacks_apply_damage_and_release_control_on_death() {
     let result = zone.apply_action(
         &ActionRequest::new("attack-1", actor, Verb::Attack)
             .on(target)
-            .by(principal)
-            .with_param("damage", "3"),
+            .by(principal),
         Millis::new(1),
     );
     assert!(result.is_applied(), "{:?}", result.error());
@@ -376,6 +375,44 @@ fn attacks_apply_damage_and_release_control_on_death() {
     let target = zone.entity(target).unwrap();
     assert_eq!(target.health.unwrap().current, 0);
     assert!(!target.is_controlled());
+}
+
+#[test]
+fn attack_rejects_client_selected_damage_without_changing_health() {
+    let mut zone = test_zone();
+    let (actor, principal) = player_at(&mut zone, 1, Vec3::ZERO, 1);
+    let target = entity(2);
+    zone.spawn(
+        EntityRecord::new(target, text("npc.rat"), Vec3::new(1.0, 0.0, 0.0))
+            .with_health(3)
+            .with_interactable(Interactable::new(2.0, [Verb::Attack])),
+    )
+    .unwrap();
+
+    let forged = zone.apply_action(
+        &ActionRequest::new("forged-attack", actor, Verb::Attack)
+            .on(target)
+            .by(principal)
+            .with_param("damage", "1000"),
+        Millis::new(1),
+    );
+    assert_eq!(forged.error().unwrap().code(), ErrorCode::InvalidRequest);
+    assert_eq!(zone.entity(target).unwrap().health.unwrap().current, 3);
+
+    let valid = zone.apply_action(
+        &ActionRequest::new("valid-attack", actor, Verb::Attack)
+            .on(target)
+            .by(principal),
+        Millis::new(1),
+    );
+    assert!(valid.effects().iter().any(|effect| matches!(
+        effect,
+        ActionEffect::Damaged {
+            amount: 1,
+            remaining: 2,
+            ..
+        }
+    )));
 }
 
 #[test]

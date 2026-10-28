@@ -54,7 +54,7 @@ recommendation, not a commitment; re-order when a dependency or risk changes.
 | --- | --- | --- |
 | 0 | [OPS-006](60-operations-release.md#ops-006--ci-matrix-and-live-integration-coverage) — CI integration coverage | The migration head check and live PostgreSQL test are configured; confirm them in CI and complete the remaining platform coverage. |
 | 1 | [SIM-001](10-simulation-gameplay.md#sim-001--server-authoritative-movement) — movement contract | There is no movement verb, so no client can exercise the authoritative loop end to end. |
-| 2 | [SIM-003](10-simulation-gameplay.md#sim-003--server-derived-combat-resolution) — server-derived damage | `attack` currently takes `damage` from the request, which violates the authority invariant. |
+| 2 | [SIM-003](10-simulation-gameplay.md#sim-003--server-derived-combat-resolution) — server-derived damage | Client-selected damage is rejected; replace the temporary fixed damage with server-owned combat rules. |
 | 3 | [CLT-001](40-bevy-client.md#clt-001--client-workspace-and-crate-layout) · [CLT-004](40-bevy-client.md#clt-004--scene-camera-and-input-abstraction) — client foundation | Phase 1/2 exit criteria and the Phase 7 vertical slice are client-blocked. |
 | 4 | [NET-001](30-networking-security.md#net-001--production-authentication-at-the-world-edge) — production auth | The world edge still accepts static hashed bearer tokens only. |
 | 5 | [PST-001](20-persistence-backend.md#pst-001--account-and-character-persistence) — account/character SQL | Durable world state exists, but characters still live in memory. |
@@ -86,7 +86,7 @@ the quick audit; update it when a gap is found or closed.
 | --- | --- | --- |
 | No Bevy client crates, rendering, input, or camera | [architecture](../architecture.md#what-is-deliberately-not-here-yet) | `CLT-001`–`CLT-014` |
 | No movement verb; clients cannot move authoritatively | [networking](../networking.md), `engine_sim::action` | `SIM-001`, `SIM-002` |
-| `attack` accepts `damage` from the request | `crates/engine_sim/src/action.rs` | `SIM-003` |
+| Attack damage is temporarily fixed rather than derived from combat rules | `crates/engine_sim/src/action.rs` | `SIM-003` |
 | World chat exists in `game_api` but is not routed by the gateway | [README](../../README.md#phase-3--interaction-and-mind-system--in-progress) | `SIM-008` |
 | Account/character/inventory data still in memory | [architecture](../architecture.md#persistence-model) | `PST-001`, `PST-002` |
 | Nakama adapter implements only health and auth | `crates/backend_nakama` | `PST-010`, `NET-001` |

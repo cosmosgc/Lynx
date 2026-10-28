@@ -100,10 +100,10 @@ input sequences and send bounded corrections the client can replay.
 - **References:** [security §Authority invariants](../security.md#authority-invariants),
   `crates/engine_sim/src/action.rs::apply_attack`
 
-**Why:** `attack` currently reads a `damage` parameter from the request. That
-lets a client choose the outcome, directly violating "clients send requests,
-never outcomes." Damage must come from server-owned actor state, equipment, and
-rules.
+**Why:** Client-supplied attack parameters are rejected, and the server applies
+a temporary fixed damage of one hit point per attack. This closes the direct
+outcome-spoofing hole, but damage still needs server-owned actor state,
+equipment, defenses, and content rules.
 
 **Scope**
 
@@ -124,6 +124,10 @@ rules.
 - [ ] Out-of-range, dead-actor, dead-target, and cooldown cases are tested.
 - [ ] Death releases control and cannot be spoofed by the client.
 - [ ] The combat formula and its inputs are documented.
+
+**Interim behavior:** An `attack` accepts no parameters and applies one hit
+point, clamped to the target's remaining health. This is a temporary server
+rule, not the planned content-driven combat formula.
 
 ---
 
