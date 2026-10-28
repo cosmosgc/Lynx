@@ -31,6 +31,30 @@ servers.
 - Content bundles are hashed and version-checked; the client cannot authorize
   gameplay from local content.
 
+## Combat authority
+
+- An `attack` request carries no combat parameters. In particular, a `damage`
+  field is rejected before an effect is applied.
+- Formula v1 is `max(minimum_damage, attacker.attack - target.defense)`. The
+  attacker and target values are server-owned `CombatStats`: content and
+  authoritative equipment/status systems resolve base stats and loadout effects
+  into them before the action pipeline runs. Older snapshots without the
+  additive component use the server's v1 default (`attack: 1`, `defense: 0`),
+  never a client fallback.
+- Each zone persists versioned `CombatRules` with its snapshot. Content may tune
+  `minimum_damage`, friendly-fire policy, and directional faction attack rules
+  without changing the engine. Rules with a zero major version, zero minimum
+  damage, an unsupported formula major version, invalid faction IDs, or duplicate
+  directional pairs are refused at zone startup.
+- Attack validation still requires server-resolved control capability, target
+  interaction/range, line of sight, target liveness, and cooldown. Same-faction
+  attacks are forbidden by default; authored directional rules may allow or
+  forbid a pair.
+- `Damaged` and `EntityDied` effects include the server-resolved source and
+  target. On death, the target controller and lease are released before the
+  `EntityDied` effect is emitted, so replication, loot, credit, and audit
+  consumers receive an authoritative hook rather than client-chosen results.
+
 ## Authentication and sessions
 
 - Player authentication is delegated to Nakama. The world gateway validates the

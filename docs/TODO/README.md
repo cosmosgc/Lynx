@@ -87,7 +87,6 @@ the quick audit; update it when a gap is found or closed.
 | --- | --- | --- |
 | No Bevy client crates, rendering, input, or camera | [architecture](../architecture.md#what-is-deliberately-not-here-yet) | `CLT-001`–`CLT-014` |
 | No movement verb; clients cannot move authoritatively | [networking](../networking.md), `engine_sim::action` | `SIM-001`, `SIM-002` |
-| Attack damage is temporarily fixed rather than derived from combat rules | `crates/engine_sim/src/action.rs` | `SIM-003` |
 | World chat exists in `game_api` but is not routed by the gateway | [README](../../README.md#phase-3--interaction-and-mind-system--in-progress) | `SIM-008` |
 | Account/character/inventory data still in memory | [architecture](../architecture.md#persistence-model) | `PST-001`, `PST-002` |
 | Nakama adapter implements only health and auth | `crates/backend_nakama` | `PST-010`, `NET-001` |

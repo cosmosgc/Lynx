@@ -12,7 +12,10 @@ use engine_core::inventory::{Inventory, ItemStack, UniformItemRules};
 use engine_core::math::Vec3;
 use engine_core::time::Millis;
 use engine_sim::action::{ActionEffect, ActionRequest, Verb};
-use engine_sim::entity::{Door, EntityRecord, Interactable, InteractionPermission, UiProvider};
+use engine_sim::combat::CombatStats;
+use engine_sim::entity::{
+    Door, EntityRecord, FactionMembership, Interactable, InteractionPermission, UiProvider,
+};
 use engine_sim::link::{EntityLink, LinkEvent};
 use engine_sim::mind::Mind;
 use engine_sim::minigame::{DigitHint, Minigame};
@@ -49,6 +52,7 @@ fn player_at(zone: &mut Zone, seed: u128, position: Vec3, capacity: usize) -> (S
     zone.spawn(
         EntityRecord::new(actor, text("character.player"), position)
             .with_health(50)
+            .with_combat(CombatStats::default())
             .with_mind(Mind::player(principal, "session-1"))
             .with_inventory(Inventory::with_capacity(capacity).unwrap())
             .with_interactable(Interactable::new(3.0, std::iter::empty()).without_line_of_sight()),
@@ -370,7 +374,7 @@ fn attacks_apply_damage_and_release_control_on_death() {
     assert!(result.is_applied(), "{:?}", result.error());
     assert!(result.effects().iter().any(|effect| matches!(
         effect,
-        ActionEffect::EntityDied { target: dead } if *dead == target
+        ActionEffect::EntityDied { target: dead, .. } if *dead == target
     )));
     let target = zone.entity(target).unwrap();
     assert_eq!(target.health.unwrap().current, 0);
@@ -395,7 +399,8 @@ fn attack_rejects_client_selected_damage_without_changing_health() {
     let target = entity(2);
     zone.spawn(
         EntityRecord::new(target, text("npc.rat"), Vec3::new(1.0, 0.0, 0.0))
-            .with_health(3)
+            .with_health(10)
+            .with_combat(CombatStats::new(0, 2))
             .with_interactable(Interactable::new(2.0, [Verb::Attack])),
     )
     .unwrap();
@@ -408,8 +413,9 @@ fn attack_rejects_client_selected_damage_without_changing_health() {
         Millis::new(1),
     );
     assert_eq!(forged.error().unwrap().code(), ErrorCode::InvalidRequest);
-    assert_eq!(zone.entity(target).unwrap().health.unwrap().current, 3);
+    assert_eq!(zone.entity(target).unwrap().health.unwrap().current, 10);
 
+    zone.entity_mut(actor).unwrap().combat = Some(CombatStats::new(7, 0));
     let valid = zone.apply_action(
         &ActionRequest::new("valid-attack", actor, Verb::Attack)
             .on(target)
@@ -419,11 +425,115 @@ fn attack_rejects_client_selected_damage_without_changing_health() {
     assert!(valid.effects().iter().any(|effect| matches!(
         effect,
         ActionEffect::Damaged {
-            amount: 1,
-            remaining: 2,
+            source,
+            amount: 5,
+            remaining: 5,
             ..
-        }
+        } if *source == actor
     )));
+    assert!(
+        !valid
+            .effects()
+            .iter()
+            .any(|effect| matches!(effect, ActionEffect::EntityDied { .. }))
+    );
+}
+
+#[test]
+fn attack_checks_range_liveness_cooldown_and_friendly_fire() {
+    let mut zone = test_zone();
+    let (actor, principal) = player_at(&mut zone, 1, Vec3::ZERO, 1);
+    let far = entity(2);
+    zone.spawn(
+        EntityRecord::new(far, text("npc.far"), Vec3::new(4.0, 0.0, 0.0))
+            .with_health(3)
+            .with_interactable(Interactable::new(2.0, [Verb::Attack])),
+    )
+    .unwrap();
+    let out_of_range = zone.apply_action(
+        &ActionRequest::new("attack-far", actor, Verb::Attack)
+            .on(far)
+            .by(principal),
+        Millis::new(1),
+    );
+    assert_eq!(out_of_range.error().unwrap().code(), ErrorCode::OutOfRange);
+
+    let target = entity(3);
+    zone.spawn(
+        EntityRecord::new(target, text("npc.target"), Vec3::new(1.0, 0.0, 0.0))
+            .with_health(3)
+            .with_interactable(Interactable::new(2.0, [Verb::Attack]).with_cooldown(2)),
+    )
+    .unwrap();
+    let first = zone.apply_action(
+        &ActionRequest::new("attack-first", actor, Verb::Attack)
+            .on(target)
+            .by(principal),
+        Millis::new(1),
+    );
+    assert!(first.is_applied());
+    let cooldown = zone.apply_action(
+        &ActionRequest::new("attack-cooldown", actor, Verb::Attack)
+            .on(target)
+            .by(principal),
+        Millis::new(1),
+    );
+    assert_eq!(cooldown.error().unwrap().code(), ErrorCode::Cooldown);
+
+    zone.entity_mut(actor)
+        .unwrap()
+        .health
+        .as_mut()
+        .unwrap()
+        .current = 0;
+    let dead_actor = zone.apply_action(
+        &ActionRequest::new("attack-dead-actor", actor, Verb::Attack)
+            .on(target)
+            .by(principal),
+        Millis::new(1),
+    );
+    assert_eq!(dead_actor.error().unwrap().code(), ErrorCode::InvalidState);
+    zone.entity_mut(actor)
+        .unwrap()
+        .health
+        .as_mut()
+        .unwrap()
+        .current = 50;
+    zone.entity_mut(target)
+        .unwrap()
+        .health
+        .as_mut()
+        .unwrap()
+        .current = 0;
+    zone.advance_tick();
+    zone.advance_tick();
+    let dead_target = zone.apply_action(
+        &ActionRequest::new("attack-dead-target", actor, Verb::Attack)
+            .on(target)
+            .by(principal),
+        Millis::new(1),
+    );
+    assert_eq!(dead_target.error().unwrap().code(), ErrorCode::InvalidState);
+
+    let friendly = entity(4);
+    zone.entity_mut(actor).unwrap().faction = Some(FactionMembership::new(text("faction.guard")));
+    zone.spawn(
+        EntityRecord::new(friendly, text("npc.guard"), Vec3::new(1.0, 0.0, 1.0))
+            .with_health(3)
+            .with_faction(FactionMembership::new(text("faction.guard")))
+            .with_interactable(Interactable::new(2.0, [Verb::Attack])),
+    )
+    .unwrap();
+    let friendly_fire = zone.apply_action(
+        &ActionRequest::new("attack-friendly", actor, Verb::Attack)
+            .on(friendly)
+            .by(principal),
+        Millis::new(1),
+    );
+    assert_eq!(
+        friendly_fire.error().unwrap().code(),
+        ErrorCode::PermissionDenied
+    );
 }
 
 #[test]

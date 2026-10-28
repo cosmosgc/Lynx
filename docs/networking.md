@@ -80,11 +80,10 @@ must keep it out of logs, traces, and error details.
 ### Attack requests
 
 `action.request` with `verb: "attack"` names a target but accepts no parameters;
-client-supplied damage is rejected. The server currently applies a temporary
-fixed one hit point, clamped to remaining health, after normal action validation.
-Attacks against dead targets are rejected and do not emit another death event.
-Stats, equipment, defenses, and content-driven combat remain planned in
-[SIM-003](TODO/10-simulation-gameplay.md#sim-003--server-derived-combat-resolution).
+client-supplied damage is rejected. The server derives physical damage from
+versioned zone combat rules and server-owned attacker/target combat stats after
+normal action validation. Attacks against dead targets are rejected and do not
+emit another death event. See [security §Combat authority](security.md#combat-authority).
 
 ### UI panel lifecycle
 

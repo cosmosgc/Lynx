@@ -156,7 +156,7 @@ discard messages from old connections and distinguish resumed from new sessions.
 ## SIM-003 — Server-derived combat resolution
 
 - **Priority:** P0
-- **Status:** Ready
+- **Status:** Done
 - **Depends on:** —
 - **References:** [security §Authority invariants](../security.md#authority-invariants),
   `crates/engine_sim/src/action.rs::apply_attack`
@@ -180,16 +180,18 @@ equipment, defenses, and content rules.
 
 **Acceptance criteria**
 
-- [ ] A request carrying an inflated `damage` field is rejected as an unknown
+- [x] A request carrying an inflated `damage` field is rejected as an unknown
       field or ignored; damage matches the actor's server-side stats.
-- [ ] Out-of-range, dead-actor, dead-target, and cooldown cases are tested.
-- [ ] Death releases control and cannot be spoofed by the client.
-- [ ] The combat formula and its inputs are documented.
+- [x] Out-of-range, dead-actor, dead-target, and cooldown cases are tested.
+- [x] Death releases control and cannot be spoofed by the client.
+- [x] The combat formula and its inputs are documented.
 
-**Interim behavior:** An `attack` accepts no parameters and applies one hit
-point, clamped to the target's remaining health. Dead targets are rejected
-without a second death event. This is a temporary server rule, not the planned
-content-driven combat formula.
+**Implemented:** Formula v1 is `max(minimum_damage, attacker.attack -
+target.defense)`. `CombatStats` are server-owned resolved values (including
+authoritative loadout effects); versioned `CombatRules` are persisted with the
+zone and configure the minimum damage and friendly-fire/faction policy. Attack
+effects include the server-resolved source for downstream loot, credit, and
+audit consumers. See [security §Combat authority](../security.md#combat-authority).
 
 ---
 

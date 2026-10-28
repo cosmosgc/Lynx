@@ -36,6 +36,7 @@ struct ActionContext {
     target_ui: Option<UiProvider>,
     target_door: Option<Door>,
     target_health: Option<Health>,
+    target_combat: Option<crate::combat::CombatStats>,
     target_inventory: Option<Inventory>,
     target_minigame: Option<Minigame>,
 }
@@ -295,6 +296,8 @@ pub enum ActionEffect {
     },
     /// A target lost hit points.
     Damaged {
+        /// Server-resolved attacking entity.
+        source: StableId,
         /// Target entity.
         target: StableId,
         /// Damage actually applied.
@@ -304,6 +307,9 @@ pub enum ActionEffect {
     },
     /// A target died.
     EntityDied {
+        /// Server-resolved entity credited for the death. Loot and credit
+        /// systems consume this effect; it is never client supplied.
+        source: StableId,
         /// Dead entity.
         target: StableId,
     },
@@ -461,7 +467,12 @@ impl Zone {
             }
             Verb::Take => self.apply_take(request, context.target_id, context.target_inventory)?,
             Verb::Play => self.apply_play(request, context.target_id)?,
-            Verb::Attack => self.apply_attack(request, context.target_id, context.target_health)?,
+            Verb::Attack => self.apply_attack(
+                request,
+                context.target_id,
+                context.target_health,
+                context.target_combat,
+            )?,
             Verb::Insert | Verb::Equip | Verb::Repair | Verb::Hack | Verb::Custom(_) => {
                 return Err(EngineError::new(
                     ErrorCode::Unsupported,
@@ -590,6 +601,7 @@ impl Zone {
             request.principal,
             actor_id,
         )?;
+        self.validate_combat_faction(request, actor_id, target)?;
 
         let cooldown_key = (actor_id, request.verb.clone(), Some(target_id));
         if let Some(until) = self.cooldowns.get(&cooldown_key)
@@ -612,9 +624,33 @@ impl Zone {
             target_ui: target.ui.clone(),
             target_door: target.door.clone(),
             target_health: target.health,
+            target_combat: target.combat,
             target_inventory: target.inventory.clone(),
             target_minigame: target.minigame.clone(),
         })
+    }
+
+    fn validate_combat_faction(
+        &self,
+        request: &ActionRequest,
+        actor_id: StableId,
+        target: &EntityRecord,
+    ) -> Result<(), EngineError> {
+        if matches!(&request.verb, Verb::Attack)
+            && !self.config.combat.permits_attack(
+                self.entities
+                    .get(&actor_id)
+                    .and_then(|actor| actor.faction.as_ref()),
+                target.faction.as_ref(),
+            )
+        {
+            return Err(EngineError::new(
+                ErrorCode::PermissionDenied,
+                "combat rules forbid attacking this faction",
+            )
+            .with_detail("target", target.id.to_string()));
+        }
+        Ok(())
     }
 
     fn apply_open_like(
@@ -828,9 +864,10 @@ impl Zone {
         request: &ActionRequest,
         target_id: StableId,
         health: Option<crate::entity::Health>,
+        target_combat: Option<crate::combat::CombatStats>,
     ) -> Result<Vec<ActionEffect>, EngineError> {
-        // Until content-backed combat rules exist, the server applies one hit
-        // point per attack. Requests must never supply combat outcomes.
+        // Requests carry intent only. Formula inputs come from the zone's
+        // versioned rules and entity components that server-owned systems set.
         if !request.params.is_empty() {
             return Err(EngineError::new(
                 ErrorCode::InvalidRequest,
@@ -847,13 +884,25 @@ impl Zone {
                     .with_detail("target", target_id.to_string()),
             );
         }
+        // Older snapshots without this additive component receive the v1
+        // server-owned default, rather than accepting a client-provided value.
+        let attacker = self
+            .entities
+            .get(&request.actor)
+            .and_then(|actor| actor.combat)
+            .unwrap_or_default();
+        let damage = self
+            .config
+            .combat
+            .resolve_damage(attacker, target_combat.unwrap_or_default());
 
         let mut effects = Vec::new();
         let mut died = false;
         if let Some(target) = self.entities.get_mut(&target_id) {
             if let Some(health) = target.health.as_mut() {
-                let applied = health.damage(1);
+                let applied = health.damage(damage);
                 effects.push(ActionEffect::Damaged {
+                    source: request.actor,
                     target: target_id,
                     amount: applied,
                     remaining: health.current,
@@ -865,7 +914,10 @@ impl Zone {
                     mind.controller = Controller::None;
                     mind.lease = None;
                 }
-                effects.push(ActionEffect::EntityDied { target: target_id });
+                effects.push(ActionEffect::EntityDied {
+                    source: request.actor,
+                    target: target_id,
+                });
             }
         }
         Ok(effects)

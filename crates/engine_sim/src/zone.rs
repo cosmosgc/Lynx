@@ -12,6 +12,7 @@ use engine_core::time::Tick;
 use serde::{Deserialize, Serialize};
 
 use crate::action::{ActionEffect, ActionKey, ActionResult};
+use crate::combat::CombatRules;
 use crate::entity::EntityRecord;
 use crate::link::{EntityLink, LinkEvent, LinkGraph};
 use crate::movement::{MovementIntent, MovementSequence};
@@ -86,6 +87,9 @@ pub struct ZoneConfig {
     pub max_entities: usize,
     /// Per-tick work limits.
     pub budget: TickBudget,
+    /// Versioned combat formula and faction policy for this zone.
+    #[serde(default)]
+    pub combat: CombatRules,
 }
 
 impl ZoneConfig {
@@ -115,6 +119,7 @@ impl ZoneConfig {
             max,
             max_entities: 1_000,
             budget: TickBudget::default(),
+            combat: CombatRules::default(),
         })
     }
 
@@ -129,6 +134,13 @@ impl ZoneConfig {
     #[must_use]
     pub const fn with_budget(mut self, budget: TickBudget) -> Self {
         self.budget = budget;
+        self
+    }
+
+    /// Override the versioned combat rules for this zone.
+    #[must_use]
+    pub fn with_combat(mut self, combat: CombatRules) -> Self {
+        self.combat = combat;
         self
     }
 
@@ -205,6 +217,7 @@ impl Zone {
                 "zone maximum entities must be at least one",
             ));
         }
+        config.combat.validate()?;
         let grid_max = nav.extent();
         if nav.origin().x > config.min.x
             || nav.origin().z > config.min.z

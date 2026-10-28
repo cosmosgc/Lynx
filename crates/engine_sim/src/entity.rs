@@ -11,6 +11,7 @@ use engine_core::schema::{ComponentInstance, ComponentKey, PersistencePolicy};
 use serde::{Deserialize, Serialize};
 
 use crate::action::Verb;
+use crate::combat::CombatStats;
 use crate::mind::Mind;
 use crate::minigame::Minigame;
 
@@ -243,6 +244,8 @@ pub struct EntityRecord {
     pub transform: Transform,
     /// Hit points, when damageable.
     pub health: Option<Health>,
+    /// Server-owned, resolved combat inputs, when this entity may attack.
+    pub combat: Option<CombatStats>,
     /// Interaction surface, when usable.
     pub interactable: Option<Interactable>,
     /// Controller slot.
@@ -276,6 +279,7 @@ impl EntityRecord {
             prototype,
             transform: Transform::new(position),
             health: None,
+            combat: None,
             interactable: None,
             mind: None,
             inventory: None,
@@ -294,6 +298,13 @@ impl EntityRecord {
     #[must_use]
     pub fn with_health(mut self, max: i32) -> Self {
         self.health = Some(Health::new(max));
+        self
+    }
+
+    /// Attach server-owned resolved combat inputs.
+    #[must_use]
+    pub const fn with_combat(mut self, combat: CombatStats) -> Self {
+        self.combat = Some(combat);
         self
     }
 

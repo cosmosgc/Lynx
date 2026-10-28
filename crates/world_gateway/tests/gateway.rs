@@ -11,6 +11,7 @@ use engine_net::envelope::{Envelope, MessageId, MessageKind};
 use engine_net::protocol::{ErrorPayload, Handshake};
 use engine_net::replication::{ReplicationBatch, SessionId};
 use engine_sim::action::{ActionEffect, ActionResult, Verb};
+use engine_sim::combat::CombatStats;
 use engine_sim::entity::{Door, EntityRecord, Interactable, InteractionPermission, UiProvider};
 use engine_sim::mind::Mind;
 use engine_sim::minigame::Minigame;
@@ -195,6 +196,7 @@ fn fixture() -> Fixture {
             Vec3::new(10.0, 0.0, 10.0),
         )
         .with_health(100)
+        .with_combat(CombatStats::default())
         .with_mind(Mind::player(alice_principal, "unbound"))
         .with_inventory(inventory),
     )

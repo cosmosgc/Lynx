@@ -29,6 +29,7 @@ use engine_core::world_event::{
 };
 use engine_net::protocol::Handshake;
 use engine_sim::action::Verb;
+use engine_sim::combat::CombatStats;
 use engine_sim::entity::{Door, EntityRecord, Interactable, UiProvider};
 use engine_sim::mind::Mind;
 use engine_sim::minigame::Minigame;
@@ -183,6 +184,7 @@ fn spawn_grant(
     zone.spawn(
         EntityRecord::new(actor, definitions.character.clone(), position)
             .with_health(100)
+            .with_combat(CombatStats::default())
             .with_mind(Mind::player(grant.principal, "unbound"))
             .with_persistence(PersistencePolicy::PersistentEntity),
     )?;
