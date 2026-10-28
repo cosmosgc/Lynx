@@ -113,7 +113,7 @@ fn cancellation_is_session_scoped_and_keeps_sequence_consumed() {
     assert!(z.advance_movement_tick(1000, 2.0).1[0].applied);
     z.queue_movement(intent(2, pos(1.5, 1.5))).unwrap();
     z.cancel_movement(actor, principal, "session");
-    assert!(z.advance_movement_tick(1000, 2.0).1.is_empty());
+    assert_eq!(z.advance_movement_tick(1000, 2.0).1.len(), 0);
     assert!(z.queue_movement(intent(2, pos(1.5, 1.5))).is_err());
     assert_eq!(z.entity(actor).unwrap().position(), pos(1.5, 0.5));
 }

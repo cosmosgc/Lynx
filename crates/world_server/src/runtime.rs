@@ -374,26 +374,20 @@ impl WorldServer {
         now: Millis,
         interval_ms: u32,
     ) -> Result<Vec<Outbound>, EngineError> {
-        let deliveries = match self.gateway.tick_with_interval(now, interval_ms) {
-            Ok(deliveries) => deliveries,
-            Err(_) => {
-                // A tick may already have consumed movement and advanced interest.
-                // Detach every connection so recovery uses a fresh baseline.
-                return self.detach_all(now);
-            }
+        let Ok(deliveries) = self.gateway.tick_with_interval(now, interval_ms) else {
+            // A tick may already have consumed movement and advanced interest.
+            // Detach every connection so recovery uses a fresh baseline.
+            return self.detach_all(now);
         };
         let mut outbound = Vec::with_capacity(deliveries.len());
         for delivery in deliveries {
             let Some(connection) = self.connection_for(&delivery.session) else {
                 continue;
             };
-            let envelope = match self.delivery_envelope(DELTA_KIND, &delivery) {
-                Ok(envelope) => envelope,
-                Err(_) => {
-                    outbound.retain(|output| matches!(output, Outbound::Closed { .. }));
-                    outbound.extend(self.detach_all(now)?);
-                    return Ok(outbound);
-                }
+            let Ok(envelope) = self.delivery_envelope(DELTA_KIND, &delivery) else {
+                outbound.retain(|output| matches!(output, Outbound::Closed { .. }));
+                outbound.extend(self.detach_all(now)?);
+                return Ok(outbound);
             };
             if envelope.encode().is_err() {
                 // The gateway has advanced this observer's state, so silently

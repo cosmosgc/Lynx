@@ -280,7 +280,9 @@ mod tests {
             backend.create_character_idempotent(
                 &owner.token,
                 &key,
-                &CreateCharacter { name: "".into() }
+                &CreateCharacter {
+                    name: String::new()
+                }
             ),
             Err(ApiError::Conflict(_))
         ));
@@ -339,7 +341,9 @@ mod tests {
             backend.create_character_idempotent(
                 &owner.token,
                 &key,
-                &CreateCharacter { name: "".into() }
+                &CreateCharacter {
+                    name: String::new()
+                }
             ),
             Err(ApiError::InvalidRequest(_))
         ));
