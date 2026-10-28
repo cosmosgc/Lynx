@@ -17,7 +17,10 @@ pub use calendar::{
     CalendarService, CalendarStore, ConflictResolutionView, EventEnrollmentView, EventSideView,
     TerritoryChangeView, WorldEventView, validate_calendar_snapshot,
 };
-pub use character::{Character, CharacterId, CharacterService, CharacterStatus};
+pub use character::{
+    Character, CharacterCreationKey, CharacterCreationReceipt, CharacterId, CharacterIntentService,
+    CharacterService, CharacterStatus, EphemeralCharacterIntentService,
+};
 pub use chat::{
     ChatChannel, ChatChannelKind, ChatMessage, ChatService, MAX_MESSAGE_CHARS, MAX_MESSAGE_PAGE,
     SendChatMessage, validate_channel_id, validate_page,
