@@ -222,6 +222,7 @@ impl NavGrid {
     /// or collision against geometry finer than the grid, and does not move an
     /// entity. A false result deliberately does not reveal the rejection reason.
     #[must_use]
+    #[allow(clippy::float_cmp)] // Any vertical change must be rejected, not approximated.
     pub fn allows_displacement(
         &self,
         from: Vec3,
