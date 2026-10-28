@@ -126,4 +126,4 @@ mode for every admin client.
 
 Do not open a public issue for a vulnerability. Contact the maintainers
 privately with reproduction steps, affected version, and impact. See
-`SECURITY.md` (to be added before any public deployment).
+[SECURITY.md](SECURITY.md) for the current reporting and response policy.
