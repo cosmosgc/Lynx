@@ -126,8 +126,9 @@ equipment, defenses, and content rules.
 - [ ] The combat formula and its inputs are documented.
 
 **Interim behavior:** An `attack` accepts no parameters and applies one hit
-point, clamped to the target's remaining health. This is a temporary server
-rule, not the planned content-driven combat formula.
+point, clamped to the target's remaining health. Dead targets are rejected
+without a second death event. This is a temporary server rule, not the planned
+content-driven combat formula.
 
 ---
 

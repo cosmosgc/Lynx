@@ -76,6 +76,15 @@ recipient is implied by the connection, so the body never repeats a session ID.
 successful open or resume and carries the rotated single-use secret. Transports
 must keep it out of logs, traces, and error details.
 
+### Attack requests
+
+`action.request` with `verb: "attack"` names a target but accepts no parameters;
+client-supplied damage is rejected. The server currently applies a temporary
+fixed one hit point, clamped to remaining health, after normal action validation.
+Attacks against dead targets are rejected and do not emit another death event.
+Stats, equipment, defenses, and content-driven combat remain planned in
+[SIM-003](TODO/10-simulation-gameplay.md#sim-003--server-derived-combat-resolution).
+
 ### UI panel lifecycle
 
 Entity-provided interfaces are server state, not a client-owned overlay.

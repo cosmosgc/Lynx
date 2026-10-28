@@ -837,9 +837,13 @@ impl Zone {
                 "attack does not accept parameters",
             ));
         }
-        if health.is_none() {
+        let health = health.ok_or_else(|| {
+            EngineError::new(ErrorCode::InvalidState, "target has no health")
+                .with_detail("target", target_id.to_string())
+        })?;
+        if !health.is_alive() {
             return Err(
-                EngineError::new(ErrorCode::InvalidState, "target has no health")
+                EngineError::new(ErrorCode::InvalidState, "target is already dead")
                     .with_detail("target", target_id.to_string()),
             );
         }

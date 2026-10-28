@@ -375,6 +375,17 @@ fn attacks_apply_damage_and_release_control_on_death() {
     let target = zone.entity(target).unwrap();
     assert_eq!(target.health.unwrap().current, 0);
     assert!(!target.is_controlled());
+    let result = zone.apply_action(
+        &ActionRequest::new("attack-dead", actor, Verb::Attack)
+            .on(entity(2))
+            .by(principal),
+        Millis::new(2),
+    );
+    assert_eq!(result.error().unwrap().code(), ErrorCode::InvalidState);
+    assert!(
+        result.effects().is_empty(),
+        "death must not be emitted twice"
+    );
 }
 
 #[test]
