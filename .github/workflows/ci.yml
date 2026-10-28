@@ -13,9 +13,43 @@ jobs:
   rust:
     name: Rust checks (Ubuntu)
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci-postgres-password
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      LYNX_PG_HOST: 127.0.0.1
+      LYNX_PG_PORT: 5432
+      LYNX_PG_DATABASE: lynx_ci
+      LYNX_PG_USER: lynx_ci
+      LYNX_PG_PASSWORD: ci-application-password
+      LYNX_PG_SUPERUSER: postgres
+      LYNX_PG_MAINTENANCE_DB: postgres
+      PGPASSWORD: ci-postgres-password
     steps:
       - name: Check out repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends postgresql-client
+
+      - name: Create native application role and schema
+        run: ./scripts/setup-postgres.sh
+
+      - name: Apply migrations
+        run: ./scripts/db-migrate.sh
 
       - name: Check formatting
         run: cargo fmt --all --check
@@ -105,10 +139,11 @@ jobs:
       - name: Create native application role and schema
         run: ./scripts/setup-postgres.sh
 
-      - name: Apply migrations twice and check status
+      - name: Apply migrations twice and check migration head
         run: |
           ./scripts/db-migrate.sh
           ./scripts/db-migrate.sh
           ./scripts/db-migrate.sh --status
-          applied="$(PGPASSWORD="$LYNX_PG_PASSWORD" psql -X -q -tA -v ON_ERROR_STOP=1 -h "$LYNX_PG_HOST" -p "$LYNX_PG_PORT" -U "$LYNX_PG_USER" -d "$LYNX_PG_DATABASE" -c 'SELECT count(*) FROM lynx.schema_migrations;')"
-          test "$applied" = "5"
+          expected="$(ls server/migrations/*.sql | sed 's#^.*/##; s#\.sql$##' | sort | tail -n 1)"
+          applied="$(PGPASSWORD="$LYNX_PG_PASSWORD" psql -X -q -tA -v ON_ERROR_STOP=1 -h "$LYNX_PG_HOST" -p "$LYNX_PG_PORT" -U "$LYNX_PG_USER" -d "$LYNX_PG_DATABASE" -c "SELECT COALESCE(MAX(version), '') FROM lynx.schema_migrations;")"
+          test "$applied" = "$expected"

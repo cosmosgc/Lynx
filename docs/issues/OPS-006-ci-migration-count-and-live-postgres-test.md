@@ -1,10 +1,21 @@
 # OPS-006 / QUA-009 — Migration count and live PostgreSQL test
 
-- **Status:** Open
+- **Status:** Resolved
 - **Reported:** 2026-10-28
+- **Resolved:** 2026-10-28
 - **Related tasks:** [OPS-006](../TODO/60-operations-release.md#ops-006--ci-matrix-and-live-integration-coverage),
   [QUA-009](../TODO/70-testing-quality.md#qua-009--documentation-and-code-consistency-sweep)
 - **Affected workflow:** [CI](../../.github/workflows/ci.yml)
+
+## Resolution
+
+The CI workflow was updated so the Ubuntu Rust job starts a PostgreSQL 17
+service, applies the migrations, and runs the workspace test suite with
+`LYNX_PG_*` configured. This allows the live PostgreSQL snapshot test to
+execute instead of skipping. The migration check now derives the expected head
+from `server/migrations` and compares it to `MAX(version)` in
+`lynx.schema_migrations`, so adding new migrations no longer breaks CI with a
+hardcoded count.
 
 ## Defect
 
