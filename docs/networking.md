@@ -244,7 +244,10 @@ See [ADR 0013](adr/0013-world-gateway-and-reconnect.md).
   re-validates range and permission before running the action.
 - Minigame outcomes are computed on the server. The client submits a guess, not
   a result; hints, attempt counts, lockouts, and unlocks are server effects.
-- Movement is validated against colliders, speed, bounds, and zone rules.
+- Queued movement is checked against a server-owned speed budget and nav-grid
+  transitions, including blocked cells and grid bounds. Occupancy, fine
+  collider checks, and status effects are not yet implemented; see
+  [SIM-001](TODO/10-simulation-gameplay.md#sim-001--server-authoritative-movement).
 - Combat, inventory, currency, progression, and placement outcomes are
   computed on the server.
 - Client raycasts are selection hints. The server re-checks range, visibility,
@@ -368,6 +371,8 @@ See [ADR 0013](adr/0013-world-gateway-and-reconnect.md).
   transport, and keep the listener on loopback while developing.
 
 Raw UDP with a reliable layer remains a possible future transport. Gameplay
-messages do not change: only the framing and socket adapter do. Rate limits and
-per-session message budgets still belong above gameplay systems; the current
-binary enforces sizes and session caps but not a per-message rate limit.
+messages do not change: only the framing and socket adapter do. The WebSocket
+transport enforces a per-connection fixed-window budget on binary and text
+messages after admission (default 100 per second); exceeding it ends the
+connection with `BudgetExhausted` and a retry hint. This is not a per-account
+or gameplay-specific abuse limit, and the initial handshake is handled separately.
