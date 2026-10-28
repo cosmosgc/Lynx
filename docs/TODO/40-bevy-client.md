@@ -4,10 +4,10 @@ Scope: the graphical client that turns the headless world service into a playabl
 game — workspace layout, login, character selection, scene, input/camera,
 rendering, prediction, UI, localization, packaging, and client-side tests.
 
-**What exists today:** no client crates. `Cargo.toml` has no Bevy dependency or
-pin yet, although [ADR 0001](../adr/0001-rust-and-bevy-version-policy.md)
-declares Bevy 0.20 as the target and restricts Bevy to client/editor crates.
-Phases 1, 2, 4, and 7 are blocked on this work.
+**What exists today:** `clients/lynx_client` is a minimal Bevy 0.20.0 window
+and headless application foundation, not yet a scene or playable client.
+[ADR 0001](../adr/0001-rust-and-bevy-version-policy.md) restricts Bevy to
+client/editor crates. Phases 1, 2, 4, and 7 still require further client work.
 
 **Related design:** [project guide §24](../lightweight_mmorpg_engine_project_guide.md#24-initial-vertical-slice-keep-it-small),
 [platforms](../platforms.md), [networking](../networking.md),
@@ -20,7 +20,7 @@ Phases 1, 2, 4, and 7 are blocked on this work.
 ## CLT-001 — Client workspace and crate layout
 
 - **Priority:** P0
-- **Status:** Ready
+- **Status:** In progress — headless CI and visual smoke verification remain
 - **Depends on:** —
 - **References:** ADR 0001, [architecture §What is deliberately not here yet](../architecture.md#what-is-deliberately-not-here-yet)
 
@@ -41,11 +41,22 @@ Phases 1, 2, 4, and 7 are blocked on this work.
 
 **Acceptance criteria**
 
-- [ ] `cargo build --workspace` and `cargo test --workspace` include the client.
+- [x] `cargo build --workspace` and `cargo test --workspace` include the client.
 - [ ] A headless CI job builds and tests the client without a display/GPU.
-- [ ] No engine domain crate depends on Bevy.
-- [ ] The Bevy pin is recorded and an upgrade note exists.
+- [x] No engine domain crate depends on Bevy.
+- [x] The Bevy pin is recorded and an upgrade note exists.
 - [ ] `cargo run -p lynx_client` opens a window on a developer machine.
+
+**Progress:** Bevy 0.20.0 is available on crates.io and pinned in the workspace.
+The client provides a shared plugin and deterministic headless update test; see
+[`clients/lynx_client/README.md`](../../clients/lynx_client/README.md) for run,
+headless build/test, and upgrade instructions. On Windows, workspace build and
+tests and the no-default-features client test passed; the default executable
+created a window handle, but a visual smoke test is still needed. The existing
+workspace CI runs client tests without opening a window, but an explicit
+no-default-features headless CI build/test has not been added or verified. No
+offline/replay UI harness or renderer exists yet. Workspace clippy is currently
+blocked by unrelated `backend_nakama` test lint errors; client clippy passes.
 
 ---
 
@@ -105,7 +116,7 @@ Phases 1, 2, 4, and 7 are blocked on this work.
 ## CLT-004 — Scene, camera, and input abstraction
 
 - **Priority:** P0
-- **Status:** Blocked — `CLT-001`
+- **Status:** In progress — offline placeholder; Windows visual verification remains
 - **Depends on:** `CLT-001`
 - **References:** [project guide §24](../lightweight_mmorpg_engine_project_guide.md#24-initial-vertical-slice-keep-it-small),
   `QUA-017` (camera/input ADR)
@@ -128,6 +139,16 @@ Phases 1, 2, 4, and 7 are blocked on this work.
 - [ ] Missing/incompatible assets produce a clear error, not a panic.
 - [ ] The 2D billboard presentation path is selectable or documented as the
       fallback.
+
+**Progress:** The shared client plugin has a headless, in-memory placeholder
+avatar, rebindable control-to-action map, and follow-camera pose. A window-only
+keyboard adapter and simple top-down 2D shapes visualize that state; WASD moves
+the avatar, while the other mapped actions have no behavior. Tests inject input
+without a display. Movement is a fixed distance per update, frame-rate dependent,
+and is neither gameplay nor prediction. The 2D camera follows the rig target,
+not its 3D offset. There is no asset loading, demo zone, billboard character,
+collision, rebinding UI, or online connection. This is not a completed camera
+and input integration. An actual Windows visual smoke test remains outstanding.
 
 ---
 

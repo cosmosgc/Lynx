@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "clients/lynx_client",
     "crates/engine_core",
     "crates/engine_sim",
     "crates/engine_content",
@@ -24,6 +25,7 @@ repository = "https://github.com/cosmosgc/Lynx"
 
 [workspace.dependencies]
 anyhow = "1.0.104"
+bevy = { version = "=0.20.0", default-features = false }
 base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive"] }
 getrandom = "0.4.3"

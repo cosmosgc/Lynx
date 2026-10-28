@@ -1,0 +1,19 @@
+[package]
+name = "lynx_client"
+description = "Lynx client application foundation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+default = ["window"]
+window = ["bevy/bevy_window", "bevy/bevy_winit", "bevy/x11", "bevy/2d_bevy_render"]
+
+[dependencies]
+bevy = { workspace = true, features = ["std", "async_executor"] }
+
+[lints]
+workspace = true
