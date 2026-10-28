@@ -191,10 +191,8 @@ impl Service {
                         break;
                     }
                 }
-                event = events.recv() => {
-                    let Some(event) = event else { break };
-                    self.handle(event);
-                }
+                // A continuously ready input queue must not starve the world clock.
+                // Delay prevents missed ticks from becoming an unbounded catch-up burst.
                 _ = ticker.tick() => {
                     self.advance();
                     ticks_since_save = ticks_since_save.wrapping_add(1);
@@ -204,6 +202,10 @@ impl Service {
                         ticks_since_save = 0;
                         self.save_snapshot();
                     }
+                }
+                event = events.recv() => {
+                    let Some(event) = event else { break };
+                    self.handle(event);
                 }
             }
         }
@@ -661,6 +663,131 @@ mod tests {
             state.last = Some(snapshot.clone());
             Ok(())
         }
+    }
+
+    /// Observes whether the last queued admission has completed at each save.
+    #[derive(Debug, Default)]
+    struct BacklogStore {
+        last_reply: std::sync::Mutex<Option<oneshot::Receiver<Result<Admitted, EngineError>>>>,
+        observations: std::sync::Mutex<Vec<(Tick, bool)>>,
+    }
+
+    impl crate::persistence::SnapshotStore for BacklogStore {
+        fn load(&self) -> Result<Option<WorldSnapshot>, EngineError> {
+            Ok(None)
+        }
+
+        fn save(&self, snapshot: &WorldSnapshot) -> Result<(), EngineError> {
+            let reply = self.last_reply.lock().unwrap();
+            let pending = reply.as_ref().unwrap().is_empty();
+            self.observations
+                .lock()
+                .unwrap()
+                .push((snapshot.zone.tick, pending));
+            Ok(())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn due_tick_and_save_run_before_a_ready_admission_backlog() {
+        let (service, grant, _) = service();
+        let store = Arc::new(BacklogStore::default());
+        let service = service.with_persistence(store.clone(), Duration::from_millis(20));
+        let (events, receiver) = mpsc::channel(32);
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let task = service.run(receiver, shutdown_rx);
+        tokio::pin!(task);
+        assert!(futures_util::poll!(&mut task).is_pending());
+        let (out_tx, mut out_rx) = mpsc::channel(32);
+        let (reply, admitted) = oneshot::channel();
+        events
+            .try_send(ServerEvent::Admit {
+                credential: Credential::Static(grant.clone()),
+                hello: Hello {
+                    handshake: demo::handshake().unwrap(),
+                    last_ack_tick: Tick::ZERO,
+                },
+                outbound: out_tx.clone(),
+                reply,
+            })
+            .unwrap();
+        assert!(futures_util::poll!(&mut task).is_pending());
+        admitted.await.unwrap().unwrap();
+        for _ in 0..3 {
+            next(&mut out_rx).await;
+        }
+
+        // Keep the service unpolled until the clock and queue are both ready.
+        tokio::time::advance(Duration::from_millis(21)).await;
+        // Queue real duplicate admissions without yielding to the service.
+        let mut replies = Vec::new();
+        for _ in 0..16 {
+            let (reply, result) = oneshot::channel();
+            events
+                .try_send(ServerEvent::Admit {
+                    credential: Credential::Static(grant.clone()),
+                    hello: Hello {
+                        handshake: demo::handshake().unwrap(),
+                        last_ack_tick: Tick::ZERO,
+                    },
+                    outbound: out_tx.clone(),
+                    reply,
+                })
+                .unwrap();
+            replies.push(result);
+        }
+        *store.last_reply.lock().unwrap() = replies.pop();
+
+        assert!(futures_util::poll!(&mut task).is_pending());
+        for reply in replies {
+            assert_eq!(
+                reply.await.unwrap().unwrap_err().code(),
+                ErrorCode::Conflict
+            );
+        }
+        let last = store.last_reply.lock().unwrap().take().unwrap();
+        assert_eq!(last.await.unwrap().unwrap_err().code(), ErrorCode::Conflict);
+        let observations = store.observations.lock().unwrap().clone();
+        assert_eq!(observations, vec![(Tick(1), true)]);
+
+        // Restore a pending receiver for the final shutdown save.
+        let (_reply, pending) = oneshot::channel();
+        *store.last_reply.lock().unwrap() = Some(pending);
+        shutdown.send(true).unwrap();
+        task.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_preempts_a_due_tick_and_queued_admission() {
+        let (service, grant, _) = service();
+        let store = Arc::new(MemoryStore::default());
+        let service = service.with_persistence(store.clone(), Duration::from_millis(20));
+        let (events, receiver) = mpsc::channel(8);
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let task = service.run(receiver, shutdown_rx);
+        tokio::pin!(task);
+        assert!(futures_util::poll!(&mut task).is_pending());
+        tokio::time::advance(Duration::from_millis(21)).await;
+
+        let (outbound, _out_rx) = mpsc::channel(16);
+        let (reply, result) = oneshot::channel();
+        events
+            .try_send(ServerEvent::Admit {
+                credential: Credential::Static(grant),
+                hello: Hello {
+                    handshake: demo::handshake().unwrap(),
+                    last_ack_tick: Tick::ZERO,
+                },
+                outbound,
+                reply,
+            })
+            .unwrap();
+        shutdown.send(true).unwrap();
+        task.await;
+        assert!(result.await.is_err());
+        let state = store.state.lock().unwrap();
+        assert_eq!(state.saves, 1);
+        assert_eq!(state.last.as_ref().unwrap().zone.tick, Tick::ZERO);
     }
 
     /// Rejects every write so startup can prove it handles the failure.

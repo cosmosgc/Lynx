@@ -15,8 +15,9 @@
   delivery failures and define a safe recovery protocol.
 - Session acknowledgements track a tick; reconnect sends a fresh snapshot, not
   a durable replay of acknowledged events. Clients must not assume event replay.
-- The biased authority loop and synchronous snapshot saves may delay ticks under
-  load. Measure tick latency under flooding and slow persistence.
+- Due ticks now take priority over queued events, with regression tests for a
+  ready admission backlog and shutdown. Synchronous snapshot saves can still
+  delay ticks; measure tick latency under flooding and slow persistence.
 - Session deadlines use wall-clock time; clock corrections can change resume
   windows. Evaluate a monotonic time source for process-local deadlines.
 
