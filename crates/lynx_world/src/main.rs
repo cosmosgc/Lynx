@@ -90,6 +90,7 @@ fn token_hash() -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // Process startup intentionally assembles every trusted subsystem.
 async fn serve(args: ServeArgs) -> Result<()> {
     args.validate_demo_auth_bind()?;
     tracing::warn!(
@@ -104,6 +105,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
     let origins = OriginPolicy::new(args.allowed_origins.clone())
         .context("invalid --allow-origin configuration")?;
     let gateway_config = args.gateway_config()?;
+    let rate_limits = args.rate_limit_config()?;
     let authenticator = Authenticator::new(&args.token_hashes()?)?.with_staff(args.staff);
     let grants: Vec<Grant> = authenticator.grants().cloned().collect();
     let snapshot_interval = args
@@ -169,7 +171,11 @@ async fn serve(args: ServeArgs) -> Result<()> {
 
     let (events, receivers) = transport::event_channel();
     let (shutdown, shutdown_rx) = watch::channel(false);
-    let state = Arc::new(AppState::new(events, authenticator).with_origin_policy(origins));
+    let state = Arc::new(
+        AppState::new(events, authenticator)
+            .with_origin_policy(origins)
+            .with_rate_limits(rate_limits),
+    );
 
     let listener = tokio::net::TcpListener::bind(args.bind)
         .await
@@ -181,6 +187,8 @@ async fn serve(args: ServeArgs) -> Result<()> {
         address = %local,
         characters = grants.len(),
         tick_ms = args.tick_ms,
+        message_burst = args.message_burst,
+        message_rate = args.message_rate,
         snapshot_ms = args.snapshot_ms,
         state_file = ?args.state_file,
         "lynx-world listening"

@@ -37,6 +37,8 @@ pub enum ErrorCode {
     Conflict,
     /// A bounded work budget was exhausted; retry is allowed.
     BudgetExhausted,
+    /// A request or admission rate limit was exceeded; retry is allowed.
+    RateLimited,
     /// The feature or operation is not supported by this build.
     Unsupported,
     /// An invariant failed or an unexpected internal error occurred.
@@ -61,6 +63,7 @@ impl ErrorCode {
             Self::ContentInvalid => "content_invalid",
             Self::Conflict => "conflict",
             Self::BudgetExhausted => "budget_exhausted",
+            Self::RateLimited => "rate_limited",
             Self::Unsupported => "unsupported",
             Self::Internal => "internal",
         }
@@ -71,7 +74,7 @@ impl ErrorCode {
     pub const fn is_retryable(self) -> bool {
         matches!(
             self,
-            Self::Cooldown | Self::BudgetExhausted | Self::Conflict
+            Self::Cooldown | Self::BudgetExhausted | Self::RateLimited | Self::Conflict
         )
     }
 
@@ -92,6 +95,7 @@ impl ErrorCode {
                 | Self::VersionMismatch
                 | Self::ContentInvalid
                 | Self::Conflict
+                | Self::RateLimited
                 | Self::Unsupported
         )
     }
@@ -210,6 +214,7 @@ mod tests {
             ErrorCode::InvalidRequest,
             ErrorCode::SessionExpired,
             ErrorCode::BudgetExhausted,
+            ErrorCode::RateLimited,
             ErrorCode::VersionMismatch,
             ErrorCode::Internal,
         ] {
@@ -224,6 +229,7 @@ mod tests {
     fn retryable_follows_code_by_default() {
         assert!(EngineError::new(ErrorCode::Cooldown, "wait").retryable());
         assert!(EngineError::new(ErrorCode::BudgetExhausted, "busy").retryable());
+        assert!(EngineError::new(ErrorCode::RateLimited, "busy").retryable());
         assert!(!EngineError::new(ErrorCode::PermissionDenied, "no").retryable());
         assert!(
             !EngineError::new(ErrorCode::Cooldown, "wait")

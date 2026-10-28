@@ -5,13 +5,14 @@
 //! connections. It never interprets gameplay intent.
 
 use std::future::Future;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use axum::Json;
-use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -25,6 +26,7 @@ use tokio::sync::{mpsc, oneshot};
 use world_gateway::{ERROR_KIND, ResumeToken};
 
 use crate::auth::Authenticator;
+use crate::rate_limit::{RateLimitConfig, RateLimits};
 use crate::service::{Admitted, Credential, HELLO_KIND, Hello, ServerEvent, ServerFrame};
 
 /// How long a peer has to send `session.hello` after the upgrade.
@@ -49,68 +51,7 @@ pub struct AppState {
     authenticator: Authenticator,
     ready: AtomicBool,
     origins: OriginPolicy,
-    message_budget: MessageBudgetConfig,
-}
-
-/// Fixed-window limit for binary and text messages on an admitted connection.
-#[derive(Debug, Clone, Copy)]
-pub struct MessageBudgetConfig {
-    limit: u32,
-    window: Duration,
-}
-
-impl MessageBudgetConfig {
-    /// Construct a bounded budget (1–10,000 messages, 1 ms–60 seconds).
-    ///
-    /// # Errors
-    /// Returns an error if either value is outside the supported range.
-    pub fn new(limit: u32, window: Duration) -> anyhow::Result<Self> {
-        anyhow::ensure!((1..=10_000).contains(&limit), "message limit out of range");
-        anyhow::ensure!(
-            (Duration::from_millis(1)..=Duration::from_secs(60)).contains(&window),
-            "message window out of range"
-        );
-        Ok(Self { limit, window })
-    }
-}
-
-impl Default for MessageBudgetConfig {
-    fn default() -> Self {
-        Self {
-            limit: 100,
-            window: Duration::from_secs(1),
-        }
-    }
-}
-
-#[derive(Debug)]
-struct MessageBudget {
-    config: MessageBudgetConfig,
-    start: Instant,
-    used: u32,
-}
-
-impl MessageBudget {
-    fn new(config: MessageBudgetConfig, now: Instant) -> Self {
-        Self {
-            config,
-            start: now,
-            used: 0,
-        }
-    }
-
-    fn check(&mut self, now: Instant) -> Result<(), Duration> {
-        let elapsed = now.saturating_duration_since(self.start);
-        if elapsed >= self.config.window {
-            self.start = now;
-            self.used = 0;
-        }
-        if self.used >= self.config.limit {
-            return Err(self.config.window.saturating_sub(elapsed));
-        }
-        self.used += 1;
-        Ok(())
-    }
+    limits: RateLimits,
 }
 
 /// Optional exact-match browser Origin allowlist. Requests without Origin are
@@ -177,7 +118,7 @@ impl AppState {
             authenticator,
             ready: AtomicBool::new(true),
             origins: OriginPolicy::default(),
-            message_budget: MessageBudgetConfig::default(),
+            limits: RateLimits::new(RateLimitConfig::default()),
         }
     }
 
@@ -188,10 +129,13 @@ impl AppState {
         self
     }
 
-    /// Set the post-admission per-connection message budget.
+    /// Set bounded per-IP admission and per-server-session rate limits.
+    ///
+    /// Limits are keyed after authentication by the server-issued session ID,
+    /// not by any client-provided identity field.
     #[must_use]
-    pub fn with_message_budget(mut self, budget: MessageBudgetConfig) -> Self {
-        self.message_budget = budget;
+    pub fn with_rate_limits(mut self, limits: RateLimitConfig) -> Self {
+        self.limits = RateLimits::new(limits);
         self
     }
 
@@ -206,6 +150,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
+        .route("/metrics", get(metrics))
         .route("/world", get(world))
         .with_state(state)
 }
@@ -221,9 +166,12 @@ pub async fn serve_with_shutdown(
     state: Arc<AppState>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
-    serve(listener, router(state))
-        .with_graceful_shutdown(shutdown)
-        .await
+    serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await
 }
 
 async fn healthz() -> Json<Value> {
@@ -247,11 +195,23 @@ async fn readyz(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>)
     }
 }
 
+async fn metrics(State(state): State<Arc<AppState>>) -> Json<Value> {
+    Json(json!({ "rate_limit_rejections": state.limits.metrics() }))
+}
+
 async fn world(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
+    if let Err(error) = state
+        .limits
+        .admission()
+        .handshake(peer.ip(), Instant::now())
+    {
+        return admission_rejected(&error);
+    }
     if !state.origins.permits(&headers) {
         tracing::info!(reason = "origin_forbidden", "websocket admission rejected");
         return (
@@ -261,20 +221,68 @@ async fn world(
             .into_response();
     }
     let Some(presented) = bearer(&headers) else {
-        return unauthorized();
+        return match state
+            .limits
+            .admission()
+            .failed_auth(peer.ip(), Instant::now())
+        {
+            Ok(()) => unauthorized(),
+            Err(error) => admission_rejected(&error),
+        };
     };
     let credential = match state.authenticator.grant_for(presented) {
         Some(grant) => Credential::Static(grant.clone()),
         None => match ResumeToken::new(presented.to_owned()) {
             Ok(token) => Credential::Resume(token),
-            Err(_) => return unauthorized(),
+            Err(_) => {
+                return match state
+                    .limits
+                    .admission()
+                    .failed_auth(peer.ip(), Instant::now())
+                {
+                    Ok(()) => unauthorized(),
+                    Err(error) => admission_rejected(&error),
+                };
+            }
         },
     };
+    if let Err(error) = state
+        .limits
+        .admission()
+        .connection_churn(peer.ip(), Instant::now())
+    {
+        return admission_rejected(&error);
+    }
 
     upgrade
         .max_message_size(MAX_FRAME_BYTES + FRAME_HEADER_BYTES)
         .max_frame_size(MAX_FRAME_BYTES + FRAME_HEADER_BYTES)
         .on_upgrade(move |socket| connection(socket, credential, state))
+}
+
+fn admission_rejected(error: &EngineError) -> Response {
+    let status = match error.code() {
+        ErrorCode::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+        ErrorCode::CapacityExceeded => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::BAD_REQUEST,
+    };
+    let mut response = (
+        status,
+        Json(json!({
+            "error": error.code().as_str(),
+            "retry_after_ms": error.details().get("retry_after_ms"),
+        })),
+    )
+        .into_response();
+    if let Some(retry) = error.details().get("retry_after_ms")
+        && let Ok(milliseconds) = retry.parse::<u64>()
+    {
+        let seconds = milliseconds.saturating_add(999) / 1_000;
+        if let Ok(value) = axum::http::HeaderValue::from_str(&seconds.max(1).to_string()) {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+    }
+    response
 }
 
 fn unauthorized() -> Response {
@@ -342,7 +350,30 @@ async fn connection(mut socket: WebSocket, credential: Credential, state: Arc<Ap
         Err(_) => return,
     };
 
-    let end = pump(&mut socket, &state, admitted.connection, &mut out_rx).await;
+    if let Err(error) = state
+        .limits
+        .sessions()
+        .register(&admitted.session, Instant::now())
+    {
+        tracing::warn!(code = ?error.code(), "websocket rate-limit registration rejected");
+        reject(&mut socket, &error).await;
+        let _ = state
+            .events
+            .send(ServerEvent::Leave {
+                connection: admitted.connection,
+            })
+            .await;
+        return;
+    }
+
+    let end = pump(
+        &mut socket,
+        &state,
+        admitted.connection,
+        &admitted.session,
+        &mut out_rx,
+    )
+    .await;
     if let End::Protocol(error) = end {
         tracing::warn!(code = ?error.code(), "closing websocket after a protocol error");
         reject(&mut socket, &error).await;
@@ -365,19 +396,19 @@ async fn pump(
     socket: &mut WebSocket,
     state: &Arc<AppState>,
     connection: world_server::ConnectionId,
+    session: &engine_net::replication::SessionId,
     out_rx: &mut mpsc::Receiver<ServerFrame>,
 ) -> End {
-    let mut budget = MessageBudget::new(state.message_budget, Instant::now());
     loop {
         tokio::select! {
             incoming = socket.recv() => {
                 match incoming {
                     Some(Ok(Message::Binary(bytes))) => {
-                        if let Err(retry) = budget.check(Instant::now()) {
-                            return rate_limit_end(retry);
-                        }
                         match decode_frame(&bytes) {
                             Ok(envelope) => {
+                                if let Err(error) = state.limits.sessions().check(session, &envelope, Instant::now()) {
+                                    return rate_limit_end(error);
+                                }
                                 if state
                                     .events
                                     .send(ServerEvent::Frame { connection, envelope })
@@ -387,15 +418,20 @@ async fn pump(
                                     return End::Clean;
                                 }
                             }
-                            Err(error) => return End::Protocol(error),
+                            Err(error) => {
+                                if let Err(limited) = state.limits.sessions().check_unknown(session, Instant::now()) {
+                                    return rate_limit_end(limited);
+                                }
+                                return End::Protocol(error);
+                            }
                         }
                     }
                     Some(Ok(Message::Text(text))) => {
-                        if let Err(retry) = budget.check(Instant::now()) {
-                            return rate_limit_end(retry);
-                        }
                         match Envelope::decode(text.as_str()) {
                             Ok(envelope) => {
+                                if let Err(error) = state.limits.sessions().check(session, &envelope, Instant::now()) {
+                                    return rate_limit_end(error);
+                                }
                                 if state
                                     .events
                                     .send(ServerEvent::Frame { connection, envelope })
@@ -405,7 +441,12 @@ async fn pump(
                                     return End::Clean;
                                 }
                             }
-                            Err(error) => return End::Protocol(error),
+                            Err(error) => {
+                                if let Err(limited) = state.limits.sessions().check_unknown(session, Instant::now()) {
+                                    return rate_limit_end(limited);
+                                }
+                                return End::Protocol(error);
+                            }
                         }
                     }
                     Some(Ok(Message::Close(_)) | Err(_)) | None => return End::Clean,
@@ -429,19 +470,12 @@ async fn pump(
     }
 }
 
-fn rate_limit_end(retry: Duration) -> End {
+fn rate_limit_end(error: EngineError) -> End {
     tracing::warn!(
-        code = "budget_exhausted",
-        "websocket message budget exceeded"
+        code = ?error.code(),
+        "websocket rate limit exceeded"
     );
-    let retry_ms = retry.as_millis().saturating_add(1);
-    End::Protocol(
-        EngineError::new(
-            ErrorCode::BudgetExhausted,
-            "connection message budget exceeded",
-        )
-        .with_detail("retry_after_ms", retry_ms.to_string()),
-    )
+    End::Protocol(error)
 }
 
 async fn read_hello(socket: &mut WebSocket) -> Result<Hello, EngineError> {
@@ -520,23 +554,6 @@ fn error_envelope(error: &EngineError) -> Result<Envelope, EngineError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn message_budget_bounds_burst_and_refills_independently() {
-        assert!(MessageBudgetConfig::new(0, Duration::from_secs(1)).is_err());
-        assert!(MessageBudgetConfig::new(10_001, Duration::from_secs(1)).is_err());
-        assert!(MessageBudgetConfig::new(1, Duration::ZERO).is_err());
-        assert!(MessageBudgetConfig::new(1, Duration::from_secs(61)).is_err());
-        let config = MessageBudgetConfig::new(2, Duration::from_secs(1)).unwrap();
-        let now = Instant::now();
-        let mut first = MessageBudget::new(config, now);
-        let mut second = MessageBudget::new(config, now);
-        assert!(first.check(now).is_ok());
-        assert!(first.check(now).is_ok());
-        assert_eq!(first.check(now), Err(Duration::from_secs(1)));
-        assert!(second.check(now).is_ok());
-        assert!(first.check(now + Duration::from_secs(1)).is_ok());
-    }
 
     fn headers(value: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();

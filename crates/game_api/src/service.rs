@@ -47,13 +47,13 @@ impl ApiError {
             Self::NotFound(_) => ErrorCode::NotFound,
             Self::InvalidRequest(_) => ErrorCode::InvalidRequest,
             Self::Conflict(_) => ErrorCode::Conflict,
-            Self::RateLimited => ErrorCode::CapacityExceeded,
+            Self::RateLimited => ErrorCode::RateLimited,
             Self::Backend { status, .. } => match status {
                 400 | 422 => ErrorCode::InvalidRequest,
                 401 | 403 => ErrorCode::PermissionDenied,
                 404 => ErrorCode::NotFound,
                 409 => ErrorCode::Conflict,
-                429 => ErrorCode::CapacityExceeded,
+                429 => ErrorCode::RateLimited,
                 _ => ErrorCode::Internal,
             },
         }

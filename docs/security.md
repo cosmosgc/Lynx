@@ -84,6 +84,19 @@ servers.
   traces, or crash reports. Unknown, expired, or replayed tokens fail with
   `SessionExpired`; a still-connected session fails with `Conflict`.
 - The client's acknowledged tick is clamped to the authoritative tick.
+- Admission is token-bucket limited per peer IP for upgrade handshakes, failed
+  credentials, and connection churn. The limiter has a fixed maximum identity
+  map and evicts idle entries; it uses the TCP peer address, not a forwarding
+  header supplied by an untrusted client.
+- After successful admission, total and message-family token buckets are keyed
+  by the server-issued session ID. `action.request`, attack actions, chat,
+  movement, calendar, and UI control each have separate budgets. A resumed
+  session keeps its bucket through its resume window, so reconnecting cannot
+  reset a burst. Rate errors use the stable `rate_limited` code and include a
+  safe `retry_after_ms` parameter; they contain no bearer or resume secret.
+- The `/metrics` endpoint exposes bounded rejection counters grouped by message
+  family and stable error code for alerting. It never uses an attacker-provided
+  kind as a metric label.
 - Expired resume windows are swept on connect, resume, and every tick. A
   missing actor invalidates the session instead of resurrecting a stale
   character.

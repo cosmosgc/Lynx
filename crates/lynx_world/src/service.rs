@@ -435,6 +435,7 @@ impl Service {
             Err(mpsc::error::TrySendError::Full(_)) => {
                 tracing::warn!(
                     connection = %connection,
+                    reason = "slow_client_outbound_queue_full",
                     "outbound queue is full; dropping the connection"
                 );
                 self.writers.remove(&connection);
@@ -922,6 +923,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::items_after_statements,
+        clippy::too_many_lines,
+        reason = "The end-to-end oversized-delivery scenario keeps helpers and assertions together."
+    )]
     async fn oversized_delta_closes_websocket_and_resume_depends_on_snapshot_size() {
         use engine_core::id::DefinitionId;
         use engine_core::math::Vec3;

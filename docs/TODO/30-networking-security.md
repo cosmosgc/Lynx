@@ -94,7 +94,7 @@ substitute demo characters or in-memory ownership for production ownership.
 ## NET-002 — Rate limiting and message budgets
 
 - **Priority:** P0
-- **Status:** Ready
+- **Status:** Done
 - **Depends on:** —
 - **References:** [security §Abuse prevention](../security.md#abuse-prevention),
   `crates/engine_net/src/envelope.rs`
@@ -115,14 +115,14 @@ movement requests and starve the authority loop.
 
 **Acceptance criteria**
 
-- [ ] A burst above the configured budget is rejected without affecting other
+- [x] A burst above the configured budget is rejected without affecting other
       sessions.
-- [ ] Limits apply after authentication and use server-resolved identity, not
+- [x] Limits apply after authentication and use server-resolved identity, not
       client claims.
-- [ ] Slow clients are detached with a documented reason before queues grow
+- [x] Slow clients are detached with a documented reason before queues grow
       without bound.
-- [ ] Rejections are counted by kind/error code for alerting.
-- [ ] Tests cover token-bucket refill, burst, and reconnect behavior.
+- [x] Rejections are counted by kind/error code for alerting.
+- [x] Tests cover token-bucket refill, burst, and reconnect behavior.
 
 ---
 

@@ -13,6 +13,8 @@ use clap::Args;
 use engine_core::time::DurationMs;
 use world_gateway::GatewayConfig;
 
+use crate::rate_limit::{RateLimitConfig, TokenBucketConfig};
+
 /// Default listen address. Loopback keeps an unconfigured process off the
 /// network.
 pub const DEFAULT_BIND: &str = "127.0.0.1:8090";
@@ -25,6 +27,7 @@ pub const DEFAULT_SNAPSHOT_MS: u64 = 10_000;
 
 /// Arguments for `lynx-world serve`.
 #[derive(Debug, Clone, Args)]
+#[allow(clippy::struct_excessive_bools)] // CLI flags are independent process options.
 pub struct ServeArgs {
     /// Address to listen on.
     #[arg(long, default_value = DEFAULT_BIND)]
@@ -50,6 +53,15 @@ pub struct ServeArgs {
     /// Maximum retained sessions, connected or disconnected.
     #[arg(long, default_value_t = 1_024)]
     pub max_sessions: usize,
+
+    /// Authenticated total-message token-bucket burst capacity. Per-kind
+    /// budgets remain bounded server defaults.
+    #[arg(long, default_value_t = 100)]
+    pub message_burst: u32,
+
+    /// Authenticated total-message token-bucket refill rate per second.
+    #[arg(long, default_value_t = 100)]
+    pub message_rate: u32,
 
     /// Allowed browser Origin, exactly as serialized (repeatable). If omitted,
     /// Origin checking is disabled; requests without Origin are always allowed.
@@ -128,6 +140,28 @@ impl ServeArgs {
             .with_max_sessions(self.max_sessions);
         config.validate().context("invalid gateway configuration")?;
         Ok(config)
+    }
+
+    /// Construct bounded admission and session rate limits.
+    ///
+    /// The total message bucket is operator-tunable; dedicated action, chat,
+    /// movement, calendar, UI, and admission budgets retain conservative,
+    /// bounded defaults so one broad knob cannot disable abuse protection.
+    ///
+    /// # Errors
+    /// Returns an error when either total-message value exceeds the hard cap.
+    pub fn rate_limit_config(&self) -> Result<RateLimitConfig> {
+        let total = TokenBucketConfig::new(self.message_burst, self.message_rate)
+            .context("invalid message rate configuration")?;
+        RateLimitConfig::default()
+            .with_max_sessions(self.max_sessions)
+            .context("invalid session rate-limit capacity")
+            .and_then(|config| {
+                config
+                    .with_session_retention(Duration::from_millis(self.resume_ttl_ms))
+                    .context("invalid session rate-limit retention")
+            })
+            .map(|config| config.with_session_total(total))
     }
 
     /// The configured tick interval.
@@ -214,6 +248,8 @@ mod tests {
             resume_ttl_ms: 30_000,
             view_radius_m: 60.0,
             max_sessions: 1_024,
+            message_burst: 100,
+            message_rate: 100,
             allowed_origins: Vec::new(),
             staff: false,
             state_file: None,
@@ -301,6 +337,7 @@ mod tests {
         assert_eq!(gateway.resume_ttl, DurationMs::new(30_000));
         assert_eq!(gateway.view_radius_m, 60.0);
         assert_eq!(gateway.max_sessions, 1_024);
+        assert!(sample().rate_limit_config().is_ok());
     }
 
     #[test]
@@ -320,6 +357,10 @@ mod tests {
         let mut invalid = sample();
         invalid.max_sessions = 0;
         assert!(invalid.gateway_config().is_err());
+
+        let mut invalid = sample();
+        invalid.message_rate = 0;
+        assert!(invalid.rate_limit_config().is_err());
     }
 
     #[test]

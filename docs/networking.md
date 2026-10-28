@@ -49,6 +49,34 @@ Every message is a JSON object:
   carrying a bare envelope are accepted for inspection tools; the canonical
   wire form is binary and length-prefixed.
 
+## Admission, rate limits, and slow clients
+
+`lynx-world` applies bounded token buckets before work reaches the authority
+loop:
+
+- Per TCP peer IP: 20 upgrade handshakes bursting at 10/s, five failed
+  credentials at 1/s, and 10 valid connection/resume churn attempts at 2/s.
+  Peer IP is taken from the listener, not client forwarding headers. The
+  identity map is capped at 16,384 idle entries and entries expire after five
+  minutes.
+- Per authenticated server-issued session: 100 total messages at 100/s; action
+  20/s; attack 8/s; chat 5/s; movement 30/s; calendar 5/s; and UI 10/s. Each
+  family has its own burst capacity and also consumes the total budget. Attack
+  consumes both its action-family and action-type budget. Session buckets stay
+  through the configured resume window.
+- `--message-burst` and `--message-rate` tune only the total authenticated
+  bucket (both must be 1–10,000). Per-family and admission limits deliberately
+  remain bounded server defaults; a broad tuning knob cannot disable abuse
+  protection. `/metrics` returns rejection counts by normalized family and
+  stable error code.
+
+A rate rejection returns HTTP 429 before an upgrade or a `protocol.error` with
+`code: "rate_limited"` after admission, then closes the WebSocket. It includes
+`retry_after_ms`; it never includes a credential. Each connection's outbound
+queue is capped at 64 frames. A full queue detaches that slow client with the
+`slow_client_outbound_queue_full` reason rather than blocking the authoritative
+tick; a resume uses a fresh snapshot.
+
 ## World service wire messages
 
 `world_server` owns the connection-oriented message kinds:
