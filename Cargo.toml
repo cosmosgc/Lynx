@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "clients/lynx_client",
+    "clients/lynx_client_net",
     "crates/engine_core",
     "crates/engine_sim",
     "crates/engine_content",
