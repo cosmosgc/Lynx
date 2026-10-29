@@ -46,6 +46,27 @@ pub struct AiTickReport {
     pub action_attempts: usize,
 }
 
+/// Fixed-size cumulative diagnostics for tick-driven AI. All counters saturate.
+/// Controller limit counters mean the limit was reached with unscanned entity
+/// records remaining; they do not assert that another AI controller was skipped.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AiDiagnostics {
+    /// Enabled AI ticks.
+    pub ticks: u64,
+    /// Controller decisions evaluated.
+    pub decisions: u64,
+    /// Ticks ending at the controller scan limit with records remaining.
+    pub controller_scan_limit_reached: u64,
+    /// Ticks ending at the AI update limit with records remaining.
+    pub update_limit_reached: u64,
+    /// Decisions whose perception reached its candidate limit.
+    pub perception_candidate_limit_reached: u64,
+    /// Decisions whose perception ran out of line-of-sight checks.
+    pub perception_los_limit_reached: u64,
+    /// Decisions with a target but no remaining action budget.
+    pub action_budget_exhaustions: u64,
+}
+
 /// A guard decision or an explicit reason for not acting.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AiDecision {
@@ -75,6 +96,18 @@ impl Zone {
         &self.ai_report
     }
 
+    /// Cumulative tick-driven AI diagnostics since creation or the last take.
+    #[must_use]
+    pub fn ai_diagnostics(&self) -> AiDiagnostics {
+        self.ai_diagnostics
+    }
+
+    /// Return and reset cumulative AI diagnostics without affecting simulation.
+    pub fn take_ai_diagnostics(&mut self) -> AiDiagnostics {
+        std::mem::take(&mut self.ai_diagnostics)
+    }
+
+    #[allow(clippy::too_many_lines)] // Keep decision and accounting order together.
     pub(crate) fn run_ai_tick(&mut self) {
         let mut report = AiTickReport {
             tick: self.tick,
@@ -84,6 +117,7 @@ impl Zone {
             self.ai_report = report;
             return;
         };
+        self.ai_diagnostics.ticks = self.ai_diagnostics.ticks.saturating_add(1);
         // Bound selection work independently of the number of non-AI entities.
         let mut controllers = Vec::new();
         for entity in self
@@ -105,6 +139,17 @@ impl Zone {
                 if controllers.len() == self.config.budget.max_ai_updates {
                     break;
                 }
+            }
+        }
+        if report.controller_candidates < self.entities.len() {
+            if controllers.len() == self.config.budget.max_ai_updates {
+                self.ai_diagnostics.update_limit_reached =
+                    self.ai_diagnostics.update_limit_reached.saturating_add(1);
+            } else if report.controller_candidates == policy.max_controller_candidates {
+                self.ai_diagnostics.controller_scan_limit_reached = self
+                    .ai_diagnostics
+                    .controller_scan_limit_reached
+                    .saturating_add(1);
             }
         }
         let elapsed = self.tick.0.saturating_mul(u64::from(policy.tick_ms));
@@ -136,6 +181,21 @@ impl Zone {
                     )
                     .expect("selected actor exists");
                 decision.target = perception.targets.first().map(|target| target.entity);
+                match perception.status {
+                    PerceptionStatus::CandidateBudgetReached => {
+                        self.ai_diagnostics.perception_candidate_limit_reached = self
+                            .ai_diagnostics
+                            .perception_candidate_limit_reached
+                            .saturating_add(1);
+                    }
+                    PerceptionStatus::LineOfSightBudgetReached => {
+                        self.ai_diagnostics.perception_los_limit_reached = self
+                            .ai_diagnostics
+                            .perception_los_limit_reached
+                            .saturating_add(1);
+                    }
+                    _ => {}
+                }
                 decision.reason = match perception.status {
                     PerceptionStatus::IneligibleObserver => "ineligible_observer",
                     PerceptionStatus::InvalidGeometry => "invalid_geometry",
@@ -165,6 +225,13 @@ impl Zone {
                         decision.action = Some(result);
                     }
                 }
+            }
+            self.ai_diagnostics.decisions = self.ai_diagnostics.decisions.saturating_add(1);
+            if decision.reason == "action_budget_reached" {
+                self.ai_diagnostics.action_budget_exhaustions = self
+                    .ai_diagnostics
+                    .action_budget_exhaustions
+                    .saturating_add(1);
             }
             report.decisions.push(decision);
         }
@@ -687,6 +754,13 @@ mod tests {
             99
         );
         assert_eq!(a.entity(id(3)), b.entity(id(3)));
+        assert_eq!(a.ai_diagnostics(), b.ai_diagnostics());
+        assert_eq!(a.ai_diagnostics().decisions, 2);
+        assert_eq!(a.ai_diagnostics().action_budget_exhaustions, 1);
+        assert_eq!(a.ai_diagnostics().update_limit_reached, 1);
+        assert_eq!(a.take_ai_diagnostics().decisions, 2);
+        assert_eq!(a.ai_diagnostics(), AiDiagnostics::default());
+        assert_eq!(a.entity(id(3)), b.entity(id(3)));
     }
 
     #[test]
@@ -776,6 +850,7 @@ mod tests {
             decisions[1].perception.as_ref().unwrap().status,
             PerceptionStatus::CandidateBudgetReached
         );
+        assert_eq!(zone.ai_diagnostics().perception_candidate_limit_reached, 1);
         assert_eq!(zone.ai_tick_report().action_attempts, 0);
     }
 

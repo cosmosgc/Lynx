@@ -83,6 +83,28 @@ pub struct Path {
     pub cost: u64,
 }
 
+/// Fixed-size, caller-owned cumulative pathfinding diagnostics. Counters saturate.
+/// Only calls to [`NavGrid::find_path_observed`] are recorded.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PathDiagnostics {
+    /// Completed requests, including failures.
+    pub requests: u64,
+    /// Nodes whose neighbours were expanded, including on failed requests.
+    pub expansions: u64,
+    /// Requests rejected for either the expansion or waypoint limit.
+    pub budget_exhaustions: u64,
+    /// Failed requests, including budget exhaustion.
+    pub failures: u64,
+}
+
+impl PathDiagnostics {
+    /// Return the accumulated counters and reset them to zero.
+    #[must_use]
+    pub fn take(&mut self) -> Self {
+        std::mem::take(self)
+    }
+}
+
 impl Path {
     /// The goal waypoint, if any.
     #[must_use]
@@ -412,6 +434,43 @@ impl NavGrid {
     ///
     /// Returns the most specific [`PathError`] for the failure.
     pub fn find_path(&self, from: Vec3, to: Vec3, budget: PathBudget) -> Result<Path, PathError> {
+        self.find_path_inner(from, to, budget, &mut 0)
+    }
+
+    /// Find a path and accumulate fixed-size diagnostics, including failed work.
+    ///
+    /// This has the same result and budget semantics as [`Self::find_path`].
+    /// # Errors
+    /// Returns the same [`PathError`] as [`Self::find_path`].
+    pub fn find_path_observed(
+        &self,
+        from: Vec3,
+        to: Vec3,
+        budget: PathBudget,
+        diagnostics: &mut PathDiagnostics,
+    ) -> Result<Path, PathError> {
+        let mut expansions = 0;
+        let result = self.find_path_inner(from, to, budget, &mut expansions);
+        diagnostics.requests = diagnostics.requests.saturating_add(1);
+        diagnostics.expansions = diagnostics
+            .expansions
+            .saturating_add(u64::try_from(expansions).unwrap_or(u64::MAX));
+        if result.is_err() {
+            diagnostics.failures = diagnostics.failures.saturating_add(1);
+        }
+        if matches!(result, Err(PathError::BudgetExhausted)) {
+            diagnostics.budget_exhaustions = diagnostics.budget_exhaustions.saturating_add(1);
+        }
+        result
+    }
+
+    fn find_path_inner(
+        &self,
+        from: Vec3,
+        to: Vec3,
+        budget: PathBudget,
+        observed: &mut usize,
+    ) -> Result<Path, PathError> {
         let Some((start_x, start_y)) = self.cell_of(from) else {
             return Err(PathError::OutOfBounds);
         };
@@ -456,6 +515,8 @@ impl NavGrid {
             if expansions > budget.max_expansions {
                 return Err(PathError::BudgetExhausted);
             }
+
+            *observed = expansions;
 
             let cx = current.index % self.width;
             let cy = current.index / self.width;
@@ -714,6 +775,46 @@ mod tests {
             room.find_path(at(0.5, 0.5), at(255.5, 255.5), tight),
             Err(PathError::BudgetExhausted)
         );
+    }
+
+    #[test]
+    fn observed_paths_include_failed_work_and_reset() {
+        let mut room = grid(5, 5);
+        let mut stats = PathDiagnostics::default();
+        let start = at(0.5, 0.5);
+        let goal = at(4.5, 0.5);
+        let normal = PathBudget::default();
+        assert_eq!(
+            room.find_path_observed(start, goal, normal, &mut stats),
+            room.find_path(start, goal, normal)
+        );
+        let tight = PathBudget {
+            max_expansions: 2,
+            max_waypoints: 10,
+        };
+        assert_eq!(
+            room.find_path_observed(start, goal, tight, &mut stats),
+            Err(PathError::BudgetExhausted)
+        );
+        let short = PathBudget {
+            max_expansions: 10,
+            max_waypoints: 1,
+        };
+        assert_eq!(
+            room.find_path_observed(start, goal, short, &mut stats),
+            Err(PathError::BudgetExhausted)
+        );
+        room.set_blocked(4, 0, true);
+        assert_eq!(
+            room.find_path_observed(start, goal, normal, &mut stats),
+            Err(PathError::Blocked)
+        );
+        assert_eq!(stats.requests, 4);
+        assert_eq!(stats.expansions, 10);
+        assert_eq!(stats.failures, 3);
+        assert_eq!(stats.budget_exhaustions, 2);
+        assert_eq!(stats.take().requests, 4);
+        assert_eq!(stats, PathDiagnostics::default());
     }
 
     #[test]

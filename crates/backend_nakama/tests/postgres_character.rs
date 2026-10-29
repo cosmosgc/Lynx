@@ -83,6 +83,9 @@ fn account_scoped_reads_survive_reconnection() {
         identities.resolve_account("' OR true--"),
         Err(ApiError::Unauthenticated)
     ));
+    let metrics = identities.telemetry().snapshot();
+    assert_eq!(metrics.count, 6);
+    assert_eq!(metrics.failures, 2);
     let new_nakama_user: String = db
         .query_one("SELECT md5($1)::uuid::text", &[&format!("new-{nonce}")])
         .unwrap()

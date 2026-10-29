@@ -34,6 +34,16 @@ impl fmt::Debug for NakamaPostgresBackend {
 }
 
 impl NakamaPostgresBackend {
+    /// Snapshot each underlying adapter independently. Concurrent updates may
+    /// occur between the three reads; each individual snapshot is coherent.
+    #[must_use]
+    pub fn telemetry_snapshot(&self) -> BackendTelemetrySnapshot {
+        BackendTelemetrySnapshot {
+            nakama: self.nakama.telemetry().snapshot(),
+            identity_store: self.identities.telemetry().snapshot(),
+            character_store: self.characters.telemetry().snapshot(),
+        }
+    }
     /// Compose established Nakama and PostgreSQL adapters.
     #[must_use]
     pub fn new(
@@ -79,6 +89,17 @@ impl NakamaPostgresBackend {
             Err(error) => Err(error),
         }
     }
+}
+
+/// Aggregate measurements by fixed adapter, with no user-supplied labels.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BackendTelemetrySnapshot {
+    /// Nakama client operations.
+    pub nakama: crate::TelemetrySnapshot,
+    /// PostgreSQL identity repository operations.
+    pub identity_store: crate::TelemetrySnapshot,
+    /// PostgreSQL character repository operations.
+    pub character_store: crate::TelemetrySnapshot,
 }
 
 impl HealthService for NakamaPostgresBackend {

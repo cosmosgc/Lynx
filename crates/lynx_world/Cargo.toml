@@ -15,6 +15,7 @@ backend_memory = { workspace = true }
 backend_nakama = { workspace = true }
 clap = { workspace = true }
 dotenvy = "0.15.7"
+engine_content = { workspace = true }
 engine_core = { workspace = true }
 engine_net = { workspace = true }
 engine_sim = { workspace = true }

@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::str::FromStr;
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
@@ -360,6 +361,72 @@ pub struct CatalogSet {
     catalogs: BTreeMap<Locale, MessageCatalog>,
 }
 
+/// Maximum number of configured locale labels in missing-key diagnostics.
+pub const MAX_DIAGNOSTIC_LOCALES: usize = 64;
+
+/// Process-local counts of resolutions that did not find the key in the
+/// requested catalog, including unsuccessful resolutions. No keys are stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalizationSnapshot {
+    /// Counts for explicitly configured, canonical locales, in locale order.
+    pub locales: BTreeMap<Locale, u64>,
+    /// Count for all other requested locales, without a locale label.
+    pub other: u64,
+}
+
+/// Opt-in, bounded localization diagnostics. Configure labels from trusted
+/// deployment configuration, not from individual requests.
+#[derive(Debug)]
+pub struct LocalizationDiagnostics {
+    counts: Mutex<LocalizationSnapshot>,
+}
+
+impl LocalizationDiagnostics {
+    /// Create counters for at most [`MAX_DIAGNOSTIC_LOCALES`] distinct locales.
+    ///
+    /// # Errors
+    /// Returns [`ErrorCode::InvalidRequest`] if the limit is exceeded.
+    pub fn new(locales: impl IntoIterator<Item = Locale>) -> Result<Self, EngineError> {
+        let mut counts = BTreeMap::new();
+        for locale in locales {
+            if !counts.contains_key(&locale) && counts.len() == MAX_DIAGNOSTIC_LOCALES {
+                return Err(EngineError::new(
+                    ErrorCode::InvalidRequest,
+                    "too many diagnostic locales",
+                ));
+            }
+            counts.insert(locale, 0);
+        }
+        Ok(Self {
+            counts: Mutex::new(LocalizationSnapshot {
+                locales: counts,
+                other: 0,
+            }),
+        })
+    }
+
+    /// Return a consistent snapshot; counts saturate rather than wrapping.
+    #[must_use]
+    pub fn snapshot(&self) -> LocalizationSnapshot {
+        self.counts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn record_missing(&self, locale: &Locale) {
+        let mut counts = self
+            .counts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let count = match counts.locales.get_mut(locale) {
+            Some(count) => count,
+            None => &mut counts.other,
+        };
+        *count = count.saturating_add(1);
+    }
+}
+
 impl CatalogSet {
     /// Create an empty set.
     #[must_use]
@@ -411,6 +478,23 @@ impl CatalogSet {
             }
         }
         None
+    }
+
+    /// Resolve normally and count fallback or missing results by requested locale.
+    /// Exact hits do not increment a counter. The caller must use this method
+    /// for each lookup it wants included; plain `resolve` is not instrumented.
+    #[must_use]
+    pub fn resolve_with_diagnostics(
+        &self,
+        key: &MessageKey,
+        requested: &Locale,
+        diagnostics: &LocalizationDiagnostics,
+    ) -> Option<ResolvedMessage<'_>> {
+        let resolved = self.resolve(key, requested);
+        if resolved.as_ref().is_none_or(|message| message.fallback) {
+            diagnostics.record_missing(requested);
+        }
+        resolved
     }
 
     /// Keys present in `source` but missing from `locale`.
@@ -591,6 +675,45 @@ mod tests {
         assert!(resolved.fallback);
 
         assert!(set.resolve(&key("ui.missing"), &en_us).is_none());
+    }
+
+    #[test]
+    fn diagnostics_count_fallbacks_and_missing_without_keys_or_unbounded_labels() {
+        let mut set = CatalogSet::new();
+        set.insert(catalog("en", &[("ui.title", "Title")])).unwrap();
+        set.insert(catalog("pt-BR", &[("ui.title", "Título")]))
+            .unwrap();
+        let en = Locale::parse("en").unwrap();
+        let en_us = Locale::parse("EN_us").unwrap();
+        let diagnostics = LocalizationDiagnostics::new([en.clone(), en_us.clone()]).unwrap();
+        assert!(
+            !set.resolve_with_diagnostics(&key("ui.title"), &en, &diagnostics)
+                .unwrap()
+                .fallback
+        );
+        assert!(
+            set.resolve_with_diagnostics(&key("ui.title"), &en_us, &diagnostics)
+                .unwrap()
+                .fallback
+        );
+        assert!(
+            set.resolve_with_diagnostics(&key("ui.missing"), &en_us, &diagnostics)
+                .is_none()
+        );
+        let other = Locale::parse("fr-FR").unwrap();
+        assert!(
+            set.resolve_with_diagnostics(&key("ui.title"), &other, &diagnostics)
+                .unwrap()
+                .fallback
+        );
+        let snapshot = diagnostics.snapshot();
+        assert_eq!(snapshot.locales[&en], 0);
+        assert_eq!(snapshot.locales[&en_us], 2);
+        assert_eq!(snapshot.other, 1);
+        assert_eq!(snapshot.locales.len(), 2);
+        let locales =
+            (0..=MAX_DIAGNOSTIC_LOCALES).map(|i| Locale::parse(&format!("en-{i}")).unwrap());
+        assert!(LocalizationDiagnostics::new(locales).is_err());
     }
 
     #[test]

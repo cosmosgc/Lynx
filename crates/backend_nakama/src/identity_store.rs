@@ -12,6 +12,7 @@ use postgres::Client;
 /// validate the Nakama session and obtain its user ID from authenticated claims
 /// or a trusted Nakama response, never from a client-supplied account or user ID.
 pub struct PostgresIdentityStore {
+    telemetry: crate::Telemetry,
     client: Mutex<Client>,
 }
 
@@ -27,8 +28,15 @@ impl PostgresIdentityStore {
     #[must_use]
     pub fn new(client: Client) -> Self {
         Self {
+            telemetry: crate::Telemetry::default(),
             client: Mutex::new(client),
         }
+    }
+
+    /// Return a shared, process-local telemetry handle for this adapter.
+    #[must_use]
+    pub fn telemetry(&self) -> crate::Telemetry {
+        self.telemetry.clone()
     }
 
     /// Resolve an authenticated Nakama user to an existing Lynx account.
@@ -37,19 +45,21 @@ impl PostgresIdentityStore {
     /// stored-account errors are sanitized. This method does not verify the
     /// provenance of `nakama_user_id` and must not be exposed directly to clients.
     pub fn resolve_account(&self, nakama_user_id: &str) -> Result<AccountId, ApiError> {
-        if !is_uuid(nakama_user_id) {
-            return Err(ApiError::Unauthenticated);
-        }
-        let mut client = self.client.lock().map_err(|_| unavailable())?;
-        let row = client
-            .query_opt(
-                "SELECT account_id FROM lynx.accounts WHERE nakama_user_id = $1::text::uuid",
-                &[&nakama_user_id],
-            )
-            .map_err(|_| unavailable())?
-            .ok_or(ApiError::Unauthenticated)?;
-        let account: String = row.try_get(0).map_err(|_| unavailable())?;
-        AccountId::new(account).map_err(|_| unavailable())
+        self.telemetry.measure(|| {
+            if !is_uuid(nakama_user_id) {
+                return Err(ApiError::Unauthenticated);
+            }
+            let mut client = self.client.lock().map_err(|_| unavailable())?;
+            let row = client
+                .query_opt(
+                    "SELECT account_id FROM lynx.accounts WHERE nakama_user_id = $1::text::uuid",
+                    &[&nakama_user_id],
+                )
+                .map_err(|_| unavailable())?
+                .ok_or(ApiError::Unauthenticated)?;
+            let account: String = row.try_get(0).map_err(|_| unavailable())?;
+            AccountId::new(account).map_err(|_| unavailable())
+        })
     }
 
     /// Provision or resolve the Lynx account for a validated Nakama user.
@@ -63,23 +73,25 @@ impl PostgresIdentityStore {
         nakama_user_id: &str,
         locale: &Locale,
     ) -> Result<AccountId, ApiError> {
-        if !is_uuid(nakama_user_id) {
-            return Err(ApiError::Unauthenticated);
-        }
-        let account_id = AccountId::new(nakama_user_id.to_ascii_lowercase())
-            .map_err(|_| ApiError::Unauthenticated)?;
-        let mut client = self.client.lock().map_err(|_| unavailable())?;
-        let row = client
-            .query_one(
-                "INSERT INTO lynx.accounts (account_id, nakama_user_id, locale) \
+        self.telemetry.measure(|| {
+            if !is_uuid(nakama_user_id) {
+                return Err(ApiError::Unauthenticated);
+            }
+            let account_id = AccountId::new(nakama_user_id.to_ascii_lowercase())
+                .map_err(|_| ApiError::Unauthenticated)?;
+            let mut client = self.client.lock().map_err(|_| unavailable())?;
+            let row = client
+                .query_one(
+                    "INSERT INTO lynx.accounts (account_id, nakama_user_id, locale) \
                  VALUES ($1, $2::text::uuid, $3) \
                  ON CONFLICT (nakama_user_id) DO UPDATE SET locale = EXCLUDED.locale \
                  RETURNING account_id",
-                &[&account_id.as_str(), &nakama_user_id, &locale.as_str()],
-            )
-            .map_err(|_| unavailable())?;
-        let account: String = row.try_get(0).map_err(|_| unavailable())?;
-        AccountId::new(account).map_err(|_| unavailable())
+                    &[&account_id.as_str(), &nakama_user_id, &locale.as_str()],
+                )
+                .map_err(|_| unavailable())?;
+            let account: String = row.try_get(0).map_err(|_| unavailable())?;
+            AccountId::new(account).map_err(|_| unavailable())
+        })
     }
 }
 

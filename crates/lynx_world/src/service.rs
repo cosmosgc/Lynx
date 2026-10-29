@@ -93,6 +93,8 @@ pub enum ServerEvent {
 pub enum ServerFrame {
     /// Frame and send this envelope.
     Envelope(Envelope),
+    /// Already encoded replication frame, reused for byte accounting and sending.
+    Encoded(Vec<u8>),
     /// Send a close frame and stop reading.
     Close,
 }
@@ -135,8 +137,24 @@ pub struct Metrics {
     retained_sessions: AtomicU64,
     actions: AtomicU64,
     action_rejections: Mutex<BTreeMap<&'static str, u64>>,
+    action_applied: AtomicU64,
+    action_duration: Mutex<SnapshotWriteDuration>,
     resume_success: AtomicU64,
     resume_failure: AtomicU64,
+    resume_failure_codes: Mutex<BTreeMap<&'static str, u64>>,
+    session_attaches: AtomicU64,
+    session_detaches: AtomicU64,
+    session_expired_closes: AtomicU64,
+    queue_depth: AtomicU64,
+    queue_capacity: AtomicU64,
+    replication_enqueued_bytes: AtomicU64,
+    ai_ticks: AtomicU64,
+    ai_decisions: AtomicU64,
+    ai_controller_scan_limit: AtomicU64,
+    ai_update_limit: AtomicU64,
+    ai_perception_candidate_limit: AtomicU64,
+    ai_perception_los_limit: AtomicU64,
+    ai_action_budget_exhaustions: AtomicU64,
     outbound_full: AtomicU64,
     snapshot_success: AtomicU64,
     snapshot_failure: AtomicU64,
@@ -176,6 +194,10 @@ impl Metrics {
     /// Render the authority measurements in Prometheus text format.
     #[must_use]
     #[allow(
+        clippy::too_many_lines,
+        reason = "one scrape snapshot keeps related metric families together"
+    )]
+    #[allow(
         clippy::cast_precision_loss,
         reason = "Prometheus samples are floating point seconds"
     )]
@@ -210,6 +232,56 @@ impl Metrics {
                 "lynx_world_action_rejections_total{{code=\"{code}\"}} {count}"
             );
         }
+        let _ = write!(
+            text,
+            "# HELP lynx_world_actions_applied_total Newly applied actions, excluding cached retries.\n# TYPE lynx_world_actions_applied_total counter\nlynx_world_actions_applied_total {}\n# HELP lynx_world_session_attaches_total Authority session attachments, including resumed sessions.\n# TYPE lynx_world_session_attaches_total counter\nlynx_world_session_attaches_total {}\n# HELP lynx_world_session_detaches_total Authority connection detach events.\n# TYPE lynx_world_session_detaches_total counter\nlynx_world_session_detaches_total {}\n# HELP lynx_world_session_expired_closes_total Connections closed because their session disappeared or expired.\n# TYPE lynx_world_session_expired_closes_total counter\nlynx_world_session_expired_closes_total {}\n# HELP lynx_world_outbound_queue_depth Sum of queued frames sampled during authority work.\n# TYPE lynx_world_outbound_queue_depth gauge\nlynx_world_outbound_queue_depth {}\n# HELP lynx_world_outbound_queue_capacity Sum of outbound queue capacities sampled during authority work.\n# TYPE lynx_world_outbound_queue_capacity gauge\nlynx_world_outbound_queue_capacity {}\n# HELP lynx_world_resume_failures_total Resume admission failures by error code.\n# TYPE lynx_world_resume_failures_total counter\n",
+            get(&self.action_applied),
+            get(&self.session_attaches),
+            get(&self.session_detaches),
+            get(&self.session_expired_closes),
+            get(&self.queue_depth),
+            get(&self.queue_capacity)
+        );
+        for (code, count) in self.resume_failure_codes.lock().unwrap().iter() {
+            let _ = writeln!(
+                text,
+                "lynx_world_resume_failures_total{{code=\"{code}\"}} {count}"
+            );
+        }
+        let _ = writeln!(
+            text,
+            "# HELP lynx_world_replication_enqueued_bytes_total Encoded snapshot and delta frame bytes successfully enqueued, not socket delivery bytes.\n# TYPE lynx_world_replication_enqueued_bytes_total counter\nlynx_world_replication_enqueued_bytes_total {}",
+            get(&self.replication_enqueued_bytes)
+        );
+        let _ = writeln!(
+            text,
+            "# HELP lynx_world_ai_ticks_total Enabled AI ticks.\n# TYPE lynx_world_ai_ticks_total counter\nlynx_world_ai_ticks_total {}\n# HELP lynx_world_ai_decisions_total AI controller decisions evaluated.\n# TYPE lynx_world_ai_decisions_total counter\nlynx_world_ai_decisions_total {}\n# HELP lynx_world_ai_budget_exhaustions_total AI budget limits reached by bounded budget class.\n# TYPE lynx_world_ai_budget_exhaustions_total counter\nlynx_world_ai_budget_exhaustions_total{{budget=\"controller_scan\"}} {}\nlynx_world_ai_budget_exhaustions_total{{budget=\"update\"}} {}\nlynx_world_ai_budget_exhaustions_total{{budget=\"perception_candidates\"}} {}\nlynx_world_ai_budget_exhaustions_total{{budget=\"perception_line_of_sight\"}} {}\nlynx_world_ai_budget_exhaustions_total{{budget=\"action\"}} {}",
+            get(&self.ai_ticks),
+            get(&self.ai_decisions),
+            get(&self.ai_controller_scan_limit),
+            get(&self.ai_update_limit),
+            get(&self.ai_perception_candidate_limit),
+            get(&self.ai_perception_los_limit),
+            get(&self.ai_action_budget_exhaustions),
+        );
+        let duration = self.action_duration.lock().unwrap();
+        text.push_str("# HELP lynx_world_action_authority_duration_seconds Time in authority receive for action requests.\n# TYPE lynx_world_action_authority_duration_seconds histogram\n");
+        for (bound, count) in ["0.001", "0.01", "0.1", "1", "10"]
+            .iter()
+            .zip(duration.buckets)
+        {
+            let _ = writeln!(
+                text,
+                "lynx_world_action_authority_duration_seconds_bucket{{le=\"{bound}\"}} {count}"
+            );
+        }
+        let _ = write!(
+            text,
+            "lynx_world_action_authority_duration_seconds_bucket{{le=\"+Inf\"}} {}\nlynx_world_action_authority_duration_seconds_sum {:.9}\nlynx_world_action_authority_duration_seconds_count {}\n",
+            duration.count,
+            duration.nanos as f64 / 1_000_000_000.0,
+            duration.count
+        );
         let _ = write!(
             text,
             "# HELP lynx_world_tick_failures_total Authority ticks that returned an error.\n# TYPE lynx_world_tick_failures_total counter\nlynx_world_tick_failures_total {}\n# HELP lynx_world_snapshot_writes_total Snapshot store writes by outcome, including startup and shutdown.\n# TYPE lynx_world_snapshot_writes_total counter\nlynx_world_snapshot_writes_total{{outcome=\"success\"}} {}\nlynx_world_snapshot_writes_total{{outcome=\"failure\"}} {}\n",
@@ -292,6 +364,19 @@ impl Service {
     }
 
     fn update_gauges(&self) {
+        let (depth, capacity) =
+            self.writers
+                .values()
+                .fold((0u64, 0u64), |(depth, capacity), writer| {
+                    (
+                        depth.saturating_add((writer.max_capacity() - writer.capacity()) as u64),
+                        capacity.saturating_add(writer.max_capacity() as u64),
+                    )
+                });
+        self.metrics.queue_depth.store(depth, Ordering::Relaxed);
+        self.metrics
+            .queue_capacity
+            .store(capacity, Ordering::Relaxed);
         self.metrics.entities.store(
             self.server.gateway().zone().entity_count() as u64,
             Ordering::Relaxed,
@@ -303,6 +388,26 @@ impl Service {
             self.server.gateway().retained_sessions() as u64,
             Ordering::Relaxed,
         );
+        let ai = self.server.gateway().zone().ai_diagnostics();
+        self.metrics.ai_ticks.store(ai.ticks, Ordering::Relaxed);
+        self.metrics
+            .ai_decisions
+            .store(ai.decisions, Ordering::Relaxed);
+        self.metrics
+            .ai_controller_scan_limit
+            .store(ai.controller_scan_limit_reached, Ordering::Relaxed);
+        self.metrics
+            .ai_update_limit
+            .store(ai.update_limit_reached, Ordering::Relaxed);
+        self.metrics
+            .ai_perception_candidate_limit
+            .store(ai.perception_candidate_limit_reached, Ordering::Relaxed);
+        self.metrics
+            .ai_perception_los_limit
+            .store(ai.perception_los_limit_reached, Ordering::Relaxed);
+        self.metrics
+            .ai_action_budget_exhaustions
+            .store(ai.action_budget_exhaustions, Ordering::Relaxed);
     }
 
     /// Write world snapshots on a fixed interval and at shutdown.
@@ -454,6 +559,15 @@ impl Service {
                         &self.metrics.resume_failure
                     };
                     counter.fetch_add(1, Ordering::Relaxed);
+                    if let Err(error) = &result {
+                        *self
+                            .metrics
+                            .resume_failure_codes
+                            .lock()
+                            .unwrap()
+                            .entry(error.code().as_str())
+                            .or_default() += 1;
+                    }
                 }
                 let _ = reply.send(result);
             }
@@ -487,6 +601,9 @@ impl Service {
         };
 
         let connection = opened.connection;
+        self.metrics
+            .session_attaches
+            .fetch_add(1, Ordering::Relaxed);
         self.writers.insert(connection, outbound.clone());
         self.push(&opened, connection);
         if !self.writers.contains_key(&connection) {
@@ -531,7 +648,21 @@ impl Service {
         if action {
             self.metrics.actions.fetch_add(1, Ordering::Relaxed);
         }
-        match self.server.receive(connection, envelope, clock()) {
+        let before = self.server.gateway().zone().stats().applied_actions;
+        let started = Instant::now();
+        let result = self.server.receive(connection, envelope, clock());
+        if action {
+            self.metrics
+                .action_duration
+                .lock()
+                .unwrap()
+                .observe(started.elapsed());
+            let after = self.server.gateway().zone().stats().applied_actions;
+            self.metrics
+                .action_applied
+                .fetch_add(after.saturating_sub(before), Ordering::Relaxed);
+        }
+        match result {
             Ok(outbound) => {
                 if action {
                     for output in &outbound {
@@ -650,6 +781,11 @@ impl Service {
                     session,
                     reason,
                 } => {
+                    match reason {
+                        CloseReason::ClientDisconnected => &self.metrics.session_detaches,
+                        CloseReason::SessionExpired => &self.metrics.session_expired_closes,
+                    }
+                    .fetch_add(1, Ordering::Relaxed);
                     Self::log_close(connection, &session, reason);
                     self.close(connection);
                 }
@@ -661,8 +797,33 @@ impl Service {
         let Some(writer) = self.writers.get_mut(&connection) else {
             return;
         };
+        let frame = match frame {
+            ServerFrame::Envelope(envelope)
+                if matches!(
+                    envelope.kind.as_str(),
+                    world_server::SNAPSHOT_KIND | world_server::DELTA_KIND
+                ) =>
+            {
+                match engine_net::framing::encode_frame(&envelope) {
+                    Ok(bytes) => ServerFrame::Encoded(bytes),
+                    // Preserve the transport's existing encode-failure handling.
+                    Err(_) => ServerFrame::Envelope(envelope),
+                }
+            }
+            frame => frame,
+        };
+        let replication_bytes = match &frame {
+            ServerFrame::Encoded(bytes) => Some(bytes.len() as u64),
+            _ => None,
+        };
         match writer.try_send(frame) {
-            Ok(()) => {}
+            Ok(()) => {
+                if let Some(bytes) = replication_bytes {
+                    self.metrics
+                        .replication_enqueued_bytes
+                        .fetch_add(bytes, Ordering::Relaxed);
+                }
+            }
             Err(mpsc::error::TrySendError::Full(_)) => {
                 self.metrics.outbound_full.fetch_add(1, Ordering::Relaxed);
                 tracing::warn!(
@@ -765,7 +926,7 @@ mod tests {
         let (mut service, grant, _) = service();
         let metrics = service.metrics();
         assert!(metrics.render().contains("lynx_world_entities 5\n"));
-        let (outbound, _receiver) = mpsc::channel(16);
+        let (outbound, mut receiver) = mpsc::channel(16);
         let (reply, mut result) = oneshot::channel();
         service.handle(ServerEvent::Admit {
             credential: Credential::Static(grant),
@@ -777,6 +938,23 @@ mod tests {
             reply,
         });
         let admitted = result.try_recv().unwrap().unwrap();
+        let initial = metrics.render();
+        assert!(initial.contains("lynx_world_session_attaches_total 1\n"));
+        assert!(initial.contains("lynx_world_outbound_queue_depth 3\n"));
+        assert!(initial.contains("lynx_world_outbound_queue_capacity 16\n"));
+        assert!(metrics.replication_enqueued_bytes.load(Ordering::Relaxed) > 0);
+        let mut queued_bytes = 0;
+        while let Ok(frame) = receiver.try_recv() {
+            if let ServerFrame::Encoded(bytes) = frame {
+                let envelope = engine_net::framing::decode_frame(&bytes).unwrap();
+                assert_eq!(envelope.kind.as_str(), world_server::SNAPSHOT_KIND);
+                queued_bytes += bytes.len() as u64;
+            }
+        }
+        assert_eq!(
+            metrics.replication_enqueued_bytes.load(Ordering::Relaxed),
+            queued_bytes
+        );
         service.handle(ServerEvent::Frame {
             connection: admitted.connection,
             envelope: Envelope::new(
@@ -798,6 +976,16 @@ mod tests {
             connection: admitted.connection,
         });
         assert!(metrics.render().contains("lynx_world_connections 0\n"));
+        assert!(
+            metrics
+                .render()
+                .contains("lynx_world_session_detaches_total 1\n")
+        );
+        assert!(
+            metrics
+                .render()
+                .contains("lynx_world_outbound_queue_capacity 0\n")
+        );
         assert!(
             metrics
                 .render()
@@ -878,6 +1066,11 @@ mod tests {
         )));
         assert!(text.contains("lynx_world_resume_attempts_total{outcome=\"success\"} 1\n"));
         assert!(text.contains("lynx_world_resume_attempts_total{outcome=\"failure\"} 1\n"));
+        assert!(text.contains("lynx_world_resume_failures_total{code=\"session_expired\"} 1\n"));
+        assert!(text.contains("lynx_world_action_authority_duration_seconds_count 2\n"));
+        assert!(
+            text.contains("lynx_world_action_authority_duration_seconds_bucket{le=\"+Inf\"} 2\n")
+        );
         assert!(!text.contains("unknown-secret-token"));
     }
 
@@ -1158,6 +1351,7 @@ mod tests {
             .expect("the queue should stay open");
         match frame {
             ServerFrame::Envelope(envelope) => envelope,
+            ServerFrame::Encoded(bytes) => engine_net::framing::decode_frame(&bytes).unwrap(),
             ServerFrame::Close => panic!("unexpected close frame"),
         }
     }

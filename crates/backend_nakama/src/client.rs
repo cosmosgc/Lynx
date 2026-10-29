@@ -41,7 +41,7 @@ impl NakamaConfig {
 impl fmt::Debug for NakamaConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NakamaConfig")
-            .field("base_url", &self.base_url)
+            .field("base_url", &"[REDACTED]")
             .field("http_key", &self.http_key.as_ref().map(|_| "[REDACTED]"))
             .field("timeout", &self.timeout)
             .finish()
@@ -50,6 +50,7 @@ impl fmt::Debug for NakamaConfig {
 
 /// Nakama adapter implementing the shared health and authentication contracts.
 pub struct NakamaClient {
+    telemetry: crate::Telemetry,
     agent: ureq::Agent,
     base_url: String,
     http_key: Option<String>,
@@ -58,7 +59,7 @@ pub struct NakamaClient {
 impl fmt::Debug for NakamaClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NakamaClient")
-            .field("base_url", &self.base_url)
+            .field("base_url", &"[REDACTED]")
             .field("http_key", &self.http_key.as_ref().map(|_| "[REDACTED]"))
             .finish_non_exhaustive()
     }
@@ -98,10 +99,17 @@ impl NakamaClient {
             .build();
 
         Ok(Self {
+            telemetry: crate::Telemetry::default(),
             agent: ureq::Agent::new_with_config(agent_config),
             base_url: base_url.to_owned(),
             http_key: config.http_key,
         })
+    }
+
+    /// Return a shared, process-local telemetry handle for this adapter.
+    #[must_use]
+    pub fn telemetry(&self) -> crate::Telemetry {
+        self.telemetry.clone()
     }
 
     fn endpoint(&self, path: &str) -> String {
@@ -175,89 +183,100 @@ impl NakamaClient {
 
 impl HealthService for NakamaClient {
     fn health(&self) -> Result<HealthStatus, ApiError> {
-        let response = self
-            .agent
-            .get(self.endpoint("/healthcheck"))
-            .call()
-            .map_err(|_| ApiError::Unavailable("Nakama health check failed".into()))?;
-        Self::checked_body(response)?;
-        Ok(HealthStatus {
-            healthy: true,
-            message: None,
+        self.telemetry.measure(|| {
+            let response = self
+                .agent
+                .get(self.endpoint("/healthcheck"))
+                .call()
+                .map_err(|_| ApiError::Unavailable("Nakama health check failed".into()))?;
+            Self::checked_body(response)?;
+            Ok(HealthStatus {
+                healthy: true,
+                message: None,
+            })
         })
     }
 }
 
 impl AuthService for NakamaClient {
     fn authenticate_device(&self, request: &DeviceLogin) -> Result<Session, ApiError> {
-        request.validate()?;
-        let mut builder = self
-            .agent
-            .post(self.endpoint("/v2/account/authenticate/device"))
-            .query("create", request.create.to_string());
-        if let Some(username) = &request.username {
-            builder = builder.query("username", username);
-        }
-        if let Some(header) = self.basic_auth() {
-            builder = builder.header("Authorization", header);
-        }
-        let response = Self::send_json(
-            builder,
-            &json!({
-                "id": request.device_id,
-                "vars": { "locale": request.locale.as_str() },
-            }),
-        )?;
-        self.parse_session(response)
+        self.telemetry.measure(|| {
+            request.validate()?;
+            let mut builder = self
+                .agent
+                .post(self.endpoint("/v2/account/authenticate/device"))
+                .query("create", request.create.to_string());
+            if let Some(username) = &request.username {
+                builder = builder.query("username", username);
+            }
+            if let Some(header) = self.basic_auth() {
+                builder = builder.header("Authorization", header);
+            }
+            let response = Self::send_json(
+                builder,
+                &json!({
+                    "id": request.device_id,
+                    "vars": { "locale": request.locale.as_str() },
+                }),
+            )?;
+            self.parse_session(response)
+        })
     }
 
     fn refresh_session(&self, refresh_token: &SessionToken) -> Result<Session, ApiError> {
-        let request = self
-            .agent
-            .post(self.endpoint("/v2/account/session/refresh"))
-            .header(
-                "Authorization",
-                format!("Bearer {}", refresh_token.expose_secret()),
-            );
-        let response = Self::send_json(request, &json!({}))?;
-        self.parse_session(response)
+        self.telemetry.measure(|| {
+            let request = self
+                .agent
+                .post(self.endpoint("/v2/account/session/refresh"))
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", refresh_token.expose_secret()),
+                );
+            let response = Self::send_json(request, &json!({}))?;
+            self.parse_session(response)
+        })
     }
 
     fn account(&self, token: &SessionToken) -> Result<Account, ApiError> {
-        let response = self.authorized_get("/v2/account", token)?;
-        let response: NakamaAccountResponse = Self::decode_json(response)?;
-        let locale = response
-            .user
-            .lang_tag
-            .as_deref()
-            .filter(|tag| !tag.is_empty())
-            .map(Locale::parse)
-            .transpose()
-            .map_err(|_| ApiError::Transport("Nakama returned an invalid locale".into()))?
-            .unwrap_or_default();
-        Ok(Account {
-            id: AccountId::new(response.user.id)
-                .map_err(|_| ApiError::Transport("Nakama returned an invalid account ID".into()))?,
-            username: response.user.username,
-            display_name: response.user.display_name,
-            locale,
-            created_at: None,
-            avatar_url: response.user.avatar_url,
+        self.telemetry.measure(|| {
+            let response = self.authorized_get("/v2/account", token)?;
+            let response: NakamaAccountResponse = Self::decode_json(response)?;
+            let locale = response
+                .user
+                .lang_tag
+                .as_deref()
+                .filter(|tag| !tag.is_empty())
+                .map(Locale::parse)
+                .transpose()
+                .map_err(|_| ApiError::Transport("Nakama returned an invalid locale".into()))?
+                .unwrap_or_default();
+            Ok(Account {
+                id: AccountId::new(response.user.id).map_err(|_| {
+                    ApiError::Transport("Nakama returned an invalid account ID".into())
+                })?,
+                username: response.user.username,
+                display_name: response.user.display_name,
+                locale,
+                created_at: None,
+                avatar_url: response.user.avatar_url,
+            })
         })
     }
 
     fn logout(&self, token: &SessionToken) -> Result<(), ApiError> {
-        let request = self
-            .agent
-            .post(self.endpoint("/v2/account/session/logout"))
-            .header("Authorization", format!("Bearer {}", token.expose_secret()));
-        let response = Self::send_json(request, &json!({}))?;
-        Self::checked_body(response)?;
-        Ok(())
+        self.telemetry.measure(|| {
+            let request = self
+                .agent
+                .post(self.endpoint("/v2/account/session/logout"))
+                .header("Authorization", format!("Bearer {}", token.expose_secret()));
+            let response = Self::send_json(request, &json!({}))?;
+            Self::checked_body(response)?;
+            Ok(())
+        })
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct NakamaSession {
     token: String,
     refresh_token: String,
@@ -265,12 +284,12 @@ struct NakamaSession {
     created: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct NakamaAccountResponse {
     user: NakamaUser,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct NakamaUser {
     id: String,
     #[serde(default)]
@@ -283,7 +302,7 @@ struct NakamaUser {
     lang_tag: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct NakamaErrorResponse {
     #[serde(default)]
     code: Option<i64>,
@@ -333,6 +352,38 @@ mod tests {
         assert!(!debug.contains("private-key"));
         assert!(debug.contains("[REDACTED]"));
         assert!(NakamaClient::new(config).is_ok());
+        let config = NakamaConfig::new("http://user:secret@localhost/private-token?token=secret");
+        assert!(!format!("{config:?}").contains("secret"));
+    }
+
+    #[test]
+    fn health_records_success_and_http_failure() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = std::thread::spawn(move || {
+            for status in ["200 OK", "503 Service Unavailable"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 1024];
+                assert!(stream.read(&mut request).unwrap() > 0);
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+            }
+        });
+        let client = NakamaClient::new(NakamaConfig::new(format!("http://{address}"))).unwrap();
+        let handle = client.telemetry();
+        assert!(client.health().is_ok());
+        assert!(client.health().is_err());
+        worker.join().unwrap();
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.count, 2);
+        assert_eq!(snapshot.failures, 1);
+        assert_eq!(snapshot.duration_buckets[5], 2);
     }
 
     #[test]

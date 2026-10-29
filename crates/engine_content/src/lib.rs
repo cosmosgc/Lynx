@@ -7,7 +7,10 @@ pub mod diff;
 pub mod publishing;
 pub mod validate;
 
-pub use bundle::{ContentManifest, DefinitionEntry, LocaleEntry, is_sha256_hex, sha256_hex};
+pub use bundle::{
+    ContentManifest, ContentVersionSnapshot, ContentVersionState, DefinitionEntry, LocaleEntry,
+    is_sha256_hex, sha256_hex,
+};
 pub use definition::{
     ContentDefinition, ContentKind, DisplayText, MapPosition, MapZone, MinigameDefinition,
     Presentation, PresentationMode, RouteKind, UiFieldBinding, UiPanelAction, UiPanelDefinition,

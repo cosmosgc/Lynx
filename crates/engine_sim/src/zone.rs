@@ -12,7 +12,7 @@ use engine_core::time::Tick;
 use serde::{Deserialize, Serialize};
 
 use crate::action::{ActionEffect, ActionKey, ActionResult};
-use crate::ai::{AiTickPolicy, AiTickReport};
+use crate::ai::{AiDiagnostics, AiTickPolicy, AiTickReport};
 use crate::combat::CombatRules;
 use crate::entity::EntityRecord;
 use crate::link::{EntityLink, LinkEvent, LinkGraph};
@@ -191,6 +191,7 @@ pub struct Zone {
     pub(crate) movement_diagnostics: VecDeque<Diagnostic>,
     pub(crate) ai_policy: Option<Arc<AiTickPolicy>>,
     pub(crate) ai_report: AiTickReport,
+    pub(crate) ai_diagnostics: AiDiagnostics,
 }
 
 impl fmt::Debug for Zone {
@@ -256,6 +257,7 @@ impl Zone {
             movement_diagnostics: VecDeque::new(),
             ai_policy: None,
             ai_report: AiTickReport::default(),
+            ai_diagnostics: AiDiagnostics::default(),
         })
     }
 

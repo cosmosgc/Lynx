@@ -192,7 +192,11 @@ async fn serve(args: ServeArgs) -> Result<()> {
     let (shutdown, shutdown_rx) = watch::channel(false);
     let state = match (authenticator, identity_backend) {
         (Some(authenticator), None) => AppState::new(events, authenticator),
-        (None, Some(backend)) => AppState::with_identity_backend(events, backend),
+        (None, Some(backend)) => {
+            let telemetry = Arc::clone(&backend);
+            AppState::with_identity_backend(events, backend)
+                .with_backend_telemetry(move || telemetry.telemetry_snapshot())
+        }
         _ => unreachable!("exactly one configured authentication mode is constructed"),
     };
     let state = Arc::new(

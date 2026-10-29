@@ -20,6 +20,7 @@ const COLUMNS: &str = "character_id, name, zone_id, status, \
 /// This does not validate tokens, create accounts, or enter
 /// the world. Connections are serialized and are not automatically reconnected.
 pub struct PostgresCharacterStore {
+    telemetry: crate::Telemetry,
     client: Mutex<Client>,
 }
 
@@ -35,23 +36,32 @@ impl PostgresCharacterStore {
     #[must_use]
     pub fn new(client: Client) -> Self {
         Self {
+            telemetry: crate::Telemetry::default(),
             client: Mutex::new(client),
         }
     }
 
+    /// Return a shared, process-local telemetry handle for this adapter.
+    #[must_use]
+    pub fn telemetry(&self) -> crate::Telemetry {
+        self.telemetry.clone()
+    }
+
     /// List the trusted account's non-deleted characters in stable order.
     pub fn characters(&self, account: &AccountId) -> Result<Vec<Character>, ApiError> {
-        let mut client = self.client.lock().map_err(|_| unavailable())?;
-        let sql = format!(
-            "SELECT {COLUMNS} FROM lynx.characters \
+        self.telemetry.measure(|| {
+            let mut client = self.client.lock().map_err(|_| unavailable())?;
+            let sql = format!(
+                "SELECT {COLUMNS} FROM lynx.characters \
             WHERE account_id = $1 AND deleted_at IS NULL ORDER BY character_id"
-        );
-        client
-            .query(&sql, &[&account.as_str()])
-            .map_err(|_| unavailable())?
-            .iter()
-            .map(|row| decode(row, account))
-            .collect()
+            );
+            client
+                .query(&sql, &[&account.as_str()])
+                .map_err(|_| unavailable())?
+                .iter()
+                .map(|row| decode(row, account))
+                .collect()
+        })
     }
 
     /// Resolve an owned, active character for selection without changing state.
@@ -61,20 +71,22 @@ impl PostgresCharacterStore {
         account: &AccountId,
         id: CharacterId,
     ) -> Result<Character, ApiError> {
-        let mut client = self.client.lock().map_err(|_| unavailable())?;
-        let sql = format!(
-            "SELECT {COLUMNS} FROM lynx.characters \
+        self.telemetry.measure(|| {
+            let mut client = self.client.lock().map_err(|_| unavailable())?;
+            let sql = format!(
+                "SELECT {COLUMNS} FROM lynx.characters \
             WHERE account_id = $1 AND character_id = $2 AND deleted_at IS NULL"
-        );
-        let row = client
-            .query_opt(&sql, &[&account.as_str(), &id.to_string()])
-            .map_err(|_| unavailable())?
-            .ok_or_else(|| ApiError::NotFound("character not found".into()))?;
-        let character = decode(&row, account)?;
-        if !character.is_playable() {
-            return Err(ApiError::NotFound("character not found".into()));
-        }
-        Ok(character)
+            );
+            let row = client
+                .query_opt(&sql, &[&account.as_str(), &id.to_string()])
+                .map_err(|_| unavailable())?
+                .ok_or_else(|| ApiError::NotFound("character not found".into()))?;
+            let character = decode(&row, account)?;
+            if !character.is_playable() {
+                return Err(ApiError::NotFound("character not found".into()));
+            }
+            Ok(character)
+        })
     }
 
     /// Tombstone an owned character, including a suspended one.
@@ -85,6 +97,7 @@ impl PostgresCharacterStore {
     /// world or release property. Callers must coordinate those operations.
     /// All character writers must lock the account row before changing state.
     pub fn delete_character(&self, account: &AccountId, id: CharacterId) -> Result<(), ApiError> {
+        self.telemetry.measure(|| {
         let mut client = self.client.lock().map_err(|_| unavailable())?;
         let mut tx = client.transaction().map_err(|_| unavailable())?;
         if tx
@@ -117,6 +130,7 @@ impl PostgresCharacterStore {
         }
         tx.commit().map_err(|_| unavailable())?;
         Ok(())
+        })
     }
 
     /// Record entry of an owned, active character into a server-resolved zone.
@@ -154,6 +168,7 @@ impl PostgresCharacterStore {
         key: &str,
         request: &CreateCharacter,
     ) -> Result<Character, ApiError> {
+        self.telemetry.measure(|| {
         request.validate()?;
         if key.is_empty() || key.chars().count() > 128 || key.chars().any(char::is_control) {
             return Err(ApiError::InvalidRequest("invalid idempotency key".into()));
@@ -222,6 +237,7 @@ impl PostgresCharacterStore {
         ).map_err(|_| unavailable())?;
         tx.commit().map_err(|_| unavailable())?;
         Ok(character)
+        })
     }
 
     fn update_character_zone(
@@ -231,6 +247,7 @@ impl PostgresCharacterStore {
         zone_id: Option<&str>,
         action: &str,
     ) -> Result<Character, ApiError> {
+        self.telemetry.measure(|| {
         let mut client = self.client.lock().map_err(|_| unavailable())?;
         let mut tx = client.transaction().map_err(|_| unavailable())?;
         if tx
@@ -275,6 +292,7 @@ impl PostgresCharacterStore {
         .map_err(|_| unavailable())?;
         tx.commit().map_err(|_| unavailable())?;
         Ok(character)
+        })
     }
 }
 

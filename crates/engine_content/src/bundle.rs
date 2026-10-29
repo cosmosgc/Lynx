@@ -81,6 +81,68 @@ pub struct ContentManifest {
     pub publishing: Option<PublishingRecord>,
 }
 
+/// Whether content integration is absent, configured, or actually loaded.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ContentVersionState {
+    /// No content bundle integration is configured.
+    #[default]
+    Absent,
+    /// A version is configured but has not been confirmed loaded.
+    Configured,
+    /// The caller confirmed that this version was loaded.
+    Loaded,
+}
+
+/// Bounded, caller-reported content state; this does not load or validate a bundle.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContentVersionSnapshot {
+    state: ContentVersionState,
+    version: Option<String>,
+}
+
+impl ContentVersionSnapshot {
+    /// No content bundle integration is configured.
+    #[must_use]
+    pub fn absent() -> Self {
+        Self::default()
+    }
+
+    /// Capture a configured version without claiming it was loaded. Returns
+    /// `None` when the complete semantic version exceeds 128 bytes.
+    #[must_use]
+    pub fn from_configured_manifest(manifest: &ContentManifest) -> Option<Self> {
+        Self::from_manifest(manifest, ContentVersionState::Configured)
+    }
+
+    /// Capture a loaded manifest's version, or return `None` if it exceeds 128
+    /// bytes. The caller is responsible for confirming the bundle was loaded;
+    /// a manifest alone is not evidence of a live content version.
+    #[must_use]
+    pub fn from_loaded_manifest(manifest: &ContentManifest) -> Option<Self> {
+        Self::from_manifest(manifest, ContentVersionState::Loaded)
+    }
+
+    fn from_manifest(manifest: &ContentManifest, state: ContentVersionState) -> Option<Self> {
+        let version = manifest.content_version.to_string();
+        (version.len() <= 128).then_some(Self {
+            state,
+            version: Some(version),
+        })
+    }
+
+    /// Integration and load state reported by the caller.
+    #[must_use]
+    pub fn state(&self) -> ContentVersionState {
+        self.state
+    }
+
+    /// Full semantic version, including prerelease and build metadata, if present.
+    #[must_use]
+    pub fn version(&self) -> Option<&str> {
+        self.version.as_deref()
+    }
+}
+
 impl ContentManifest {
     /// Create an empty manifest.
     #[must_use]
@@ -536,6 +598,25 @@ mod tests {
             semver::Version::new(0, 1, 0),
             semver::VersionReq::parse("^0.1").unwrap(),
         )
+    }
+
+    #[test]
+    fn loaded_version_snapshot_is_bounded_and_preserves_full_version() {
+        let absent = ContentVersionSnapshot::absent();
+        assert_eq!(absent.state(), ContentVersionState::Absent);
+        assert_eq!(absent.version(), None);
+        let mut manifest = manifest();
+        manifest.content_version = semver::Version::parse("1.2.3-beta.1+build.2").unwrap();
+        let configured = ContentVersionSnapshot::from_configured_manifest(&manifest).unwrap();
+        assert_eq!(configured.state(), ContentVersionState::Configured);
+        let loaded = ContentVersionSnapshot::from_loaded_manifest(&manifest).unwrap();
+        assert_eq!(loaded.state(), ContentVersionState::Loaded);
+        assert_eq!(loaded.version(), Some("1.2.3-beta.1+build.2"));
+        assert_eq!(configured.version(), loaded.version());
+        manifest.content_version =
+            semver::Version::parse(&format!("1.2.3+{}", "a".repeat(128))).unwrap();
+        assert!(ContentVersionSnapshot::from_loaded_manifest(&manifest).is_none());
+        assert!(ContentVersionSnapshot::from_configured_manifest(&manifest).is_none());
     }
 
     #[test]

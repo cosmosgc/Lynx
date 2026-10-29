@@ -3317,6 +3317,7 @@ dependencies = [
  "backend_nakama",
  "clap",
  "dotenvy",
+ "engine_content",
  "engine_core",
  "engine_net",
  "engine_sim",

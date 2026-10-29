@@ -76,6 +76,12 @@ impl NakamaIdentityBackend {
     pub const fn new(backend: NakamaPostgresBackend) -> Self {
         Self { backend }
     }
+
+    /// Read bounded adapter telemetry for the process metrics endpoint.
+    #[must_use]
+    pub fn telemetry_snapshot(&self) -> backend_nakama::BackendTelemetrySnapshot {
+        self.backend.telemetry_snapshot()
+    }
 }
 
 impl IdentityBackend for NakamaIdentityBackend {

@@ -23,6 +23,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::serve::Listener;
 use axum::{Router, serve};
+use backend_nakama::BackendTelemetrySnapshot;
+use engine_content::{ContentVersionSnapshot, ContentVersionState};
 use engine_core::error::{EngineError, ErrorCode};
 use engine_core::id::StableId;
 use engine_net::envelope::Envelope;
@@ -206,6 +208,7 @@ pub struct AppState {
     origins: OriginPolicy,
     limits: RateLimits,
     metrics: Arc<Metrics>,
+    backend_telemetry: Option<Arc<dyn Fn() -> BackendTelemetrySnapshot + Send + Sync>>,
     capacity: Arc<Mutex<Capacity>>,
 }
 
@@ -228,6 +231,7 @@ impl std::fmt::Debug for AppState {
         f.debug_struct("AppState")
             .field("admission", &self.admission)
             .field("ready", &self.ready.load(Ordering::Relaxed))
+            .field("backend_telemetry", &self.backend_telemetry.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -298,6 +302,7 @@ impl AppState {
             origins: OriginPolicy::default(),
             limits: RateLimits::new(RateLimitConfig::default()),
             metrics: Arc::new(Metrics::default()),
+            backend_telemetry: None,
             capacity: Arc::new(Mutex::new(Capacity::default())),
         }
     }
@@ -317,8 +322,20 @@ impl AppState {
             origins: OriginPolicy::default(),
             limits: RateLimits::new(RateLimitConfig::default()),
             metrics: Arc::new(Metrics::default()),
+            backend_telemetry: None,
             capacity: Arc::new(Mutex::new(Capacity::default())),
         }
+    }
+
+    /// Attach a scrape-time snapshot provider for bounded production backend
+    /// measurements. The callback must not include credentials or user labels.
+    #[must_use]
+    pub fn with_backend_telemetry(
+        mut self,
+        provider: impl Fn() -> BackendTelemetrySnapshot + Send + Sync + 'static,
+    ) -> Self {
+        self.backend_telemetry = Some(Arc::new(provider));
+        self
     }
 
     fn configured_demo_characters(&self) -> usize {
@@ -431,6 +448,12 @@ async fn readyz(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>)
 
 async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let mut body = state.metrics.render();
+    // This service composition does not yet load content bundles. Report that
+    // explicitly instead of presenting a missing series as version zero.
+    body.push_str(&encode_content_version(&ContentVersionSnapshot::absent()));
+    if let Some(telemetry) = &state.backend_telemetry {
+        body.push_str(&encode_backend_metrics(&telemetry()));
+    }
     let admission = {
         let capacity = state.capacity.lock().expect("capacity lock poisoned");
         [
@@ -450,6 +473,65 @@ async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         )],
         body,
     )
+}
+
+fn encode_content_version(snapshot: &ContentVersionSnapshot) -> String {
+    let state = match snapshot.state() {
+        ContentVersionState::Absent => "absent",
+        ContentVersionState::Configured => "configured",
+        ContentVersionState::Loaded => "loaded",
+    };
+    let mut text = String::from(
+        "# HELP lynx_world_content_version_info Content bundle integration state and current version when configured.\n# TYPE lynx_world_content_version_info gauge\n",
+    );
+    if let Some(version) = snapshot.version() {
+        use std::fmt::Write as _;
+        let _ = writeln!(
+            text,
+            "lynx_world_content_version_info{{state=\"{state}\",version=\"{version}\"}} 1"
+        );
+    } else {
+        use std::fmt::Write as _;
+        let _ = writeln!(
+            text,
+            "lynx_world_content_version_info{{state=\"{state}\"}} 1"
+        );
+    }
+    text
+}
+
+fn encode_backend_metrics(snapshot: &BackendTelemetrySnapshot) -> String {
+    let adapters = [
+        ("nakama", &snapshot.nakama),
+        ("identity_store", &snapshot.identity_store),
+        ("character_store", &snapshot.character_store),
+    ];
+    let mut text = String::from(
+        "# HELP lynx_backend_operations_total Backend adapter operations completed, including failures.\n# TYPE lynx_backend_operations_total counter\n# HELP lynx_backend_operation_errors_total Backend adapter operations returning errors, including validation and domain errors.\n# TYPE lynx_backend_operation_errors_total counter\n# HELP lynx_backend_operation_duration_seconds Backend adapter operation duration, including lock waits and failures.\n# TYPE lynx_backend_operation_duration_seconds histogram\n",
+    );
+    for (adapter, measurement) in adapters {
+        use std::fmt::Write as _;
+        let _ = writeln!(
+            text,
+            "lynx_backend_operations_total{{adapter=\"{adapter}\"}} {}\nlynx_backend_operation_errors_total{{adapter=\"{adapter}\"}} {}",
+            measurement.count, measurement.failures
+        );
+        for (bound, count) in ["0.001", "0.01", "0.1", "1", "10", "+Inf"]
+            .into_iter()
+            .zip(measurement.duration_buckets)
+        {
+            let _ = writeln!(
+                text,
+                "lynx_backend_operation_duration_seconds_bucket{{adapter=\"{adapter}\",le=\"{bound}\"}} {count}"
+            );
+        }
+        let _ = writeln!(
+            text,
+            "lynx_backend_operation_duration_seconds_sum{{adapter=\"{adapter}\"}} {:.9}\nlynx_backend_operation_duration_seconds_count{{adapter=\"{adapter}\"}} {}",
+            measurement.duration_seconds, measurement.count
+        );
+    }
+    text
 }
 
 // Encode a scrape snapshot so the existing bounded counters remain the source
@@ -879,6 +961,11 @@ async fn pump(
                             return End::Clean;
                         }
                     }
+                    Some(ServerFrame::Encoded(bytes)) => {
+                        if send_encoded(socket, bytes).await.is_err() {
+                            return End::Clean;
+                        }
+                    }
                     Some(ServerFrame::Close) | None => {
                         let _ = tokio::time::timeout(WRITE_TIMEOUT, socket.send(Message::Close(None))).await;
                         return End::Clean;
@@ -952,6 +1039,10 @@ async fn reject(socket: &mut WebSocket, error: &EngineError) {
 
 async fn send_envelope(socket: &mut WebSocket, envelope: &Envelope) -> Result<(), ()> {
     let frame = encode_frame(envelope).map_err(|_| ())?;
+    send_encoded(socket, frame).await
+}
+
+async fn send_encoded(socket: &mut WebSocket, frame: Vec<u8>) -> Result<(), ()> {
     tokio::time::timeout(WRITE_TIMEOUT, socket.send(Message::Binary(frame.into())))
         .await
         .map_err(|_| ())?
@@ -1054,6 +1145,7 @@ mod tests {
             assert!(response.contains(status), "{response}");
             if path == "/metrics" {
                 assert!(response.contains("# TYPE lynx_world_ticks_total counter"));
+                assert!(response.contains("lynx_world_content_version_info{state=\"absent\"} 1"));
             }
         }
         task.abort();
@@ -1084,6 +1176,48 @@ mod tests {
             "lynx_world_rate_limit_rejections_total{class=\"movement\",code=\"rate_limited\"} 7\n"
         ));
         assert!(!text.contains("# EOF"));
+    }
+
+    #[test]
+    fn backend_metrics_use_only_fixed_labels_and_cumulative_buckets() {
+        let snapshot = BackendTelemetrySnapshot {
+            nakama: backend_nakama::TelemetrySnapshot {
+                count: 2,
+                failures: 1,
+                duration_seconds: 0.011,
+                duration_buckets: [1, 2, 2, 2, 2, 2],
+            },
+            ..BackendTelemetrySnapshot::default()
+        };
+        let text = encode_backend_metrics(&snapshot);
+        assert!(text.contains("lynx_backend_operations_total{adapter=\"nakama\"} 2\n"));
+        assert!(text.contains("lynx_backend_operation_errors_total{adapter=\"nakama\"} 1\n"));
+        assert!(text.contains(
+            "lynx_backend_operation_duration_seconds_bucket{adapter=\"nakama\",le=\"+Inf\"} 2\n"
+        ));
+        assert!(text.contains(
+            "lynx_backend_operation_duration_seconds_sum{adapter=\"nakama\"} 0.011000000\n"
+        ));
+        assert!(text.contains("adapter=\"identity_store\""));
+        assert!(text.contains("adapter=\"character_store\""));
+        assert!(!text.contains("account"));
+        assert!(!text.contains("token"));
+    }
+
+    #[test]
+    fn content_metrics_distinguish_absent_from_an_actual_version() {
+        let absent = encode_content_version(&ContentVersionSnapshot::absent());
+        assert!(absent.contains("lynx_world_content_version_info{state=\"absent\"} 1"));
+
+        let manifest = engine_content::ContentManifest::new(
+            semver::Version::parse("1.2.3+build.4").unwrap(),
+            semver::VersionReq::STAR,
+        );
+        let loaded = ContentVersionSnapshot::from_loaded_manifest(&manifest).unwrap();
+        let text = encode_content_version(&loaded);
+        assert!(text.contains(
+            "lynx_world_content_version_info{state=\"loaded\",version=\"1.2.3+build.4\"} 1"
+        ));
     }
 
     #[tokio::test]

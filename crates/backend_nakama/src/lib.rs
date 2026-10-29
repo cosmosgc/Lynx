@@ -4,8 +4,10 @@ pub mod backend;
 pub mod character_store;
 pub mod client;
 pub mod identity_store;
+pub mod telemetry;
 
-pub use backend::NakamaPostgresBackend;
+pub use backend::{BackendTelemetrySnapshot, NakamaPostgresBackend};
 pub use character_store::PostgresCharacterStore;
 pub use client::{NakamaClient, NakamaConfig};
 pub use identity_store::PostgresIdentityStore;
+pub use telemetry::{DURATION_BUCKETS_SECONDS, Telemetry, TelemetrySnapshot};

@@ -41,18 +41,25 @@ invisible until players complain.
 
 **Acceptance criteria**
 
-- [ ] The endpoint returns valid Prometheus text and is covered by a test.
-- [ ] Metrics reflect a real tick/session/action scenario.
-- [ ] Labels are bounded and contain no PII or secrets.
-- [ ] Missing metrics are documented as unsupported, not silently omitted.
-- [ ] Readiness and metrics can be scraped without opening the world port.
+- [x] The endpoint returns valid Prometheus text and is covered by a test.
+- [x] Metrics reflect a real tick/session/action scenario.
+- [x] Labels are bounded and contain no PII or secrets.
+- [x] Missing metrics are documented as unsupported, not silently omitted.
+- [x] Readiness and metrics can be scraped without opening the world port.
 
 Partial implementation: the admin listener exports tick execution time, scheduler
-deadline misses, overruns and failures, entities, attached and retained sessions, authority inputs and action
-requests/rejections, resume success/failure, outbound queue-full events, and
-bounded admission and rate-limit rejections, snapshot write outcomes, and store write latency. The remaining metric families and limitations
-are listed in operations.
-This task remains in progress until the full scope is verified.
+deadline misses, overruns and failures, entities, attached and retained sessions,
+authority inputs and action request/rejection/applied/timing metrics, resume
+outcomes, sampled outbound queue pressure and enqueued replication bytes, AI
+budget counters, bounded admission/rate-limit rejections, snapshot write outcomes
+and store write latency. Nakama mode also exports bounded backend adapter counts,
+errors and duration histograms. Content state is explicitly reported as absent
+until the service loads a bundle. Pathfinding and localization diagnostics remain
+opt-in and are not wired to current world-service call sites. See operations for
+metric semantics and unsupported families.
+
+This task remains in progress until pathfinding/localization are integrated or
+formally removed from scope, and the full validation gates are verified.
 
 ---
 

@@ -215,6 +215,18 @@ part of the endpoint contract.
 | `lynx_world_snapshot_writes_total{outcome}` | configured snapshot store write attempts, including startup and shutdown, by `success` or `failure`; no-store calls are excluded |
 | `lynx_world_snapshot_write_duration_seconds` | histogram of time in configured store `save` calls, including successful and failed writes at startup, periodically, and at shutdown; excludes snapshot capture and no-store calls. Cumulative buckets: 0.001, 0.01, 0.1, 1, 10, +Inf seconds |
 | `lynx_world_rate_limit_rejections_total{class,code}` | rate-limit rejections by bounded class and error code |
+| `lynx_world_actions_applied_total` | newly applied actions; cached idempotent replies are excluded |
+| `lynx_world_action_authority_duration_seconds` | histogram of time spent handling action requests inside the authority; not end-to-end client latency. Cumulative buckets: 0.001, 0.01, 0.1, 1, 10, +Inf seconds |
+| `lynx_world_resume_failures_total{code}` | failed resume admissions by bounded `ErrorCode`; unknown and expired tokens share the gateway's `session_expired` category |
+| `lynx_world_session_attaches_total` / `lynx_world_session_detaches_total` | authority connection attach and detach events, including resume attach |
+| `lynx_world_session_expired_closes_total` | connections closed after the attached session disappeared or expired; not disconnected-window expiry sweeps |
+| `lynx_world_outbound_queue_depth` / `lynx_world_outbound_queue_capacity` | summed frame depth/capacity sampled during authority work; not a continuous high-water mark |
+| `lynx_world_replication_enqueued_bytes_total` | encoded snapshot/delta bytes accepted by the outbound queue; not confirmed socket delivery bytes |
+| `lynx_world_ai_ticks_total` / `lynx_world_ai_decisions_total` | enabled AI ticks and evaluated controller decisions |
+| `lynx_world_ai_budget_exhaustions_total{budget}` | AI controller-scan, update, perception and action limits using fixed budget labels |
+| `lynx_world_content_version_info{state,version}` | content integration state (`absent`, `configured`, or `loaded`) and version when available. The current world service reports `state="absent"`; it does not load a content bundle |
+| `lynx_backend_operations_total{adapter}` / `lynx_backend_operation_errors_total{adapter}` | Nakama and PostgreSQL adapter operation counts/errors; emitted in Nakama auth mode with fixed adapter labels. Errors include validation/domain failures |
+| `lynx_backend_operation_duration_seconds{adapter}` | backend operation duration including PostgreSQL lock waits and failures; adapter snapshots are individually coherent, not atomic as a group |
 
 Starting alert examples (tune against staging; not tested production rules):
 `increase(lynx_world_tick_overruns_total[5m]) > 0`,
@@ -222,18 +234,17 @@ Starting alert examples (tune against staging; not tested production rules):
 `increase(lynx_world_snapshot_writes_total{outcome="failure"}[5m]) > 0`, and
 `up{job="lynx-world"} == 0` for five minutes. Monitor readiness separately.
 
-Unsupported requested families (do not interpret their absence as zero):
+Unsupported or incomplete requested families (do not interpret their absence as zero):
 
 - Tick duration distributions.
-- A separate count of disconnected reconnect windows and expiry sweeps.
-- Action rejections before authority delivery, action latency, and applied action counts (requests may be retries).
-- Replication bytes and queue depth, plus per-session delivery counts.
-- Resume failures broken down by `ErrorCode` (`expired`, `conflict`, etc.).
-- Pathfinding expansions, budget exhaustion, AI errors.
-- Database latency and errors.
+- A separate count of disconnected reconnect windows and resume-window expiry sweeps.
+- End-to-end action latency and action rejections before authority delivery (authority latency, applied actions, and transport rate limits are measured separately).
+- Per-session replication delivery counts, queue high-water marks, and bytes confirmed written to sockets.
+- Pathfinding expansion/budget metrics are not wired into the world runtime. `NavGrid::find_path_observed` is opt-in; the current service has no pathfinding call site to observe.
+- AI error counters; current AI diagnostics cover decisions and bounded-work limits only.
+- Backend metrics are emitted only in Nakama auth mode and combine database domain/validation errors with infrastructure errors. There are no per-query or pool metrics.
 - Snapshot load failures; write metrics above do not identify the store or error cause and do not include snapshot capture time.
-- Content version per zone.
-- Missing localization keys by locale (should be zero in release).
+- Localization fallback/missing-key counts are not wired to the service. `CatalogSet::resolve_with_diagnostics` is opt-in and the world service currently does not resolve localized catalogs.
 
 ## Session operations
 
