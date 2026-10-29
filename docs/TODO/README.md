@@ -86,7 +86,7 @@ the quick audit; update it when a gap is found or closed.
 
 | Documented gap | Source | Task |
 | --- | --- | --- |
-| Client scene, input, and camera remain an offline placeholder; full client integration is outstanding | [client backlog](40-bevy-client.md#clt-004--scene-camera-and-input-abstraction) | `CLT-004`–`CLT-014` |
+| Client scene, input, and camera have an offline foundation and early online presentation; full integration is outstanding | [client backlog](40-bevy-client.md#clt-004--scene-camera-and-input-abstraction) | `CLT-004`–`CLT-014` |
 | Client prediction and reconciliation are not integrated with networking or rendering | [simulation backlog](10-simulation-gameplay.md#sim-002--client-prediction-and-reconciliation-contract) | `SIM-002` |
 | World chat exists in `game_api` but is not routed by the gateway | [README](../../README.md#phase-3--interaction-and-mind-system--in-progress) | `SIM-008` |
 | Durable per-aggregate inventory and transfer ledger are not implemented | [persistence backlog](20-persistence-backend.md#pst-002--inventory-and-transfer-ledger-persistence) | `PST-002` |
@@ -106,7 +106,7 @@ the quick audit; update it when a gap is found or closed.
 | CI migration and live PostgreSQL checks await run confirmation; platform coverage remains incomplete | [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml), [issue detail](../issues/OPS-006-ci-migration-count-and-live-postgres-test.md) | `OPS-006`, `QUA-009` |
 | ADR 0022 (dynamic classes and Treat targeting) is Proposed | [ADR 0022](../adr/0022-dynamic-character-classes-and-combat-targeting.md) | `SIM-004` |
 | Guilds, quests, progression, economy, trading, parties | [README](../../README.md#phase-8--expand-and-stabilize--selected-systems-delivered-early) | `SIM-009`–`SIM-013` |
-| Local Markdown link and anchor checker exists, but a CI link gate is missing | [quality backlog](70-testing-quality.md#qua-009--documentation-and-code-consistency-sweep) | `QUA-009` |
+| Markdown link gate is configured; hosted CI confirmation and unsupported Markdown syntax remain open | [quality backlog](70-testing-quality.md#qua-009--documentation-and-code-consistency-sweep) | `QUA-009` |
 | No checked-in vulnerability reporting policy or documented private contact | [issue](../issues/AUTH-SecurityDocumentationGap.md) | `QUA-009` |
 
 ## Working conventions

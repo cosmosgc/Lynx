@@ -243,7 +243,7 @@ they need a reliable, non-flaky matrix.
 ## QUA-009 — Documentation and code consistency sweep
 
 - **Priority:** P1
-- **Status:** In progress — local link check available; link gate and CI confirmation remain
+- **Status:** In progress — link gate configured; hosted CI confirmation and broader documentation audit remain
 - **Depends on:** —
 - **References:** [architecture §Persistence model](../architecture.md#persistence-model),
   [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)
@@ -251,7 +251,8 @@ they need a reliable, non-flaky matrix.
 **Why:** Documentation drift leads to wrong decisions. Architecture and issue
 records have been corrected for the PostgreSQL snapshot store and current
 recovery gaps. CI derives the migration head and configures a live test, but a
-successful CI run is not yet confirmed. A Markdown link gate is still missing.
+successful CI run is not yet confirmed. CI is configured to run the Markdown
+checker and its tests; its hosted run also remains unconfirmed.
 Run `python scripts/check_markdown_links.py` locally and
 `python scripts/test_check_markdown_links.py` for its tests; both use only the
 Python standard library. The checker covers inline relative links and images,
@@ -277,7 +278,7 @@ the repository except `.git`, `.lynx`, `target`, and `__pycache__`.
 - [ ] No doc claims the SQL adapter is future work.
 - [ ] README counts/links and phase statements match the repository.
 - [x] CI migration assertions derive from `server/migrations`.
-- [ ] Broken relative links/anchors fail CI.
+- [ ] Broken relative links/anchors fail CI (configured for supported syntax; hosted run unconfirmed).
 - [ ] The gap register in the TODO index is current.
 
 ---

@@ -83,6 +83,7 @@ power values impossible to audit.
 - `FactionService` currently exposes public read-only state. Mutating faction
   commands remain authoritative simulation actions and are not part of the
   client-facing backend trait yet.
-- The SQL schema records normalized governance and economy rows. A future
-  PostgreSQL adapter must map them to and from `FactionSnapshot` and preserve the
-  same validation before replacing persisted state.
+- The PostgreSQL snapshot store persists `FactionSnapshot` as part of the
+  whole-world aggregate. The normalized governance and economy tables are not
+  its storage representation; a future normalized adapter would need to map
+  those rows to and from `FactionSnapshot` with the same validation.

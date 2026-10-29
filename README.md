@@ -24,7 +24,7 @@ localization model is described in
 
 | Metric | Value |
 | --- | --- |
-| Workspace crates | 11 (10 crates + the `lynx` CLI) |
+| Workspace crates | 14 members, including two client crates and the `lynx` CLI |
 | Rust edition / toolchain | 2024 edition, pinned to Rust **1.99** via `rust-toolchain.toml` |
 | Tests | Unit and integration tests; workspace forbids unsafe code (`unsafe_code = "forbid"`) |
 | ADRs | 21 accepted architecture decision records |
@@ -33,8 +33,8 @@ localization model is described in
 
 ## Status
 
-Early implementation — the server foundation is real and tested, the game
-client is not started yet. The repository currently contains the Phase 0/1
+Early implementation — the server foundation and an early client exist, but
+the graphical vertical slice is incomplete. The repository contains the Phase 0/1
 foundation plus a runnable headless world service: pinned toolchain, workspace
 layout, stable entity IDs, versioned component schemas, validated world-map
 atlases with explicit zone routes, faction governance, treasury, and territory
@@ -47,8 +47,10 @@ WebSocket `lynx-world` binary, durable whole-world snapshots for file or
 PostgreSQL storage (zone, calendar, and faction state in one versioned
 aggregate), and the `lynx` project CLI.
 
-**Not started:** Bevy client crates (rendering, input, camera), the world
-editor, and any final production hardening for the persisted world service;
+**Incomplete:** the integrated playable client, the world editor, and production
+hardening for the persisted world service. The Bevy client has an offline scene,
+input and camera foundation and early online presentation; see the
+[client backlog](docs/TODO/40-bevy-client.md). In addition,
 file-backed and PostgreSQL-backed snapshot stores are already in place, and
 sessions remain in memory.
 
@@ -75,9 +77,9 @@ forward-looking backlog with task IDs, dependencies, and acceptance criteria is
 ```text
 Engine project · 9 phases · last reviewed: October 2026
 
-Phase 0  Architecture proof          [██████████████████] 100%  Complete
-Phase 1  Engine skeleton             [███████████████░░░]  85%  In progress — Bevy client work pending
-Phase 2  Authoritative simulation    [███████████████░░░]  85%  In progress — account persistence pending
+Phase 0  Architecture proof          [███████████████░░░]       In progress — platform validation pending
+Phase 1  Engine skeleton             [███████████████░░░]  85%  In progress — client integration pending
+Phase 2  Authoritative simulation    [███████████████░░░]  85%  In progress — admission integration pending
 Phase 3  Interaction & minds         [█████████████░░░░░]  75%  In progress
 Phase 4  UI & minigames              [███████████░░░░░░░]  65%  In progress
 Phase 5  Editor & content pipeline   [█████░░░░░░░░░░░░░]  30%  In progress
@@ -86,11 +88,11 @@ Phase 7  MMORPG vertical slice       [█░░░░░░░░░░░░░
 Phase 8  Expand & stabilize          [██░░░░░░░░░░░░░░░░]  15%  Selected systems delivered early
 ```
 
-### Phase 0 — Architecture proof · Complete
+### Phase 0 — Architecture proof · In progress
 
 - [x] Pin Rust, Bevy, Nakama, and PostgreSQL versions (ADR 0001, 0003;
       `rust-toolchain.toml` pins Rust 1.99).
-- [x] Validate native, non-Docker Nakama setup on target development OSes
+- [ ] Validate native, non-Docker Nakama setup on target development OSes
       ([`docs/getting-started.md`](docs/getting-started.md), `scripts/`, `BAT/`).
 - [x] Decide the authoritative simulation topology (ADR 0002, 0004).
 - [x] Minimal login path and server health checks (`/healthz`, `/readyz`,
@@ -103,8 +105,8 @@ Phase 8  Expand & stabilize          [██░░░░░░░░░░░░
 - [x] Project CLI and minimal template (`lynx new`, `lynx doctor`).
 - [x] Stable IDs, schema definitions, and content loading (ADR 0007, 0006).
 - [x] Network protocol adapter and structured logging (`engine_net`, `tracing`).
-- [ ] Basic Bevy scene and input abstraction — next up; Bevy client crates
-      arrive in the next phase of work.
+- [~] Basic Bevy scene and input abstraction exist as an offline foundation;
+       integration into the playable client remains pending.
 - [ ] Exit criterion: a generated project opens a playable scene and runs the
       test pipeline (server-side pipeline already runs; scene is pending).
 
@@ -252,8 +254,8 @@ survive restarts; sessions still do not. `--fresh` discards that saved world
 and restores the authored demo. Wire kinds and reconnection rules are
 documented in
 [`docs/networking.md`](docs/networking.md); operation flags and shutdown
-behavior are in [`docs/operations.md`](docs/operations.md). There is no client
-crate yet.
+behavior are in [`docs/operations.md`](docs/operations.md). The client is an
+early foundation, not a complete playable vertical slice.
 
 ### The `lynx` CLI
 
@@ -272,14 +274,17 @@ The CLI is also exposed as `lynx` when installed with
 Generated projects include a Brazilian Portuguese catalog and default to
 `pt-BR`; additional locales are opt-in translations.
 
-Nakama and PostgreSQL are optional for engine development and required only
-for multiplayer work. The native, non-Docker setup is documented in
+Nakama and PostgreSQL are optional for engine development; the demo world
+service can run without either. Database-backed features and Nakama integration
+require their respective services. The native, non-Docker setup is documented in
 [`docs/getting-started.md`](docs/getting-started.md); Windows helper scripts
 live in `BAT/` and portable PowerShell shell scripts in `scripts/`.
 
 ## Repository layout
 
 ```text
+clients/lynx_client     Bevy client foundation and early presentation
+clients/lynx_client_net Client transport and protocol support
 crates/engine_core      Stable IDs, schemas, factions, world events, inventory, audit, errors
 crates/engine_sim       Headless authoritative zone simulation and action pipeline
 crates/engine_content   Content definitions, world maps, manifests, validation, versioning
@@ -289,6 +294,7 @@ crates/world_server     Connection IDs, wire messages, and delivery envelopes
 crates/lynx_world       Runnable WebSocket world service (`lynx-world`)
 crates/backend_nakama   Native Nakama HTTP adapter (no Docker required)
 crates/backend_memory   Non-persistent test/offline adapter (not production auth)
+crates/backend_contract_tests Shared backend contract tests
 crates/game_api         Backend service interfaces and gameplay DTOs
 tools/project_cli       `lynx` project scaffolding, doctor, and validation
 server/                 Native Nakama config, SQL migrations, run scripts

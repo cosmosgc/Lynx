@@ -1,7 +1,11 @@
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
+import check_markdown_links
 from check_markdown_links import anchors, check
 
 
@@ -25,6 +29,17 @@ class MarkdownLinksTest(unittest.TestCase):
             self.assertEqual(len(errors), 2)
             self.assertIn("README.md:8: missing target", errors[0])
             self.assertIn("README.md:9: missing anchor", errors[1])
+
+    def test_main_fails_for_broken_links_and_anchors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "README.md").write_text(
+                "# Home\n[missing](missing.md) [bad anchor](#missing)\n",
+                encoding="utf-8",
+            )
+            with patch.object(check_markdown_links, "ROOT", root), \
+                    redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                self.assertTrue(check_markdown_links.main())
 
 
 if __name__ == "__main__":

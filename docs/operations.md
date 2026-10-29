@@ -254,6 +254,9 @@ Unsupported requested families (do not interpret their absence as zero):
 1. Build and test the exact artifact. Review the changelog, migration notes,
    README progress and counts, relevant docs and links, and backlog gap register
    against the release (`OPS-014`; this review is not yet an enforced gate).
+   Run `python scripts/test_check_markdown_links.py` and
+   `python scripts/check_markdown_links.py`; manually review links outside the
+   checker's documented coverage in `QUA-009`.
 2. Apply forward-compatible migrations.
 3. Deploy to staging; run smoke and load tests.
 4. Publish content as an immutable versioned bundle, including validated
