@@ -266,7 +266,7 @@ prioritizing tanks). It is a design proposal, not an implementation contract.
 ## SIM-006 — AI behaviors, schedules, and perception budgets
 
 - **Priority:** P1
-- **Status:** In progress — bounded hostile-perception foundation only
+- **Status:** In progress — opt-in bounded tick-driven guard increment
 - **Depends on:** `SIM-001`
 - **References:** `crates/engine_sim/src/ai.rs`, `mind.rs`,
   [world simulation](../world-simulation.md)
@@ -301,10 +301,28 @@ the inspected prefix, not necessarily the globally nearest entities. A candidate
 limit reached exactly at iterator end is conservatively reported as reached,
 without reading ahead. Dead, non-AI-controlled, or factionless observers and
 invalid observer geometry are rejected. Tests cover limits, replay, player
-control, invalid ranges, and no candidate lookahead. This is an opt-in query,
-not a tick-integrated AI controller: existing unbounded perception/helper APIs
-are unchanged, and action budgets, behavior definitions, schedules, group aggro,
-and validated AI action dispatch remain to be implemented.
+control, invalid ranges, and no candidate lookahead.
+
+**Tick increment:** An explicitly installed server-owned `AiTickPolicy` makes
+`advance_tick` (including the gateway's movement tick) evaluate the built-in
+`behavior.guard`: perceive hostiles and attempt an attack on the nearest
+discovered target through the same `apply_action` pipeline used by players.
+Only current AI controllers are selected; player control is never overridden.
+Controller records scanned, AI updates, per-observer candidates/LOS/targets,
+and AI action attempts (including rejected actions) have deterministic caps.
+The last tick's server-side report includes decisions, perception counts and
+status, targets, and action rejections. Unknown behaviors are reported and do
+not act. Faction reputation expiry uses the policy's explicit simulation epoch
+and tick duration. Selection and perception inspect stable ID prefixes, so
+low limits can starve later entities; this is not yet a fair scheduler.
+
+This is opt-in: the running world must install the policy and restore it after
+snapshot reload; the existing demo does not configure it. `max_actions` caps AI
+attempts here, **not** all player plus AI actions: player actions are currently
+applied immediately without a shared tick counter. The policy epoch must match
+the authoritative reputation timebase. Existing unbounded perception/helper
+APIs are unchanged. Content-defined behavior graphs, scheduling, group aggro,
+fair scheduling, persistent inspection, and a shared action budget remain.
 
 ---
 

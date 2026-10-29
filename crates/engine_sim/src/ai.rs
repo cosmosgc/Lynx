@@ -5,12 +5,172 @@ use engine_core::faction::{
 };
 use engine_core::id::{DefinitionId, StableId};
 use engine_core::math::Vec3;
-use engine_core::time::Millis;
+use engine_core::time::{Millis, Tick};
 use serde::{Deserialize, Serialize};
 
+use crate::action::{ActionRequest, ActionResult, Verb};
 use crate::entity::EntityRecord;
 use crate::mind::Controller;
 use crate::zone::Zone;
+
+/// Server-owned, opt-in policy for the built-in guard behavior.
+/// Simulation time is `epoch + tick * tick_ms`, not wall-clock time.
+#[derive(Debug, Clone)]
+pub struct AiTickPolicy {
+    /// Directional faction alignments used for perception.
+    pub factions: FactionCatalog,
+    /// Alignment classification thresholds.
+    pub thresholds: Thresholds,
+    /// Guard perception range in meters.
+    pub range_m: f32,
+    /// Per-guard perception limits.
+    pub perception: PerceptionBudget,
+    /// Maximum entity records scanned for controllers each tick.
+    pub max_controller_candidates: usize,
+    /// Simulation epoch for reputation expiry.
+    pub epoch: Millis,
+    /// Milliseconds per simulation tick.
+    pub tick_ms: u32,
+}
+
+/// Last tick's bounded AI decisions, retained for server inspection.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AiTickReport {
+    /// Tick on which these decisions ran.
+    pub tick: Tick,
+    /// Entity records scanned for controllers.
+    pub controller_candidates: usize,
+    /// Controllers evaluated in entity-ID order.
+    pub decisions: Vec<AiDecision>,
+    /// Number of action attempts, including rejections.
+    pub action_attempts: usize,
+}
+
+/// A guard decision or an explicit reason for not acting.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AiDecision {
+    /// Acting entity.
+    pub actor: StableId,
+    /// Behavior identifier on the mind.
+    pub behavior: DefinitionId,
+    /// Perception report when the behavior was recognized.
+    pub perception: Option<PerceptionReport>,
+    /// Selected target, if one was perceived.
+    pub target: Option<StableId>,
+    /// Action pipeline result, if dispatched.
+    pub action: Option<ActionResult>,
+    /// Stable decision diagnostic.
+    pub reason: &'static str,
+}
+
+impl Zone {
+    /// Enable or disable tick-driven AI. This is server configuration, not client input.
+    pub fn set_ai_tick_policy(&mut self, policy: Option<AiTickPolicy>) {
+        self.ai_policy = policy.map(std::sync::Arc::new);
+    }
+
+    /// Inspect the most recent AI tick.
+    #[must_use]
+    pub fn ai_tick_report(&self) -> &AiTickReport {
+        &self.ai_report
+    }
+
+    pub(crate) fn run_ai_tick(&mut self) {
+        let mut report = AiTickReport {
+            tick: self.tick,
+            ..AiTickReport::default()
+        };
+        let Some(policy) = self.ai_policy.clone() else {
+            self.ai_report = report;
+            return;
+        };
+        // Bound selection work independently of the number of non-AI entities.
+        let mut controllers = Vec::new();
+        for entity in self
+            .entities
+            .values()
+            .take(if self.config.budget.max_ai_updates == 0 {
+                0
+            } else {
+                policy.max_controller_candidates
+            })
+        {
+            report.controller_candidates += 1;
+            if let Some(crate::mind::Mind {
+                controller: Controller::Ai { behavior },
+                ..
+            }) = &entity.mind
+            {
+                controllers.push((entity.id, behavior.clone()));
+                if controllers.len() == self.config.budget.max_ai_updates {
+                    break;
+                }
+            }
+        }
+        let elapsed = self.tick.0.saturating_mul(u64::from(policy.tick_ms));
+        let now = Millis::new(
+            policy
+                .epoch
+                .0
+                .saturating_add(i64::try_from(elapsed).unwrap_or(i64::MAX)),
+        );
+        for (actor, behavior) in controllers {
+            let mut decision = AiDecision {
+                actor,
+                behavior,
+                perception: None,
+                target: None,
+                action: None,
+                reason: "unknown_behavior",
+            };
+            // The built-in behavior is deliberately explicit: unknown content does not attack.
+            if decision.behavior.as_str() == "behavior.guard" {
+                let perception = self
+                    .perceive_hostiles_bounded(
+                        actor,
+                        &policy.factions,
+                        policy.thresholds,
+                        policy.range_m,
+                        now,
+                        policy.perception,
+                    )
+                    .expect("selected actor exists");
+                decision.target = perception.targets.first().map(|target| target.entity);
+                decision.reason = match perception.status {
+                    PerceptionStatus::IneligibleObserver => "ineligible_observer",
+                    PerceptionStatus::InvalidGeometry => "invalid_geometry",
+                    _ if decision.target.is_none() => "no_target",
+                    _ => "action_budget_reached",
+                };
+                decision.perception = Some(perception);
+                if let Some(target) = decision.target
+                    && report.action_attempts < self.config.budget.max_actions
+                {
+                    let request_id =
+                        format!("ai:{}:{}:{}", self.config.instance, self.tick.0, actor);
+                    // Never let a cached client request be mistaken for this decision.
+                    if self.action_results.contains_key(&request_id) {
+                        decision.reason = "request_id_conflict";
+                    } else {
+                        let request = ActionRequest::new(request_id, actor, Verb::Attack)
+                            .on(target)
+                            .at_tick(self.tick);
+                        report.action_attempts += 1;
+                        let result = self.apply_action(&request, now);
+                        decision.reason = if result.is_applied() {
+                            "applied"
+                        } else {
+                            "action_rejected"
+                        };
+                        decision.action = Some(result);
+                    }
+                }
+            }
+            report.decisions.push(decision);
+        }
+        self.ai_report = report;
+    }
+}
 
 /// A bounded request for nearby allies to assist.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -426,11 +586,14 @@ fn skip(entity: StableId, reason: &str) -> HelpSkipped {
 mod tests {
     use super::*;
     use engine_core::id::IdKind;
-    use engine_core::inventory::Inventory;
+    use engine_core::inventory::{Inventory, UniformItemRules};
     use engine_core::schema::PersistencePolicy;
 
     use crate::entity::{FactionMembership, Health, Interactable};
     use crate::mind::Mind;
+    use crate::nav::NavGrid;
+    use crate::zone::{TickBudget, ZoneConfig};
+    use std::sync::Arc;
 
     fn id(seed: u128) -> StableId {
         StableId::from_parts(IdKind::Entity, 1, seed)
@@ -463,6 +626,157 @@ mod tests {
         catalog.set(guards.clone(), bandits.clone(), Alignment::new(-90));
         catalog.set(bandits.clone(), guards.clone(), Alignment::new(-90));
         catalog
+    }
+
+    fn tick_zone(max_actions: usize, max_updates: usize) -> Zone {
+        let config = ZoneConfig::new(
+            DefinitionId::new("zone.ai_test").unwrap(),
+            StableId::from_parts(IdKind::Zone, 1, 1),
+            Vec3::ZERO,
+            Vec3::new(10.0, 1.0, 10.0),
+        )
+        .unwrap()
+        .with_budget(TickBudget {
+            max_actions,
+            max_ai_updates: max_updates,
+            max_path_expansions: 0,
+        });
+        let nav = NavGrid::new(10, 10, 1.0, Vec3::ZERO).unwrap();
+        let mut zone = Zone::new(config, nav, Arc::new(UniformItemRules::new(10))).unwrap();
+        zone.set_ai_tick_policy(Some(AiTickPolicy {
+            factions: catalog(),
+            thresholds: Thresholds::default(),
+            range_m: 8.0,
+            perception: PerceptionBudget {
+                max_candidates: 10,
+                max_line_of_sight: 10,
+                max_targets: 1,
+            },
+            max_controller_candidates: 10,
+            epoch: Millis::new(0),
+            tick_ms: 50,
+        }));
+        zone
+    }
+
+    #[test]
+    fn tick_guards_use_validated_actions_and_replay_deterministically() {
+        let setup = || {
+            let mut zone = tick_zone(1, 2);
+            zone.spawn(ai_at(1, "faction.guards", 1.5, 1.5)).unwrap();
+            zone.spawn(ai_at(2, "faction.guards", 1.5, 2.5)).unwrap();
+            let mut target = ai_at(3, "faction.bandits", 2.5, 1.5);
+            target.mind = Some(Mind::player(id(99), "session"));
+            target.interactable = Some(Interactable::new(2.0, [Verb::Attack]));
+            zone.spawn(target).unwrap();
+            zone
+        };
+        let mut a = setup();
+        let mut b = setup();
+        // This is the same tick entrypoint used by the gateway.
+        a.advance_movement_tick(50, 2.0);
+        b.advance_movement_tick(50, 2.0);
+        assert_eq!(a.ai_tick_report(), b.ai_tick_report());
+        let report = a.ai_tick_report();
+        assert_eq!(report.action_attempts, 1);
+        assert_eq!(report.decisions.len(), 2);
+        assert_eq!(report.decisions[0].reason, "applied");
+        assert_eq!(report.decisions[1].reason, "action_budget_reached");
+        assert_eq!(
+            a.entity(id(3)).unwrap().health.as_ref().unwrap().current,
+            99
+        );
+        assert_eq!(a.entity(id(3)), b.entity(id(3)));
+    }
+
+    #[test]
+    fn tick_respects_control_limits_and_action_rejection() {
+        let mut zone = tick_zone(2, 2);
+        let mut player = ai_at(1, "faction.guards", 1.5, 1.5);
+        player.mind = Some(Mind::player(id(99), "session"));
+        zone.spawn(player).unwrap();
+        let mut guard = ai_at(2, "faction.guards", 1.5, 2.5);
+        guard
+            .mind
+            .as_mut()
+            .unwrap()
+            .capabilities
+            .remove(&crate::mind::ControlCapability::Attack);
+        zone.spawn(guard).unwrap();
+        let mut target = ai_at(3, "faction.bandits", 2.5, 2.5);
+        target.mind = None;
+        target.interactable = Some(Interactable::new(2.0, [Verb::Attack]));
+        zone.spawn(target).unwrap();
+        zone.advance_tick();
+        let report = zone.ai_tick_report();
+        assert_eq!(report.decisions.len(), 1);
+        assert_eq!(report.decisions[0].actor, id(2));
+        assert_eq!(report.decisions[0].reason, "action_rejected");
+        assert!(
+            report.decisions[0]
+                .action
+                .as_ref()
+                .unwrap()
+                .error()
+                .is_some()
+        );
+        assert_eq!(
+            zone.entity(id(3)).unwrap().health.as_ref().unwrap().current,
+            100
+        );
+        let mut policy = zone.ai_policy.as_ref().unwrap().as_ref().clone();
+        policy.max_controller_candidates = 1;
+        zone.set_ai_tick_policy(Some(policy));
+        zone.advance_tick();
+        assert_eq!(zone.ai_tick_report().controller_candidates, 1);
+        assert_eq!(zone.ai_tick_report().decisions, [] as [AiDecision; 0]);
+    }
+
+    #[test]
+    fn control_transfer_and_zero_budgets_prevent_ai_actions() {
+        let mut zone = tick_zone(0, 1);
+        zone.spawn(ai_at(1, "faction.guards", 1.5, 1.5)).unwrap();
+        let mut target = ai_at(2, "faction.bandits", 2.5, 1.5);
+        target.mind = None;
+        target.interactable = Some(Interactable::new(2.0, [Verb::Attack]));
+        zone.spawn(target).unwrap();
+        zone.advance_tick();
+        assert_eq!(zone.ai_tick_report().action_attempts, 0);
+        assert_eq!(
+            zone.ai_tick_report().decisions[0].reason,
+            "action_budget_reached"
+        );
+        zone.entity_mut(id(1)).unwrap().mind = Some(Mind::player(id(99), "session"));
+        zone.config.budget.max_actions = 1;
+        zone.advance_tick();
+        assert_eq!(zone.ai_tick_report().decisions, [] as [AiDecision; 0]);
+        assert_eq!(
+            zone.entity(id(2)).unwrap().health.as_ref().unwrap().current,
+            100
+        );
+        zone.config.budget.max_ai_updates = 0;
+        zone.advance_tick();
+        assert_eq!(zone.ai_tick_report().controller_candidates, 0);
+    }
+
+    #[test]
+    fn unknown_behavior_and_exhausted_perception_are_inspectable() {
+        let mut zone = tick_zone(2, 2);
+        let mut unknown = ai_at(1, "faction.guards", 1.5, 1.5);
+        unknown.mind = Some(Mind::ai(DefinitionId::new("behavior.unknown").unwrap()));
+        zone.spawn(unknown).unwrap();
+        zone.spawn(ai_at(2, "faction.guards", 1.5, 2.5)).unwrap();
+        let mut policy = zone.ai_policy.as_ref().unwrap().as_ref().clone();
+        policy.perception.max_candidates = 0;
+        zone.set_ai_tick_policy(Some(policy));
+        zone.advance_tick();
+        let decisions = &zone.ai_tick_report().decisions;
+        assert_eq!(decisions[0].reason, "unknown_behavior");
+        assert_eq!(
+            decisions[1].perception.as_ref().unwrap().status,
+            PerceptionStatus::CandidateBudgetReached
+        );
+        assert_eq!(zone.ai_tick_report().action_attempts, 0);
     }
 
     #[test]

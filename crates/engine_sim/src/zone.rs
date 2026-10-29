@@ -12,6 +12,7 @@ use engine_core::time::Tick;
 use serde::{Deserialize, Serialize};
 
 use crate::action::{ActionEffect, ActionKey, ActionResult};
+use crate::ai::{AiTickPolicy, AiTickReport};
 use crate::combat::CombatRules;
 use crate::entity::EntityRecord;
 use crate::link::{EntityLink, LinkEvent, LinkGraph};
@@ -188,6 +189,8 @@ pub struct Zone {
     pub(crate) movement_pending: BTreeMap<StableId, MovementIntent>,
     pub(crate) movement_sequences: BTreeMap<StableId, MovementSequence>,
     pub(crate) movement_diagnostics: VecDeque<Diagnostic>,
+    pub(crate) ai_policy: Option<Arc<AiTickPolicy>>,
+    pub(crate) ai_report: AiTickReport,
 }
 
 impl fmt::Debug for Zone {
@@ -251,6 +254,8 @@ impl Zone {
             movement_pending: BTreeMap::new(),
             movement_sequences: BTreeMap::new(),
             movement_diagnostics: VecDeque::new(),
+            ai_policy: None,
+            ai_report: AiTickReport::default(),
         })
     }
 
@@ -384,6 +389,7 @@ impl Zone {
     /// Advance the tick and refresh statistics.
     pub fn advance_tick(&mut self) -> TickStats {
         self.tick = self.tick.next();
+        self.run_ai_tick();
         self.stats.tick = self.tick;
         self.stats.entity_count = self.entities.len();
         self.stats.controlled_entities = self
