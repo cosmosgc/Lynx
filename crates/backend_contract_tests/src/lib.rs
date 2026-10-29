@@ -48,6 +48,20 @@ pub trait CharacterContract {
     ) -> Result<Character, ApiError>;
 }
 
+/// A different, still-valid name for the same idempotency key.
+///
+/// Test callers may pass a name already at the 32-character limit, so appending
+/// would make the conflicting request invalid and mask the key conflict.
+fn different_name(name: &str) -> String {
+    let mut characters: Vec<char> = name.chars().collect();
+    if characters.len() < 32 {
+        characters.push('x');
+    } else if let Some(last) = characters.last_mut() {
+        *last = if *last == 'x' { 'y' } else { 'x' };
+    }
+    characters.into_iter().collect()
+}
+
 /// Assert character semantics shared by memory and PostgreSQL adapters.
 pub fn assert_character_contract<B: CharacterContract>(
     backend: &B,
@@ -69,14 +83,12 @@ pub fn assert_character_contract<B: CharacterContract>(
             .expect("same key replays receipt"),
         receipt
     );
+    let conflicting = CreateCharacter {
+        name: different_name(name),
+    };
+    assert_ne!(conflicting.name, name);
     assert!(matches!(
-        backend.create(
-            owner,
-            &key,
-            &CreateCharacter {
-                name: format!("{name} other"),
-            },
-        ),
+        backend.create(owner, &key, &conflicting),
         Err(ApiError::Conflict(_))
     ));
 
