@@ -293,7 +293,7 @@ database and not acceptable for a remote one.
 ## PST-008 — Schema version checks and migration integration
 
 - **Priority:** P1
-- **Status:** In progress
+- **Status:** Done — binary schema gate, read-only doctor, and hosted CI migration coverage
 - **Depends on:** —
 - **References:** [`scripts/db-migrate.ps1`](../../scripts/db-migrate.ps1),
   [migrations README](../../server/migrations/README.md)
@@ -317,16 +317,17 @@ later, in a less obvious place.
 **Runner follow-on:** Both migration scripts preflight local applied-file
 checksums before running any pending migration, including out-of-order files.
 Mocked runner tests cover mismatch and status behavior without a database;
-live PostgreSQL verification remains needed. Preflight is not locked across the
-whole run, so operators must not concurrently change files or run migrations.
+hosted PostgreSQL CI also verifies the gate and runner. Preflight is not locked
+across the whole run, so operators must not concurrently change files or run
+migrations.
 
 **Progress:** The binary embeds the repository migrations and compares history,
 checksums, pending entries, and unknown/newer entries before opening the
 PostgreSQL snapshot store. `lynx doctor --backend` reports this status using
 read-only inspection. CI provisions PostgreSQL, verifies missing/newer/checksum
 gate behavior and doctor output, applies migrations twice, checks the second
-run leaves history unchanged, and checks runner checksum rejection. The CI job
-has not yet been confirmed on a hosted run.
+run leaves history unchanged, and checks runner checksum rejection. The hosted
+CI run was confirmed green on 2026-10-29.
 
 **Acceptance criteria**
 
@@ -334,9 +335,8 @@ has not yet been confirmed on a hosted run.
 - [x] Starting against a newer schema is refused unless compatibility is
       explicitly declared.
 - [x] `doctor` reports pending/applied versions without changing state.
-- [ ] Hosted CI confirms a fresh database migrates to head and a second run is
-      a no-op. The assertions and job are configured, but no hosted run is
-      confirmed yet.
+- [x] Hosted CI confirms a fresh database migrates to head and a second run is
+      a no-op.
 - [x] Applied-migration checksum changes are rejected by startup inspection and
       the migration runner.
 

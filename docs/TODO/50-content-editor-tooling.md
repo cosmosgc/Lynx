@@ -307,10 +307,11 @@ contracts are still needed.
 - [ ] Every command has `--json` output with a documented schema.
 - [ ] Exit codes distinguish validation failure, incompatibility, and internal
       error.
-- [ ] CI exercises the generated-project build, validation, run, and test commands.
+- [x] Hosted CI exercises the generated-project build, validation, run, and
+      test commands.
 
-The Ubuntu CI workflow is configured to exercise these commands, but the updated
-workflow has not yet been verified in a hosted run.
+The Ubuntu CI workflow exercises these commands and completed green in the
+hosted CI run confirmed on 2026-10-29.
 
 ---
 

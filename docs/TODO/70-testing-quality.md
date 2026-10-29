@@ -8,10 +8,10 @@ toolchain upgrades, and flaky-test control.
 **Current baseline:** unit and integration tests, a zero-unsafe workspace,
 fmt/Clippy/test gates, a generated-project CI check, and a PostgreSQL migration
 job. The Ubuntu Rust job configures the live PostgreSQL test and requires its
-configuration; local runs can skip it when unconfigured. CI run confirmation is
-still pending. There is no coverage report, fuzz target, or load harness. A
-Markdown link checker and its tests run locally and in the configured CI
-workflow; hosted CI confirmation is still pending.
+configuration; local runs can skip it when unconfigured. Hosted CI confirmed
+the PostgreSQL, Markdown, Ubuntu, and Windows gates on 2026-10-29. There is no
+coverage report, fuzz target, or load harness. A Markdown link checker and its
+tests run locally and in CI.
 
 **Related design:** [project guide §26 definition of done](../lightweight_mmorpg_engine_project_guide.md#26-definition-of-done),
 [security](../security.md), [testing conventions](../../README.md#design-rules).
@@ -40,7 +40,7 @@ workflow; hosted CI confirmation is still pending.
       passing-after test.
 - [x] Tests exercise the wire/gateway seam and the simulation together.
 - [x] Reconnect and death paths are covered.
-- [ ] The suite runs in CI without a GPU or external service.
+- [x] The suite runs in hosted CI without a GPU or external service.
 
 **Coverage and remaining gaps:** `crates/world_gateway/tests/gateway.rs` drives
 real protocol envelopes through the gateway and zone. It covers forged combat
@@ -55,7 +55,7 @@ Contested destinations resolve in stable actor order regardless of request
 arrival order, and revoking Move after queuing causes processing-time rejection
 and consumes the sequence. The gateway test suite passed locally with these
 tests. The tests require no GPU or service; CI's workspace test command
-includes them, but a CI run has not been confirmed. The full invariant matrix
+includes them and passed in hosted CI. The full invariant matrix
 and historical failing-before evidence remain open. In particular, integrated
 coverage still needs authored directional faction overrides and broader
 queue/budget boundaries. Zone transfer is not yet available. Simulation unit
@@ -120,9 +120,9 @@ tests cover some of these separately, but do not substitute for this suite.
 - **Depends on:** `PST-001`
 - **References:** `PST-001`, `PST-008`, `OPS-006`
 
-**Why:** The Ubuntu CI test job is configured to run the live snapshot
-round-trip, pending run confirmation. Persistence work will add more live tests;
-they need a reliable, non-flaky matrix.
+**Why:** The Ubuntu CI job now runs the live snapshot round-trip against
+PostgreSQL 17. Persistence work will add more live tests; they need a reliable,
+non-flaky matrix.
 
 **Scope**
 
@@ -137,11 +137,11 @@ they need a reliable, non-flaky matrix.
 
 **Acceptance criteria**
 
-- [ ] Live persistence tests run in CI, not only locally.
+- [x] Live persistence tests run in CI, not only locally.
 - [ ] A configured-but-unreachable database fails loudly.
 - [ ] Tests are isolated and parallel-safe or explicitly serialized.
-- [ ] Migration/schema failures produce actionable diagnostics.
-- [ ] No test depends on Docker for local execution.
+- [x] Migration/schema failures produce actionable diagnostics.
+- [x] No test depends on Docker for local execution.
 
 ---
 
@@ -244,16 +244,16 @@ they need a reliable, non-flaky matrix.
 ## QUA-009 — Documentation and code consistency sweep
 
 - **Priority:** P1
-- **Status:** In progress — link gate configured; hosted CI confirmation and broader documentation audit remain
+- **Status:** Done — documentation sweep and hosted Markdown/CI verification completed
 - **Depends on:** —
 - **References:** [architecture §Persistence model](../architecture.md#persistence-model),
   [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)
 
 **Why:** Documentation drift leads to wrong decisions. Architecture and issue
 records have been corrected for the PostgreSQL snapshot store and current
-recovery gaps. CI derives the migration head and configures a live test, but a
-successful CI run is not yet confirmed. CI is configured to run the Markdown
-checker and its tests; its hosted run also remains unconfirmed.
+recovery gaps. CI derives the migration head, runs the live test, and runs the
+Markdown checker and its tests; the hosted run was confirmed green on
+2026-10-29.
 Run `python scripts/check_markdown_links.py` locally and
 `python scripts/test_check_markdown_links.py` for its tests; both use only the
 Python standard library. The checker covers inline relative links and images,
@@ -276,11 +276,11 @@ the repository except `.git`, `.lynx`, `target`, and `__pycache__`.
 
 **Acceptance criteria**
 
-- [ ] No doc claims the SQL adapter is future work.
-- [ ] README counts/links and phase statements match the repository.
+- [x] No doc claims the SQL adapter is future work.
+- [x] README counts/links and phase statements match the repository.
 - [x] CI migration assertions derive from `server/migrations`.
-- [ ] Broken relative links/anchors fail CI (configured for supported syntax; hosted run unconfirmed).
-- [ ] The gap register in the TODO index is current.
+- [x] Broken relative links/anchors fail CI for the checker's supported syntax.
+- [x] The gap register in the TODO index is current.
 
 ---
 

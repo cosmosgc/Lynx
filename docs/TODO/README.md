@@ -102,11 +102,9 @@ the quick audit; update it when a gap is found or closed.
 | User content has schemas/moderation requirements but no implementation | [security](../security.md#content-and-user-generated-content) | `CNT-008`, `NET-009` |
 | No staging publish, rollout, rollback, or upgrade workflow | [operations](../operations.md) | `OPS-004`, `OPS-010` |
 | No backup/restore drills | [security](../security.md#abuse-prevention) | `OPS-003` |
-| Platform matrix is build-supported, not CI-smoke-tested | [platforms](../platforms.md) | `OPS-006` |
-| CI migration and live PostgreSQL checks await run confirmation; platform coverage remains incomplete | [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml), [issue detail](../issues/OPS-006-ci-migration-count-and-live-postgres-test.md) | `OPS-006`, `QUA-009` |
+| macOS, client connect/render/move smoke, and automated CI duration/flakiness tracking are missing | [platforms](../platforms.md), [CI](../../.github/workflows/ci.yml) | `OPS-006` |
 | ADR 0022 (dynamic classes and Treat targeting) is Proposed | [ADR 0022](../adr/0022-dynamic-character-classes-and-combat-targeting.md) | `SIM-004` |
 | Guilds, quests, progression, economy, trading, parties | [README](../../README.md#phase-8--expand-and-stabilize--selected-systems-delivered-early) | `SIM-009`–`SIM-013` |
-| Markdown link gate is configured; hosted CI confirmation and unsupported Markdown syntax remain open | [quality backlog](70-testing-quality.md#qua-009--documentation-and-code-consistency-sweep) | `QUA-009` |
 | No checked-in vulnerability reporting policy or documented private contact | [issue](../issues/AUTH-SecurityDocumentationGap.md) | `QUA-009` |
 
 ## Working conventions

@@ -133,7 +133,7 @@ This task remains in progress until the full scope is verified.
 ## OPS-005 — Release artifacts and packaging
 
 - **Priority:** P2
-- **Status:** Ready
+- **Status:** In progress — hosted Linux, Windows, PostgreSQL, and Markdown gates confirmed; smoke, macOS, and timing work remain
 - **Depends on:** —
 - **References:** [platforms](../platforms.md), `CLT-012`
 
@@ -163,9 +163,9 @@ This task remains in progress until the full scope is verified.
 - **References:** [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml),
   [platforms](../platforms.md)
 
-**Why:** CI covers Linux and Windows plus a PostgreSQL migration job, but the
-live PostgreSQL integration test is configured but awaits CI run confirmation,
-macOS is unverified, and there is no client smoke test. The migration check
+**Why:** CI now confirms Linux and Windows checks plus PostgreSQL migration and
+live snapshot coverage. macOS, a true client connect/render/move smoke, and
+automated duration/flakiness tracking are still absent. The migration check
 derives its head from the migration files.
 
 **Scope**
@@ -182,12 +182,17 @@ derives its head from the migration files.
 
 **Acceptance criteria**
 
-- [ ] The live PostgreSQL integration test runs and passes in CI.
+- [x] The live PostgreSQL integration test runs and passes in CI.
 - [x] Migration head is derived, not hardcoded; adding `0007` does not break CI
       by itself.
-- [ ] Linux, Windows, and (once enabled) macOS pass fmt/Clippy/tests.
+- [x] Linux and Windows pass fmt/Clippy/tests in hosted CI; macOS is not enabled.
 - [ ] Client smoke coverage runs on at least one platform.
 - [ ] CI duration and flakiness are tracked.
+
+**Observed hosted baseline (2026-10-29):** the green run took just under ten
+minutes overall; Ubuntu workspace tests took about three minutes and Clippy
+about 90 seconds. Windows workspace tests exceeded ten minutes. This is a
+manual baseline, not automated duration/flakiness tracking.
 
 ---
 
