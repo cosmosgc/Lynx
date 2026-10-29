@@ -44,6 +44,7 @@ fn present_online(
     mut cameras: Query<&mut Transform, (With<SceneCamera>, Without<OnlineEntity>)>,
     mut windows: Query<&mut Window>,
 ) {
+    let client = client.into_inner();
     let state = client.world();
     let public: BTreeMap<_, _> = state
         .entities()
@@ -108,11 +109,11 @@ fn setup_scene(mut commands: Commands) {
         Sprite::from_color(Color::srgb(0.15, 0.25, 0.18), Vec2::splat(2048.0)),
         Transform::from_xyz(0.0, 0.0, -1.0),
     ));
-    for x in -4..=4 {
-        for y in -4..=4 {
+    for x in -4_i8..=4_i8 {
+        for y in -4_i8..=4_i8 {
             commands.spawn((
                 Sprite::from_color(Color::srgb(0.3, 0.45, 0.3), Vec2::splat(8.0)),
-                Transform::from_xyz(x as f32 * 128.0, y as f32 * 128.0, 0.0),
+                Transform::from_xyz(f32::from(x) * 128.0, f32::from(y) * 128.0, 0.0),
             ));
         }
     }
@@ -134,6 +135,7 @@ fn keyboard_input(keys: Res<ButtonInput<KeyCode>>, mut pressed: ResMut<PressedCo
         (KeyCode::KeyI, Control::I),
         (KeyCode::KeyC, Control::C),
     ];
+    let keys = keys.into_inner();
     pressed.0 = KEYS
         .iter()
         .filter_map(|(key, control)| keys.pressed(*key).then_some(*control))
@@ -146,6 +148,8 @@ fn present_scene(
     mut avatars: Query<&mut Transform, (With<Avatar>, Without<SceneCamera>)>,
     mut cameras: Query<&mut Transform, (With<SceneCamera>, Without<Avatar>)>,
 ) {
+    let scene = scene.into_inner();
+    let pose = pose.into_inner();
     for mut transform in &mut avatars {
         transform.translation.x = scene.avatar_position.x * SCALE;
         transform.translation.y = -scene.avatar_position.z * SCALE;

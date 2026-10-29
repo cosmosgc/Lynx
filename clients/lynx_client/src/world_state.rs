@@ -353,7 +353,13 @@ mod tests {
             json!({"session": session, "actor": actor(1), "resumed": resumed, "negotiated": {}}),
         )
     }
-    fn world(kind: &str, tick: u64, ids: &[StableId], updates: Value, movement: Value) -> Envelope {
+    fn world(
+        kind: &str,
+        tick: u64,
+        ids: &[StableId],
+        updates: &Value,
+        movement: &Value,
+    ) -> Envelope {
         message(
             kind,
             json!({"tick": tick, "interest": {"set": ids, "added": [], "removed": []},
@@ -381,8 +387,8 @@ mod tests {
                     "world.snapshot",
                     10,
                     &[actor(1), actor(2)],
-                    json!([public(actor(1), 10, 1, 0.0), public(actor(2), 10, 1, 4.0)]),
-                    movement(10, 0.0, None, None),
+                    &json!([public(actor(1), 10, 1, 0.0), public(actor(2), 10, 1, 4.0)]),
+                    &movement(10, 0.0, None, None),
                 ),
             )
             .unwrap();
@@ -408,8 +414,8 @@ mod tests {
             "world.delta",
             11,
             &[actor(1)],
-            json!([public(actor(1), 11, 2, 0.25)]),
-            movement(11, 0.25, Some(1), Some(false)),
+            &json!([public(actor(1), 11, 2, 0.25)]),
+            &movement(11, 0.25, Some(1), Some(false)),
         );
         state.receive(g, &delta).unwrap();
         assert_eq!(state.entities().count(), 1);
@@ -440,8 +446,8 @@ mod tests {
                     "world.snapshot",
                     12,
                     &[actor(1)],
-                    json!([public(actor(1), 12, 2, 0.5)]),
-                    movement(12, 0.5, Some(1), None),
+                    &json!([public(actor(1), 12, 2, 0.5)]),
+                    &movement(12, 0.5, Some(1), None),
                 ),
             )
             .unwrap();
@@ -458,8 +464,8 @@ mod tests {
                     "world.snapshot",
                     1,
                     &[],
-                    json!([]),
-                    movement(1, 0.0, None, None),
+                    &json!([]),
+                    &movement(1, 0.0, None, None),
                 ),
             )
             .unwrap();
@@ -485,8 +491,8 @@ mod tests {
             "world.delta",
             11,
             &[actor(1)],
-            json!([public(actor(2), 11, 2, 2.0)]),
-            Value::Null,
+            &json!([public(actor(2), 11, 2, 2.0)]),
+            &Value::Null,
         );
         assert_eq!(state.receive(g, &invalid), Err(Error::InvalidMessage));
         assert_eq!(state.entities().count(), 2);
@@ -509,15 +515,15 @@ mod tests {
     fn bounded_interest_and_per_entity_ordering() {
         let (mut state, g) = start();
         let many: Vec<_> = (1..=MAX_INTEREST_ENTITIES as u128 + 1).map(actor).collect();
-        let oversized = world("world.delta", 11, &many, json!([]), Value::Null);
+        let oversized = world("world.delta", 11, &many, &json!([]), &Value::Null);
         assert_eq!(state.receive(g, &oversized), Err(Error::Capacity));
         assert_eq!(state.tick(), Some(10));
         let older = world(
             "world.delta",
             11,
             &[actor(1), actor(2)],
-            json!([public(actor(1), 11, 0, 99.0)]),
-            Value::Null,
+            &json!([public(actor(1), 11, 0, 99.0)]),
+            &Value::Null,
         );
         state.receive(g, &older).unwrap();
         assert_eq!(
@@ -540,8 +546,8 @@ mod tests {
             "world.snapshot",
             10,
             &[actor(1)],
-            json!([]),
-            movement(10, 0.0, None, None),
+            &json!([]),
+            &movement(10, 0.0, None, None),
         );
         assert_eq!(state.receive(g, &incomplete), Err(Error::InvalidMessage));
         assert_eq!(state.tick(), None);
@@ -554,8 +560,8 @@ mod tests {
                     "world.snapshot",
                     10,
                     &[actor(1)],
-                    json!([public(actor(1), 10, 1, 0.0)]),
-                    movement(10, 0.0, None, None),
+                    &json!([public(actor(1), 10, 1, 0.0)]),
+                    &movement(10, 0.0, None, None),
                 ),
             )
             .unwrap();
@@ -564,8 +570,8 @@ mod tests {
             "world.delta",
             11,
             &[actor(1), actor(2)],
-            json!([public(actor(1), 11, 2, 0.5)]),
-            movement(11, 0.5, Some(1), Some(true)),
+            &json!([public(actor(1), 11, 2, 0.5)]),
+            &movement(11, 0.5, Some(1), Some(true)),
         );
         assert_eq!(state.receive(g, &incomplete), Err(Error::InvalidMessage));
         assert_eq!(state.tick(), Some(10));
@@ -578,8 +584,8 @@ mod tests {
                 "world.delta",
                 11,
                 &[actor(1)],
-                json!([public(actor(1), 11, 2, 0.5), reliable]),
-                movement(11, 0.5, Some(1), Some(true)),
+                &json!([public(actor(1), 11, 2, 0.5), reliable]),
+                &movement(11, 0.5, Some(1), Some(true)),
             );
             assert_eq!(state.receive(g, &delta), Err(Error::UnsupportedReplication));
             assert_eq!(state.tick(), Some(10));
@@ -593,8 +599,8 @@ mod tests {
                     "world.delta",
                     11,
                     &[actor(1), actor(2)],
-                    json!([public(actor(2), 11, 1, 4.0)]),
-                    Value::Null,
+                    &json!([public(actor(2), 11, 1, 4.0)]),
+                    &Value::Null,
                 ),
             )
             .unwrap();
