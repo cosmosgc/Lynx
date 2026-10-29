@@ -87,7 +87,7 @@ jobs:
       - name: Lint shell scripts
         run: shellcheck -x scripts/*.sh
 
-      - name: Generate and validate a project
+      - name: Exercise generated project creator workflow
         shell: bash
         run: |
           project="$RUNNER_TEMP/lynx-generated-ci"
@@ -96,7 +96,10 @@ jobs:
           jq -e '.ok == true' "$RUNNER_TEMP/doctor.json"
           cargo run --quiet -p project_cli -- --json validate --project "$project" > "$RUNNER_TEMP/validate.json"
           jq -e '.ok == true' "$RUNNER_TEMP/validate.json"
-          cargo check --manifest-path "$project/Cargo.toml"
+          for command in build run test; do
+            cargo run --quiet -p project_cli -- --json "$command" --project "$project" > "$RUNNER_TEMP/$command.json"
+            jq -e '.ok == true and .validation.ok == true and .cargo.exit_code == 0' "$RUNNER_TEMP/$command.json"
+          done
 
   windows:
     name: Rust checks (Windows)

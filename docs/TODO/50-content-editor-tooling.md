@@ -280,18 +280,18 @@ are not implemented. This must not be improvised after uploads exist.
 ## CNT-011 — CLI expansion
 
 - **Priority:** P1
-- **Status:** Ready
+- **Status:** In progress — project workflow available; automation contracts incomplete
 - **Depends on:** —
 - **References:** `tools/project_cli/src/main.rs`,
   [AI tooling](../ai-tooling.md)
 
-**Why:** The CLI covers scaffolding, doctor, validation, hashing, diffing, and
-publish checks. It lacks the commands a creator or CI pipeline needs to build,
-run, test, migrate, and diagnose a project as one workflow.
+**Why:** The CLI covers scaffolding, validation, basic project execution, and
+content checks, but migrations, richer diagnostics, and consistent automation
+contracts are still needed.
 
 **Scope**
 
-- `lynx run` and `lynx test` now validate content and invoke Cargo for the
+- `lynx build`, `lynx run` and `lynx test` now validate content and invoke Cargo for the
   project; generated templates remain starter executables, not playable servers.
 - `lynx content build` (bundle + manifest + hashes) and a stable output layout.
 - `lynx run` and `lynx test` for a generated project, with headless modes.
@@ -302,11 +302,15 @@ run, test, migrate, and diagnose a project as one workflow.
 
 **Acceptance criteria**
 
-- [ ] A generated project can be built, validated, run, and tested from the CLI.
+- [x] A generated project can be built, validated, run, and tested from the CLI
+      while its generated path dependencies remain available.
 - [ ] Every command has `--json` output with a documented schema.
 - [ ] Exit codes distinguish validation failure, incompatibility, and internal
       error.
-- [ ] CI uses the same commands a creator uses.
+- [ ] CI exercises the generated-project build, validation, run, and test commands.
+
+The Ubuntu CI workflow is configured to exercise these commands, but the updated
+workflow has not yet been verified in a hosted run.
 
 ---
 

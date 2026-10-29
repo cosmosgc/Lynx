@@ -45,33 +45,84 @@ fn run_and_test_validate_before_executing_cargo() {
     )
     .unwrap();
 
-    for command in ["run", "test"] {
+    for command in ["build", "run", "test"] {
         let (status, result) = invoke(&project, command);
         assert!(status.success(), "{result}");
         assert_eq!(result["ok"], true);
         assert_eq!(result["command"], command);
         assert_eq!(result["validation"]["ok"], true);
         assert_eq!(result["cargo"]["exit_code"], 0);
-        assert!(
-            result["cargo"]["stdout"]
-                .as_str()
-                .unwrap()
-                .contains(if command == "run" {
-                    "workflow ran"
-                } else {
-                    "test result: ok"
-                })
-        );
+        if command != "build" {
+            assert!(
+                result["cargo"]["stdout"]
+                    .as_str()
+                    .unwrap()
+                    .contains(if command == "run" {
+                        "workflow ran"
+                    } else {
+                        "test result: ok"
+                    })
+            );
+        }
     }
 
     fs::write(project.join("content/zones/starter.ron"), "not valid ron").unwrap();
-    let (status, result) = invoke(&project, "run");
-    assert!(!status.success());
-    assert_eq!(result["ok"], false);
-    assert_eq!(result["validation"]["ok"], false);
-    assert!(result["cargo"].is_null());
+    for command in ["build", "run", "test"] {
+        let (status, result) = invoke(&project, command);
+        assert!(!status.success());
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["validation"]["ok"], false);
+        assert!(result["cargo"].is_null());
+    }
 
     fs::remove_dir_all(project).unwrap();
+}
+
+#[test]
+fn generated_templates_build_run_and_test_without_modification() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root =
+        std::env::temp_dir().join(format!("lynx-real-workflow-{}-{nonce}", std::process::id()));
+    for template in ["minimal", "mmorpg"] {
+        let project = root.join(template);
+        let generated = Command::new(env!("CARGO_BIN_EXE_lynx"))
+            .args(["new", "workflow", "--template", template, "--output"])
+            .arg(&project)
+            .output()
+            .unwrap();
+        assert!(
+            generated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        for command in ["build", "run", "test"] {
+            let output = Command::new(env!("CARGO_BIN_EXE_lynx"))
+                .args([command, "--project"])
+                .arg(&project)
+                .arg("--json")
+                .env("CARGO_TARGET_DIR", root.join("target"))
+                .output()
+                .unwrap();
+            let result: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
+                panic!("invalid JSON: {}", String::from_utf8_lossy(&output.stderr))
+            });
+            assert!(output.status.success(), "{template} {command}: {result}");
+            assert_eq!(result["validation"]["ok"], true);
+            assert_eq!(result["cargo"]["exit_code"], 0);
+            if command == "run" {
+                assert!(
+                    result["cargo"]["stdout"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Welcome to workflow!")
+                );
+            }
+        }
+    }
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -89,11 +140,13 @@ fn cargo_failure_is_reported_and_returns_nonzero() {
         .unwrap();
     assert!(generated.status.success());
     fs::write(project.join("Cargo.toml"), "not a valid manifest").unwrap();
-    let (status, result) = invoke(&project, "test");
-    assert!(!status.success());
-    assert_eq!(result["ok"], false);
-    assert_eq!(result["validation"]["ok"], true);
-    assert_ne!(result["cargo"]["exit_code"], 0);
-    assert_ne!(result["cargo"]["stderr"].as_str().unwrap(), "");
+    for command in ["build", "run", "test"] {
+        let (status, result) = invoke(&project, command);
+        assert!(!status.success());
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["validation"]["ok"], true);
+        assert_ne!(result["cargo"]["exit_code"], 0);
+        assert_ne!(result["cargo"]["stderr"].as_str().unwrap(), "");
+    }
     fs::remove_dir_all(project).unwrap();
 }

@@ -15,7 +15,7 @@ testing a Lynx project never requires an MCP server.
 
 | Surface | Status | Notes |
 |---|---|---|
-| CLI (`lynx new/doctor/validate/run/test/content hash/content diff/content publish-check`) | Partial | JSON reports are available; consistent failure handling and schemas across all commands remain in progress |
+| CLI (`lynx new/doctor/validate/build/run/test/content hash/content diff/content publish-check`) | Partial | JSON reports are available; consistent failure handling and schemas across all commands remain in progress |
 | Engine MCP server | Planned | Narrow tools wrapping the CLI and content validators |
 | External MCP client | Planned | Explicit per-workspace configuration |
 | Shell execution | Not exposed by default | Allowlist or user approval per command |
@@ -65,7 +65,7 @@ unrestricted filesystem access, secret stores, or publishing without approval.
 ```bash
 lynx new my-world --template mmorpg --output ../my-world --json
 lynx validate --project ../my-world --json
-cargo build --manifest-path ../my-world/Cargo.toml
+lynx build --project ../my-world --json
 lynx run --project ../my-world --json
 lynx test --project ../my-world --json
 ```
@@ -76,14 +76,20 @@ same commands a human would use.
 
 ### Project execution
 
-`lynx run` and `lynx test` accept `--project` (default `.`), validate content,
-then invoke `cargo run` or `cargo test` using that project's `Cargo.toml` and
+`lynx build`, `lynx run` and `lynx test` accept `--project` (default `.`), validate content,
+then invoke the corresponding Cargo command using that project's `Cargo.toml` and
 working directory. They execute project code and Cargo build scripts; only use
 them on trusted projects. The current templates are starter executables, not a
 playable server, and there is no headless-mode switch yet.
 
-With `--json`, both commands return an object with `ok` (boolean), `command`
-(`"run"` or `"test"`), `project` (path string), `validation` (the validation
+The generated manifest uses absolute path dependencies pointing to the Lynx
+checkout used to build the CLI. That checkout must remain available at that
+path; generated projects are not yet portable standalone packages. Cargo may
+also need registry access and a compatible Rust toolchain. CI exercises the
+creator workflow against a generated project on Ubuntu.
+
+With `--json`, these commands return an object with `ok` (boolean), `command`
+(`"build"`, `"run"` or `"test"`), `project` (path string), `validation` (the validation
 report), and `cargo` (null if validation failed, otherwise an object containing
 `exit_code` (integer or null if terminated by signal), `stdout`, and `stderr`
 (strings)). Output is captured until Cargo exits and stdin is closed; this is

@@ -32,6 +32,7 @@ enum Commands {
     New(NewArgs),
     Doctor(DoctorArgs),
     Validate(ValidateArgs),
+    Build(ProjectCommandArgs),
     Run(ProjectCommandArgs),
     Test(ProjectCommandArgs),
     Content(ContentArgs),
@@ -340,6 +341,7 @@ fn run() -> Result<()> {
         Commands::Doctor(args) => doctor(&args)?,
         Commands::Validate(args) => validate_project(&args)?,
         Commands::Content(args) => content(&args)?,
+        Commands::Build(args) => project_command(&args, "build")?,
         Commands::Run(args) => project_command(&args, "run")?,
         Commands::Test(args) => project_command(&args, "test")?,
     };
@@ -350,7 +352,8 @@ fn run() -> Result<()> {
         println!("{}", render_human_output(&output));
     }
 
-    if matches!(output["command"].as_str(), Some("run" | "test")) && output["ok"] == false {
+    if matches!(output["command"].as_str(), Some("build" | "run" | "test")) && output["ok"] == false
+    {
         std::process::exit(1);
     }
     Ok(())
@@ -380,8 +383,8 @@ fn new_project(args: &NewArgs) -> Result<Value> {
                  Authored game data lives in `content/`. The world map, two \
                  connected starter zones, interactable tavern keeper, torch \
                  item, inventory panel, and Brazilian Portuguese source catalog \
-                 are ready for `lynx validate --project .`. Use `lynx run --project .` \
-                 or `lynx test --project .` to validate and invoke Cargo. This \
+                 are ready for `lynx validate --project .`. Use `lynx build --project .`, \
+                 `lynx run --project .`, or `lynx test --project .` to validate and invoke Cargo. This \
                  starter executable is not yet a playable game server.\n\n\
                  Interactions describe client intent only; the authoritative \
                  game server must validate each request and determine its outcome.\n"
@@ -740,7 +743,7 @@ fn backend_url() -> String {
 }
 
 fn render_human_output(output: &Value) -> String {
-    if matches!(output["command"].as_str(), Some("run" | "test")) {
+    if matches!(output["command"].as_str(), Some("build" | "run" | "test")) {
         let command = output["command"].as_str().unwrap_or("");
         let mut text = format!(
             "Project {command}: {}",
