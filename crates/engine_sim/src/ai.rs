@@ -158,6 +158,144 @@ pub struct PerceivedTarget {
     pub alignment: Alignment,
 }
 
+/// Per-query limits supplied by the server, not by content or a client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PerceptionBudget {
+    /// Maximum candidate records inspected, including the observer.
+    pub max_candidates: usize,
+    /// Maximum line-of-sight checks.
+    pub max_line_of_sight: usize,
+    /// Maximum targets returned.
+    pub max_targets: usize,
+}
+
+/// Why a bounded perception query stopped or could not run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PerceptionStatus {
+    /// The supplied candidate iterator was exhausted.
+    Complete,
+    /// The candidate limit was reached; more candidates may remain.
+    CandidateBudgetReached,
+    /// A candidate needed a line-of-sight check after that budget was spent.
+    LineOfSightBudgetReached,
+    /// The observer is dead, lacks a faction, or is not AI-controlled.
+    IneligibleObserver,
+    /// Range is negative or non-finite, or the observer's position is non-finite.
+    InvalidGeometry,
+}
+
+/// Inspectable output from a bounded perception query.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PerceptionReport {
+    /// Nearest discovered enemies, with entity id as the tie breaker.
+    pub targets: Vec<PerceivedTarget>,
+    /// Candidate records actually inspected.
+    pub candidates_examined: usize,
+    /// Line-of-sight checks actually performed.
+    pub line_of_sight_checks: usize,
+    /// Completion or failure diagnostic.
+    pub status: PerceptionStatus,
+}
+
+/// Perceive enemies with hard candidate, line-of-sight, and output limits.
+///
+/// Candidates must be supplied in a stable order for replay. When a budget is
+/// reached, the results cover only the inspected prefix and therefore need not
+/// contain the globally nearest enemies. No lookahead is performed to detect
+/// whether the candidate limit coincides exactly with the end of the iterator.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn perceive_hostiles_bounded<'a>(
+    observer: &EntityRecord,
+    entities: impl IntoIterator<Item = &'a EntityRecord>,
+    line_of_sight: impl Fn(Vec3, Vec3) -> bool,
+    catalog: &FactionCatalog,
+    thresholds: Thresholds,
+    range_m: f32,
+    now: Millis,
+    budget: PerceptionBudget,
+) -> PerceptionReport {
+    let mut report = PerceptionReport {
+        targets: Vec::new(),
+        candidates_examined: 0,
+        line_of_sight_checks: 0,
+        status: PerceptionStatus::Complete,
+    };
+    let Some(membership) = observer.faction.as_ref().filter(|_| {
+        observer.is_alive()
+            && observer
+                .mind
+                .as_ref()
+                .is_some_and(|mind| matches!(mind.controller, Controller::Ai { .. }))
+    }) else {
+        report.status = PerceptionStatus::IneligibleObserver;
+        return report;
+    };
+    let position = observer.position();
+    if !range_m.is_finite() || range_m < 0.0 || !finite_position(position) {
+        report.status = PerceptionStatus::InvalidGeometry;
+        return report;
+    }
+
+    let mut entities = entities.into_iter();
+    while report.candidates_examined < budget.max_candidates {
+        let Some(entity) = entities.next() else {
+            return finish_perception(report, budget.max_targets);
+        };
+        report.candidates_examined += 1;
+        if entity.id == observer.id || !entity.is_alive() || !finite_position(entity.position()) {
+            continue;
+        }
+        let Some(other) = &entity.faction else {
+            continue;
+        };
+        let distance = position.distance_xz(entity.position());
+        if !distance.is_finite() || distance > range_m {
+            continue;
+        }
+        let alignment = resolve_alignment(
+            catalog,
+            &membership.faction,
+            &other.faction,
+            Some(&membership.reputation),
+            now,
+            &[],
+        );
+        if alignment.class(thresholds) != AlignmentClass::Enemy {
+            continue;
+        }
+        if report.line_of_sight_checks == budget.max_line_of_sight {
+            report.status = PerceptionStatus::LineOfSightBudgetReached;
+            return finish_perception(report, budget.max_targets);
+        }
+        report.line_of_sight_checks += 1;
+        if line_of_sight(position, entity.position()) {
+            report.targets.push(PerceivedTarget {
+                entity: entity.id,
+                distance_m: distance,
+                alignment,
+            });
+        }
+    }
+    report.status = PerceptionStatus::CandidateBudgetReached;
+    finish_perception(report, budget.max_targets)
+}
+
+fn finite_position(position: Vec3) -> bool {
+    position.x.is_finite() && position.y.is_finite() && position.z.is_finite()
+}
+
+fn finish_perception(mut report: PerceptionReport, max_targets: usize) -> PerceptionReport {
+    report.targets.sort_by(|a, b| {
+        a.distance_m
+            .total_cmp(&b.distance_m)
+            .then_with(|| a.entity.cmp(&b.entity))
+    });
+    report.targets.truncate(max_targets);
+    report
+}
+
 /// Perceive hostile entities within range and line of sight, nearest first.
 #[must_use]
 pub fn perceive_hostiles<'a>(
@@ -207,6 +345,32 @@ pub fn perceive_hostiles<'a>(
 }
 
 impl Zone {
+    /// Bounded hostile perception in stable entity-id order using the zone nav grid.
+    /// Returns `None` when the observer does not exist.
+    #[must_use]
+    pub fn perceive_hostiles_bounded(
+        &self,
+        observer_id: StableId,
+        catalog: &FactionCatalog,
+        thresholds: Thresholds,
+        range_m: f32,
+        now: Millis,
+        budget: PerceptionBudget,
+    ) -> Option<PerceptionReport> {
+        self.entities.get(&observer_id).map(|observer| {
+            perceive_hostiles_bounded(
+                observer,
+                self.entities.values(),
+                |from, to| self.nav.line_of_sight(from, to),
+                catalog,
+                thresholds,
+                range_m,
+                now,
+                budget,
+            )
+        })
+    }
+
     /// Select nearby allies willing to help, using this zone's nav grid for
     /// line of sight.
     #[must_use]
@@ -415,5 +579,102 @@ mod tests {
         assert_eq!(targets.len(), 2);
         assert_eq!(targets[0].entity, id(2));
         assert_eq!(targets[1].entity, id(3));
+    }
+
+    #[test]
+    fn bounded_perception_limits_work_and_reports_partial_results() {
+        use std::cell::Cell;
+        let guard = ai_at(1, "faction.guards", 0.0, 0.0);
+        let entities = vec![
+            ai_at(2, "faction.bandits", 4.0, 0.0),
+            ai_at(3, "faction.bandits", 2.0, 0.0),
+            ai_at(4, "faction.bandits", 1.0, 0.0),
+        ];
+        let checks = Cell::new(0);
+        let run = || {
+            perceive_hostiles_bounded(
+                &guard,
+                &entities,
+                |_, _| {
+                    checks.set(checks.get() + 1);
+                    true
+                },
+                &catalog(),
+                Thresholds::default(),
+                10.0,
+                Millis::new(10),
+                PerceptionBudget {
+                    max_candidates: 3,
+                    max_line_of_sight: 2,
+                    max_targets: 1,
+                },
+            )
+        };
+        let report = run();
+        assert_eq!(report.status, PerceptionStatus::LineOfSightBudgetReached);
+        assert_eq!(report.candidates_examined, 3);
+        assert_eq!(report.line_of_sight_checks, 2);
+        assert_eq!(checks.get(), 2);
+        assert_eq!(
+            report.targets.iter().map(|t| t.entity).collect::<Vec<_>>(),
+            vec![id(3)]
+        );
+        assert_eq!(report, run());
+    }
+
+    #[test]
+    fn bounded_perception_rejects_player_control_and_invalid_geometry() {
+        let mut guard = ai_at(1, "faction.guards", 0.0, 0.0);
+        let enemy = ai_at(2, "faction.bandits", 1.0, 0.0);
+        let budget = PerceptionBudget {
+            max_candidates: 5,
+            max_line_of_sight: 5,
+            max_targets: 5,
+        };
+        guard.mind = Some(Mind::player(id(99), "session"));
+        let run = |observer: &EntityRecord, range| {
+            perceive_hostiles_bounded(
+                observer,
+                [&enemy],
+                |_, _| panic!("unexpected LOS"),
+                &catalog(),
+                Thresholds::default(),
+                range,
+                Millis::new(0),
+                budget,
+            )
+        };
+        let report = run(&guard, 10.0);
+        assert_eq!(report.status, PerceptionStatus::IneligibleObserver);
+        assert_eq!(report.candidates_examined, 0);
+        guard.mind = Some(Mind::ai(DefinitionId::new("behavior.guard").unwrap()));
+        assert_eq!(
+            run(&guard, f32::NAN).status,
+            PerceptionStatus::InvalidGeometry
+        );
+    }
+
+    #[test]
+    fn bounded_perception_candidate_limit_never_reads_ahead() {
+        let guard = ai_at(1, "faction.guards", 0.0, 0.0);
+        let enemy = ai_at(2, "faction.bandits", 1.0, 0.0);
+        let entities =
+            std::iter::once(&enemy).chain(std::iter::from_fn(|| panic!("read beyond budget")));
+        let report = perceive_hostiles_bounded(
+            &guard,
+            entities,
+            |_, _| true,
+            &catalog(),
+            Thresholds::default(),
+            10.0,
+            Millis::new(0),
+            PerceptionBudget {
+                max_candidates: 1,
+                max_line_of_sight: 1,
+                max_targets: 1,
+            },
+        );
+        assert_eq!(report.status, PerceptionStatus::CandidateBudgetReached);
+        assert_eq!(report.targets[0].entity, id(2));
     }
 }

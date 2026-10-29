@@ -266,7 +266,7 @@ prioritizing tanks). It is a design proposal, not an implementation contract.
 ## SIM-006 — AI behaviors, schedules, and perception budgets
 
 - **Priority:** P1
-- **Status:** Ready
+- **Status:** In progress — bounded hostile-perception foundation only
 - **Depends on:** `SIM-001`
 - **References:** `crates/engine_sim/src/ai.rs`, `mind.rs`,
   [world simulation](../world-simulation.md)
@@ -292,6 +292,19 @@ groups without code changes.
       player.
 - [ ] Deterministic replay produces identical AI decisions for the same inputs.
 - [ ] Behavior failures emit diagnostics instead of silently idling.
+
+**Foundation:** `perceive_hostiles_bounded` provides server-supplied limits on
+candidate records, line-of-sight checks, and returned targets, with counts and
+completion/failure diagnostics. The zone wrapper iterates in stable entity-ID
+order; results are sorted by distance and ID, but budget exhaustion returns only
+the inspected prefix, not necessarily the globally nearest entities. A candidate
+limit reached exactly at iterator end is conservatively reported as reached,
+without reading ahead. Dead, non-AI-controlled, or factionless observers and
+invalid observer geometry are rejected. Tests cover limits, replay, player
+control, invalid ranges, and no candidate lookahead. This is an opt-in query,
+not a tick-integrated AI controller: existing unbounded perception/helper APIs
+are unchanged, and action budgets, behavior definitions, schedules, group aggro,
+and validated AI action dispatch remain to be implemented.
 
 ---
 
