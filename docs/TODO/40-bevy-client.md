@@ -184,6 +184,11 @@ and is neither gameplay nor prediction. The 2D camera follows the rig target,
 not its 3D offset. There is no asset loading, demo zone, billboard character,
 collision, rebinding UI, or online connection. This is not a completed camera
 and input integration. An actual Windows visual smoke test remains outstanding.
+The offline core now permits the existing action resolver and follow rig to be
+replaced independently, with ordered headless-tested seams; this is not an
+accepted camera/input architecture. Asset import policy and the final camera/
+input design still require the QUA-017 decisions. No acceptance criterion has
+been verified by this increment.
 
 ---
 

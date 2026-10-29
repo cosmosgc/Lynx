@@ -96,42 +96,70 @@ impl Default for FollowCamera {
     }
 }
 
-/// Installs a deterministic placeholder scene and follow camera.
-/// Replacing this plugin allows another input or camera implementation.
+/// Installs the existing offline core and its default placeholder adapters.
 #[derive(Debug)]
 pub struct OfflineFoundationPlugin;
 
-/// Ordering points for platform input and presentation adapters.
+/// Ordering points for platform input, action resolution, movement, camera and presentation.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, SystemSet)]
 pub enum OfflineSet {
     Input,
+    Actions,
     Simulation,
+    Camera,
     Presentation,
 }
 
 impl Plugin for OfflineFoundationPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins((OfflineCorePlugin, DefaultActionPlugin, FollowCameraPlugin));
+    }
+}
+
+/// Local placeholder state and movement; install adapters separately when needed.
+#[derive(Debug)]
+pub struct OfflineCorePlugin;
+
+impl Plugin for OfflineCorePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<InputBindings>()
             .init_resource::<PressedControls>()
             .init_resource::<ActiveActions>()
             .init_resource::<OfflineScene>()
             .init_resource::<CameraPose>()
-            .init_resource::<FollowCamera>()
             .configure_sets(
                 Update,
                 (
                     OfflineSet::Input,
+                    OfflineSet::Actions,
                     OfflineSet::Simulation,
+                    OfflineSet::Camera,
                     OfflineSet::Presentation,
                 )
                     .chain(),
             )
-            .add_systems(
-                Update,
-                (resolve_actions, move_placeholder, follow_camera)
-                    .chain()
-                    .in_set(OfflineSet::Simulation),
-            );
+            .add_systems(Update, move_placeholder.in_set(OfflineSet::Simulation));
+    }
+}
+
+/// Resolves the existing control bindings into local placeholder actions.
+#[derive(Debug)]
+pub struct DefaultActionPlugin;
+
+impl Plugin for DefaultActionPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Update, resolve_actions.in_set(OfflineSet::Actions));
+    }
+}
+
+/// Supplies the existing local follow-camera pose.
+#[derive(Debug)]
+pub struct FollowCameraPlugin;
+
+impl Plugin for FollowCameraPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<FollowCamera>()
+            .add_systems(Update, follow_camera.in_set(OfflineSet::Camera));
     }
 }
 
@@ -175,6 +203,31 @@ fn follow_camera(scene: Res<OfflineScene>, rig: Res<FollowCamera>, mut pose: Res
 mod tests {
     use super::*;
     use crate::headless_app;
+
+    #[test]
+    fn alternative_action_and_camera_adapters_run_in_order() {
+        fn custom_actions(mut actions: ResMut<ActiveActions>) {
+            actions.0 = HashSet::from([Action::MoveRight]);
+        }
+        #[allow(clippy::needless_pass_by_value)] // Bevy system parameters must be passed by value.
+        fn custom_camera(scene: Res<OfflineScene>, mut pose: ResMut<CameraPose>) {
+            pose.target = scene.avatar_position;
+            pose.position = scene.avatar_position + Vec3::Y;
+        }
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, OfflineCorePlugin))
+            .add_systems(Update, custom_actions.in_set(OfflineSet::Actions))
+            .add_systems(Update, custom_camera.in_set(OfflineSet::Camera));
+        app.update();
+        assert_eq!(
+            app.world().resource::<OfflineScene>().avatar_position,
+            Vec3::X
+        );
+        let pose = app.world().resource::<CameraPose>();
+        assert_eq!(pose.target, Vec3::X);
+        assert_eq!(pose.position, Vec3::X + Vec3::Y);
+        assert!(!app.world().contains_resource::<FollowCamera>());
+    }
 
     #[test]
     fn actions_move_placeholder_and_camera_follows() {
