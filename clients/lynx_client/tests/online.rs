@@ -217,6 +217,7 @@ async fn rejected_updates_are_not_acknowledged() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // Keep the end-to-end headless session in one readable flow.
 async fn headless_schedule_connects_moves_and_disconnects() {
     const TOKEN: &str = "headless-test-secret";
     let auth = Authenticator::new(&[digest(TOKEN)]).unwrap();
@@ -290,7 +291,7 @@ async fn headless_schedule_connects_moves_and_disconnects() {
             .entities()
             .map(|e| (e.position.x * 32.0, -e.position.z * 32.0))
             .collect();
-        assert!(!expected.is_empty());
+        assert_ne!(expected.len(), 0);
         let world = app.world_mut();
         let displayed: Vec<_> = world
             .query::<(&Sprite, &Transform)>()
@@ -338,11 +339,12 @@ async fn headless_schedule_connects_moves_and_disconnects() {
     .await
     .unwrap();
     assert!(!format!("{:?}", app.world().resource::<OnlineClient>()).contains(TOKEN));
-    let mut client = app.world_mut().resource_mut::<OnlineClient>();
-    client.disconnect();
-    assert_eq!(client.status(), OnlineStatus::Disconnected);
-    assert_eq!(client.world().tick(), None);
-    drop(client);
+    {
+        let mut client = app.world_mut().resource_mut::<OnlineClient>();
+        client.disconnect();
+        assert_eq!(client.status(), OnlineStatus::Disconnected);
+        assert_eq!(client.world().tick(), None);
+    }
     #[cfg(feature = "window")]
     {
         use bevy::prelude::*;

@@ -85,10 +85,28 @@ cargo build -p lynx_client --no-default-features
 cargo test -p lynx_client --no-default-features
 ```
 
-The no-default-features executable advances the shared application by one
-update and exits; it is not an offline gameplay or replay harness. Workspace
-tests also exercise the headless application, even with the default window
-feature enabled.
+Without arguments, the no-default-features executable advances the shared
+application by one update and exits. Use `--replay` to apply an offline
+presentation fixture as described below. Workspace tests also exercise the
+headless application, even with the default window feature enabled.
+
+## Offline presentation replay
+
+Drive the placeholder scene without a server using a JSON fixture. Each entry in
+`frames` represents one client update; `pressed` names controls (`W`, `A`, `S`,
+`D`, `E`, `Enter`, `I`, or `C`). For example:
+
+```json
+{"frames":[{"pressed":["W"]},{"pressed":["W","D"]},{}]}
+```
+
+With the default window feature, run `cargo run -p lynx_client -- --replay
+path/to/fixture.json` to view the scripted sequence. For GPU/display-independent
+inspection, run `cargo run -p lynx_client --no-default-features -- --replay
+path/to/fixture.json`; this prints the final placeholder position. Fixtures
+supply only local presentation inputs: they are not server snapshots and never
+decide authoritative gameplay state. The fixture parser rejects unknown fields
+and control names. Replay ends after its last frame and leaves controls released.
 
 Bevy is pinned to 0.20.0 at the workspace boundary. Per ADR 0001, upgrade it in
 a dedicated change, run workspace tests and a visual smoke test, and add a

@@ -23,7 +23,7 @@ moderation surface.
 ## NET-001 — Production authentication at the world edge
 
 - **Priority:** P0
-- **Status:** Blocked — production account provisioning and character world-entry boundary
+- **Status:** Blocked — live-zone character population boundary
 - **Depends on:** —
 - **References:** [networking §Transport](../networking.md#transport),
   [architecture §What is deliberately not here yet](../architecture.md#what-is-deliberately-not-here-yet),
@@ -64,16 +64,17 @@ Provider integration, refresh/revalidation, audit, and lifetime/skew policy
 remain open. Backend implementations and callers must avoid logging credentials or backend details;
 the synchronous seam does not settle production I/O architecture.
 
-**Execution blocker:** ADR 0018 selects Nakama, but the production account and
-character entry path is not implemented. `PostgresIdentityStore` only resolves
-already-provisioned account mappings; `PostgresCharacterStore` checks owned
-records but does not enter characters into the world. Startup still restores a
-demo snapshot or spawns characters from static-token grants. Provisioning and
-authenticated world entry are outstanding `PST-001` work, outside this selected
-task set. Before wiring production admission, decide whether NET-001 targets
-only pre-provisioned accounts and characters already present in an authoritative
-snapshot, or authorize the prerequisite provisioning/world-entry work. Do not
-substitute demo characters or in-memory ownership for production ownership.
+**Execution blocker:** ADR 0018 selects Nakama, and `PST-001` now implements
+account provisioning plus account-scoped character persistence and
+character-bound world-entry records. That entry service records the selected
+zone; it does not spawn or load an actor into the live authoritative zone.
+`lynx-world` admission still restores a world snapshot or builds the demo world,
+then spawns demo characters from static-token grants. Before wiring production
+admission, decide whether NET-001 is limited to owned characters already
+represented in the authoritative world, or should also include the separate
+world-population path for newly created characters. Never admit a character
+based only on a database row or substitute demo characters/in-memory ownership
+for production ownership.
 
 **Acceptance criteria**
 

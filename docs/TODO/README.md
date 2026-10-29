@@ -58,7 +58,6 @@ recommendation, not a commitment; re-order when a dependency or risk changes.
 | 2 | [SIM-003](10-simulation-gameplay.md#sim-003--server-derived-combat-resolution) — server-derived damage | Client-selected damage is rejected; replace the temporary fixed damage with server-owned combat rules. |
 | 3 | [CLT-001](40-bevy-client.md#clt-001--client-workspace-and-crate-layout) · [CLT-004](40-bevy-client.md#clt-004--scene-camera-and-input-abstraction) — client foundation | Phase 1/2 exit criteria and the Phase 7 vertical slice are client-blocked. |
 | 4 | [NET-001](30-networking-security.md#net-001--production-authentication-at-the-world-edge) — production auth | The world edge still accepts static hashed bearer tokens only. |
-| 5 | [PST-001](20-persistence-backend.md#pst-001--account-and-character-persistence) — account/character SQL | Durable world state exists, but characters still live in memory. |
 
 Chat wiring ([SIM-008](10-simulation-gameplay.md#sim-008--world-chat-and-presence))
 is the cheapest Phase 3 completion and can run in parallel.

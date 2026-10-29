@@ -4,6 +4,7 @@ use bevy::prelude::*;
 
 use crate::offline::{CameraPose, Control, OfflineScene, OfflineSet, PressedControls};
 use crate::online::{OnlineClient, OnlineStatus};
+use crate::replay::ReplayInput;
 use engine_core::id::StableId;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -124,7 +125,12 @@ fn setup_scene(mut commands: Commands) {
     ));
 }
 
-fn keyboard_input(keys: Res<ButtonInput<KeyCode>>, mut pressed: ResMut<PressedControls>) {
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters must be passed by value.
+fn keyboard_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    replay: Option<Res<ReplayInput>>,
+    mut pressed: ResMut<PressedControls>,
+) {
     const KEYS: [(KeyCode, Control); 8] = [
         (KeyCode::KeyW, Control::W),
         (KeyCode::KeyA, Control::A),
@@ -135,6 +141,9 @@ fn keyboard_input(keys: Res<ButtonInput<KeyCode>>, mut pressed: ResMut<PressedCo
         (KeyCode::KeyI, Control::I),
         (KeyCode::KeyC, Control::C),
     ];
+    if replay.is_some() {
+        return;
+    }
     let keys = keys.into_inner();
     pressed.0 = KEYS
         .iter()

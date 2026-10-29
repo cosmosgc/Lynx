@@ -5,6 +5,7 @@
 use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
+use serde::Deserialize;
 
 /// Actions are independent of physical controls and camera implementation.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -20,7 +21,8 @@ pub enum Action {
 }
 
 /// A platform-neutral control identifier; a platform adapter supplies pressed keys.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub enum Control {
     W,
     A,

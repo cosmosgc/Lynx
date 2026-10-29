@@ -5,6 +5,7 @@ use bevy::prelude::*;
 pub mod offline;
 pub mod online;
 pub mod reconciliation;
+pub mod replay;
 #[cfg(feature = "window")]
 pub mod windowed;
 pub mod world_state;
@@ -22,7 +23,7 @@ impl Plugin for LynxClientPlugin {
         app.init_resource::<ClientFrameCount>()
             .add_systems(Update, count_frame)
             .add_systems(Update, online::poll_online)
-            .add_plugins(offline::OfflineFoundationPlugin);
+            .add_plugins((offline::OfflineFoundationPlugin, replay::ReplayPlugin));
     }
 }
 

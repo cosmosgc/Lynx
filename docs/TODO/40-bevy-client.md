@@ -20,7 +20,7 @@ client/editor crates. Phases 1, 2, 4, and 7 still require further client work.
 ## CLT-001 — Client workspace and crate layout
 
 - **Priority:** P0
-- **Status:** In progress — hosted headless CI and visual smoke verification remain
+- **Status:** In progress — visual smoke verification remains
 - **Depends on:** —
 - **References:** ADR 0001, [architecture §What is deliberately not here yet](../architecture.md#what-is-deliberately-not-here-yet)
 
@@ -42,7 +42,7 @@ client/editor crates. Phases 1, 2, 4, and 7 still require further client work.
 **Acceptance criteria**
 
 - [x] `cargo build --workspace` and `cargo test --workspace` include the client.
-- [ ] A hosted CI run verifies the configured headless client build and test
+- [x] A hosted CI run verifies the configured headless client build and test
       without a display/GPU.
 - [x] No engine domain crate depends on Bevy.
 - [x] The Bevy pin is recorded and an upgrade note exists.
@@ -57,10 +57,13 @@ tests and the no-default-features client test passed; the default executable
 created a window handle, but a visual smoke test is still needed. Ubuntu and
 Windows CI jobs run explicit no-default-features headless client build and test
 steps before workspace Clippy, so unrelated lint failures cannot suppress the
-focused GPU-free verification; a hosted run verifying them remains outstanding.
-No offline/replay UI harness exists yet. Workspace Clippy remains blocked by
-unrelated `lynx_world` test-dependency lint errors; the client library and binary pass
-their focused lint check.
+focused GPU-free verification. Hosted CI run
+[#41](https://github.com/cosmosgc/Lynx/actions/runs/40806879047) passed those
+headless client test/build steps on Ubuntu and Windows, although the full run
+failed later at workspace Clippy and predates the current local changes.
+The JSON offline presentation replay harness is documented in the client README.
+Local workspace fmt, Clippy, build, and test checks pass; visual smoke testing
+on a developer machine remains outstanding.
 
 ---
 

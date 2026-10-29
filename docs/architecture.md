@@ -208,9 +208,10 @@ format, validation rules, and formatting policy are specified in
   calendar, and factions with either the file store or `PostgresSnapshotStore`
   (`--state-postgres`). The file store remains available as an alternative; neither
   store persists sessions or resume tokens.
-- PostgreSQL migrations define additional character, inventory, property,
-  faction, audit, and zone-event tables, but database-backed gameplay services
-  and event replay are still backlog work.
+- `backend_nakama` provides PostgreSQL-backed account mapping and character
+  services, including character-bound world-entry records. The world edge does
+  not yet use those services for production admission (NET-001). Inventory,
+  normalized faction/calendar persistence, and event replay remain backlog work.
 - The zone snapshot persists transfer receipts so retries stay idempotent across
   a restart. A general durable SQL idempotency ledger is not yet implemented.
 - Content definitions are versioned bundles; instances record the content
@@ -245,7 +246,8 @@ format, validation rules, and formatting policy are specified in
   or `--state-postgres`)
   are durable, but they restore the zone, calendar, and factions — not
   sessions.
-- Database-backed account, character, and inventory services and event replay;
-  the PostgreSQL whole-world snapshot adapter does not implement those services.
+- Production admission through the account/character services and database-backed
+  inventory services and event replay. The PostgreSQL whole-world snapshot
+  adapter does not implement those services.
 - The editor application, behavior graph editor, and admin spectator client.
 - WebAssembly scripting, which needs a sandbox design review before adoption.
