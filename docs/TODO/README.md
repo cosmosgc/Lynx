@@ -54,13 +54,15 @@ recommendation, not a commitment; re-order when a dependency or risk changes.
 | Order | Task | Why now |
 | --- | --- | --- |
 | 0 | [OPS-006](60-operations-release.md#ops-006--ci-matrix-and-live-integration-coverage) — CI integration coverage | The migration head check and live PostgreSQL test are configured; confirm them in CI and complete the remaining platform coverage. |
-| 1 | [SIM-001](10-simulation-gameplay.md#sim-001--server-authoritative-movement) — movement contract | There is no movement verb, so no client can exercise the authoritative loop end to end. |
-| 2 | [SIM-003](10-simulation-gameplay.md#sim-003--server-derived-combat-resolution) — server-derived damage | Client-selected damage is rejected; replace the temporary fixed damage with server-owned combat rules. |
-| 3 | [CLT-001](40-bevy-client.md#clt-001--client-workspace-and-crate-layout) · [CLT-004](40-bevy-client.md#clt-004--scene-camera-and-input-abstraction) — client foundation | Phase 1/2 exit criteria and the Phase 7 vertical slice are client-blocked. |
-| 4 | [NET-001](30-networking-security.md#net-001--production-authentication-at-the-world-edge) — production auth | The world edge still accepts static hashed bearer tokens only. |
+| 1 | [CLT-004](40-bevy-client.md#clt-004--scene-camera-and-input-abstraction) — scene, camera, and input | The client workspace exists, but the scene is still an offline placeholder; the vertical slice needs an integrated client. |
+| 2 | [SIM-002](10-simulation-gameplay.md#sim-002--client-prediction-and-reconciliation-contract) — movement reconciliation | Server movement authority is done; client reconciliation still needs networking, rendering, and reset integration. |
+| 3 | [NET-001](30-networking-security.md#net-001--production-authentication-at-the-world-edge) — production auth | Blocked on the live-zone character population boundary; production admission and ownership validation remain important. |
 
 Chat wiring ([SIM-008](10-simulation-gameplay.md#sim-008--world-chat-and-presence))
 is the cheapest Phase 3 completion and can run in parallel.
+Server-authoritative movement, server-derived combat, and account/character
+persistence are complete under `SIM-001`, `SIM-003`, and `PST-001` respectively.
+The latest workspace-wide Clippy check passed.
 
 ## Backlogs
 
@@ -84,11 +86,11 @@ the quick audit; update it when a gap is found or closed.
 
 | Documented gap | Source | Task |
 | --- | --- | --- |
-| No Bevy client crates, rendering, input, or camera | [architecture](../architecture.md#what-is-deliberately-not-here-yet) | `CLT-001`–`CLT-014` |
-| No movement verb; clients cannot move authoritatively | [networking](../networking.md), `engine_sim::action` | `SIM-001`, `SIM-002` |
+| Client scene, input, and camera remain an offline placeholder; full client integration is outstanding | [client backlog](40-bevy-client.md#clt-004--scene-camera-and-input-abstraction) | `CLT-004`–`CLT-014` |
+| Client prediction and reconciliation are not integrated with networking or rendering | [simulation backlog](10-simulation-gameplay.md#sim-002--client-prediction-and-reconciliation-contract) | `SIM-002` |
 | World chat exists in `game_api` but is not routed by the gateway | [README](../../README.md#phase-3--interaction-and-mind-system--in-progress) | `SIM-008` |
-| Account/character/inventory data still in memory | [architecture](../architecture.md#persistence-model) | `PST-001`, `PST-002` |
-| Nakama adapter implements only health and auth | `crates/backend_nakama` | `PST-010`, `NET-001` |
+| Durable per-aggregate inventory and transfer ledger are not implemented | [persistence backlog](20-persistence-backend.md#pst-002--inventory-and-transfer-ledger-persistence) | `PST-002` |
+| Persistent account/character adapter is not wired into world admission; other Nakama services remain incomplete | [persistence backlog](20-persistence-backend.md#pst-001--account-and-character-persistence), [networking backlog](30-networking-security.md#net-001--production-authentication-at-the-world-edge) | `PST-010`, `NET-001` |
 | `zone_leases` and `zone_events` exist but are unused | migrations 0003 | `PST-004`, `PST-005` |
 | Snapshot replay is not implemented; recovery target unproven | [architecture](../architecture.md#failure-and-recovery) | `PST-005` |
 | PostgreSQL adapter is plain TCP, no TLS | [operations](../operations.md) | `PST-007`, `NET-003` |
@@ -104,7 +106,7 @@ the quick audit; update it when a gap is found or closed.
 | CI migration and live PostgreSQL checks await run confirmation; platform coverage remains incomplete | [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml), [issue detail](../issues/OPS-006-ci-migration-count-and-live-postgres-test.md) | `OPS-006`, `QUA-009` |
 | ADR 0022 (dynamic classes and Treat targeting) is Proposed | [ADR 0022](../adr/0022-dynamic-character-classes-and-combat-targeting.md) | `SIM-004` |
 | Guilds, quests, progression, economy, trading, parties | [README](../../README.md#phase-8--expand-and-stabilize--selected-systems-delivered-early) | `SIM-009`–`SIM-013` |
-| No automated relative Markdown link and anchor check | [quality backlog](70-testing-quality.md#qua-009--documentation-and-code-consistency-sweep) | `QUA-009` |
+| Local Markdown link and anchor checker exists, but a CI link gate is missing | [quality backlog](70-testing-quality.md#qua-009--documentation-and-code-consistency-sweep) | `QUA-009` |
 | No checked-in vulnerability reporting policy or documented private contact | [issue](../issues/AUTH-SecurityDocumentationGap.md) | `QUA-009` |
 
 ## Working conventions
