@@ -67,50 +67,33 @@ impl PostgresSnapshotStore {
     /// port, or a failed connection, and [`ErrorCode::InvalidRequest`] for an
     /// invalid `world_id`.
     pub fn from_env(world_id: impl Into<String>) -> Result<Self, EngineError> {
-        let host = environment_or("LYNX_PG_HOST", "127.0.0.1");
-        let port = environment_or("LYNX_PG_PORT", "5432")
-            .parse::<u16>()
-            .map_err(|error| {
-                EngineError::new(ErrorCode::Internal, "LYNX_PG_PORT is not a valid port")
-                    .with_detail("error", error.to_string())
-            })?;
-        let database = required_environment("LYNX_PG_DATABASE")?;
-        let user = required_environment("LYNX_PG_USER")?;
-        let password = required_environment("LYNX_PG_PASSWORD")?;
-
-        let mut config = Config::new();
-        config
-            .host(&host)
-            .port(port)
-            .dbname(&database)
-            .user(&user)
-            .password(&password)
-            .application_name("lynx-world");
-        Self::connect(&config, world_id)
+        Self::connect(&postgres_config_from_env()?, world_id)
     }
 
     /// Connect with an explicit configuration.
     ///
     /// # Errors
     ///
-    /// Returns [`ErrorCode::InvalidRequest`] for an invalid `world_id` and
-    /// [`ErrorCode::Internal`] when the connection fails.
+    /// Returns an error if the connection or schema compatibility check fails.
     pub fn connect(config: &Config, world_id: impl Into<String>) -> Result<Self, EngineError> {
         let world_id = world_id.into();
         if !valid_world_id(&world_id) {
             return Err(EngineError::new(
                 ErrorCode::InvalidRequest,
                 "the world snapshot ID is invalid",
-            )
-            .with_detail("world_id", &world_id));
+            ));
         }
-        let client = config.connect(NoTls).map_err(|error| {
+        let mut client = config.connect(NoTls).map_err(|_| {
             EngineError::new(
                 ErrorCode::Internal,
                 "the PostgreSQL snapshot store could not connect",
             )
-            .with_detail("error", error.to_string())
         })?;
+        let status = crate::schema::inspect(&mut client)
+            .map_err(|message| EngineError::new(ErrorCode::Internal, message))?;
+        if !status.compatible() {
+            return Err(EngineError::new(ErrorCode::Internal, status.diagnostic()));
+        }
         Ok(Self {
             client: Mutex::new(client),
             world_id,
@@ -125,13 +108,8 @@ impl PostgresSnapshotStore {
 
     /// Remove the stored snapshot for this world.
     ///
-    /// Startup does not call this: `--fresh` overwrites the row before serving.
-    /// It exists so operators and tests can return a world to a true
-    /// no-snapshot state.
-    ///
     /// # Errors
-    ///
-    /// Returns [`ErrorCode::Internal`] when the delete fails.
+    /// Returns an error if the delete fails.
     pub fn delete(&self) -> Result<bool, EngineError> {
         let mut client = self.client()?;
         let deleted = client
@@ -151,6 +129,30 @@ impl PostgresSnapshotStore {
             )
         })
     }
+}
+
+/// Read the shared PostgreSQL configuration without exposing its values.
+pub fn postgres_config_from_env() -> Result<Config, EngineError> {
+    let host = environment_or("LYNX_PG_HOST", "127.0.0.1");
+    let port = environment_or("LYNX_PG_PORT", "5432")
+        .parse::<u16>()
+        .map_err(|error| {
+            EngineError::new(ErrorCode::Internal, "LYNX_PG_PORT is not a valid port")
+                .with_detail("error", error.to_string())
+        })?;
+    let database = required_environment("LYNX_PG_DATABASE")?;
+    let user = required_environment("LYNX_PG_USER")?;
+    let password = required_environment("LYNX_PG_PASSWORD")?;
+
+    let mut config = Config::new();
+    config
+        .host(&host)
+        .port(port)
+        .dbname(&database)
+        .user(&user)
+        .password(&password)
+        .application_name("lynx-world");
+    Ok(config)
 }
 
 impl SnapshotStore for PostgresSnapshotStore {

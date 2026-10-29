@@ -22,6 +22,7 @@ pub mod config;
 pub mod demo;
 pub mod persistence;
 pub mod rate_limit;
+pub mod schema;
 pub mod service;
 pub mod startup;
 pub mod transport;

@@ -652,30 +652,38 @@ fn project_component_registry() -> Result<ComponentRegistry> {
 
 fn check_backend() -> Value {
     let url = backend_url();
-    let client = NakamaClient::new(NakamaConfig::new(url.clone()));
+    let client = NakamaClient::new(NakamaConfig::new(url));
 
-    match client {
+    let mut result = match client {
         Ok(client) => match client.health() {
             Ok(_) => json!({
                 "ok": true,
-                "url": url,
                 "healthy": true,
                 "message": "Nakama health check passed",
             }),
-            Err(error) => json!({
+            Err(_) => json!({
                 "ok": false,
-                "url": url,
                 "healthy": false,
-                "message": error.to_string(),
+                "message": "Nakama health check failed",
             }),
         },
-        Err(error) => json!({
+        Err(_) => json!({
             "ok": false,
-            "url": url,
             "healthy": false,
-            "message": error.to_string(),
+            "message": "Nakama configuration is invalid",
         }),
+    };
+    match lynx_world::schema::inspect_env() {
+        Ok(status) => {
+            result["ok"] = json!(result["ok"].as_bool().unwrap_or(false) && status.compatible());
+            result["schema"] = json!(status);
+        }
+        Err(message) => {
+            result["ok"] = json!(false);
+            result["schema"] = json!({"error": message});
+        }
     }
+    result
 }
 
 fn backend_url() -> String {
@@ -735,6 +743,7 @@ fn render_human_output(output: &Value) -> String {
                 backend["healthy"],
                 backend["message"].as_str().unwrap_or("")
             ));
+            lines.push(format!("- schema: {}", backend["schema"]));
         }
         if let Some(project) = project {
             lines.push(format!(

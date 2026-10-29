@@ -18,6 +18,33 @@ use lynx_world::startup;
 use world_gateway::{GatewayConfig, SystemResumeTokens, WorldGateway};
 use world_server::WorldServer;
 
+#[test]
+fn schema_inspection_does_not_change_history() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+    if std::env::var("LYNX_PG_PASSWORD").is_err() {
+        anyhow::ensure!(
+            std::env::var_os("LYNX_REQUIRE_POSTGRES_TEST").is_none(),
+            "PostgreSQL test required but not configured"
+        );
+        return Ok(());
+    }
+    let config = lynx_world::persistence::postgres_config_from_env()?;
+    let mut client = config
+        .connect(postgres::NoTls)
+        .map_err(|_| anyhow::anyhow!("PostgreSQL connection failed"))?;
+    let history = |client: &mut postgres::Client| -> anyhow::Result<Vec<String>> {
+        Ok(client.query("SELECT version || '|' || checksum || '|' || applied_at::text FROM lynx.schema_migrations ORDER BY version", &[])?.iter().map(|r| r.get(0)).collect())
+    };
+    let before = history(&mut client)?;
+    assert!(
+        lynx_world::schema::inspect(&mut client)
+            .map_err(anyhow::Error::msg)?
+            .compatible()
+    );
+    assert_eq!(before, history(&mut client)?);
+    Ok(())
+}
+
 fn characters(count: usize) -> Vec<Grant> {
     let hashes: Vec<[u8; 32]> = (0..count)
         .map(|index| digest(&format!("postgres-token-{index}")))

@@ -293,7 +293,7 @@ database and not acceptable for a remote one.
 ## PST-008 — Schema version checks and migration integration
 
 - **Priority:** P1
-- **Status:** Ready
+- **Status:** In progress
 - **Depends on:** —
 - **References:** [`scripts/db-migrate.ps1`](../../scripts/db-migrate.ps1),
   [migrations README](../../server/migrations/README.md)

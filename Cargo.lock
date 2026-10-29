@@ -4213,6 +4213,7 @@ dependencies = [
  "engine_content",
  "engine_core",
  "game_api",
+ "lynx-world",
  "serde_json",
 ]
 

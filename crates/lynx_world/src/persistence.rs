@@ -25,7 +25,7 @@ use engine_sim::snapshot::ZoneSnapshot;
 
 mod postgres;
 
-pub use postgres::PostgresSnapshotStore;
+pub use postgres::{PostgresSnapshotStore, postgres_config_from_env};
 
 /// The schema version written by this service build.
 pub const WORLD_SNAPSHOT_VERSION: SchemaVersion = SchemaVersion::new(1, 0);

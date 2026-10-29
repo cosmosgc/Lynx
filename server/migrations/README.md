@@ -35,6 +35,19 @@ Migrations are plain PostgreSQL SQL, applied in filename order by
 The runner is idempotent: applied migrations are skipped, and a checksum
 mismatch is an error.
 
+## Upgrades and compatibility
+
+Stop writers and take a verified database backup before upgrading. Run the
+new release's migration runner, then start its world binary. The binary embeds
+the exact migration files and refuses missing history, pending or unknown
+migrations, and checksum mismatches before loading or writing a world (including
+`--fresh`). `lynx doctor --backend` reports schema history without applying
+migrations; configure the same `LYNX_PG_*` variables as the world service.
+Unknown migrations are refused; no forward compatibility is currently declared.
+If rollback is needed, stop the service and restore the pre-upgrade backup before
+starting the old binary: an old binary cannot safely use a newer schema. Never
+edit applied migration files to resolve a mismatch.
+
 ## Current schema
 
 | Migration | Contents |
