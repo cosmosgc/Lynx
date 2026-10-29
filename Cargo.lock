@@ -3361,13 +3361,17 @@ dependencies = [
 name = "lynx_client_net"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "engine_core",
  "engine_net",
  "futures-util",
+ "game_api",
  "lynx-world",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-tungstenite 0.30.0",
+ "ureq",
  "world_gateway",
  "world_server",
 ]

@@ -9,9 +9,11 @@ versioned components, inventory, property, idempotency keys, audit, content
 bundles, zone leases/snapshots/events, factions, the world calendar, and
 whole-world snapshots. `lynx-world` can persist a whole world to a JSON file or
 to `lynx.world_snapshots` through `PostgresSnapshotStore`. `backend_memory`
-implements every `game_api` service; `backend_nakama` implements only health and
-authentication services, with separate, unwired character and identity SQL
-repositories. Most normalized tables are defined but not yet used by the runtime.
+implements every `game_api` service; `backend_nakama` implements health,
+authentication, and character SQL repositories, while its Nakama HTTP client is
+limited to health and authentication. Social/chat, inventory, faction, calendar,
+and admin integrations remain absent. Most normalized tables are defined but not
+yet used by the runtime.
 
 **Related design:** [architecture §Persistence model](../architecture.md#persistence-model),
 [ADR 0003](../adr/0003-native-nakama-and-postgresql.md),
@@ -385,14 +387,19 @@ world database or snapshots.
 
 **Why:** `backend_nakama` implements `HealthService` and `AuthService` only.
 Character, inventory, chat, social, faction, calendar, and admin calls cannot use
-Nakama today. If Nakama remains the backend of record, the adapter is incomplete;
-if direct SQL becomes the backend of record, this task should be closed with
-that decision instead.
+Nakama today. Social/chat are not a mechanical quick adapter: the current
+`FriendState` cannot represent Nakama's incoming/outgoing invitation states,
+and `ChatService::channels` requires generic discovery unavailable through the
+public REST API. If Nakama remains the backend of record, the adapter is
+incomplete; if direct SQL becomes the backend of record, this task should be
+closed with that decision instead.
 
 **Scope**
 
-- Implement the remaining `game_api` service traits over Nakama's HTTP API
-  behind the existing seam.
+- Implement applicable remaining `game_api` service traits over Nakama REST and
+  realtime socket APIs behind the existing seam.
+- Evolve the social/chat contracts before implementing them so Nakama invitation
+  states and socket-driven channel semantics are preserved rather than flattened.
 - Map Nakama errors to `ApiError` without leaking HTTP bodies or tokens.
 - Keep Nakama types out of `game_api` and engine crates.
 - Add shared contract tests against a test Nakama instance; skip when

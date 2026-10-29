@@ -17,7 +17,9 @@ deployment path. Docker is convenient but cannot be the only supported route.
 - Repository scripts live in `scripts/`:
   - `setup-postgres.ps1` / `setup-postgres.sh` create the role, database, and
     extensions, and are safe to re-run.
-  - `run-nakama.ps1` / `run-nakama.sh` start Nakama with `server/nakama/local.yml`.
+  - `run-nakama.ps1` / `run-nakama.sh` start Nakama with `server/nakama/local.yml`;
+    their `-Migrate` / `--migrate` forms apply Nakama's internal schema before
+    first start and before a Nakama upgrade.
   - `db-migrate.ps1` / `db-migrate.sh` apply versioned SQL migrations.
 - Configuration comes from a checked-in non-secret template plus environment
   variables. Real secrets are never committed.

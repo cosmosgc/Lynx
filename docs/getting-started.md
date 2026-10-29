@@ -103,13 +103,30 @@ connects as the application role.
 Download the official release for your platform from
 <https://github.com/heroiclabs/nakama/releases/tag/v3.41.0> and place the
 binary on `PATH` (or set `NAKAMA_BIN` in `.env` or the process environment).
-The run scripts also read `LYNX_NAKAMA_CONSOLE_USER`,
-`LYNX_NAKAMA_CONSOLE_PASSWORD`, `LYNX_NAKAMA_SERVER_KEY`, and
-`LYNX_NAKAMA_LOG_LEVEL` from `.env` or the process environment. Use unique
-console credentials even for local development; the defaults are insecure.
+The run scripts read `LYNX_NAKAMA_*` configuration from `.env` or the process
+environment. For a persistent or networked deployment, provide independent,
+high-entropy `LYNX_NAKAMA_CONSOLE_SIGNING_KEY`,
+`LYNX_NAKAMA_SESSION_ENCRYPTION_KEY`,
+`LYNX_NAKAMA_REFRESH_ENCRYPTION_KEY`, and `LYNX_NAKAMA_RUNTIME_HTTP_KEY`, as
+well as unique console credentials and a non-default
+`LYNX_NAKAMA_SERVER_KEY`. See `.env.example`; omitted values retain Nakama's
+development defaults.
 
 Windows note: the official Windows build is distributed as a `.tar.gz`; extract
 it with `tar -xzf nakama-3.41.0-windows-amd64.tar.gz`.
+
+Before its first start (and before upgrading the pinned Nakama release), apply
+Nakama's own database schema migrations. This is separate from the Lynx schema
+migrations in step 2:
+
+```powershell
+./scripts/run-nakama.ps1 -Migrate
+# Or, when using the local Windows helper: .\nakama-migrate.bat
+```
+
+```bash
+./scripts/run-nakama.sh --migrate
+```
 
 Start the server:
 
@@ -134,6 +151,12 @@ intentionally omits the database address. The startup script creates the
 gitignored `.lynx/nakama.local.yml` overlay with encoded database credentials,
 then passes both files to Nakama using repeated `--config` arguments. Do not
 share or commit the generated overlay.
+
+To expose Nakama's Prometheus endpoint locally, set
+`LYNX_NAKAMA_METRICS_PORT=7354` (or another free port), restart Nakama, then
+request `http://127.0.0.1:7354/metrics`. This listener is unauthenticated and
+binds all interfaces; leave it disabled (empty or `0`) unless a firewall or
+private network restricts access to Prometheus.
 
 Check engine-to-backend connectivity:
 
@@ -187,6 +210,9 @@ default keys, mismatched placeholders, and incomplete release locales. See
   `PATH` or pass its full path in the environment.
 - **Nakama exits with a database error** — verify `LYNX_PG_*` values and that
   the database exists; Nakama does not create the database for you.
+- **Nakama reports `migration_info` does not exist** — run the Nakama migration
+  command above. `db-migrate.*` applies Lynx-owned SQL migrations only; it does
+  not create Nakama's internal tables.
 - **Port already in use** — stop the conflicting service or change the ports in
   `server/nakama/local.yml` and your client configuration together.
 - **Doctor reports a content error** — the message includes the file, JSON/RON

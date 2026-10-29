@@ -26,14 +26,33 @@ secret store.
 Use `LYNX_PG_MAINTENANCE_DB` to choose the database used for setup operations.
 
 `run-nakama.*` locates the binary using `NAKAMA_BIN` (default `nakama`) and
-reads console credentials, server key, and log level from the corresponding
-`LYNX_NAKAMA_*` environment variables. `server/nakama/local.yml` contains
-non-secret development settings and deliberately has no database address. The
-script renders `.lynx/nakama.local.yml` with the database URL and optional
-overrides, then starts Nakama with both configs via repeated `--config`
-arguments. `.lynx/` is gitignored; the overlay contains credentials and must
-not be shared. The PowerShell script writes it using the current directory ACL;
-the Bash script restricts its permissions with `umask 077`.
+reads console credentials, console signing key, socket server key, session and
+refresh encryption keys, runtime HTTP key, optional Prometheus port, and log
+level from the corresponding `LYNX_NAKAMA_*` environment variables.
+`server/nakama/local.yml` contains non-secret development settings and
+deliberately has no database address. The script renders `.lynx/nakama.local.yml`
+with the database URL and optional overrides, then starts Nakama with both
+configs via repeated `--config` arguments. `.lynx/` is gitignored; the overlay
+contains credentials and must not be shared. The PowerShell script writes it
+using the current directory ACL; the Bash script restricts its permissions with
+`umask 077`.
+
+All five Nakama keys must be independent, high-entropy, single-line values in
+any persistent or networked environment. Changing the console signing or
+session/refresh keys invalidates the relevant issued tokens; every node in a
+cluster must use the same values. `LYNX_NAKAMA_SERVER_KEY` is the public client
+server key and the Basic-auth key named `LYNX_NAKAMA_HTTP_KEY` by `lynx-world`;
+it is distinct from the private `LYNX_NAKAMA_RUNTIME_HTTP_KEY` used for Nakama
+runtime invocation. The former variable is retained for backwards-compatible
+world-service configuration.
+
+Nakama maintains its own schema history (`migration_info`) separately from the
+Lynx `lynx.schema_migrations` history. On first setup, and before starting a
+new pinned Nakama release, run `scripts/run-nakama.ps1 -Migrate` on Windows or
+`scripts/run-nakama.sh --migrate` on Unix-like hosts. The root
+`nakama-migrate.bat` helper does the same for the configured local Windows
+binary. Run `db-migrate.*` separately for Lynx-owned migrations. See
+[Nakama capabilities and boundaries](nakama.md) for feature ownership.
 
 The `lynx` CLI does not load `.env`. For `lynx doctor --backend`, set
 `LYNX_NAKAMA_URL` in the process environment (or use `NAKAMA_URL` /
@@ -195,6 +214,22 @@ The endpoint uses Prometheus text format 0.0.4 on both listeners. Transport
 counter samples are encoded with `prometheus-client` from a scrape-time snapshot;
 the authority metrics retain their existing collector. Sample ordering is not
 part of the endpoint contract.
+
+### Nakama metrics
+
+Set `LYNX_NAKAMA_METRICS_PORT` to a nonzero port to enable Nakama's Prometheus
+endpoint (for example `7354`), then scrape `http://<nakama-host>:<port>/metrics`.
+The default is disabled. Nakama exposes this listener unauthenticated on all
+interfaces and has no separate metrics bind-address setting: only enable it
+behind a host firewall, private network, or similarly restrictive network
+policy. Lynx currently does not proxy, scrape, or alert on these metrics.
+
+```yaml
+scrape_configs:
+  - job_name: nakama
+    static_configs:
+      - targets: ['127.0.0.1:7354']
+```
 
 | Metric | Meaning |
 |---|---|

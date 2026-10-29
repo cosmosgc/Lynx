@@ -16,6 +16,10 @@
     Validate the binary, configuration, and environment without starting Nakama
     or writing the secret overlay.
 
+.PARAMETER Migrate
+    Generate the local secret overlay and apply Nakama's own database migrations
+    without starting the server.
+
 .EXAMPLE
     ./scripts/run-nakama.ps1
 
@@ -24,8 +28,13 @@
 #>
 [CmdletBinding()]
 param(
-    [switch]$Check
+    [switch]$Check,
+    [switch]$Migrate
 )
+
+if ($Check -and $Migrate) {
+    throw 'Use either -Check or -Migrate, not both.'
+}
 
 . (Join-Path $PSScriptRoot 'common.ps1')
 
@@ -46,7 +55,12 @@ if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
 
 $consoleUser = Get-LynxSetting 'LYNX_NAKAMA_CONSOLE_USER' ''
 $consolePassword = Get-LynxSetting 'LYNX_NAKAMA_CONSOLE_PASSWORD' ''
+$consoleSigningKey = Get-LynxSetting 'LYNX_NAKAMA_CONSOLE_SIGNING_KEY' ''
 $serverKey = Get-LynxSetting 'LYNX_NAKAMA_SERVER_KEY' ''
+$sessionEncryptionKey = Get-LynxSetting 'LYNX_NAKAMA_SESSION_ENCRYPTION_KEY' ''
+$refreshEncryptionKey = Get-LynxSetting 'LYNX_NAKAMA_REFRESH_ENCRYPTION_KEY' ''
+$runtimeHttpKey = Get-LynxSetting 'LYNX_NAKAMA_RUNTIME_HTTP_KEY' ''
+$metricsPort = Get-LynxSetting 'LYNX_NAKAMA_METRICS_PORT' ''
 $logLevel = Get-LynxSetting 'LYNX_NAKAMA_LOG_LEVEL' ''
 
 if ($consoleUser -and $consoleUser -notmatch '^[A-Za-z0-9_.-]{3,32}$') {
@@ -58,8 +72,28 @@ if ($consolePassword -and ($consolePassword -match '[\x00-\x1f\x7f]' -or $consol
 if ($logLevel -and $logLevel -notmatch '^(debug|info|warn|error)$') {
     throw 'LYNX_NAKAMA_LOG_LEVEL must be one of: debug, info, warn, error.'
 }
-if ($serverKey -and ($serverKey -match '[\x00-\x1f\x7f]' -or $serverKey.Length -gt 256)) {
-    throw 'LYNX_NAKAMA_SERVER_KEY must be at most 256 characters without control characters.'
+function Assert-NakamaSecret {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [AllowEmptyString()][string]$Value
+    )
+
+    if ($Value -and ($Value -match '[\x00-\x1f\x7f]' -or $Value.Length -gt 512)) {
+        throw "$Name must be at most 512 characters without control characters."
+    }
+}
+
+Assert-NakamaSecret 'LYNX_NAKAMA_CONSOLE_SIGNING_KEY' $consoleSigningKey
+Assert-NakamaSecret 'LYNX_NAKAMA_SERVER_KEY' $serverKey
+Assert-NakamaSecret 'LYNX_NAKAMA_SESSION_ENCRYPTION_KEY' $sessionEncryptionKey
+Assert-NakamaSecret 'LYNX_NAKAMA_REFRESH_ENCRYPTION_KEY' $refreshEncryptionKey
+Assert-NakamaSecret 'LYNX_NAKAMA_RUNTIME_HTTP_KEY' $runtimeHttpKey
+
+if ($metricsPort) {
+    [int]$parsedMetricsPort = 0
+    if (-not [int]::TryParse($metricsPort, [ref]$parsedMetricsPort) -or $parsedMetricsPort -lt 0 -or $parsedMetricsPort -gt 65535) {
+        throw 'LYNX_NAKAMA_METRICS_PORT must be an integer from 0 to 65535.'
+    }
 }
 
 $encodedUser = [Uri]::EscapeDataString($pg.User)
@@ -70,6 +104,18 @@ $redactedAddress = "$($pg.User):***@$($pg.Host):$($pg.Port)/$($pg.Database)"
 $overlayDirectory = Join-Path $root '.lynx'
 $overlayPath = Join-Path $overlayDirectory 'nakama.local.yml'
 
+function Write-NakamaSecurityWarning {
+    $insecureSettings = New-Object System.Collections.Generic.List[string]
+    if (-not $consoleSigningKey -or $consoleSigningKey -eq 'defaultsigningkey') { $insecureSettings.Add('console signing key') }
+    if (-not $serverKey -or $serverKey -eq 'defaultkey') { $insecureSettings.Add('socket server key') }
+    if (-not $sessionEncryptionKey -or $sessionEncryptionKey -eq 'defaultencryptionkey') { $insecureSettings.Add('session encryption key') }
+    if (-not $refreshEncryptionKey -or $refreshEncryptionKey -eq 'defaultrefreshencryptionkey') { $insecureSettings.Add('refresh-session encryption key') }
+    if (-not $runtimeHttpKey -or $runtimeHttpKey -eq 'defaulthttpkey') { $insecureSettings.Add('runtime HTTP key') }
+    if ($insecureSettings.Count -gt 0) {
+        Write-Warning ("Nakama uses insecure defaults for: " + ($insecureSettings -join ', ') + '. Set the matching LYNX_NAKAMA_* values for any non-disposable deployment.')
+    }
+}
+
 if ($Check) {
     Write-Host 'Nakama preflight'
     Write-Host "  binary:   $($binary.Source)"
@@ -78,6 +124,10 @@ if ($Check) {
     Write-Host "  overlay:  $overlayPath (not written in -Check mode)"
     if (-not $consoleUser -or -not $consolePassword) {
         Write-Warning 'The console falls back to insecure defaults for missing credentials. Set LYNX_NAKAMA_CONSOLE_USER and LYNX_NAKAMA_CONSOLE_PASSWORD for anything but a local throwaway database.'
+    }
+    Write-NakamaSecurityWarning
+    if ($metricsPort -and $metricsPort -ne '0') {
+        Write-Warning "Nakama metrics bind unauthenticated on all interfaces at port $metricsPort. Restrict the port to a private scrape network."
     }
     Write-Host 'Preflight OK.'
     exit 0
@@ -98,7 +148,7 @@ if ($serverKey) {
     $lines.Add('  server_key: ' + (ConvertTo-YamlSingleQuoted $serverKey))
 }
 
-if ($consoleUser -or $consolePassword) {
+if ($consoleUser -or $consolePassword -or $consoleSigningKey) {
     $lines.Add('console:')
     if ($consoleUser) {
         $lines.Add('  username: ' + (ConvertTo-YamlSingleQuoted $consoleUser))
@@ -106,6 +156,29 @@ if ($consoleUser -or $consolePassword) {
     if ($consolePassword) {
         $lines.Add('  password: ' + (ConvertTo-YamlSingleQuoted $consolePassword))
     }
+    if ($consoleSigningKey) {
+        $lines.Add('  signing_key: ' + (ConvertTo-YamlSingleQuoted $consoleSigningKey))
+    }
+}
+
+if ($sessionEncryptionKey -or $refreshEncryptionKey) {
+    $lines.Add('session:')
+    if ($sessionEncryptionKey) {
+        $lines.Add('  encryption_key: ' + (ConvertTo-YamlSingleQuoted $sessionEncryptionKey))
+    }
+    if ($refreshEncryptionKey) {
+        $lines.Add('  refresh_encryption_key: ' + (ConvertTo-YamlSingleQuoted $refreshEncryptionKey))
+    }
+}
+
+if ($runtimeHttpKey) {
+    $lines.Add('runtime:')
+    $lines.Add('  http_key: ' + (ConvertTo-YamlSingleQuoted $runtimeHttpKey))
+}
+
+if ($metricsPort) {
+    $lines.Add('metrics:')
+    $lines.Add('  prometheus_port: ' + $metricsPort)
 }
 
 if ($logLevel) {
@@ -119,18 +192,43 @@ if (-not (Test-Path -LiteralPath $overlayDirectory -PathType Container)) {
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [IO.File]::WriteAllText($overlayPath, ($lines -join "`n") + "`n", $utf8NoBom)
 
-Write-Host 'Starting Nakama 3.41.0'
+if ($Migrate) {
+    Write-Host 'Preparing Nakama 3.41.0 migration'
+} else {
+    Write-Host 'Starting Nakama 3.41.0'
+}
 Write-Host "  binary:   $($binary.Source)"
 Write-Host "  config:   $configPath"
 Write-Host "  overlay:  $overlayPath"
 Write-Host "  database: $redactedAddress"
 Write-Host "  console:  http://127.0.0.1:7351"
+if ($metricsPort -and $metricsPort -ne '0') {
+    Write-Host "  metrics:  http://127.0.0.1:$metricsPort/metrics (restrict network access)"
+} else {
+    Write-Host '  metrics:  disabled'
+}
 if (-not $consoleUser -or -not $consolePassword) {
     Write-Warning 'The console uses insecure defaults for missing credentials. Set LYNX_NAKAMA_CONSOLE_* for anything but a local throwaway database.'
+}
+Write-NakamaSecurityWarning
+if ($metricsPort -and $metricsPort -ne '0') {
+    Write-Warning "Nakama metrics bind unauthenticated on all interfaces at port $metricsPort. Restrict the port to a private scrape network."
 }
 Write-Host ''
 
 Set-Location -LiteralPath $root
+if ($Migrate) {
+    Write-Host 'Applying Nakama database migrations'
+    & $binary.Source 'migrate' 'up' '--config' $configPath '--config' $overlayPath
+    $code = $LASTEXITCODE
+    if ($code -ne 0) {
+        Write-Host ''
+        Write-Host "Nakama migration exited with code $code." -ForegroundColor Red
+        Write-Host 'Check LYNX_PG_* values and that the database exists.'
+    }
+    exit $code
+}
+
 & $binary.Source '--config' $configPath '--config' $overlayPath
 $code = $LASTEXITCODE
 

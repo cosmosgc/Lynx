@@ -31,6 +31,10 @@ implementation gaps are listed below and in the [backlog](TODO/README.md).
 └─────────────────────────────┘      └───────────────────────────────────┘
 ```
 
+The [Nakama capability matrix](nakama.md) distinguishes features supplied by
+Nakama from the smaller set currently integrated into Lynx. It is the source of
+truth for platform-feature ownership and implementation status.
+
 ## Crates and dependency direction
 
 ```text

@@ -12,6 +12,7 @@
 # Usage:
 #   ./scripts/run-nakama.sh
 #   ./scripts/run-nakama.sh --check
+#   ./scripts/run-nakama.sh --migrate
 
 set -euo pipefail
 
@@ -20,11 +21,13 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$script_dir/common.sh"
 
 check_only=false
+migrate_only=false
 case "${1-}" in
     --check | -Check) check_only=true ;;
+    --migrate | -Migrate) migrate_only=true ;;
     '') ;;
     *)
-        lynx_die "unknown argument: $1 (expected --check)"
+        lynx_die "unknown argument: $1 (expected --check or --migrate)"
         ;;
 esac
 
@@ -42,7 +45,12 @@ config_path="$root/server/nakama/local.yml"
 
 console_user="${LYNX_NAKAMA_CONSOLE_USER:-}"
 console_password="${LYNX_NAKAMA_CONSOLE_PASSWORD:-}"
+console_signing_key="${LYNX_NAKAMA_CONSOLE_SIGNING_KEY:-}"
 server_key="${LYNX_NAKAMA_SERVER_KEY:-}"
+session_encryption_key="${LYNX_NAKAMA_SESSION_ENCRYPTION_KEY:-}"
+refresh_encryption_key="${LYNX_NAKAMA_REFRESH_ENCRYPTION_KEY:-}"
+runtime_http_key="${LYNX_NAKAMA_RUNTIME_HTTP_KEY:-}"
+metrics_port="${LYNX_NAKAMA_METRICS_PORT:-}"
 log_level="${LYNX_NAKAMA_LOG_LEVEL:-}"
 
 [[ -z "$console_user" || "$console_user" =~ ^[A-Za-z0-9_.-]{3,32}$ ]] ||
@@ -53,8 +61,23 @@ log_level="${LYNX_NAKAMA_LOG_LEVEL:-}"
     lynx_die 'LYNX_NAKAMA_CONSOLE_PASSWORD must be on a single line'
 [[ -z "$log_level" || "$log_level" =~ ^(debug|info|warn|error)$ ]] ||
     lynx_die 'LYNX_NAKAMA_LOG_LEVEL must be one of: debug, info, warn, error'
-[[ -z "$server_key" || ${#server_key} -le 256 ]] ||
-    lynx_die 'LYNX_NAKAMA_SERVER_KEY must be at most 256 characters'
+validate_secret() {
+    local name="$1"
+    local value="$2"
+    [[ -z "$value" || (${#value} -le 512 && ! "$value" =~ [[:cntrl:]]) ]] ||
+        lynx_die "$name must be at most 512 characters without control characters"
+}
+
+validate_secret 'LYNX_NAKAMA_CONSOLE_SIGNING_KEY' "$console_signing_key"
+validate_secret 'LYNX_NAKAMA_SERVER_KEY' "$server_key"
+validate_secret 'LYNX_NAKAMA_SESSION_ENCRYPTION_KEY' "$session_encryption_key"
+validate_secret 'LYNX_NAKAMA_REFRESH_ENCRYPTION_KEY' "$refresh_encryption_key"
+validate_secret 'LYNX_NAKAMA_RUNTIME_HTTP_KEY' "$runtime_http_key"
+
+if [[ -n "$metrics_port" ]]; then
+    [[ "$metrics_port" =~ ^[0-9]{1,5}$ ]] && ((10#$metrics_port <= 65535)) ||
+        lynx_die 'LYNX_NAKAMA_METRICS_PORT must be an integer from 0 to 65535'
+fi
 
 # Percent-encode credentials so '@', ':', '/', and '%' in a password cannot
 # change the meaning of the database address. Nakama parses the address as a
@@ -95,6 +118,24 @@ warn_console_defaults() {
     fi
 }
 
+warn_security_defaults() {
+    local insecure=()
+    [[ -n "$console_signing_key" && "$console_signing_key" != 'defaultsigningkey' ]] || insecure+=('console signing key')
+    [[ -n "$server_key" && "$server_key" != 'defaultkey' ]] || insecure+=('socket server key')
+    [[ -n "$session_encryption_key" && "$session_encryption_key" != 'defaultencryptionkey' ]] || insecure+=('session encryption key')
+    [[ -n "$refresh_encryption_key" && "$refresh_encryption_key" != 'defaultrefreshencryptionkey' ]] || insecure+=('refresh-session encryption key')
+    [[ -n "$runtime_http_key" && "$runtime_http_key" != 'defaulthttpkey' ]] || insecure+=('runtime HTTP key')
+    if ((${#insecure[@]} > 0)); then
+        printf 'warning: Nakama uses insecure defaults for: %s. Set the matching LYNX_NAKAMA_* values for any non-disposable deployment.\n' "$(IFS=', '; printf '%s' "${insecure[*]}")" >&2
+    fi
+}
+
+warn_metrics_exposure() {
+    if [[ -n "$metrics_port" && "$metrics_port" != '0' ]]; then
+        printf 'warning: Nakama metrics bind unauthenticated on all interfaces at port %s. Restrict the port to a private scrape network.\n' "$metrics_port" >&2
+    fi
+}
+
 if [[ "$check_only" == true ]]; then
     printf 'Nakama preflight\n'
     printf '  binary:   %s\n' "$resolved_bin"
@@ -102,6 +143,8 @@ if [[ "$check_only" == true ]]; then
     printf '  database: %s\n' "$redacted_address"
     printf '  overlay:  %s (not written in --check mode)\n' "$overlay"
     warn_console_defaults
+    warn_security_defaults
+    warn_metrics_exposure
     printf 'Preflight OK.\n'
     exit 0
 fi
@@ -114,7 +157,7 @@ mkdir -p "$root/.lynx"
         if [[ -n "$server_key" ]]; then
             printf 'socket:\n  server_key: %s\n' "$(yaml_quote "$server_key")"
         fi
-        if [[ -n "$console_user" || -n "$console_password" ]]; then
+        if [[ -n "$console_user" || -n "$console_password" || -n "$console_signing_key" ]]; then
             printf 'console:\n'
             if [[ -n "$console_user" ]]; then
                 printf '  username: %s\n' "$(yaml_quote "$console_user")"
@@ -122,6 +165,24 @@ mkdir -p "$root/.lynx"
             if [[ -n "$console_password" ]]; then
                 printf '  password: %s\n' "$(yaml_quote "$console_password")"
             fi
+            if [[ -n "$console_signing_key" ]]; then
+                printf '  signing_key: %s\n' "$(yaml_quote "$console_signing_key")"
+            fi
+        fi
+        if [[ -n "$session_encryption_key" || -n "$refresh_encryption_key" ]]; then
+            printf 'session:\n'
+            if [[ -n "$session_encryption_key" ]]; then
+                printf '  encryption_key: %s\n' "$(yaml_quote "$session_encryption_key")"
+            fi
+            if [[ -n "$refresh_encryption_key" ]]; then
+                printf '  refresh_encryption_key: %s\n' "$(yaml_quote "$refresh_encryption_key")"
+            fi
+        fi
+        if [[ -n "$runtime_http_key" ]]; then
+            printf 'runtime:\n  http_key: %s\n' "$(yaml_quote "$runtime_http_key")"
+        fi
+        if [[ -n "$metrics_port" ]]; then
+            printf 'metrics:\n  prometheus_port: %s\n' "$metrics_port"
         fi
         if [[ -n "$log_level" ]]; then
             printf 'logger:\n  level: %s\n' "$(yaml_quote "$log_level")"
@@ -129,14 +190,30 @@ mkdir -p "$root/.lynx"
     } >"$overlay"
 )
 
-printf 'Starting Nakama 3.41.0\n'
+if [[ "$migrate_only" == true ]]; then
+    printf 'Preparing Nakama 3.41.0 migration\n'
+else
+    printf 'Starting Nakama 3.41.0\n'
+fi
 printf '  binary:   %s\n' "$resolved_bin"
 printf '  config:   %s\n' "$config_path"
 printf '  overlay:  %s\n' "$overlay"
 printf '  database: %s\n' "$redacted_address"
 printf '  console:  http://127.0.0.1:7351\n'
+if [[ -n "$metrics_port" && "$metrics_port" != '0' ]]; then
+    printf '  metrics:  http://127.0.0.1:%s/metrics (restrict network access)\n' "$metrics_port"
+else
+    printf '  metrics:  disabled\n'
+fi
 warn_console_defaults
+warn_security_defaults
+warn_metrics_exposure
 printf '\n'
 
 cd "$root"
+if [[ "$migrate_only" == true ]]; then
+    printf 'Applying Nakama database migrations\n'
+    exec "$resolved_bin" migrate up --config "$config_path" --config "$overlay"
+fi
+
 exec "$resolved_bin" --config "$config_path" --config "$overlay"

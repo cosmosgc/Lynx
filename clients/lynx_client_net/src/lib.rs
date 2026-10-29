@@ -9,6 +9,10 @@
 //! DNS resolution must not be able to redirect a bearer token to a remote host.
 //! Loopback plaintext still exposes credentials to local traffic observers.
 
+mod nakama_auth;
+
+pub use nakama_auth::{NakamaAuthClient, NakamaAuthConfig, NakamaAuthFailure, NakamaSession};
+
 use std::fmt;
 use std::net::IpAddr;
 use std::time::Duration;
