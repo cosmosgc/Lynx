@@ -27,9 +27,10 @@ On Windows, install Flask once and double-click
 
 Open <http://127.0.0.1:5000>. The app binds to loopback only and reads the
 backlog on each page/API request, so Markdown updates appear after refresh.
-The local server also reloads Python and template changes automatically; wait
-for Flask's reload message, then refresh the browser. It intentionally leaves
-the interactive Flask debugger disabled.
+The local server reloads Python edits automatically and checks template changes
+on the next browser refresh. Wait for Flask's reload message after editing
+Python; refresh after editing a template. It intentionally leaves the interactive
+Flask debugger disabled.
 Task IDs used in `Depends on` and `References` are linked when a matching task
 exists. Dependencies that refer to decisions or other non-task items remain
 visible as text.

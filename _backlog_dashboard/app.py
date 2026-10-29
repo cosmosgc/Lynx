@@ -596,6 +596,10 @@ def create_app(
     state_db_path: Path | None = None,
 ) -> Flask:
     app = Flask(__name__)
+    # Keep HTML/CSS/JS edits visible on the next refresh even though the
+    # interactive debugger remains disabled. Python edits use the reloader in
+    # the module entry point below.
+    app.config["TEMPLATES_AUTO_RELOAD"] = True
     source_todo_dir = todo_dir or Path(__file__).resolve().parents[1] / "docs" / "TODO"
     database_path = state_db_path or Path(__file__).resolve().parent / ".data" / "task-state.sqlite3"
     _initialize_state_store(database_path)

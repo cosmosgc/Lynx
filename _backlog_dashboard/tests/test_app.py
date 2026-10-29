@@ -141,7 +141,9 @@ Phase 1  Engine skeleton             [██████████████
         self.assertEqual(phases[0]["status"], "Complete")
 
     def test_home_and_api_routes(self):
-        client = self.make_app().test_client()
+        app = self.make_app()
+        self.assertTrue(app.config["TEMPLATES_AUTO_RELOAD"])
+        client = app.test_client()
 
         page = client.get("/")
         self.assertEqual(page.status_code, 200)
