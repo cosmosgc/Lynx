@@ -33,6 +33,10 @@ pub struct ServeArgs {
     #[arg(long, default_value = DEFAULT_BIND)]
     pub bind: SocketAddr,
 
+    /// Trusted admin listener for health and metrics; unauthenticated.
+    #[arg(long, default_value = "127.0.0.1:8091")]
+    pub admin_bind: SocketAddr,
+
     /// Allow static demo authentication on a non-loopback listener. Dangerous:
     /// this is for controlled development only, not production authentication.
     #[arg(long)]
@@ -242,6 +246,7 @@ mod tests {
 
     fn sample() -> ServeArgs {
         ServeArgs {
+            admin_bind: "127.0.0.1:8091".parse().unwrap(),
             bind: DEFAULT_BIND.parse().unwrap(),
             dangerous_allow_non_loopback_demo_auth: false,
             tick_ms: 50,

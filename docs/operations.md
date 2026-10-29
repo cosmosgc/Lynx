@@ -69,6 +69,7 @@ flags:
 | Flag | Default | Meaning |
 |---|---|---|
 | `--bind` | `127.0.0.1:8090` | listen address; loopback by default |
+| `--admin-bind` | `127.0.0.1:8091` | unauthenticated health and metrics listener |
 | `--tick-ms` | `50` | authoritative tick interval, 5–1000 ms |
 | `--resume-ttl-ms` | `30000` | reconnect window |
 | `--view-radius-m` | `60` | server-chosen interest radius |
@@ -136,7 +137,7 @@ Health checks:
 | Nakama connectivity | `lynx doctor --backend` (Nakama health only, not a database check) |
 | Content validity | `lynx validate --project <dir>` |
 | Content compatibility | `lynx content diff --base <manifest> --next <manifest>` |
-| Metrics | Prometheus text endpoint (planned) |
+| Metrics | `GET /metrics` |
 
 Readiness is stricter than liveness: the current binary becomes ready after the
 zone is built or restored and before it accepts connections, and turns not-ready
@@ -150,11 +151,47 @@ The service emits tracing logs; the comprehensive structured fields and
 correlation plumbing below are targets, not a guaranteed current log schema
 (`OPS-013`). Never log tokens, passwords, or full private chat.
 
-Target minimum metrics (export is not implemented; `OPS-001`):
+The admin listener serves `/healthz`, `/readyz`, and `/metrics` independently
+of the gameplay listener. These endpoints are unauthenticated and have no TLS;
+keep the default loopback bind or restrict a private admin interface with
+network policy and a trusted TLS proxy. Local users able to connect can read
+aggregate operational data. The gameplay listener retains these routes for
+compatibility. Do not expose either listener to untrusted networks without
+appropriate controls; demo bearer authentication is not production auth.
 
-- Tick duration, missed deadlines, entity count per zone.
-- Connected sessions, retained reconnect windows, and zone population.
-- Action throughput, rejection counts by `ErrorCode`.
+Prometheus scrape example (use a private target reachable by Prometheus):
+
+```yaml
+scrape_configs:
+  - job_name: lynx-world
+    static_configs:
+      - targets: ['127.0.0.1:8091']
+```
+
+Exported metrics are process-local and reset on restart. No client-controlled
+strings or identities are labels. Rate-limit class and code labels come from
+fixed enums. The single demo zone is exported without a zone label.
+
+| Metric | Meaning |
+|---|---|
+| `lynx_world_ticks_total` | attempted ticks |
+| `lynx_world_tick_duration_seconds_total` | total time executing ticks, seconds |
+| `lynx_world_tick_overruns_total` | ticks whose execution exceeded the interval; not scheduler deadline misses |
+| `lynx_world_entities` | current demo-zone entities, refreshed on authority work |
+| `lynx_world_connections` | attached connections, refreshed on authority work |
+| `lynx_world_inputs_total` | envelopes delivered to authority, not action throughput |
+| `lynx_world_rate_limit_rejections_total{class,code}` | rate-limit rejections by bounded class and error code |
+
+Starting alert examples (tune against staging; not tested production rules):
+`increase(lynx_world_tick_overruns_total[5m]) > 0`,
+`sum(rate(lynx_world_rate_limit_rejections_total[5m])) > 1`, and
+`up{job="lynx-world"} == 0` for five minutes. Monitor readiness separately.
+
+Unsupported requested families (do not interpret their absence as zero):
+
+- Scheduler deadline misses and tick duration distributions.
+- Retained reconnect windows and zone population beyond attached connections.
+- Action throughput and action rejection counts by `ErrorCode`.
 - Replication bytes and queue depth, plus per-session delivery counts.
 - Resume attempts by outcome (`resumed`, `expired`, `conflict`) and expired
   windows swept. Alert on a spike in `SessionExpired` or `Conflict`, which

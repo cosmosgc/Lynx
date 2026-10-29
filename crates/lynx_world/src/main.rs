@@ -173,6 +173,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
     let (shutdown, shutdown_rx) = watch::channel(false);
     let state = Arc::new(
         AppState::new(events, authenticator)
+            .with_metrics(service.metrics())
             .with_origin_policy(origins)
             .with_rate_limits(rate_limits),
     );
@@ -180,6 +181,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(args.bind)
         .await
         .with_context(|| format!("failed to bind {}", args.bind))?;
+    let admin_listener = tokio::net::TcpListener::bind(args.admin_bind)
+        .await
+        .with_context(|| format!("failed to bind admin listener {}", args.admin_bind))?;
+    tracing::info!(address = %admin_listener.local_addr()?, "admin listener started (unauthenticated)");
     let local = listener
         .local_addr()
         .context("failed to read the listener address")?;
@@ -196,6 +201,19 @@ async fn serve(args: ServeArgs) -> Result<()> {
 
     let loop_task = tokio::spawn(service.run(receivers, shutdown_rx));
 
+    let mut admin_shutdown = shutdown.subscribe();
+    let admin_task = tokio::spawn(
+        axum::serve(admin_listener, transport::admin_router(Arc::clone(&state)))
+            .with_graceful_shutdown(async move {
+                while !*admin_shutdown.borrow() {
+                    if admin_shutdown.changed().await.is_err() {
+                        break;
+                    }
+                }
+            })
+            .into_future(),
+    );
+
     let signal_state = Arc::clone(&state);
     let signal_shutdown = shutdown.clone();
     let shutdown_signal = async move {
@@ -207,6 +225,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
 
     let result = transport::serve_with_shutdown(listener, state, shutdown_signal).await;
     let _ = shutdown.send(true);
+    admin_task
+        .await
+        .context("admin listener task failed")?
+        .context("admin listener failed")?;
     match loop_task.await {
         Ok(()) => {}
         Err(error) => tracing::error!(%error, "authority loop panicked"),

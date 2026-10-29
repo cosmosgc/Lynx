@@ -20,7 +20,7 @@ packaging, load testing, and runbooks are still missing.
 ## OPS-001 — Metrics endpoint
 
 - **Priority:** P1
-- **Status:** Ready
+- **Status:** In progress
 - **Depends on:** —
 - **References:** [operations §Metrics and logs](../operations.md#metrics-and-logs)
 
@@ -46,6 +46,12 @@ invisible until players complain.
 - [ ] Labels are bounded and contain no PII or secrets.
 - [ ] Missing metrics are documented as unsupported, not silently omitted.
 - [ ] Readiness and metrics can be scraped without opening the world port.
+
+Partial implementation: the admin listener exports tick execution time and
+overruns, entities, attached connections, authority inputs, and bounded
+rate-limit rejections. The remaining metric families and limitations are listed
+in operations; scheduler deadline misses and action-specific counts are not
+yet measured. This task remains in progress until the full scope is verified.
 
 ---
 

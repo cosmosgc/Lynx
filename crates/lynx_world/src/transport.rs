@@ -27,7 +27,7 @@ use world_gateway::{ERROR_KIND, ResumeToken};
 
 use crate::auth::Authenticator;
 use crate::rate_limit::{RateLimitConfig, RateLimits};
-use crate::service::{Admitted, Credential, HELLO_KIND, Hello, ServerEvent, ServerFrame};
+use crate::service::{Admitted, Credential, HELLO_KIND, Hello, Metrics, ServerEvent, ServerFrame};
 
 /// How long a peer has to send `session.hello` after the upgrade.
 pub const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
@@ -52,6 +52,7 @@ pub struct AppState {
     ready: AtomicBool,
     origins: OriginPolicy,
     limits: RateLimits,
+    metrics: Arc<Metrics>,
 }
 
 /// Optional exact-match browser Origin allowlist. Requests without Origin are
@@ -119,7 +120,15 @@ impl AppState {
             ready: AtomicBool::new(true),
             origins: OriginPolicy::default(),
             limits: RateLimits::new(RateLimitConfig::default()),
+            metrics: Arc::new(Metrics::default()),
         }
+    }
+
+    /// Attach the authority's shared metrics.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: Arc<Metrics>) -> Self {
+        self.metrics = metrics;
+        self
     }
 
     /// Set the browser Origin policy before sharing the state with the router.
@@ -152,6 +161,15 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
         .route("/world", get(world))
+        .with_state(state)
+}
+
+/// HTTP routes suitable for a trusted admin listener, without gameplay access.
+pub fn admin_router(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
+        .route("/metrics", get(metrics))
         .with_state(state)
 }
 
@@ -195,8 +213,24 @@ async fn readyz(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>)
     }
 }
 
-async fn metrics(State(state): State<Arc<AppState>>) -> Json<Value> {
-    Json(json!({ "rate_limit_rejections": state.limits.metrics() }))
+async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let mut body = state.metrics.render();
+    body.push_str("# HELP lynx_world_rate_limit_rejections_total Rate limit rejections by bounded class and error code.\n# TYPE lynx_world_rate_limit_rejections_total counter\n");
+    for row in state.limits.metrics() {
+        use std::fmt::Write;
+        let _ = writeln!(
+            body,
+            "lynx_world_rate_limit_rejections_total{{class=\"{}\",code=\"{}\"}} {}",
+            row.kind, row.code, row.count
+        );
+    }
+    (
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    )
 }
 
 async fn world(
@@ -554,6 +588,67 @@ fn error_envelope(error: &EngineError) -> Result<Envelope, EngineError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn admin_listener_scrapes_without_gameplay_route() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (events, _receiver) = event_channel();
+        let state = Arc::new(AppState::new(
+            events,
+            Authenticator::new(&[crate::auth::digest("test-secret")]).unwrap(),
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task =
+            tokio::spawn(async move { axum::serve(listener, admin_router(state)).await.unwrap() });
+        for (path, status) in [
+            ("/metrics", "200 OK"),
+            ("/readyz", "200 OK"),
+            ("/world", "404 Not Found"),
+        ] {
+            let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+            stream
+                .write_all(
+                    format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).await.unwrap();
+            assert!(response.contains(status), "{response}");
+            if path == "/metrics" {
+                assert!(response.contains("# TYPE lynx_world_ticks_total counter"));
+            }
+        }
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn admin_metrics_are_prometheus_text_and_redacted() {
+        let (events, _receiver) = event_channel();
+        let state = Arc::new(AppState::new(
+            events,
+            Authenticator::new(&[crate::auth::digest("secret-token")]).unwrap(),
+        ));
+        let response = metrics(State(Arc::clone(&state))).await.into_response();
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/plain; version=0.0.4; charset=utf-8"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        let text = std::str::from_utf8(&body).unwrap();
+        assert!(text.ends_with('\n'));
+        for line in text.lines().filter(|line| !line.starts_with('#')) {
+            let (name, value) = line.split_once(' ').unwrap();
+            assert!(name.starts_with("lynx_world_"));
+            assert!(value.parse::<f64>().is_ok());
+        }
+        assert!(!text.contains("secret-token"));
+        assert_eq!(readyz(State(state)).await.0, StatusCode::OK);
+    }
 
     fn headers(value: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();

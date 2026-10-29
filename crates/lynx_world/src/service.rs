@@ -9,7 +9,8 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use engine_core::error::{EngineError, ErrorCode};
 use engine_core::id::StableId;
@@ -113,6 +114,39 @@ pub struct Service {
     reply_sequence: u64,
     token_sequence: u64,
     persistence: Option<Persistence>,
+    metrics: Arc<Metrics>,
+}
+
+/// Process-local, unlabeled authority measurements.
+#[derive(Debug, Default)]
+pub struct Metrics {
+    ticks: AtomicU64,
+    tick_nanos: AtomicU64,
+    tick_overruns: AtomicU64,
+    entities: AtomicU64,
+    connections: AtomicU64,
+    inputs: AtomicU64,
+}
+
+impl Metrics {
+    /// Render the authority measurements in Prometheus text format.
+    #[must_use]
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "Prometheus samples are floating point seconds"
+    )]
+    pub fn render(&self) -> String {
+        let get = |value: &AtomicU64| value.load(Ordering::Relaxed);
+        format!(
+            "# HELP lynx_world_ticks_total Authority ticks attempted.\n# TYPE lynx_world_ticks_total counter\nlynx_world_ticks_total {}\n# HELP lynx_world_tick_duration_seconds_total Time spent executing ticks in seconds.\n# TYPE lynx_world_tick_duration_seconds_total counter\nlynx_world_tick_duration_seconds_total {:.9}\n# HELP lynx_world_tick_overruns_total Ticks taking longer than the configured interval.\n# TYPE lynx_world_tick_overruns_total counter\nlynx_world_tick_overruns_total {}\n# HELP lynx_world_entities Current entities in the demo zone.\n# TYPE lynx_world_entities gauge\nlynx_world_entities {}\n# HELP lynx_world_connections Current attached connections.\n# TYPE lynx_world_connections gauge\nlynx_world_connections {}\n# HELP lynx_world_inputs_total Envelopes delivered to the authority.\n# TYPE lynx_world_inputs_total counter\nlynx_world_inputs_total {}\n",
+            get(&self.ticks),
+            get(&self.tick_nanos) as f64 / 1_000_000_000.0,
+            get(&self.tick_overruns),
+            get(&self.entities),
+            get(&self.connections),
+            get(&self.inputs)
+        )
+    }
 }
 
 /// How and when the service writes durable world snapshots.
@@ -146,7 +180,24 @@ impl Service {
             reply_sequence: 0,
             token_sequence: 0,
             persistence: None,
+            metrics: Arc::new(Metrics::default()),
         }
+    }
+
+    /// Share measurements with the HTTP listener.
+    #[must_use]
+    pub fn metrics(&self) -> Arc<Metrics> {
+        Arc::clone(&self.metrics)
+    }
+
+    fn update_gauges(&self) {
+        self.metrics.entities.store(
+            self.server.gateway().zone().entity_count() as u64,
+            Ordering::Relaxed,
+        );
+        self.metrics
+            .connections
+            .store(self.server.connections().count() as u64, Ordering::Relaxed);
     }
 
     /// Write world snapshots on a fixed interval and at shutdown.
@@ -178,6 +229,7 @@ impl Service {
         mut events: mpsc::Receiver<ServerEvent>,
         mut shutdown: watch::Receiver<bool>,
     ) {
+        self.update_gauges();
         let mut ticker = tokio::time::interval(self.tick);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         ticker.tick().await;
@@ -279,6 +331,7 @@ impl Service {
             } => self.receive(connection, &envelope),
             ServerEvent::Leave { connection } => self.leave(connection),
         }
+        self.update_gauges();
     }
 
     fn admit(
@@ -346,6 +399,7 @@ impl Service {
         if !self.writers.contains_key(&connection) {
             return;
         }
+        self.metrics.inputs.fetch_add(1, Ordering::Relaxed);
         match self.server.receive(connection, envelope, clock()) {
             Ok(outbound) => self.dispatch(outbound),
             Err(error) => {
@@ -393,6 +447,7 @@ impl Service {
     }
 
     fn advance(&mut self) {
+        let started = Instant::now();
         // This is the configured interval, not elapsed wall time: late ticks
         // do not grant extra movement or bank unused time.
         let interval_ms = u32::try_from(self.tick.as_millis()).unwrap_or(u32::MAX);
@@ -405,6 +460,16 @@ impl Service {
                 );
             }
         }
+        let elapsed = started.elapsed();
+        self.metrics.ticks.fetch_add(1, Ordering::Relaxed);
+        self.metrics.tick_nanos.fetch_add(
+            u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        if elapsed > self.tick {
+            self.metrics.tick_overruns.fetch_add(1, Ordering::Relaxed);
+        }
+        self.update_gauges();
     }
 
     fn dispatch(&mut self, outbound: Vec<Outbound>) {
@@ -537,6 +602,44 @@ mod tests {
     use world_server::{READY_KIND, SNAPSHOT_KIND};
 
     const TOKEN: &str = "service-test-token";
+
+    #[test]
+    fn metrics_follow_real_session_input_and_tick() {
+        let (mut service, grant, _) = service();
+        let metrics = service.metrics();
+        let (outbound, _receiver) = mpsc::channel(16);
+        let (reply, mut result) = oneshot::channel();
+        service.handle(ServerEvent::Admit {
+            credential: Credential::Static(grant),
+            hello: Hello {
+                handshake: demo::handshake().unwrap(),
+                last_ack_tick: Tick::ZERO,
+            },
+            outbound,
+            reply,
+        });
+        let admitted = result.try_recv().unwrap().unwrap();
+        service.handle(ServerEvent::Frame {
+            connection: admitted.connection,
+            envelope: Envelope::new(
+                MessageId::parse("private-message").unwrap(),
+                message_kind("bogus.kind"),
+                serde_json::json!({"secret": TOKEN}),
+            ),
+        });
+        service.advance();
+        let text = metrics.render();
+        assert!(text.contains("lynx_world_ticks_total 1\n"));
+        assert!(text.contains("lynx_world_entities 5\n"));
+        assert!(text.contains("lynx_world_connections 1\n"));
+        assert!(text.contains("lynx_world_inputs_total 1\n"));
+        assert!(!text.contains(TOKEN));
+        assert!(!text.contains("private-message"));
+        service.handle(ServerEvent::Leave {
+            connection: admitted.connection,
+        });
+        assert!(metrics.render().contains("lynx_world_connections 0\n"));
+    }
 
     fn service() -> (Service, Grant, Vec<Grant>) {
         let authenticator = Authenticator::new(&[digest(TOKEN)]).unwrap();
