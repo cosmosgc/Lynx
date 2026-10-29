@@ -1,4 +1,5 @@
 import tempfile
+import sqlite3
 import unittest
 from pathlib import Path
 
@@ -276,6 +277,35 @@ Phase 1  Engine skeleton             [██████████████
         self.assertIn(b"Network coverage.", detail.data)
         self.assertIn(b"docs/TODO/10-sample.md:3", detail.data)
         self.assertEqual(client.get("/history?task=UNKNOWN-999").status_code, 404)
+
+    def test_history_timestamp_is_readable_in_gmt_minus_three(self):
+        client = self.make_app().test_client()
+        connection = sqlite3.connect(self.state_db)
+        try:
+            connection.execute(
+                """
+                INSERT INTO observed_task_state_changes
+                    (task_id, old_status, new_status, description, changed_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "SIM-001",
+                    "in_progress",
+                    "done",
+                    "Status changed from In progress to Done",
+                    "2025-01-02T06:05:00Z",
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        response = client.get("/history")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'datetime="2025-01-02T06:05:00Z"', response.data)
+        self.assertIn(b"Jan 2, 2025", response.data)
+        self.assertIn("03:05 AM GMT−3".encode(), response.data)
 
     def test_flask_app_does_not_expose_a_status_update_endpoint(self):
         client = self.make_app().test_client()

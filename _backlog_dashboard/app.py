@@ -4,7 +4,7 @@ import re
 import sqlite3
 from collections import Counter
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from heapq import heappop, heappush
 from pathlib import Path
 from typing import Any
@@ -38,6 +38,7 @@ STATUS_LABELS = {
     "icebox": "Icebox",
     "unspecified": "Unspecified",
 }
+HISTORY_TIMEZONE = timezone(timedelta(hours=-3), name="GMT-3")
 PHASE_LINE = re.compile(
     r"^Phase\s+(\d+)\s+(.+?)\s+\[([█░]+)\]\s+(\d+)%\s+(.+?)\s*$",
     re.MULTILINE,
@@ -76,6 +77,16 @@ def _initialize_state_store(database_path: Path) -> None:
             """
         )
         connection.commit()
+
+
+def _history_timestamp(changed_at: str) -> tuple[str, str]:
+    timestamp = datetime.fromisoformat(changed_at.replace("Z", "+00:00"))
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    local_time = timestamp.astimezone(HISTORY_TIMEZONE)
+    date_label = f"{local_time.strftime('%b')} {local_time.day}, {local_time.year}"
+    time_label = f"{local_time.strftime('%I:%M %p')} GMT−3"
+    return date_label, time_label
 
 
 def observe_task_states(
@@ -557,6 +568,9 @@ def create_app(
             )
             changes = [dict(row) for row in rows]
         for change in changes:
+            change["changed_at_date"], change["changed_at_time"] = _history_timestamp(
+                change["changed_at"]
+            )
             task = items_by_id.get(change["task_id"])
             change["task_exists"] = task is not None
             change["title"] = task["title"] if task else "Task no longer in backlog"

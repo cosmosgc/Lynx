@@ -18,7 +18,10 @@
     table { width:100%; border-collapse:collapse; }
     th,td { padding:10px 8px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
     th { color:var(--muted); font-weight:600; }
-    .change { white-space:nowrap; }
+     .change { white-space:nowrap; }
+    .timestamp { display:grid; gap:2px; min-width:150px; white-space:nowrap; }
+    .timestamp-date { font-weight:600; }
+    .timestamp-time { color:var(--muted); font-size:12px; font-variant-numeric:tabular-nums; }
     .arrow { color:var(--green); padding:0 6px; }
     .meta { display:flex; flex-wrap:wrap; gap:7px; margin:10px 0 18px; }
     .badge { display:inline-block; padding:2px 8px; border:1px solid var(--line); border-radius:99px; white-space:nowrap; font-size:12px; }
@@ -105,7 +108,7 @@
         <tbody>
           {% for change in changes %}
           <tr>
-            <td><time datetime="{{ change.changed_at }}">{{ change.changed_at }}</time></td>
+            <td><time class="timestamp" datetime="{{ change.changed_at }}" title="{{ change.changed_at }} UTC"><span class="timestamp-date">{{ change.changed_at_date }}</span><span class="timestamp-time">{{ change.changed_at_time }}</span></time></td>
             <td>
               {% if change.task_exists %}<a href="/history?task={{ change.task_id|urlencode }}#task-detail">{% endif %}
               <strong>{{ change.task_id }}</strong><br>{{ change.title }}
