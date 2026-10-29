@@ -63,7 +63,11 @@ not block socket tasks. Resume tokens remain local; their configured TTL bounds
 the upstream-revocation observation gap. The deliberate population policy is to
 admit only an already-present authoritative actor; persistent rows neither spawn
 actors nor fall back to demo characters. New-character loading and multi-zone
-routing remain separate backlog work.
+routing remain separate backlog work. The client now persists its device ID and
+rotating refresh token in the OS credential store, refreshes on login, supports
+`--logout`, and can list/create/select characters through the authenticated
+world HTTP API. Character creation and selection do not yet provision or load a
+live actor, and the client has no character onboarding UI.
 
 **Acceptance criteria**
 

@@ -102,10 +102,7 @@ impl CharacterApiClient {
         request
             .validate()
             .map_err(|_| CharacterApiFailure::InvalidRequest)?;
-        if idempotency_key.is_empty()
-            || idempotency_key.len() > 128
-            || idempotency_key.chars().any(char::is_control)
-        {
+        if game_api::CharacterCreationKey::new(idempotency_key).is_err() {
             return Err(CharacterApiFailure::InvalidRequest);
         }
         let response = self
@@ -126,12 +123,7 @@ impl CharacterApiClient {
         token: &SessionToken,
         character_id: &str,
     ) -> Result<Character, CharacterApiFailure> {
-        if character_id.is_empty()
-            || character_id.len() > 128
-            || character_id
-                .chars()
-                .any(|ch| ch.is_control() || ch.is_whitespace())
-        {
+        if character_id.parse::<game_api::CharacterId>().is_err() {
             return Err(CharacterApiFailure::InvalidRequest);
         }
         let response = self
@@ -266,5 +258,76 @@ mod tests {
             CharacterApiClient::new("https://example.test/characters"),
             Err(CharacterApiFailure::InvalidConfiguration)
         ));
+    }
+
+    #[test]
+    fn creation_retry_reuses_caller_intent_after_lost_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let id =
+            engine_core::StableId::from_parts(engine_core::IdKind::Character, 1, 123).to_string();
+        let expected_id = id.clone();
+        let worker = std::thread::spawn(move || {
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut bytes = Vec::new();
+                let mut buffer = [0; 1024];
+                loop {
+                    let n = stream.read(&mut buffer).unwrap();
+                    assert!(n > 0);
+                    bytes.extend_from_slice(&buffer[..n]);
+                    let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let headers = String::from_utf8_lossy(&bytes[..end]);
+                    let len = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.split_once(':').and_then(|(name, value)| {
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            })
+                        })
+                        .unwrap();
+                    if bytes.len() >= end + 4 + len {
+                        break;
+                    }
+                }
+                let request = String::from_utf8(bytes).unwrap();
+                assert!(request.starts_with("POST /characters HTTP/1.1"));
+                assert!(
+                    request
+                        .lines()
+                        .any(|line| line.eq_ignore_ascii_case("idempotency-key: stable-intent"))
+                );
+                assert!(request.ends_with("{\"name\":\"Hero\"}"));
+                if attempt == 1 {
+                    let body = format!("{{\"character_id\":\"{id}\"}}");
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .unwrap();
+                }
+            }
+        });
+        let token = SessionToken::new("access-secret").unwrap();
+        let request = CreateCharacter {
+            name: "Hero".into(),
+        };
+        let first = CharacterApiClient::new(format!("http://{address}")).unwrap();
+        assert!(
+            first
+                .create_character(&token, "stable-intent", &request)
+                .is_err()
+        );
+        let restarted = CharacterApiClient::new(format!("http://{address}")).unwrap();
+        let receipt = restarted
+            .create_character(&token, "stable-intent", &request)
+            .unwrap();
+        assert_eq!(receipt.character_id.to_string(), expected_id);
+        worker.join().unwrap();
     }
 }

@@ -9,6 +9,10 @@ fn main() {
     };
     use std::ffi::OsStr;
 
+    if character_command() {
+        return;
+    }
+
     if std::env::args_os().nth(1).as_deref() == Some(OsStr::new("--logout")) {
         if std::env::args_os().nth(2).is_some() {
             eprintln!("Usage: lynx_client --logout");
@@ -25,7 +29,7 @@ fn main() {
         (Some(mode), Some(path), None) if mode == "--replay" => (None, Some(path)),
         _ => {
             eprintln!(
-                "Usage: lynx_client [--demo-online | --login <character-id> | --logout | --replay <fixture.json>]"
+                "Usage: lynx_client [--characters | --create-character <name> <intent-key> | --select-character <id> | --demo-online | --login <id> | --logout | --replay <fixture.json>]"
             );
             std::process::exit(2);
         }
@@ -87,6 +91,96 @@ fn main() {
         None
     };
     app.run();
+}
+
+#[cfg(feature = "window")]
+fn character_command() -> bool {
+    use game_api::{CharacterCreationKey, CreateCharacter, SessionToken};
+    use lynx_client::nakama_credentials::{OsNakamaCredentialStore, authenticate_or_resume};
+    use lynx_client_net::{CharacterApiClient, NakamaAuthClient, NakamaAuthConfig};
+
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let Some(command) = args.first().map(String::as_str) else {
+        return false;
+    };
+    if !matches!(
+        command,
+        "--characters" | "--create-character" | "--select-character"
+    ) {
+        return false;
+    }
+    if !matches!(
+        (command, args.len()),
+        ("--characters", 1) | ("--create-character", 3) | ("--select-character", 2)
+    ) {
+        eprintln!(
+            "Usage: lynx_client --characters | --create-character <name> <intent-key> | --select-character <id>"
+        );
+        std::process::exit(2);
+    }
+    if command == "--create-character"
+        && ((CreateCharacter {
+            name: args[1].clone(),
+        })
+        .validate()
+        .is_err()
+            || CharacterCreationKey::new(&args[2]).is_err())
+    {
+        eprintln!(
+            "Invalid name or intent key. Names must contain 1–32 characters without surrounding whitespace or control characters; keys use 1–128 ASCII letters, digits, underscores or hyphens."
+        );
+        std::process::exit(2);
+    }
+    let required = |key: &str| {
+        std::env::var(key).unwrap_or_else(|_| {
+            eprintln!("Missing required environment setting {key}.");
+            std::process::exit(2);
+        })
+    };
+    let base_url = required("LYNX_NAKAMA_URL");
+    let server_key = required("LYNX_NAKAMA_SERVER_KEY");
+    let api_url =
+        std::env::var("LYNX_WORLD_API_URL").unwrap_or_else(|_| "http://127.0.0.1:8090".into());
+    let result = std::thread::spawn(move || -> Result<(), String> {
+        let auth = NakamaAuthClient::new(NakamaAuthConfig::new(&base_url, server_key)).map_err(|e| format!("{e:?}"))?;
+        let session = authenticate_or_resume(&auth, &base_url, &OsNakamaCredentialStore, engine_core::Locale::default()).map_err(|e| format!("{e:?}"))?;
+        let token = SessionToken::new(session.access_token()).map_err(|_| "invalid access session".to_owned())?;
+        let api = CharacterApiClient::new(api_url).map_err(|e| format!("{e:?}"))?;
+        match args[0].as_str() {
+            "--characters" => {
+                let characters = api.characters(&token).map_err(|e| format!("{e:?}"))?;
+                if characters.is_empty() { println!("No characters yet. Create one with --create-character <name> <intent-key>."); }
+                for character in characters { println!("{}\t{}\t{:?}", character.id, character.name, character.status); }
+            }
+            "--create-character" => {
+                let receipt = api.create_character(&token, &args[2], &CreateCharacter { name: args[1].clone() }).map_err(|e| format!("{e:?}"))?;
+                println!("Character created (or previously created): {}. Select with --select-character or enter with --login.", receipt.character_id);
+                println!("World admission requires a corresponding live actor; character creation does not provision one.");
+            }
+            _ => {
+                let character = api.select_character(&token, &args[1]).map_err(|e| format!("{e:?}"))?;
+                println!("Selected {} ({}). Selection verifies ownership but does not admit an actor.", character.name, character.id);
+                println!("Use --login {} to attempt world entry; admission is unavailable unless the server has a corresponding live actor.", character.id);
+            }
+        }
+        Ok(())
+    }).join();
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            eprintln!(
+                "Character operation failed ({error}). For an uncertain creation outcome, retry the same name and intent key."
+            );
+            std::process::exit(1);
+        }
+        Err(_) => {
+            eprintln!(
+                "Character operation worker failed. Retry creation using the same name and intent key."
+            );
+            std::process::exit(1);
+        }
+    }
+    true
 }
 
 #[cfg(feature = "window")]

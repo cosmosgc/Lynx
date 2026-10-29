@@ -64,10 +64,9 @@ public server discovery is not specified.
 
 ## Development-only login and online demo
 
-For Nakama device login, set `LYNX_NAKAMA_URL` (local default
+For Nakama device login, set `LYNX_NAKAMA_URL` (for example,
 `http://127.0.0.1:7350`) and the public client server key in
-`LYNX_NAKAMA_SERVER_KEY`, then run
-`cargo run -p lynx_client -- --login <character-id>`. The device ID and rotating
+`LYNX_NAKAMA_SERVER_KEY`. The device ID and rotating
 refresh token are stored in the OS credential manager (Windows Credential
 Manager, macOS Keychain, or Linux Secret Service); the access token stays in
 memory. If that secure store is unavailable, login fails closed without a
@@ -80,14 +79,30 @@ only to loopback; remote Nakama and world endpoints require HTTPS/WSS. The
 Nakama server key is public client configuration, but must not be confused with
 the private runtime HTTP key.
 
-There is no login form, character-list UI, or automatic character creation; pass
-the ID of an existing character. `cargo run -p lynx_client -- --logout` revokes
-the saved Nakama session and removes its OS credential entry. The authenticated
-world character API also supports server-side list/create/select operations,
-but the current client does not yet expose a character-creation UI or retry-safe
-creation command. Character selection verifies ownership and playability; the
-world still requires a corresponding live actor in its active snapshot. Startup
-errors are coarse and printed without response bodies or credentials.
+Onboarding uses the default-feature executable and the same saved device account:
+
+```text
+cargo run -p lynx_client -- --characters
+cargo run -p lynx_client -- --create-character "Hero" my-first-hero-2026
+cargo run -p lynx_client -- --select-character <character-id>
+cargo run -p lynx_client -- --login <character-id>
+```
+
+Choose a unique, non-secret intent key for each creation (1–128 ASCII letters,
+digits, underscores or hyphens). Keep it and the exact name until the outcome is
+known. If a request fails or the process stops, **repeat the same command and
+key**, including after restarting; never choose a new key for that retry. A new
+creation intent needs a new key, even if reusing a name. The server binds the key
+to the request and account; changing the name with the same key conflicts. The
+key is supplied explicitly, not generated or saved by the client. Names must have
+1–32 characters with no control characters or surrounding whitespace.
+
+Selection verifies ownership and playability but does not provision an actor.
+World admission is unavailable unless the server already has the corresponding
+live actor in its active snapshot; creation alone does not make one. There is no
+graphical character UI yet. `cargo run -p lynx_client -- --logout` revokes the
+saved Nakama session and removes its OS credential entry. Startup errors are
+coarse and printed without response bodies or credentials.
 
 ### Static-token demo
 
@@ -137,8 +152,8 @@ in `Config` debug output. The explicit `--login` development mode below now
 acquires a Nakama device session, but the reusable transport API remains a seam
 rather than a login UI or account manager. The HTTP auth client supports refresh
 and per-session logout, but the application does not yet expose those operations
-in its UI. No OS credential-store integration exists: remembering credentials is
-unavailable, and no plaintext substitute is used. The application does not yet
+in its UI. The command-line device flow uses the OS credential store, with no
+plaintext substitute. The application does not yet
 retain or rotate world resume tokens. Closing the transport detaches the session,
 which may remain resumable.
 

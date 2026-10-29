@@ -60,6 +60,11 @@ metric semantics and unsupported families.
 
 This task remains in progress until pathfinding/localization are integrated or
 formally removed from scope, and the full validation gates are verified.
+The read-only `scripts/test-nakama.ps1` smoke check accepts an explicit
+`-MetricsUrl`, and Ubuntu CI has a dedicated ShellCheck job for operations
+scripts. Live Nakama metrics verification is still pending because the available
+Nakama health endpoint and PostgreSQL listener were unreachable during the
+latest smoke attempt; the existing Nakama process was not restarted.
 
 ---
 

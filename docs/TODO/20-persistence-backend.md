@@ -385,19 +385,25 @@ world database or snapshots.
 - **References:** [ADR 0018](../adr/0018-nakama-adapter-seam-and-replacement-criteria.md),
   `crates/backend_nakama`
 
-**Why:** `backend_nakama` implements `HealthService` and `AuthService` only.
-Character, inventory, chat, social, faction, calendar, and admin calls cannot use
-Nakama today. Social/chat are not a mechanical quick adapter: the current
-`FriendState` cannot represent Nakama's incoming/outgoing invitation states,
-and `ChatService::channels` requires generic discovery unavailable through the
-public REST API. If Nakama remains the backend of record, the adapter is
-incomplete; if direct SQL becomes the backend of record, this task should be
-closed with that decision instead.
+**Why:** `backend_nakama` uses Nakama HTTP for health and authentication, and
+composes those identities with Lynx PostgreSQL character persistence. The world
+HTTP edge now exposes authenticated character list/create/select operations over
+that backend; selection verifies ownership but does not provision a live world
+actor. Inventory, chat, social, faction, calendar, and admin calls are not
+implemented through a Nakama service adapter. Social/chat are not a mechanical
+quick adapter: the current `FriendState` cannot represent Nakama's
+incoming/outgoing invitation states, and `ChatService::channels` requires
+generic discovery unavailable through the public REST API. If Nakama remains
+the backend of record, the adapter is incomplete; if direct SQL becomes the
+backend of record, this task should be closed with that decision instead.
 
 **Scope**
 
 - Implement applicable remaining `game_api` service traits over Nakama REST and
   realtime socket APIs behind the existing seam.
+- Keep Lynx-owned character records in the PostgreSQL character store unless the
+  backend-of-record decision explicitly changes; do not describe the current
+  HTTP character routes as Nakama character storage.
 - Evolve the social/chat contracts before implementing them so Nakama invitation
   states and socket-driven channel semantics are preserved rather than flattened.
 - Map Nakama errors to `ApiError` without leaking HTTP bodies or tokens.

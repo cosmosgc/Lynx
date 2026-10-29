@@ -112,25 +112,19 @@ window displaying the default offline placeholder scene.
 - [ ] Tokens do not appear in logs, crash reports, or screenshots.
 - [ ] Logout/close releases the session promptly.
 
-**Progress:** Unblocked by completed `NET-001`. The client has a bounded
-WebSocket transport and an explicit, read-only online demo path, but no login
-flow, server browser, credential storage, character-selection UI,
-or resume-token lifecycle. The CLT-002 scope remains largely unimplemented.
-
-The transport now exposes URL validation and an optional sensitive character
-header for fresh Nakama admission, plus coarse HTTP admission failure categories.
-This is a headless integration seam, not character selection or login; no
-credentials are remembered because no portable OS secure-store integration has
-been implemented. Identity acquisition/refresh, resume lifecycle, localized UI,
-server profiles/history and explicit session revocation remain open. Plaintext
-transport is restricted to literal loopback IPs, not arbitrary trusted LANs.
+**Progress:** The development CLI now acquires/resumes a Nakama device session,
+stores the device ID and rotating refresh token in the OS credential store,
+supports logout, and can reach the character HTTP API. Access tokens remain in
+memory. The graphical login, server browser/profiles/history, localized errors,
+and world resume-token lifecycle remain open. Plaintext transport is restricted
+to literal loopback IPs, not arbitrary trusted LANs.
 
 ---
 
 ## CLT-003 — Character selection and creation
 
 - **Priority:** P0
-- **Status:** Blocked — `PST-001`
+- **Status:** In progress — CLI flow; blocked on authoritative actor provisioning
 - **Depends on:** `PST-001`, `CLT-002`
 - **References:** `game_api::CharacterService`, `PST-001`
 
@@ -151,6 +145,11 @@ transport is restricted to literal loopback IPs, not arbitrary trusted LANs.
 
 **Acceptance criteria**
 
+- [x] Authenticated character list/create/select routes enforce account
+      ownership; creation requires a retry-stable idempotency key.
+- [x] The development CLI can list, create, and select characters, and tells
+      the player to reuse the same creation key after an uncertain result.
+- [x] Client-side name/key/ID validation matches server contracts.
 - [ ] A new account can create a character and enter the world after restart.
 - [ ] The client cannot select a character it does not own.
 - [ ] Name/appearance validation matches server rules.
@@ -158,6 +157,13 @@ transport is restricted to literal loopback IPs, not arbitrary trusted LANs.
 - [ ] Two instances can play different characters from one account when the
       server uses per-character limits; per-account limits reject a second
       session without affecting the first.
+
+**Blocker:** Character selection verifies ownership and playability but does not
+create or restore a live actor. Safe provisioning needs a durable
+character-to-actor binding and a crash-recovery protocol coordinated with world
+snapshots. Do not spawn on every admission or client retry until that persistence
+boundary is implemented and tested; otherwise a crash can duplicate actors or
+lose actor state.
 
 ---
 
