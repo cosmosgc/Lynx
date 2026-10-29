@@ -277,9 +277,10 @@ See [ADR 0013](adr/0013-world-gateway-and-reconnect.md).
   re-validates range and permission before running the action.
 - Minigame outcomes are computed on the server. The client submits a guess, not
   a result; hints, attempt counts, lockouts, and unlocks are server effects.
-- Queued movement is checked against a server-owned speed budget and nav-grid
-  transitions, including blocked cells and grid bounds. Occupancy, fine
-  collider checks, and status effects are not yet implemented; see
+- Queued movement is checked against a server-owned speed budget, nav-grid
+  transitions, zone bounds, destination-cell occupancy, circular body
+  collisions, and a server-owned mobile/stunned status. A rejected endpoint
+  never updates the authoritative transform; see
   [SIM-001](TODO/10-simulation-gameplay.md#sim-001--server-authoritative-movement).
 - Combat, inventory, currency, progression, and placement outcomes are
   computed on the server.
@@ -311,9 +312,11 @@ See [ADR 0013](adr/0013-world-gateway-and-reconnect.md).
 - Movement requests contain only `sequence` (u64) and `destination` (`x`, `y`,
   `z` in meters). The server resolves actor and session, permits one pending
   input per actor and at most the tick action budget in total, and validates
-  using a fixed server interval and provisional 2 m/s speed. A correlated
-  `movement.queued` means admission only; malformed, stale, unauthorized or
-  over-budget requests return `protocol.error` and do not consume the sequence.
+  using a fixed server interval and provisional 2 m/s speed, the actor's
+  server-owned status and body, nav-grid transitions, zone bounds, and
+  destination-cell occupancy. A correlated `movement.queued` means admission
+  only; malformed, stale, unauthorized or over-budget requests return
+  `protocol.error` and do not consume the sequence.
 - `world.snapshot` includes a private `movement` baseline with `tick`,
   authoritative `position`, `last_consumed_sequence` (number or null), and
   `applied: null`. A `world.delta` includes this field for a processed input,
