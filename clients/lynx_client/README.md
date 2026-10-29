@@ -99,6 +99,19 @@ resume-token storage, tick acknowledgements, and interpretation of world data.
 `world.token` envelopes contain bearer secrets: do not log them. Transport
 failures are deliberately coarse and do not include URLs or credentials.
 
+`validate_server_url` exposes the same URL policy before connecting. For fresh
+Nakama admission, callers may supply the selected character in `Config.character`;
+the transport sends it as a sensitive `X-Lynx-Character` header alongside the
+bearer. Omit it for the static demo or a gateway resume token. The server checks
+ownership. HTTP 401, 403, 429 and 503 map to coarse authentication, character,
+rate-limit and unavailable failures, without retaining response details; 503
+does not distinguish capacity from identity failure. Neither field is included
+in `Config` debug output. This is an integration seam, not a login UI or identity
+client. No OS credential-store integration exists: remembering credentials is not
+available, and no plaintext substitute is used. The client does not yet acquire
+or refresh Nakama sessions, retain/rotate resume tokens, or implement logout
+revocation. Closing the transport detaches the session, which may remain resumable.
+
 The demo server's static bearer tokens are development authentication, not a
 production identity system. Use local `ws://` only on trusted networks; `wss://`
 uses WebPKI roots. Configure compatible handshake versions explicitly. Run

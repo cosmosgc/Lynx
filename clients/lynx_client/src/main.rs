@@ -53,6 +53,7 @@ fn main() {
                 .connect(lynx_client_net::Config {
                     url,
                     bearer,
+                    character: None,
                     handshake: engine_net::protocol::Handshake::new(version.clone(), version),
                     last_ack_tick: engine_core::time::Tick::ZERO,
                 })

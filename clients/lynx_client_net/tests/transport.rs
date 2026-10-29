@@ -22,6 +22,7 @@ fn config(url: String, bearer: &str) -> Config {
     Config {
         url,
         bearer: bearer.into(),
+        character: None,
         handshake: demo::handshake().unwrap(),
         last_ack_tick: Tick::ZERO,
     }
@@ -80,6 +81,58 @@ async fn plaintext_policy_and_redaction() {
     ] {
         let client = Client::connect(config(url.into(), TOKEN));
         assert_eq!(finished(&client).await, Status::Failed(Failure::Transport));
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::result_large_err)] // Tungstenite's callback fixes the error type.
+async fn character_header_is_sent_and_redacted() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/world", listener.local_addr().unwrap());
+    let server =
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let callback = |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                        response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+            assert_eq!(request.headers()["authorization"], format!("Bearer {TOKEN}"));
+            assert_eq!(request.headers()["x-lynx-character"], "chr_private");
+            Ok(response)
+        };
+            let mut socket = tokio_tungstenite::accept_hdr_async(stream, callback)
+                .await
+                .unwrap();
+            assert!(socket.next().await.unwrap().is_ok());
+        });
+    let mut settings = config(url, TOKEN);
+    settings.character = Some("chr_private".into());
+    let debug = format!("{settings:?}");
+    assert!(!debug.contains("chr_private"));
+    assert!(!debug.contains(TOKEN));
+    let client = Client::connect(settings);
+    server.await.unwrap();
+    assert!(matches!(
+        finished(&client).await,
+        Status::Closed | Status::Failed(_)
+    ));
+}
+
+#[test]
+fn server_url_validation_is_available_before_connecting() {
+    use lynx_client_net::validate_server_url;
+    for url in [
+        "wss://example.com:443/world",
+        "ws://127.0.0.1:8090/world",
+        "ws://[::1]:8090/world",
+    ] {
+        assert_eq!(validate_server_url(url), Ok(()));
+    }
+    for url in [
+        "ws://localhost/world",
+        "ws://192.168.1.1/world",
+        "wss://user:pass@example.com/world",
+        "wss://example.com/world?token=secret",
+    ] {
+        assert_eq!(validate_server_url(url), Err(Failure::InvalidConfiguration));
     }
 }
 

@@ -70,7 +70,7 @@ window displaying the default offline placeholder scene.
 ## CLT-002 — Login and session bootstrap
 
 - **Priority:** P0
-- **Status:** Blocked — `NET-001`
+- **Status:** Ready
 - **Depends on:** `NET-001`, `CLT-001`
 - **References:** [networking §Transport](../networking.md#transport)
 
@@ -111,6 +111,19 @@ window displaying the default offline placeholder scene.
 - [ ] A version mismatch is blocked before world entry with the supported range.
 - [ ] Tokens do not appear in logs, crash reports, or screenshots.
 - [ ] Logout/close releases the session promptly.
+
+**Progress:** Unblocked by completed `NET-001`. The client has a bounded
+WebSocket transport and an explicit, read-only online demo path, but no login
+flow, server browser, credential storage, character-selection UI,
+or resume-token lifecycle. The CLT-002 scope remains largely unimplemented.
+
+The transport now exposes URL validation and an optional sensitive character
+header for fresh Nakama admission, plus coarse HTTP admission failure categories.
+This is a headless integration seam, not character selection or login; no
+credentials are remembered because no portable OS secure-store integration has
+been implemented. Identity acquisition/refresh, resume lifecycle, localized UI,
+server profiles/history and explicit session revocation remain open. Plaintext
+transport is restricted to literal loopback IPs, not arbitrary trusted LANs.
 
 ---
 

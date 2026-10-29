@@ -80,6 +80,7 @@ async fn acknowledges_applied_snapshot_and_fails_on_stale_delta() {
         .connect(Config {
             url,
             bearer: "test-secret".into(),
+            character: None,
             handshake: demo::handshake().unwrap(),
             last_ack_tick: Tick::ZERO,
         })
@@ -189,6 +190,7 @@ async fn rejected_updates_are_not_acknowledged() {
             .connect(Config {
                 url,
                 bearer: "test-secret".into(),
+                character: None,
                 handshake: demo::handshake().unwrap(),
                 last_ack_tick: Tick::ZERO,
             })
@@ -251,6 +253,7 @@ async fn headless_schedule_connects_moves_and_disconnects() {
         .connect(Config {
             url,
             bearer: TOKEN.into(),
+            character: None,
             handshake: demo::handshake().unwrap(),
             last_ack_tick: Tick::ZERO,
         })

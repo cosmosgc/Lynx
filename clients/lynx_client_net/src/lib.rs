@@ -48,6 +48,14 @@ pub enum Failure {
     InvalidConfiguration,
     Timeout,
     Transport,
+    /// The world edge rejected the bearer credential.
+    Authentication,
+    /// The selected character was not accepted by the world edge.
+    CharacterForbidden,
+    /// The edge rejected admission due to rate limiting.
+    RateLimited,
+    /// The edge or its identity dependency is unavailable.
+    Unavailable,
     Protocol,
     IncomingQueueFull,
 }
@@ -66,6 +74,8 @@ pub struct Config {
     pub url: String,
     /// Static demo token, or a previously received single-use resume token.
     pub bearer: String,
+    /// Character selected for fresh Nakama admission; omitted for demo or resume.
+    pub character: Option<String>,
     /// Client protocol and content advertisement.
     pub handshake: Handshake,
     /// Last authoritative tick received, used when resuming.
@@ -181,27 +191,18 @@ async fn pump(
     incoming: &mpsc::Sender<Envelope>,
     status: &watch::Sender<Status>,
 ) -> Result<(), Failure> {
-    // Reject embedded credentials and query strings: neither is needed by this protocol.
-    let mut request = config
-        .url
-        .as_str()
-        .into_client_request()
-        .map_err(|_| Failure::InvalidConfiguration)?;
-    let uri = request.uri();
-    if !matches!(uri.scheme_str(), Some("ws" | "wss"))
-        || uri.authority().is_none_or(|a| a.as_str().contains('@'))
-        || uri.query().is_some()
-        || (uri.scheme_str() == Some("ws")
-            && !uri.host().is_some_and(|host| {
-                host.trim_start_matches('[')
-                    .trim_end_matches(']')
-                    .parse::<IpAddr>()
-                    .is_ok_and(|ip| ip.is_loopback())
-            }))
-        || config.bearer.is_empty()
-        || config.bearer.chars().any(char::is_whitespace)
-    {
+    let mut request = validate_url(&config.url)?;
+    if config.bearer.is_empty() || config.bearer.chars().any(char::is_whitespace) {
         return Err(Failure::InvalidConfiguration);
+    }
+    if let Some(character) = &config.character {
+        if character.is_empty() || character.chars().any(char::is_whitespace) {
+            return Err(Failure::InvalidConfiguration);
+        }
+        let mut value =
+            HeaderValue::from_str(character).map_err(|_| Failure::InvalidConfiguration)?;
+        value.set_sensitive(true);
+        request.headers_mut().insert("x-lynx-character", value);
     }
     let mut authorization = HeaderValue::from_str(&format!("Bearer {}", config.bearer))
         .map_err(|_| Failure::InvalidConfiguration)?;
@@ -218,7 +219,16 @@ async fn pump(
     )
     .await
     .map_err(|_| Failure::Timeout)?
-    .map_err(|_| Failure::Transport)?;
+    .map_err(|error| match error {
+        tokio_tungstenite::tungstenite::Error::Http(response) => match response.status().as_u16() {
+            401 => Failure::Authentication,
+            403 => Failure::CharacterForbidden,
+            429 => Failure::RateLimited,
+            503 => Failure::Unavailable,
+            _ => Failure::Transport,
+        },
+        _ => Failure::Transport,
+    })?;
     let hello = Envelope::new(
         MessageId::parse("client-hello").expect("valid literal"),
         MessageKind::parse("session.hello").expect("valid literal"),
@@ -269,4 +279,33 @@ async fn pump(
             }
         }
     }
+}
+
+/// Validate a world URL without connecting or exposing it in an error.
+/// Plaintext is restricted to literal loopback IPs, not DNS names.
+pub fn validate_server_url(url: &str) -> Result<(), Failure> {
+    validate_url(url).map(|_| ())
+}
+
+fn validate_url(
+    url: &str,
+) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, Failure> {
+    let request = url
+        .into_client_request()
+        .map_err(|_| Failure::InvalidConfiguration)?;
+    let uri = request.uri();
+    if !matches!(uri.scheme_str(), Some("ws" | "wss"))
+        || uri.authority().is_none_or(|a| a.as_str().contains('@'))
+        || uri.query().is_some()
+        || (uri.scheme_str() == Some("ws")
+            && !uri.host().is_some_and(|host| {
+                host.trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .parse::<IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+            }))
+    {
+        return Err(Failure::InvalidConfiguration);
+    }
+    Ok(request)
 }
