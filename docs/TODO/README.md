@@ -95,7 +95,7 @@ the quick audit; update it when a gap is found or closed.
 | Snapshot replay is not implemented; recovery target unproven | [architecture](../architecture.md#failure-and-recovery) | `PST-005` |
 | PostgreSQL adapter is plain TCP, no TLS | [operations](../operations.md) | `PST-007`, `NET-003` |
 | Sessions and resume windows are process-local | [networking](../networking.md#reconnect-and-recovery) | `PST-006` |
-| No rate limiting or per-session message budgets | [security](../security.md#abuse-prevention) | `NET-002` |
+| Session and token abuse defenses, including revocation and attack alerting, remain incomplete | [networking backlog](30-networking-security.md#net-007--session-and-token-abuse-defenses) | `NET-007` |
 | No metrics endpoint or dashboards | [operations](../operations.md#metrics-and-logs) | `OPS-001`, `OPS-002` |
 | No editor, inspector, link graph, or navigation authoring | [content authoring](../content-authoring.md) | `CNT-001`–`CNT-007` |
 | MCP server and external client are planned only | [AI tooling](../ai-tooling.md) | `CNT-009`, `CNT-010` |
