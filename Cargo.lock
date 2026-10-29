@@ -4215,6 +4215,7 @@ dependencies = [
  "engine_core",
  "game_api",
  "lynx-world",
+ "semver",
  "serde_json",
 ]
 

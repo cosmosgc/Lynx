@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use backend_nakama::{NakamaClient, NakamaConfig};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use engine_content::{
-    ContentLoader, ContentManifest, PublishingPolicy, check_publish, diff, sha256_hex,
+    ContentLoader, ContentManifest, ContentSet, PublishingPolicy, check_publish, diff, sha256_hex,
 };
 use engine_core::schema::{
     ComponentKey, ComponentRegistry, ComponentSchema, FieldSchema, FieldType, PersistencePolicy,
@@ -79,9 +79,29 @@ struct ContentArgs {
 
 #[derive(Subcommand)]
 enum ContentCommand {
+    Build(ContentBuildArgs),
     Hash(HashArgs),
     Diff(DiffArgs),
     PublishCheck(PublishCheckArgs),
+}
+
+#[derive(Args)]
+struct ContentBuildArgs {
+    /// Project directory containing content/.
+    #[arg(long, default_value = ".")]
+    project: PathBuf,
+
+    /// Manifest output path, relative to the project when not absolute.
+    #[arg(long, default_value = "content/manifest.json")]
+    output: PathBuf,
+
+    /// Semantic content bundle version recorded in the manifest.
+    #[arg(long, default_value = "0.1.0")]
+    content_version: String,
+
+    /// Compatible engine semantic-version requirement.
+    #[arg(long, default_value = "^0.1")]
+    engine: String,
 }
 
 #[derive(Args)]
@@ -466,7 +486,10 @@ fn doctor(args: &DoctorArgs) -> Result<Value> {
 
 fn validate_project(args: &ValidateArgs) -> Result<Value> {
     let project_dir = absolute_path(args.project.as_path())?;
-    validate_dir(project_dir.as_path())
+    let mut report = validate_dir(project_dir.as_path())?;
+    report["command"] = json!("validate");
+    report["project"] = json!(project_dir.to_string_lossy());
+    Ok(report)
 }
 
 fn project_command(args: &ProjectCommandArgs, command: &str) -> Result<Value> {
@@ -500,10 +523,82 @@ fn project_command(args: &ProjectCommandArgs, command: &str) -> Result<Value> {
 
 fn content(args: &ContentArgs) -> Result<Value> {
     match &args.command {
+        ContentCommand::Build(build_args) => build_content(build_args),
         ContentCommand::Hash(hash_args) => hash_file(hash_args.path.as_path()),
         ContentCommand::Diff(diff_args) => diff_manifests(diff_args),
         ContentCommand::PublishCheck(check_args) => check_publish_manifest(check_args),
     }
+}
+
+fn build_content(args: &ContentBuildArgs) -> Result<Value> {
+    let project = absolute_path(&args.project)?;
+    let validation = validate_dir(&project)?;
+    let output = if args.output.is_absolute() {
+        args.output.clone()
+    } else {
+        project.join(&args.output)
+    };
+    if validation["ok"] != true {
+        return Ok(json!({
+            "ok": false,
+            "command": "content build",
+            "project": project.to_string_lossy(),
+            "output": output.to_string_lossy(),
+            "validation": validation,
+            "manifest": null,
+        }));
+    }
+    let version = semver::Version::parse(&args.content_version)
+        .context("--content-version must be a semantic version")?;
+    let engine = semver::VersionReq::parse(&args.engine)
+        .context("--engine must be a semantic-version requirement")?;
+    let content_root = project.join("content");
+    let (set, report) =
+        ContentLoader::new(project_component_registry()?).load_project(&content_root);
+    if report.has_errors() {
+        bail!("content validation changed while building manifest");
+    }
+    let manifest = manifest_for(&content_root, &set, version, engine)?;
+    manifest
+        .write(&output)
+        .with_context(|| format!("failed to write {}", output.display()))?;
+    Ok(json!({
+        "ok": true,
+        "command": "content build",
+        "project": project.to_string_lossy(),
+        "output": output.to_string_lossy(),
+        "validation": validation,
+        "manifest": manifest,
+    }))
+}
+
+fn manifest_for(
+    root: &Path,
+    set: &ContentSet,
+    content_version: semver::Version,
+    engine: semver::VersionReq,
+) -> Result<ContentManifest> {
+    let mut manifest = ContentManifest::new(content_version, engine);
+    for (id, definition) in &set.definitions {
+        let path = &set.sources[id];
+        manifest.add_definition(path, definition, &fs::read(root.join(path))?)?;
+    }
+    for (id, panel) in &set.panels {
+        let path = &set.panel_sources[id];
+        manifest.add_panel(path, panel, &fs::read(root.join(path))?)?;
+    }
+    for (id, minigame) in &set.minigames {
+        let path = &set.minigame_sources[id];
+        manifest.add_minigame(path, minigame, &fs::read(root.join(path))?)?;
+    }
+    for (id, map) in &set.maps {
+        let path = &set.map_sources[id];
+        manifest.add_map(path, map, &fs::read(root.join(path))?)?;
+    }
+    for (locale, path) in &set.catalog_paths {
+        manifest.add_locale(path, locale.clone(), &fs::read(root.join(path))?)?;
+    }
+    Ok(manifest)
 }
 
 fn hash_file(path: &Path) -> Result<Value> {
@@ -799,6 +894,10 @@ fn render_human_output(output: &Value) -> String {
         return format!("SHA-256: {sha}");
     }
 
+    if output["command"] == "content build" {
+        return render_content_build(output);
+    }
+
     if output["command"] == "content diff" {
         return render_content_diff(output);
     }
@@ -841,6 +940,18 @@ fn render_human_output(output: &Value) -> String {
 
     let errors = output["errors"].as_array().map_or(0, Vec::len);
     format!("Validation failed with {errors} error(s)")
+}
+
+fn render_content_build(output: &Value) -> String {
+    format!(
+        "Content build {}: {}",
+        if output["ok"] == true {
+            "passed"
+        } else {
+            "failed"
+        },
+        output["output"].as_str().unwrap_or("manifest not written")
+    )
 }
 
 fn render_content_diff(output: &Value) -> String {

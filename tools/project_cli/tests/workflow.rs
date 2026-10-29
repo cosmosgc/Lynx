@@ -150,3 +150,59 @@ fn cargo_failure_is_reported_and_returns_nonzero() {
     }
     fs::remove_dir_all(project).unwrap();
 }
+
+#[test]
+fn content_build_writes_a_validated_stable_manifest() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let project =
+        std::env::temp_dir().join(format!("lynx-content-build-{}-{nonce}", std::process::id()));
+    let generated = Command::new(env!("CARGO_BIN_EXE_lynx"))
+        .args(["new", "content-build", "--template", "mmorpg", "--output"])
+        .arg(&project)
+        .output()
+        .unwrap();
+    assert!(generated.status.success());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_lynx"))
+        .args([
+            "content",
+            "build",
+            "--project",
+            project.to_str().unwrap(),
+            "--content-version",
+            "1.2.3",
+            "--engine",
+            "^0.1",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["ok"], true);
+    assert_eq!(report["command"], "content build");
+    assert_eq!(report["manifest"]["content_version"], "1.2.3");
+    let manifest = fs::read_to_string(project.join("content/manifest.json")).unwrap();
+    assert!(manifest.contains("entity.training_master"));
+    assert!(manifest.contains("pt-BR"));
+
+    fs::write(project.join("content/zones/starter.ron"), "not valid ron").unwrap();
+    let failed = Command::new(env!("CARGO_BIN_EXE_lynx"))
+        .args(["content", "build", "--project"])
+        .arg(&project)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(failed.status.success(), "validation is a structured report");
+    let report: Value = serde_json::from_slice(&failed.stdout).unwrap();
+    assert_eq!(report["ok"], false);
+    assert!(report["manifest"].is_null());
+    assert_eq!(
+        fs::read_to_string(project.join("content/manifest.json")).unwrap(),
+        manifest
+    );
+    fs::remove_dir_all(project).unwrap();
+}

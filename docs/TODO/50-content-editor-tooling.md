@@ -280,7 +280,7 @@ are not implemented. This must not be improvised after uploads exist.
 ## CNT-011 — CLI expansion
 
 - **Priority:** P1
-- **Status:** In progress — project workflow available; automation contracts incomplete
+- **Status:** In progress — project workflow and manifest build available; automation contracts incomplete
 - **Depends on:** —
 - **References:** `tools/project_cli/src/main.rs`,
   [AI tooling](../ai-tooling.md)
@@ -293,7 +293,8 @@ contracts are still needed.
 
 - `lynx build`, `lynx run` and `lynx test` now validate content and invoke Cargo for the
   project; generated templates remain starter executables, not playable servers.
-- `lynx content build` (bundle + manifest + hashes) and a stable output layout.
+- `lynx content build` now writes a validated manifest and hashes to a stable
+  `content/manifest.json` output by default.
 - `lynx run` and `lynx test` for a generated project, with headless modes.
 - `lynx migrate` for content/schema migrations (`CNT-014`).
 - `lynx doctor --json` coverage for database/schema/content/protocol versions.

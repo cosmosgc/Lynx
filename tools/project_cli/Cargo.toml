@@ -21,6 +21,7 @@ engine_core = { workspace = true }
 game_api = { workspace = true }
 lynx-world = { path = "../../crates/lynx_world" }
 serde_json = { workspace = true }
+semver = { workspace = true }
 
 [lints]
 workspace = true

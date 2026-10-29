@@ -15,7 +15,7 @@ testing a Lynx project never requires an MCP server.
 
 | Surface | Status | Notes |
 |---|---|---|
-| CLI (`lynx new/doctor/validate/build/run/test/content hash/content diff/content publish-check`) | Partial | JSON reports are available; consistent failure handling and schemas across all commands remain in progress |
+| CLI (`lynx new/doctor/validate/build/run/test/content build/content hash/content diff/content publish-check`) | Partial | JSON reports are available; consistent failure handling and schemas across all commands remain in progress |
 | Engine MCP server | Planned | Narrow tools wrapping the CLI and content validators |
 | External MCP client | Planned | Explicit per-workspace configuration |
 | Shell execution | Not exposed by default | Allowlist or user approval per command |
@@ -97,6 +97,12 @@ not an interactive or streaming runner. Successful execution exits 0;
 validation or Cargo failure exits 1 after printing the report. Failure to start
 Cargo or another internal error exits 1 with a message on stderr, not a JSON
 report. These exit conventions do not yet apply consistently to other commands.
+
+`lynx content build --project <dir> --content-version <semver> --engine <version-req>`
+validates first, then writes a deterministic `content/manifest.json` by default.
+Its JSON report contains `ok`, `command` (`"content build"`), `project`, `output`,
+`validation`, and `manifest` (or `null` when validation blocks a write). It never
+rewrites a manifest when validation fails.
 
 Generated projects author player-facing text in Brazilian Portuguese (`pt-BR`)
 by default. When an assistant drafts another locale, it must preserve message
