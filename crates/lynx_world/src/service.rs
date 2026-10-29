@@ -122,6 +122,7 @@ pub struct Service {
 #[derive(Debug, Default)]
 pub struct Metrics {
     ticks: AtomicU64,
+    tick_failures: AtomicU64,
     tick_nanos: AtomicU64,
     tick_overruns: AtomicU64,
     entities: AtomicU64,
@@ -133,6 +134,8 @@ pub struct Metrics {
     resume_success: AtomicU64,
     resume_failure: AtomicU64,
     outbound_full: AtomicU64,
+    snapshot_success: AtomicU64,
+    snapshot_failure: AtomicU64,
 }
 
 impl Metrics {
@@ -168,6 +171,13 @@ impl Metrics {
                 "lynx_world_action_rejections_total{{code=\"{code}\"}} {count}"
             );
         }
+        let _ = write!(
+            text,
+            "# HELP lynx_world_tick_failures_total Authority ticks that returned an error.\n# TYPE lynx_world_tick_failures_total counter\nlynx_world_tick_failures_total {}\n# HELP lynx_world_snapshot_writes_total Snapshot store writes by outcome, including startup and shutdown.\n# TYPE lynx_world_snapshot_writes_total counter\nlynx_world_snapshot_writes_total{{outcome=\"success\"}} {}\nlynx_world_snapshot_writes_total{{outcome=\"failure\"}} {}\n",
+            get(&self.tick_failures),
+            get(&self.snapshot_success),
+            get(&self.snapshot_failure)
+        );
         text
     }
 
@@ -205,7 +215,7 @@ impl Service {
     /// Wrap a world server and choose the tick interval.
     #[must_use]
     pub fn new(server: WorldServer, tick: Duration) -> Self {
-        Self {
+        let service = Self {
             server,
             tick,
             writers: BTreeMap::new(),
@@ -213,7 +223,9 @@ impl Service {
             token_sequence: 0,
             persistence: None,
             metrics: Arc::new(Metrics::default()),
-        }
+        };
+        service.update_gauges();
+        service
     }
 
     /// Share measurements with the HTTP listener.
@@ -334,7 +346,14 @@ impl Service {
         };
         let store = Arc::clone(&persistence.store);
         let world = WorldSnapshot::capture(&self.snapshot_inputs(), clock().value());
-        store.save(&world)
+        let result = store.save(&world);
+        let counter = if result.is_ok() {
+            &self.metrics.snapshot_success
+        } else {
+            &self.metrics.snapshot_failure
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+        result
     }
 
     /// The authoritative state a snapshot is built from.
@@ -536,6 +555,7 @@ impl Service {
         match self.server.tick_with_interval(clock(), interval_ms) {
             Ok(outbound) => self.dispatch(outbound),
             Err(error) => {
+                self.metrics.tick_failures.fetch_add(1, Ordering::Relaxed);
                 tracing::error!(
                     code = ?error.code(),
                     "authoritative tick failed"
@@ -690,6 +710,7 @@ mod tests {
     fn metrics_follow_real_session_input_and_tick() {
         let (mut service, grant, _) = service();
         let metrics = service.metrics();
+        assert!(metrics.render().contains("lynx_world_entities 5\n"));
         let (outbound, _receiver) = mpsc::channel(16);
         let (reply, mut result) = oneshot::channel();
         service.handle(ServerEvent::Admit {
@@ -713,6 +734,7 @@ mod tests {
         service.advance();
         let text = metrics.render();
         assert!(text.contains("lynx_world_ticks_total 1\n"));
+        assert!(text.contains("lynx_world_tick_failures_total 0\n"));
         assert!(text.contains("lynx_world_entities 5\n"));
         assert!(text.contains("lynx_world_connections 1\n"));
         assert!(text.contains("lynx_world_inputs_total 1\n"));
@@ -1549,7 +1571,14 @@ mod tests {
 
     #[test]
     fn a_rejected_snapshot_write_surfaces_to_the_caller() {
-        let (service, _, _) = service();
+        let (mut service, _, _) = service();
+        service.try_save_snapshot().unwrap();
+        assert!(
+            service
+                .metrics()
+                .render()
+                .contains("lynx_world_snapshot_writes_total{outcome=\"success\"} 0\n")
+        );
         let store: Arc<dyn crate::persistence::SnapshotStore + Send + Sync> =
             Arc::new(FailingStore);
         let mut service = service.with_persistence(store, Duration::from_millis(1));
@@ -1561,6 +1590,23 @@ mod tests {
 
         // The cadence path stays best-effort and never panics.
         service.save_snapshot();
+        assert!(
+            service
+                .metrics()
+                .render()
+                .contains("lynx_world_snapshot_writes_total{outcome=\"failure\"} 2\n")
+        );
+    }
+
+    #[test]
+    fn successful_snapshot_write_is_counted() {
+        let (service, _, _) = service();
+        let mut service =
+            service.with_persistence(Arc::new(MemoryStore::default()), Duration::from_secs(1));
+        service.try_save_snapshot().unwrap();
+        let text = service.metrics().render();
+        assert!(text.contains("lynx_world_snapshot_writes_total{outcome=\"success\"} 1\n"));
+        assert!(text.contains("lynx_world_snapshot_writes_total{outcome=\"failure\"} 0\n"));
     }
 
     #[tokio::test]

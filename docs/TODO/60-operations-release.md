@@ -8,7 +8,7 @@ correlation, docs, and capacity.
 shutdown with a final snapshot, a checksummed migration runner, native
 setup/run scripts, and a CI workflow that runs formatting, Clippy, tests, a
 generated-project check, migrations on Ubuntu, and a PostgreSQL 17
-service. Metrics, dashboards, backup drills, staging/rollback automation, client
+service. Partial metrics exist; dashboards, backup drills, staging/rollback automation, client
 packaging, load testing, and runbooks are still missing.
 
 **Related design:** [operations](../operations.md),
@@ -24,8 +24,8 @@ packaging, load testing, and runbooks are still missing.
 - **Depends on:** —
 - **References:** [operations §Metrics and logs](../operations.md#metrics-and-logs)
 
-**Why:** The documented minimum metrics have no export path. Without them,
-tick overruns, replication pressure, session churn, and database latency are
+**Why:** The metrics endpoint covers only part of the documented minimum;
+replication pressure, session churn details, and database latency remain
 invisible until players complain.
 
 **Scope**
@@ -48,9 +48,9 @@ invisible until players complain.
 - [ ] Readiness and metrics can be scraped without opening the world port.
 
 Partial implementation: the admin listener exports tick execution time and
-overruns, entities, attached and retained sessions, authority inputs and action
+overruns and failures, entities, attached and retained sessions, authority inputs and action
 requests/rejections, resume success/failure, outbound queue-full events, and
-bounded rate-limit rejections. The remaining metric families and limitations
+bounded rate-limit rejections and snapshot write outcomes. The remaining metric families and limitations
 are listed in operations; scheduler deadline misses are not yet measured.
 This task remains in progress until the full scope is verified.
 

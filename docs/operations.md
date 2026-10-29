@@ -175,6 +175,7 @@ fixed enums. The single demo zone is exported without a zone label.
 | Metric | Meaning |
 |---|---|
 | `lynx_world_ticks_total` | attempted ticks |
+| `lynx_world_tick_failures_total` | ticks returning an authority error |
 | `lynx_world_tick_duration_seconds_total` | total time executing ticks, seconds |
 | `lynx_world_tick_overruns_total` | ticks whose execution exceeded the interval; not scheduler deadline misses |
 | `lynx_world_entities` | current demo-zone entities, refreshed on authority work |
@@ -185,6 +186,7 @@ fixed enums. The single demo zone is exported without a zone label.
 | `lynx_world_action_rejections_total{code}` | authority action rejection replies, including gameplay rejections, by fixed `ErrorCode`; excludes transport rate limits |
 | `lynx_world_resume_attempts_total{outcome}` | authority resume admissions, classified `success` or `failure`; excludes failures before authority admission |
 | `lynx_world_outbound_queue_full_total` | failed enqueues due to a full per-connection outbound queue |
+| `lynx_world_snapshot_writes_total{outcome}` | configured snapshot store write attempts, including startup and shutdown, by `success` or `failure`; no-store calls are excluded |
 | `lynx_world_rate_limit_rejections_total{class,code}` | rate-limit rejections by bounded class and error code |
 
 Starting alert examples (tune against staging; not tested production rules):
@@ -201,6 +203,7 @@ Unsupported requested families (do not interpret their absence as zero):
 - Resume failures broken down by `ErrorCode` (`expired`, `conflict`, etc.).
 - Pathfinding expansions, budget exhaustion, AI errors.
 - Database latency and errors.
+- Snapshot load failures and write latency; write outcomes above do not identify the store or error cause.
 - Content version per zone.
 - Missing localization keys by locale (should be zero in release).
 

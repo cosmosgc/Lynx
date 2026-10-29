@@ -7,9 +7,9 @@
   [OPS-002](../TODO/60-operations-release.md#ops-002--dashboards-and-alerts)
 - **Affected workflow:** `crates/world_server`, CI/CD pipelines, monitoring
 
-## Resolution
+## Current status
 
-The project guide lists metrics and dashboards as a live-operations requirement, yet no metrics endpoint or monitoring infrastructure exists. Operators cannot observe system health, performance bottlenecks, or abuse indicators without manual instrumentation.
+The service now exposes a partial Prometheus endpoint on both gameplay and trusted admin listeners. See [operations](../operations.md#metrics-and-logs) for the implemented metrics, security constraints, scrape example, and unsupported families. Dashboards and substantial instrumentation remain open.
 
 A production-ready observability layer must be added:
 - Metrics collection for tick duration, entity counts, session counts, action processing rates
@@ -22,16 +22,16 @@ A production-ready observability layer must be added:
 The current `lynx-world` binary exposes:
 - `GET /healthz` — basic liveness check
 - `GET /readyz` - process readiness check (not continuous dependency health)
+- `GET /metrics` — process-local partial metrics
 - WebSocket `/world` endpoint
 
-There is no structured metrics endpoint, no performance monitoring for tick budgets, and no abuse detection dashboards. This violates the project's observability requirements in `docs/operations.md`.
+Tick execution overruns and bounded rate-limit rejections are counted, but scheduler deadline misses, several requested metric families, and abuse detection dashboards remain unavailable.
 
 ## Impact
 
-- Operators have no way to monitor server health, performance, or security incidents
-- Tick budget regressions cannot be detected proactively; they only manifest as lag after users report it
-- No visibility into authentication failures, connection drops, or abuse patterns
-- This is a P1 risk: without metrics, the system cannot be safely scaled or monitored in production
+- Existing counters give only partial visibility into health, performance, and abuse.
+- Scheduler delays and several failure modes remain unmeasured; dashboards and tested alert rules are missing.
+- This remains a P1 operational risk for production use.
 
 ## Acceptance criteria
 
