@@ -1,6 +1,7 @@
 //! Window-only keyboard and 2D presentation adapters for the offline foundation.
 
 use bevy::prelude::*;
+use bevy::window::PrimaryWindow;
 
 use crate::offline::{CameraPose, Control, OfflineScene, OfflineSet, PressedControls};
 use crate::online::{OnlineClient, OnlineStatus};
@@ -129,6 +130,7 @@ fn setup_scene(mut commands: Commands) {
 fn keyboard_input(
     keys: Res<ButtonInput<KeyCode>>,
     replay: Option<Res<ReplayInput>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
     mut pressed: ResMut<PressedControls>,
 ) {
     const KEYS: [(KeyCode, Control); 8] = [
@@ -142,6 +144,12 @@ fn keyboard_input(
         (KeyCode::KeyC, Control::C),
     ];
     if replay.is_some() {
+        return;
+    }
+    // Keyboard state is global; do not move the offline avatar while another
+    // window has focus. Replay is deliberately independent of window focus.
+    if !windows.single().is_ok_and(|window| window.focused) {
+        pressed.0.clear();
         return;
     }
     let keys = keys.into_inner();
@@ -183,6 +191,7 @@ mod tests {
         let mut app = headless_app();
         app.init_resource::<ButtonInput<KeyCode>>()
             .add_plugins(OfflineWindowPlugin);
+        app.world_mut().spawn((Window::default(), PrimaryWindow));
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()
             .press(KeyCode::KeyW);
@@ -224,6 +233,7 @@ mod tests {
         let mut app = headless_app();
         app.init_resource::<ButtonInput<KeyCode>>()
             .add_plugins(OfflineWindowPlugin);
+        app.world_mut().spawn((Window::default(), PrimaryWindow));
         app.world_mut().resource_mut::<OfflineInputEnabled>().0 = false;
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()
@@ -238,6 +248,75 @@ mod tests {
         assert_eq!(
             app.world().resource::<OfflineScene>().avatar_position,
             Vec3::NEG_Z
+        );
+    }
+
+    #[test]
+    fn losing_focus_releases_keyboard_actions_before_movement() {
+        use crate::offline::ActionTransitions;
+
+        let mut app = headless_app();
+        app.init_resource::<ButtonInput<KeyCode>>()
+            .add_plugins(OfflineWindowPlugin);
+        let window = app
+            .world_mut()
+            .spawn((Window::default(), PrimaryWindow))
+            .id();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyW);
+        app.update();
+        app.world_mut().get_mut::<Window>(window).unwrap().focused = false;
+        app.update();
+        assert!(app.world().resource::<ActiveActions>().0.is_empty());
+        assert!(
+            app.world()
+                .resource::<ActionTransitions>()
+                .released
+                .contains(&Action::MoveForward)
+        );
+        assert_eq!(
+            app.world().resource::<OfflineScene>().avatar_position,
+            Vec3::NEG_Z
+        );
+        app.update();
+        assert!(
+            app.world()
+                .resource::<ActionTransitions>()
+                .released
+                .is_empty()
+        );
+        app.world_mut().get_mut::<Window>(window).unwrap().focused = true;
+        app.update();
+        assert_eq!(
+            app.world().resource::<OfflineScene>().avatar_position,
+            Vec3::NEG_Z * 2.0
+        );
+    }
+
+    #[test]
+    fn replay_is_not_suppressed_by_missing_or_unfocused_window() {
+        use crate::replay::ReplayFixture;
+
+        let mut app = headless_app();
+        app.init_resource::<ButtonInput<KeyCode>>()
+            .add_plugins(OfflineWindowPlugin)
+            .insert_resource(ReplayInput::new(
+                ReplayFixture::from_json(r#"{"frames":[{"pressed":["W"]},{"pressed":["D"]}]}"#)
+                    .unwrap(),
+            ));
+        app.update();
+        app.world_mut().spawn((
+            Window {
+                focused: false,
+                ..default()
+            },
+            PrimaryWindow,
+        ));
+        app.update();
+        assert_eq!(
+            app.world().resource::<OfflineScene>().avatar_position,
+            Vec3::new(1.0, 0.0, -1.0)
         );
     }
 }

@@ -29,8 +29,11 @@ The offline core also exposes `OfflineInputEnabled` (default true). Set it in
 or before `OfflineSet::Input` to discard supplied controls before action
 resolution, for example when an experimental UI captures input. The default
 resolver emits releases on the first disabled update. This gate does not
-automatically observe window focus or UI state; a held keyboard key is supplied
-again when re-enabled. Replay continues consuming frames while disabled rather
+automatically observe UI state; a held keyboard key is supplied again when
+re-enabled. Separately, the window keyboard adapter clears controls when the
+primary window is unfocused or missing, releasing actions on that update. It
+supplies any keys still reported held when focus returns. Replay ignores window
+focus and continues consuming frames while the gate is disabled rather
 than postponing them. Custom action adapters must honor the filtered controls
 themselves. This affects only offline presentation, not online server state.
 

@@ -194,8 +194,11 @@ per-update press/release transitions after combining bindings, including changes
 to bindings while a control is held; these are not gameplay commands.
 An opt-in local input gate can discard offline controls before action resolution;
 it emits default-resolver releases, but does not automatically handle window focus
-or UI capture. Replay frames still advance while gated, and held keyboard input
-resumes when re-enabled. This does not establish the final input architecture.
+or UI capture. The separate window keyboard adapter clears controls when the
+primary window is unfocused or missing; replay ignores window focus. Held keys
+still reported by Bevy resume on focus return. Replay frames still advance while
+gated, and held keyboard input resumes when re-enabled. This does not establish
+the final input architecture.
 
 ---
 
