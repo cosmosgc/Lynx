@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use backend_nakama::{NakamaClient, NakamaConfig};
@@ -31,6 +32,8 @@ enum Commands {
     New(NewArgs),
     Doctor(DoctorArgs),
     Validate(ValidateArgs),
+    Run(ProjectCommandArgs),
+    Test(ProjectCommandArgs),
     Content(ContentArgs),
 }
 
@@ -57,6 +60,13 @@ struct DoctorArgs {
 #[derive(Args)]
 struct ValidateArgs {
     #[arg(long)]
+    project: PathBuf,
+}
+
+#[derive(Args)]
+struct ProjectCommandArgs {
+    /// Project directory containing Cargo.toml and content/.
+    #[arg(long, default_value = ".")]
     project: PathBuf,
 }
 
@@ -330,6 +340,8 @@ fn run() -> Result<()> {
         Commands::Doctor(args) => doctor(&args)?,
         Commands::Validate(args) => validate_project(&args)?,
         Commands::Content(args) => content(&args)?,
+        Commands::Run(args) => project_command(&args, "run")?,
+        Commands::Test(args) => project_command(&args, "test")?,
     };
 
     if cli.json {
@@ -338,6 +350,9 @@ fn run() -> Result<()> {
         println!("{}", render_human_output(&output));
     }
 
+    if matches!(output["command"].as_str(), Some("run" | "test")) && output["ok"] == false {
+        std::process::exit(1);
+    }
     Ok(())
 }
 
@@ -365,7 +380,9 @@ fn new_project(args: &NewArgs) -> Result<Value> {
                  Authored game data lives in `content/`. The world map, two \
                  connected starter zones, interactable tavern keeper, torch \
                  item, inventory panel, and Brazilian Portuguese source catalog \
-                 are ready for `lynx validate --project .`.\n\n\
+                 are ready for `lynx validate --project .`. Use `lynx run --project .` \
+                 or `lynx test --project .` to validate and invoke Cargo. This \
+                 starter executable is not yet a playable game server.\n\n\
                  Interactions describe client intent only; the authoritative \
                  game server must validate each request and determine its outcome.\n"
             )
@@ -447,6 +464,35 @@ fn doctor(args: &DoctorArgs) -> Result<Value> {
 fn validate_project(args: &ValidateArgs) -> Result<Value> {
     let project_dir = absolute_path(args.project.as_path())?;
     validate_dir(project_dir.as_path())
+}
+
+fn project_command(args: &ProjectCommandArgs, command: &str) -> Result<Value> {
+    let project = absolute_path(&args.project)?;
+    let validation = validate_dir(&project)?;
+    if validation["ok"] != true {
+        return Ok(json!({
+            "ok": false, "command": command, "project": project.to_string_lossy(),
+            "validation": validation, "cargo": null,
+        }));
+    }
+
+    let manifest = project.join("Cargo.toml");
+    let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+        .arg(command)
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .current_dir(&project)
+        .output()
+        .with_context(|| format!("failed to start cargo {command}"))?;
+    Ok(json!({
+        "ok": output.status.success(), "command": command,
+        "project": project.to_string_lossy(), "validation": validation,
+        "cargo": {
+            "exit_code": output.status.code(),
+            "stdout": String::from_utf8_lossy(&output.stdout),
+            "stderr": String::from_utf8_lossy(&output.stderr),
+        },
+    }))
 }
 
 fn content(args: &ContentArgs) -> Result<Value> {
@@ -694,6 +740,35 @@ fn backend_url() -> String {
 }
 
 fn render_human_output(output: &Value) -> String {
+    if matches!(output["command"].as_str(), Some("run" | "test")) {
+        let command = output["command"].as_str().unwrap_or("");
+        let mut text = format!(
+            "Project {command}: {}",
+            if output["ok"] == true {
+                "passed"
+            } else {
+                "failed"
+            }
+        );
+        if let Some(cargo) = output["cargo"].as_object() {
+            for key in ["stdout", "stderr"] {
+                if let Some(contents) = cargo[key].as_str().filter(|s| !s.is_empty()) {
+                    text.push('\n');
+                    text.push_str(contents.trim_end());
+                }
+            }
+        } else {
+            for error in output["validation"]["errors"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                text.push_str("\n- ");
+                text.push_str(error.as_str().unwrap_or(""));
+            }
+        }
+        return text;
+    }
     if output["command"] == "new" {
         let ok = output["ok"].as_bool().unwrap_or(false);
         let path = output["path"].as_str().unwrap_or(".");

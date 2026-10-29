@@ -15,7 +15,7 @@ testing a Lynx project never requires an MCP server.
 
 | Surface | Status | Notes |
 |---|---|---|
-| CLI (`lynx new/doctor/validate/content hash/content diff`) | Implemented | Stable, typed, machine-readable JSON via `--json` |
+| CLI (`lynx new/doctor/validate/run/test/content hash/content diff/content publish-check`) | Partial | JSON reports are available; consistent failure handling and schemas across all commands remain in progress |
 | Engine MCP server | Planned | Narrow tools wrapping the CLI and content validators |
 | External MCP client | Planned | Explicit per-workspace configuration |
 | Shell execution | Not exposed by default | Allowlist or user approval per command |
@@ -66,11 +66,31 @@ unrestricted filesystem access, secret stores, or publishing without approval.
 lynx new my-world --template mmorpg --output ../my-world --json
 lynx validate --project ../my-world --json
 cargo build --manifest-path ../my-world/Cargo.toml
+lynx run --project ../my-world --json
+lynx test --project ../my-world --json
 ```
 
 Expected result: created-file summary, validation diagnostics, build result,
 and actionable errors with file paths and error codes. The AI iterates on the
 same commands a human would use.
+
+### Project execution
+
+`lynx run` and `lynx test` accept `--project` (default `.`), validate content,
+then invoke `cargo run` or `cargo test` using that project's `Cargo.toml` and
+working directory. They execute project code and Cargo build scripts; only use
+them on trusted projects. The current templates are starter executables, not a
+playable server, and there is no headless-mode switch yet.
+
+With `--json`, both commands return an object with `ok` (boolean), `command`
+(`"run"` or `"test"`), `project` (path string), `validation` (the validation
+report), and `cargo` (null if validation failed, otherwise an object containing
+`exit_code` (integer or null if terminated by signal), `stdout`, and `stderr`
+(strings)). Output is captured until Cargo exits and stdin is closed; this is
+not an interactive or streaming runner. Successful execution exits 0;
+validation or Cargo failure exits 1 after printing the report. Failure to start
+Cargo or another internal error exits 1 with a message on stderr, not a JSON
+report. These exit conventions do not yet apply consistently to other commands.
 
 Generated projects author player-facing text in Brazilian Portuguese (`pt-BR`)
 by default. When an assistant drafts another locale, it must preserve message

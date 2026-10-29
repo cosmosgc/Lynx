@@ -291,6 +291,8 @@ run, test, migrate, and diagnose a project as one workflow.
 
 **Scope**
 
+- `lynx run` and `lynx test` now validate content and invoke Cargo for the
+  project; generated templates remain starter executables, not playable servers.
 - `lynx content build` (bundle + manifest + hashes) and a stable output layout.
 - `lynx run` and `lynx test` for a generated project, with headless modes.
 - `lynx migrate` for content/schema migrations (`CNT-014`).
