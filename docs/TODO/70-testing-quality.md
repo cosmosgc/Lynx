@@ -50,14 +50,15 @@ idempotent attack retries, and a repeated mixed-input replay. It also checks
 stunned and zero-speed actors at both queue and processing time, occupied cells
 and swept-body collision, same-faction denial and different-faction attacks, and
 stale/pending sequence rejection without consuming a rejected newer sequence.
-The gateway test suite passed locally against commit `1e3de17` with these test
-changes. The tests require no GPU or service; CI's workspace test command
+Contested destinations resolve in stable actor order regardless of request
+arrival order, and revoking Move after queuing causes processing-time rejection
+and consumes the sequence. The gateway test suite passed locally with these
+tests. The tests require no GPU or service; CI's workspace test command
 includes them, but a CI run has not been confirmed. The full invariant matrix
 and historical failing-before evidence remain open. In particular, integrated
-coverage still needs contested occupancy ordering, authored directional faction
-overrides, broader queue/budget boundaries, and an explicit capability-change
-case. Zone transfer is not yet available. Simulation unit tests cover some of
-these separately, but do not substitute for this suite.
+coverage still needs authored directional faction overrides and broader
+queue/budget boundaries. Zone transfer is not yet available. Simulation unit
+tests cover some of these separately, but do not substitute for this suite.
 
 ---
 

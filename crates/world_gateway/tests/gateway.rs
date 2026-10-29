@@ -16,7 +16,7 @@ use engine_sim::entity::{
     Door, EntityRecord, FactionMembership, Interactable, InteractionPermission, MovementProfile,
     MovementStatus, UiProvider,
 };
-use engine_sim::mind::Mind;
+use engine_sim::mind::{ControlCapability, Mind};
 use engine_sim::minigame::Minigame;
 use engine_sim::movement::MovementIntent;
 use engine_sim::nav::NavGrid;
@@ -494,6 +494,154 @@ fn gateway_revalidates_stunned_and_zero_speed_movement() {
                 .as_str(),
             "protocol.error"
         );
+    }
+}
+
+#[test]
+fn gateway_revalidates_revoked_move_capability() {
+    let mut f = fixture();
+    let alice = connect(&mut f.gateway, "alice", f.alice_principal);
+    let request = move_request(1, 10.1, 10.0);
+    assert_eq!(
+        f.gateway
+            .handle(&alice.session, &request, Millis::new(1001))
+            .unwrap()[0]
+            .kind
+            .as_str(),
+        "movement.queued"
+    );
+    f.gateway
+        .zone_mut()
+        .entity_mut(alice.actor)
+        .unwrap()
+        .mind
+        .as_mut()
+        .unwrap()
+        .capabilities
+        .remove(&ControlCapability::Move);
+    let updates = f
+        .gateway
+        .tick_with_interval(Millis::new(1002), 100)
+        .unwrap();
+    let result = delivery(&updates, &alice.session)
+        .movement
+        .as_ref()
+        .unwrap();
+    assert_eq!(result.applied, Some(false));
+    assert_eq!(result.last_consumed_sequence, Some(1));
+    assert_eq!(result.position, Vec3::new(10.0, 0.0, 10.0));
+    assert_eq!(
+        f.gateway
+            .handle(
+                &alice.session,
+                &move_request(2, 10.1, 10.0),
+                Millis::new(1003)
+            )
+            .unwrap()[0]
+            .kind
+            .as_str(),
+        "protocol.error"
+    );
+    f.gateway
+        .zone_mut()
+        .entity_mut(alice.actor)
+        .unwrap()
+        .mind
+        .as_mut()
+        .unwrap()
+        .capabilities
+        .insert(ControlCapability::Move);
+    assert_eq!(
+        f.gateway
+            .handle(&alice.session, &request, Millis::new(1004))
+            .unwrap()[0]
+            .kind
+            .as_str(),
+        "protocol.error"
+    );
+    assert_eq!(
+        f.gateway
+            .handle(
+                &alice.session,
+                &move_request(2, 10.1, 10.0),
+                Millis::new(1005)
+            )
+            .unwrap()[0]
+            .kind
+            .as_str(),
+        "movement.queued"
+    );
+    let updates = f
+        .gateway
+        .tick_with_interval(Millis::new(1006), 100)
+        .unwrap();
+    let result = delivery(&updates, &alice.session)
+        .movement
+        .as_ref()
+        .unwrap();
+    assert_eq!(result.applied, Some(true));
+    assert_eq!(result.last_consumed_sequence, Some(2));
+    assert_eq!(result.position, Vec3::new(10.1, 0.0, 10.0));
+}
+
+#[test]
+fn gateway_contested_destination_uses_stable_actor_order() {
+    for reverse in [false, true] {
+        let mut f = fixture();
+        f.gateway
+            .zone_mut()
+            .entity_mut(f.alice_actor)
+            .unwrap()
+            .transform
+            .position = Vec3::new(10.5, 0.0, 10.5);
+        f.gateway
+            .zone_mut()
+            .entity_mut(f.bob_actor)
+            .unwrap()
+            .transform
+            .position = Vec3::new(12.5, 0.0, 10.5);
+        let alice = connect(&mut f.gateway, "alice", f.alice_principal);
+        let bob = connect(&mut f.gateway, "bob", f.bob_principal);
+        let request = move_request(1, 11.5, 11.5);
+        let sessions = if reverse {
+            [&bob.session, &alice.session]
+        } else {
+            [&alice.session, &bob.session]
+        };
+        for session in sessions {
+            assert_eq!(
+                f.gateway
+                    .handle(session, &request, Millis::new(1001))
+                    .unwrap()[0]
+                    .kind
+                    .as_str(),
+                "movement.queued"
+            );
+        }
+        let updates = f
+            .gateway
+            .tick_with_interval(Millis::new(1002), 1000)
+            .unwrap();
+        for (connection, applied, position) in [
+            (&alice, true, Vec3::new(11.5, 0.0, 11.5)),
+            (&bob, false, Vec3::new(12.5, 0.0, 10.5)),
+        ] {
+            let result = delivery(&updates, &connection.session)
+                .movement
+                .as_ref()
+                .unwrap();
+            assert_eq!(result.applied, Some(applied));
+            assert_eq!(result.last_consumed_sequence, Some(1));
+            assert_eq!(result.position, position);
+            assert_eq!(
+                f.gateway
+                    .zone()
+                    .entity(connection.actor)
+                    .unwrap()
+                    .position(),
+                position
+            );
+        }
     }
 }
 
