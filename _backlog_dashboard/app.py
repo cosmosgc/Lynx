@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import os
 from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -78,6 +79,18 @@ def _initialize_state_store(database_path: Path) -> None:
                 new_status TEXT NOT NULL,
                 description TEXT NOT NULL,
                 changed_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS source_todo_files (
+                file TEXT PRIMARY KEY,
+                modified_ns INTEGER NOT NULL,
+                size INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS source_todo_markers (
+                file TEXT NOT NULL,
+                line INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                text TEXT NOT NULL,
+                PRIMARY KEY (file, line, kind)
             );
             """
         )
@@ -544,40 +557,107 @@ def load_phase_progress(readme_path: Path) -> list[dict[str, Any]]:
     ]
 
 
-def scan_user_todos(repository_root: Path) -> list[dict[str, str | int]]:
-    """Return explicit source TODO/FIXME/XXX markers outside the task backlog.
+def _todo_source_files(repository_root: Path):
+    """Yield eligible source files without opening their contents."""
+    for directory, child_directories, filenames in os.walk(repository_root):
+        current = Path(directory)
+        relative_directory = current.relative_to(repository_root)
+        child_directories[:] = [
+            child
+            for child in child_directories
+            if child not in TODO_IGNORED_DIRECTORIES
+            and relative_directory.parts + (child,) != ("docs", "TODO")
+        ]
+        for filename in filenames:
+            source = current / filename
+            if source.suffix.lower() in TODO_EXTENSIONS:
+                yield source
 
-    The scan intentionally stays local, skips generated/build directories, and
-    only reads text-oriented repository files. It is a triage inbox, not a
-    replacement for the Markdown backlog.
-    """
+
+def _markers_from_source(source: Path, relative: Path) -> list[dict[str, str | int]]:
+    try:
+        if source.stat().st_size > 1_000_000:
+            return []
+        lines = source.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return []
     markers: list[dict[str, str | int]] = []
-    for source in repository_root.rglob("*"):
-        if not source.is_file() or source.suffix.lower() not in TODO_EXTENSIONS:
+    for line_number, line in enumerate(lines, start=1):
+        match = USER_TODO.search(line)
+        if not match:
             continue
-        relative = source.relative_to(repository_root)
-        if set(relative.parts) & TODO_IGNORED_DIRECTORIES or relative.parts[:2] == ("docs", "TODO"):
-            continue
-        try:
-            if source.stat().st_size > 1_000_000:
-                continue
-            lines = source.read_text(encoding="utf-8").splitlines()
-        except (OSError, UnicodeError):
-            continue
-        for line_number, line in enumerate(lines, start=1):
-            match = USER_TODO.search(line)
-            if not match:
-                continue
-            detail = match.group(2).strip().strip("*/#- ") or "No detail provided."
-            markers.append(
-                {
-                    "kind": match.group(1).upper(),
-                    "text": detail,
-                    "file": relative.as_posix(),
-                    "line": line_number,
-                }
-            )
+        markers.append(
+            {
+                "kind": match.group(1).upper(),
+                "text": match.group(2).strip().strip("*/#- ") or "No detail provided.",
+                "file": relative.as_posix(),
+                "line": line_number,
+            }
+        )
+    return markers
+
+
+def scan_user_todos(repository_root: Path) -> list[dict[str, str | int]]:
+    """Scan every eligible source file. Intended for isolated tests only."""
+    markers = [
+        marker
+        for source in _todo_source_files(repository_root)
+        for marker in _markers_from_source(source, source.relative_to(repository_root))
+    ]
     return sorted(markers, key=lambda item: (str(item["file"]), int(item["line"])))
+
+
+def sync_user_todos(
+    repository_root: Path, database_path: Path
+) -> list[dict[str, str | int]]:
+    """Incrementally synchronize source markers into SQLite.
+
+    Directory entries are statted to detect additions, removals, and edits, but
+    source contents are read only when their size or nanosecond mtime differs
+    from the prior scan. This keeps normal report and inbox requests bounded by
+    metadata checks rather than full repository content scans.
+    """
+    with _state_connection(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        cached = {
+            row["file"]: (row["modified_ns"], row["size"])
+            for row in connection.execute("SELECT file, modified_ns, size FROM source_todo_files")
+        }
+        seen: set[str] = set()
+        for source in _todo_source_files(repository_root):
+            relative = source.relative_to(repository_root).as_posix()
+            try:
+                stat = source.stat()
+            except OSError:
+                continue
+            fingerprint = (stat.st_mtime_ns, stat.st_size)
+            seen.add(relative)
+            if cached.get(relative) == fingerprint:
+                continue
+            connection.execute("DELETE FROM source_todo_markers WHERE file = ?", (relative,))
+            markers = _markers_from_source(source, Path(relative))
+            connection.executemany(
+                "INSERT INTO source_todo_markers (file, line, kind, text) VALUES (?, ?, ?, ?)",
+                [
+                    (marker["file"], marker["line"], marker["kind"], marker["text"])
+                    for marker in markers
+                ],
+            )
+            connection.execute(
+                """
+                INSERT INTO source_todo_files (file, modified_ns, size) VALUES (?, ?, ?)
+                ON CONFLICT(file) DO UPDATE SET modified_ns = excluded.modified_ns, size = excluded.size
+                """,
+                (relative, *fingerprint),
+            )
+        for removed in set(cached) - seen:
+            connection.execute("DELETE FROM source_todo_markers WHERE file = ?", (removed,))
+            connection.execute("DELETE FROM source_todo_files WHERE file = ?", (removed,))
+        connection.commit()
+        rows = connection.execute(
+            "SELECT kind, text, file, line FROM source_todo_markers ORDER BY file, line, kind"
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def manager_report(items: list[dict[str, Any]], markers: list[dict[str, str | int]]) -> dict[str, Any]:
@@ -702,7 +782,7 @@ def create_app(
     @app.get("/todos")
     def todos():
         try:
-            markers = scan_user_todos(get_repository_root())
+            markers = sync_user_todos(get_repository_root(), database_path)
         except (OSError, UnicodeError) as error:
             return render_template("error.html", error=str(error)), 500
         return render_template("todos.html", markers=markers)
@@ -711,7 +791,7 @@ def create_app(
     def reports():
         try:
             items = get_items()
-            report = manager_report(items, scan_user_todos(get_repository_root()))
+            report = manager_report(items, sync_user_todos(get_repository_root(), database_path))
         except (OSError, sqlite3.Error, UnicodeError, ValueError) as error:
             return render_template("error.html", error=str(error)), 500
         return render_template("reports.html", report=report)
@@ -729,14 +809,14 @@ def create_app(
                 "summary": backlog_summary(items),
                 "categories": backlog_categories(items),
                 "phases": phases,
-                "user_todos": scan_user_todos(get_repository_root()),
+                "user_todos": sync_user_todos(get_repository_root(), database_path),
             }
         )
 
     @app.get("/api/report")
     def api_report():
         try:
-            return jsonify(manager_report(get_items(), scan_user_todos(get_repository_root())))
+            return jsonify(manager_report(get_items(), sync_user_todos(get_repository_root(), database_path)))
         except (OSError, sqlite3.Error, UnicodeError, ValueError) as error:
             return jsonify({"error": str(error)}), 500
 

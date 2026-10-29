@@ -2,7 +2,9 @@ import tempfile
 import sqlite3
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+import _backlog_dashboard.app as dashboard_app
 from _backlog_dashboard.app import (
     backlog_categories,
     backlog_summary,
@@ -11,6 +13,7 @@ from _backlog_dashboard.app import (
     load_phase_progress,
     order_tasks,
     scan_user_todos,
+    sync_user_todos,
     suggest_next_tasks,
 )
 
@@ -181,6 +184,28 @@ Phase 1  Engine skeleton             [██████████████
         api = client.get("/api/report")
         self.assertEqual(api.status_code, 200)
         self.assertEqual(len(api.json["user_todos"]), 1)
+
+    def test_source_todo_cache_rereads_only_changed_files_and_removes_deleted_files(self):
+        source = self.root / "crates" / "engine_sim" / "src" / "nav.rs"
+        self.make_app()
+        with patch(
+            "_backlog_dashboard.app._markers_from_source",
+            wraps=dashboard_app._markers_from_source,
+        ) as parse:
+            initial = sync_user_todos(self.root, self.state_db)
+            self.assertEqual(len(initial), 1)
+            initial_parse_count = parse.call_count
+            self.assertGreater(initial_parse_count, 0)
+            self.assertEqual(len(sync_user_todos(self.root, self.state_db)), 1)
+            self.assertEqual(parse.call_count, initial_parse_count)
+
+            source.write_text("# FIXME: replacement marker\n", encoding="utf-8")
+            changed = sync_user_todos(self.root, self.state_db)
+            self.assertEqual(parse.call_count, initial_parse_count + 1)
+            self.assertEqual(changed[0]["kind"], "FIXME")
+
+            source.unlink()
+            self.assertEqual(sync_user_todos(self.root, self.state_db), [])
 
     def test_full_dependency_graph_view_includes_all_tasks_and_links(self):
         response = self.make_app().test_client().get("/dependencies")

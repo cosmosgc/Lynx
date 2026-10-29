@@ -38,8 +38,11 @@ visible as text.
 Completion percentage is completed tasks divided by all parsed task sections.
 Statuses not recognized by the parser are counted as unspecified rather than
 silently treated as incomplete. Source markers are a triage inbox, not canonical
-backlog tasks. This is a read-only view of the Markdown backlog: task statuses
-are changed in `docs/TODO/`, never in the Flask app.
+backlog tasks. The inbox is cached in `_backlog_dashboard/.data/task-state.sqlite3`:
+each request checks source-file metadata and only rereads marker content for
+added or changed files; removed files are pruned from the cache. This is a
+read-only view of the Markdown backlog: task statuses are changed in
+`docs/TODO/`, never in the Flask app.
 When the dashboard next reads the backlog, it records status transitions in
 `_backlog_dashboard/.data/task-state.sqlite3` and shows their UTC timestamps in
 the state history. The first read establishes a baseline; changes made between
