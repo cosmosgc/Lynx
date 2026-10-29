@@ -198,7 +198,10 @@ degrade, and how breaking changes are staged.
 limits. `engine_net` tests cover a version/content matrix, feature degradation,
 unknown feature rejection, and golden hello, mismatch error, and negotiated
 parameters. Full world-message fixtures, automated version/changelog enforcement,
-and end-to-end compatibility verification remain outstanding.
+and end-to-end compatibility verification remain outstanding. A test verifies
+that the declared version matches the protocol constants and has a changelog
+entry, but it does not compare wire changes to the merge base or require a bump
+for every breaking change.
 
 ---
 
@@ -406,9 +409,8 @@ behavior rather than only rejecting individual malformed messages.
 - **References:** [networking §Transport](../networking.md#transport),
   `crates/lynx_world/src/transport.rs`
 
-**Why:** Handshake timeout and frame caps exist, but admission is still open to
-connection floods and browser cross-origin upgrades. These are cheap controls to
-add before a client is published.
+**Why:** Admission controls must bound resource use and enforce the browser
+origin boundary before a client is published.
 
 **Scope**
 
@@ -425,16 +427,25 @@ enables an exact-match Origin allowlist; repeat the option for additional
 origins. Unlisted, malformed, and multiple Origin headers receive HTTP 403
 `origin_forbidden` before upgrade. Requests without Origin remain allowed for
 native clients; Origin is not authentication. With no options, origin checking
-is disabled. Connection caps, draining, and rejection metrics remain open.
+is disabled. The service caps live/pending upgraded connections at 1,024 total
+and 16 per peer IP, rejects admission once draining begins, bounds aggregate
+world-route headers at 16 KiB, closes idle connections after 120 seconds, and
+limits socket writes and authority-queue waits to five seconds. Rejections are
+exposed through bounded-cardinality metrics. Idle and slow-write behavior still
+lack deterministic end-to-end tests; an authority-queue timeout closes cleanly
+but does not emit a distinct metric.
 
 **Acceptance criteria**
 
-- [ ] A connection flood cannot exhaust memory or file descriptors.
+- [ ] A connection flood cannot exhaust memory or file descriptors. Upgraded
+      connections, headers, and per-connection queues are bounded, but raw
+      accepted TCP/HTTP connections are not independently capped.
 - [x] Browser clients from unlisted origins are rejected when origin policy is
       enabled.
-- [ ] Draining stops new admissions while existing sessions complete or close
-      predictably.
-- [ ] Admission rejections have stable errors and metrics.
+- [x] Draining stops new admissions; existing connections close on client
+      closure, idle timeout, transport failure, or process shutdown.
+- [x] Capacity and draining admission rejections have stable reasons and
+      bounded-cardinality metrics; rate-limit rejections retain stable codes.
 
 ---
 

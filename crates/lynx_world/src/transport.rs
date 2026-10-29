@@ -42,6 +42,9 @@ const MAX_CONNECTIONS: usize = 1024;
 const MAX_CONNECTIONS_PER_IP: usize = 16;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const AUTHORITY_QUEUE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Maximum aggregate HTTP request header size accepted by the world route.
+pub const MAX_REQUEST_HEADER_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Default)]
 struct Capacity {
@@ -320,6 +323,13 @@ async fn world(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
+    if request_header_bytes(&headers) > MAX_REQUEST_HEADER_BYTES {
+        return (
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+            Json(json!({ "error": "request_headers_too_large" })),
+        )
+            .into_response();
+    }
     let permit = match acquire(&state.capacity, peer.ip()) {
         Ok(permit) => permit,
         Err(reason) => {
@@ -386,6 +396,15 @@ async fn world(
             let _permit = permit;
             connection(socket, credential, state).await;
         })
+}
+
+fn request_header_bytes(headers: &HeaderMap) -> usize {
+    headers.iter().fold(0usize, |total, (name, value)| {
+        total
+            .saturating_add(name.as_str().len())
+            .saturating_add(value.as_bytes().len())
+            .saturating_add(4) // colon and CRLF
+    })
 }
 
 fn admission_rejected(error: &EngineError) -> Response {
@@ -541,12 +560,11 @@ async fn pump(
                                 if let Err(error) = state.limits.sessions().check(session, &envelope, Instant::now()) {
                                     return rate_limit_end(error);
                                 }
-                                if state
-                                    .events
-                                    .send(ServerEvent::Frame { connection, envelope })
-                                    .await
-                                    .is_err()
-                                {
+                                let queued = tokio::time::timeout(
+                                    AUTHORITY_QUEUE_TIMEOUT,
+                                    state.events.send(ServerEvent::Frame { connection, envelope }),
+                                ).await;
+                                if !matches!(queued, Ok(Ok(()))) {
                                     return End::Clean;
                                 }
                             }
@@ -564,12 +582,11 @@ async fn pump(
                                 if let Err(error) = state.limits.sessions().check(session, &envelope, Instant::now()) {
                                     return rate_limit_end(error);
                                 }
-                                if state
-                                    .events
-                                    .send(ServerEvent::Frame { connection, envelope })
-                                    .await
-                                    .is_err()
-                                {
+                                let queued = tokio::time::timeout(
+                                    AUTHORITY_QUEUE_TIMEOUT,
+                                    state.events.send(ServerEvent::Frame { connection, envelope }),
+                                ).await;
+                                if !matches!(queued, Ok(Ok(()))) {
                                     return End::Clean;
                                 }
                             }
@@ -818,6 +835,21 @@ mod tests {
         assert!(bearer(&headers("Bearer   ")).is_none());
         assert!(bearer(&headers("Bearer two words")).is_none());
         assert!(bearer(&HeaderMap::new()).is_none());
+    }
+
+    #[test]
+    fn request_headers_are_bounded_by_aggregate_wire_size() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-test",
+            "a".repeat(MAX_REQUEST_HEADER_BYTES - 11).parse().unwrap(),
+        );
+        assert!(request_header_bytes(&headers) <= MAX_REQUEST_HEADER_BYTES);
+        headers.insert(
+            "x-test",
+            "a".repeat(MAX_REQUEST_HEADER_BYTES).parse().unwrap(),
+        );
+        assert!(request_header_bytes(&headers) > MAX_REQUEST_HEADER_BYTES);
     }
 
     #[test]

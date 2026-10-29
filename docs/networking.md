@@ -139,12 +139,26 @@ loop:
   protection. `/metrics` returns rejection counts by normalized family and
   stable error code.
 
+Before upgrade, the world route also limits pending/live connections to 1,024
+globally and 16 per peer IP, and rejects aggregate request headers larger than
+16 KiB with HTTP 431 (`request_headers_too_large`). These checks run before
+session admission. Capacity failures return HTTP 503 with `total_capacity` or
+`ip_capacity`; once draining starts, new attempts receive HTTP 503 with
+`draining`. Capacity and draining counters use fixed reason labels in
+`/metrics`. A request without `Origin` remains permitted for native clients;
+configured browser origins must match exactly.
+
 A rate rejection returns HTTP 429 before an upgrade or a `protocol.error` with
 `code: "rate_limited"` after admission, then closes the WebSocket. It includes
 `retry_after_ms`; it never includes a credential. Each connection's outbound
 queue is capped at 64 frames. A full queue detaches that slow client with the
 `slow_client_outbound_queue_full` reason rather than blocking the authoritative
-tick; a resume uses a fresh snapshot.
+tick; a resume uses a fresh snapshot. A connection closes after 120 seconds
+without an incoming WebSocket message. Socket writes and waits to enqueue an
+inbound frame to the authority are each bounded to five seconds; a timed-out
+authority enqueue closes that connection. Draining rejects new upgrades while
+existing connections close through normal service shutdown or these transport
+limits.
 
 ## World service wire messages
 

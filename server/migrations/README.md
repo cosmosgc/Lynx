@@ -27,6 +27,23 @@ Migrations are plain PostgreSQL SQL, applied in filename order by
 ./scripts/db-migrate.ps1 -Status
 ```
 
+## Upgrade order and rollback
+
+1. Take and verify a database backup before a production upgrade.
+2. Apply the migrations with `scripts/db-migrate.*` and confirm the reported
+   head/status.
+3. Start the new binary. A PostgreSQL-backed world service refuses startup when
+   migration history is missing, pending, newer than the binary, or has a
+   checksum mismatch. `lynx doctor --backend` inspects the same history without
+   changing it.
+4. If rolling back the binary, first verify that the older binary supports the
+   migrated schema and that any writes made by the new binary remain compatible.
+   Restore the backup when that cannot be guaranteed; do not delete migration
+   history or edit an applied migration to force startup.
+
+Schema checks prevent an unsupported binary/schema pairing; they do not make
+database migrations reversible or provide automatic data rollback.
+
 ```bash
 ./scripts/db-migrate.sh
 ./scripts/db-migrate.sh --status
