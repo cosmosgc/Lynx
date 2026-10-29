@@ -165,7 +165,7 @@ proxy configuration and a native-TLS escape hatch for non-proxy deployments.
 ## NET-004 — Protocol compatibility lifecycle
 
 - **Priority:** P1
-- **Status:** Ready
+- **Status:** In progress
 - **Depends on:** —
 - **References:** [networking](../networking.md), `engine_net::protocol`,
   [ADR 0006](../adr/0006-content-and-protocol-formats.md)

@@ -34,7 +34,7 @@ pub const CALENDAR_ACTION_CACHE_LIMIT: usize = 2_048;
 /// staff-level world operation; the calendar never accepts lifecycle changes
 /// from an ordinary session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CalendarAction {
     /// Join one side of an open event.
     Enroll {
@@ -389,6 +389,15 @@ fn validate_request(request: &CalendarActionRequest) -> Result<(), EngineError> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn calendar_action_rejects_unknown_nested_authority_fields() {
+        let mut value = serde_json::json!({
+            "kind": "enroll", "event": "event.test", "side": "side.test"
+        });
+        assert!(serde_json::from_value::<super::CalendarAction>(value.clone()).is_ok());
+        value["staff"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<super::CalendarAction>(value).is_err());
+    }
     use super::*;
     use engine_core::faction::{
         Faction, FactionDefinition, GovernancePolicy, PowerRules, TerritoryRules,

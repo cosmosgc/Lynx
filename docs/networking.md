@@ -2,13 +2,65 @@
 
 ## Protocol versioning
 
-- `PROTOCOL_VERSION` is a semantic version owned by `engine_net`.
-- The handshake exchanges protocol version, engine version, content version,
-  locale (BCP 47, default `pt-BR`), and a feature bitmap.
-- A different **major** version is rejected with `ErrorCode::VersionMismatch`.
-- A different minor version is accepted; the server disables features the
-  client does not advertise and reports the degradation.
-- Patch differences are informational only.
+The current server emits protocol **1.0.0** and accepts major **1**, any
+non-negative minor and patch. This is a parser compatibility promise, not a
+claim that future, unimplemented features work. No support window for a future
+major has been established; release owners must publish one before shipping it.
+The handshake carries independent protocol, engine and content semantic
+versions, locale (default `pt-BR`), and a set of named features (not a bitmap).
+
+| Client against 1.0 server | Outcome |
+|---|---|
+| 1.0.x | accepted; patch is informational |
+| 1.N.x, N > 0 | accepted with a minor warning; only shared known features are negotiated |
+| other protocol major | `version_mismatch` before session creation |
+| different content major | `version_mismatch` before session creation |
+| same content major, different minor | accepted with warning; content patch is informational |
+
+The negotiated protocol and content values are the **server's**, not the
+minimum of both peers. Engine major differences warn only. Features are the
+intersection of known advertised names; `degraded` indicates client-requested
+known features absent on the server. Unknown feature names currently fail
+deserialization rather than degrading gracefully. Negotiation does not itself
+gate all message handlers or replication; do not assume a feature flag enforces
+security or disables a wire shape. Authority remains server-side. Warnings are
+diagnostic English strings, not localized notices. Mismatch errors carry stable
+`version_mismatch` plus `kind`, `client`, and `server` parameters for client
+localization; envelope-major errors have `received` and `supported_major`.
+Content versions are independently compared, but the handshake does not verify
+bundle hashes or prove the client actually loaded the advertised bundle.
+
+### Lifecycle and rollback
+
+Record every wire change in the protocol changelog below, with compatibility,
+feature gating and migration notes. Under ADR 0006, optional additions require
+a minor bump; removals, renames, retypes, changed authority semantics, or any
+addition rejected by an older strict reader require a major bump unless a
+separately negotiated, backward-compatible representation is provided. Never
+reuse a feature name or change its meaning. Advertise a feature only when its
+implementation and safe fallback exist; clients must not send gated messages
+without mutual support. Strict request bodies cannot gain fields compatibly
+without explicit versioned handling. Unknown envelope fields and fields in
+non-strict response structures are currently ignored; this is not permission
+to ignore unknown authority-bearing input. Request parameter maps are defined
+by their action validators, not arbitrary authority claims.
+
+Before removing support, announce the replacement and a dated minimum support
+window in release notes, provide migration guidance and telemetry, and retain
+the old path throughout that window. A concrete duration is not yet decided.
+For rollback, deploy an older server only after confirming client messages and
+content remain compatible with it; disable new features first, retain matching
+content bundles, and test admission and resume. A major rollback rejects clients
+of the other major; provide a matching client or restore the newer server.
+In-memory resume sessions do not survive a server restart. Never roll back
+persisted state or bypass server authority merely to regain compatibility.
+
+### Protocol changelog
+
+- **1.0.0** — Existing JSON envelope and handshake baseline, independent content
+  major check, named feature intersection, and current world message kinds.
+  Nested calendar action unknown fields are rejected as an authority-boundary
+  validation correction; no new wire fields or features are introduced.
 
 ## Envelope
 

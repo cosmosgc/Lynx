@@ -1,0 +1,1 @@
+{"v":"1.0.0","id":"req_1","kind":"session.hello","body":{"handshake":{"content":"0.1.0","engine":"0.1.0","features":["chat"],"locale":"pt-BR","protocol":"1.0.0"},"last_ack_tick":0}}
