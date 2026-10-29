@@ -57,3 +57,8 @@ separate project taxonomy.
 The project is intentionally conservative: if a behavior is not implemented or
 not validated, it should be described as planned or incomplete rather than as a
 finished capability.
+
+For any user-facing UI change, follow the visual-test and task-report protocol
+in [`../ai-tooling.md`](../ai-tooling.md#visual-ui-test-and-task-report-protocol).
+It requires interaction and accessibility evidence in addition to automated
+tests, and defines the concise validation note expected in the task or issue.

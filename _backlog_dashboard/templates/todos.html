@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Source TODO inbox · Lynx backlog</title>
+  <style>
+    :root { color-scheme:dark; --bg:#11151b; --panel:#1a2029; --line:#303a47; --muted:#a3afbd; --text:#edf2f7; --blue:#76b7ff; --yellow:#f0c674; }
+    * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 system-ui,sans-serif; }
+    main { max-width:1280px; margin:auto; padding:24px 20px 50px; } a { color:var(--blue); } h1,h2,p { margin-top:0; }
+    .nav { display:flex; flex-wrap:wrap; gap:8px; margin:16px 0 24px; } .nav a { border:1px solid var(--line); border-radius:7px; padding:7px 10px; text-decoration:none; }
+    .nav a:hover,.nav a[aria-current=page] { border-color:var(--blue); background:#17334b; } .muted { color:var(--muted); }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:9px; padding:16px; } .table-wrap { overflow:auto; }
+    table { width:100%; border-collapse:collapse; } th,td { padding:10px 8px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
+    th { color:var(--muted); } code { overflow-wrap:anywhere; } .kind { color:var(--yellow); border:1px solid var(--line); border-radius:99px; padding:2px 7px; font-size:12px; }
+  </style>
+</head>
+<body><main>
+  <header>
+    <h1>Source TODO inbox</h1>
+    <p class="muted">Explicit <code>TODO</code>, <code>FIXME</code>, and <code>XXX</code> markers found in source and documentation files. Triage a real item into <code>docs/TODO/</code>; this view does not infer work from prose.</p>
+    <nav class="nav" aria-label="Backlog navigation"><a href="/">Backlog</a><a href="/task-order">Plan</a><a href="/dependencies">Dependencies</a><a href="/reports">Reports</a><a href="/todos" aria-current="page">Source TODOs</a><a href="/history">History</a></nav>
+  </header>
+  <section class="panel">
+    <h2>{{ markers|length }} marker{{ '' if markers|length == 1 else 's' }}</h2>
+    {% if markers %}<div class="table-wrap"><table><thead><tr><th>Marker</th><th>Detail</th><th>Source</th></tr></thead><tbody>
+      {% for marker in markers %}<tr><td><span class="kind">{{ marker.kind }}</span></td><td>{{ marker.text }}</td><td><a href="/source?file={{ marker.file|urlencode }}#L{{ marker.line }}"><code>{{ marker.file }}:{{ marker.line }}</code></a></td></tr>{% endfor %}
+    </tbody></table></div>{% else %}<p class="muted">No explicit source markers were found.</p>{% endif %}
+  </section>
+</main></body></html>

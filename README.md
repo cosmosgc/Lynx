@@ -29,7 +29,7 @@ localization model is described in
 | Tests | Unit and integration tests; workspace forbids unsafe code (`unsafe_code = "forbid"`) |
 | ADRs | 21 accepted architecture decision records |
 | Platform database | 6 SQL migrations (Nakama/PostgreSQL) |
-| Docs | 11 design docs + full ADR index (see [Documentation](#documentation)) |
+| Docs | 12 design docs + full ADR index (see [Documentation](#documentation)) |
 
 ## Status
 
@@ -341,6 +341,7 @@ root.
 | [`docs/internationalization.md`](docs/internationalization.md) | `pt-BR` defaults, key-based catalogs, locale negotiation. |
 | [`docs/platforms.md`](docs/platforms.md) | Which targets are supported and how they are CI-tested. |
 | [`docs/ai-tooling.md`](docs/ai-tooling.md) | Optional MCP tooling policy and shell-execution rules. |
+| [`docs/ai-tooling.md#visual-ui-test-and-task-report-protocol`](docs/ai-tooling.md#visual-ui-test-and-task-report-protocol) | Required visual validation and task-report protocol for AI-authored UI changes. |
 | [`docs/TODO/`](docs/TODO/README.md) | Forward-looking backlog: milestones, priorities, tasks, and known gaps. |
 | [`docs/adr/`](docs/adr/) | 21 accepted architecture decision records (0001–0021) plus proposed ADR 0022. |
 

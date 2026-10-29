@@ -10,6 +10,7 @@ from _backlog_dashboard.app import (
     load_backlog,
     load_phase_progress,
     order_tasks,
+    scan_user_todos,
     suggest_next_tasks,
 )
 
@@ -22,7 +23,7 @@ class BacklogDashboardTests(unittest.TestCase):
         self.todo.mkdir(parents=True)
         relevant_file = self.root / "crates" / "engine_sim" / "src" / "nav.rs"
         relevant_file.parent.mkdir(parents=True)
-        relevant_file.write_text("// sample", encoding="utf-8")
+        relevant_file.write_text("// TODO: add a bounded preview\n// sample", encoding="utf-8")
         (self.todo / "10-sample.md").write_text(
             """# Sample
 
@@ -145,7 +146,9 @@ Phase 1  Engine skeleton             [██████████████
         page = client.get("/")
         self.assertEqual(page.status_code, 200)
         self.assertIn(b"Ready means the task can be started", page.data)
-        self.assertIn(b"Phase 0", page.data)
+        self.assertIn(b"Backlog navigation", page.data)
+        self.assertIn(b"Source TODOs", page.data)
+        self.assertNotIn(b"Roadmap phases", page.data)
         self.assertIn(b"Task status distribution", page.data)
         self.assertIn(b"progress-segment status-ready", page.data)
         response = client.get("/api/items")
@@ -156,6 +159,26 @@ Phase 1  Engine skeleton             [██████████████
         self.assertEqual(response.json["phases"][1]["percent"], 85)
         self.assertEqual(client.get("/source?file=docs/TODO/10-sample.md").status_code, 200)
         self.assertEqual(client.get("/source?file=../../outside.md").status_code, 404)
+
+    def test_source_todo_inbox_and_manager_report(self):
+        markers = scan_user_todos(self.root)
+        self.assertEqual(markers[0]["kind"], "TODO")
+        self.assertEqual(markers[0]["file"], "crates/engine_sim/src/nav.rs")
+        self.assertEqual(markers[0]["line"], 1)
+
+        client = self.make_app().test_client()
+        todos = client.get("/todos")
+        self.assertEqual(todos.status_code, 200)
+        self.assertIn(b"Source TODO inbox", todos.data)
+        self.assertIn(b"add a bounded preview", todos.data)
+        self.assertEqual(client.get("/source?file=crates/engine_sim/src/nav.rs").status_code, 200)
+        report = client.get("/reports")
+        self.assertEqual(report.status_code, 200)
+        self.assertIn(b"Manager report", report.data)
+        self.assertIn(b"Recommended next", report.data)
+        api = client.get("/api/report")
+        self.assertEqual(api.status_code, 200)
+        self.assertEqual(len(api.json["user_todos"]), 1)
 
     def test_full_dependency_graph_view_includes_all_tasks_and_links(self):
         response = self.make_app().test_client().get("/dependencies")
@@ -181,9 +204,11 @@ Phase 1  Engine skeleton             [██████████████
         self.assertIn(b"per-task", response.data)
         self.assertIn(b"crates/engine_sim/src/nav.rs", response.data)
         self.assertIn(b"Status is read from the backlog Markdown", response.data)
+        self.assertIn(b"populateToggles", response.data)
+        self.assertNotIn(b'<select id="category"', response.data)
         self.assertNotIn(b"data-status-for", response.data)
         self.assertNotIn(b"Change status for", response.data)
-        self.assertIn(b"State change history", response.data)
+        self.assertIn(b'href="/history">History</a>', response.data)
 
     def test_task_order_filter_hiding_overrides_task_grid_display(self):
         response = self.make_app().test_client().get("/task-order")

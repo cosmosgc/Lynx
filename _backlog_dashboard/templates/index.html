@@ -41,11 +41,9 @@
     .section { margin:28px 0; }
     .section-heading { display:flex; align-items:baseline; gap:10px; }
     .section-heading p { margin:0; color:var(--muted); }
-    .phase-list { display:grid; gap:9px; }
-    .phase-row { display:grid; grid-template-columns:minmax(210px,1fr) minmax(190px,1.2fr) 48px minmax(190px,1fr); align-items:center; gap:14px; padding:11px 14px; background:var(--panel); border:1px solid var(--line); border-radius:8px; }
-    .phase-name strong { margin-right:6px; }
-    .phase-bar { color:var(--green); font-size:14px; white-space:pre; }
-    .phase-status { color:var(--muted); font-size:13px; }
+    .nav { display:flex; flex-wrap:wrap; gap:8px; margin:18px 0 24px; }
+    .nav a { border:1px solid var(--line); border-radius:7px; padding:7px 10px; color:var(--text); text-decoration:none; }
+    .nav a:hover,.nav a[aria-current=page] { border-color:var(--blue); background:#17334b; }
     .category-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(270px,1fr)); gap:12px; }
     .category-card { text-align:left; color:var(--text); cursor:pointer; padding:15px; }
     .category-card:hover { border-color:var(--blue); }
@@ -60,11 +58,14 @@
     .category-stats .status-blocked { color:var(--red); }
     .layout { display:grid; grid-template-columns:minmax(0,1.3fr) minmax(330px,.9fr); gap:16px; align-items:start; }
     .panel { padding:18px; min-width:0; }
-    .filters { display:grid; grid-template-columns:2fr 1fr 1fr 1fr; gap:9px; margin-bottom:12px; }
-    input,select,button { border:1px solid var(--line); background:#11151b; color:var(--text); padding:10px 11px; border-radius:7px; font:inherit; }
-    input,select { width:100%; }
+    .filters { display:grid; gap:10px; margin-bottom:12px; }
+    .toggle-row { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+    .toggle-label { color:var(--muted); font-size:12px; margin-right:2px; }
+    input,button { border:1px solid var(--line); background:#11151b; color:var(--text); padding:8px 10px; border-radius:7px; font:inherit; }
+    input { width:100%; padding:10px 11px; }
     button { cursor:pointer; }
     button:hover { border-color:var(--blue); }
+    .filter-toggle[aria-pressed=true] { color:var(--text); border-color:var(--blue); background:#17334b; }
     .table-wrap { overflow:auto; max-height:72vh; }
     table { border-collapse:collapse; width:100%; font-size:14px; }
     th { text-align:left; color:var(--muted); font-weight:600; position:sticky; top:0; background:var(--panel); }
@@ -90,38 +91,18 @@
     .node text { fill:var(--text); font-size:13px; pointer-events:none; }
     .graph-legend { color:var(--muted); font-size:12px; margin-top:3px; }
     @media (max-width:900px) { .layout { grid-template-columns:1fr; } .table-wrap { max-height:60vh; } }
-    @media (max-width:800px) { .phase-row { grid-template-columns:1fr 1fr; } }
-    @media (max-width:600px) { main { padding:20px 12px 40px; }.filters { grid-template-columns:1fr 1fr; } }
+    @media (max-width:600px) { main { padding:20px 12px 40px; } }
   </style>
 </head>
 <body>
 <main>
   <header>
     <h1>Lynx backlog progress</h1>
-    <p class="subtle">Live summary parsed from task sections under <code>docs/TODO/</code>, with any locally saved status overrides applied.</p>
-    <p><a href="/dependencies">View the full dependency graph →</a></p>
-    <p><a href="/task-order">Plan a task route and copy an implementation prompt →</a></p>
-    <p><a href="/history">View task state change history →</a></p>
+    <p class="subtle">Live backlog manager parsed from task sections under <code>docs/TODO/</code>. Status remains source-controlled in Markdown.</p>
+    <nav class="nav" aria-label="Backlog navigation">
+      <a href="/" aria-current="page">Backlog</a><a href="/task-order">Plan</a><a href="/dependencies">Dependencies</a><a href="/reports">Reports</a><a href="/todos">Source TODOs</a><a href="/history">History</a>
+    </nav>
   </header>
-
-  <section class="section" aria-labelledby="phase-heading">
-    <div class="section-heading">
-      <h2 id="phase-heading">Roadmap phases</h2>
-      <p>Estimated phase progress copied from the repository README.</p>
-    </div>
-    <div class="phase-list">
-      {% for phase in phases %}
-      <div class="phase-row">
-        <div class="phase-name"><strong>Phase {{ phase.number }}</strong>{{ phase.title }}</div>
-        <code class="phase-bar">[{{ phase.bar }}]</code>
-        <strong>{{ phase.percent }}%</strong>
-        <span class="phase-status">{{ phase.status }}</span>
-      </div>
-      {% else %}
-      <p class="subtle">No phase progress lines found in README.md.</p>
-      {% endfor %}
-    </div>
-  </section>
 
   <section class="section" aria-labelledby="category-heading">
     <div class="section-heading">
@@ -173,9 +154,9 @@
       <h2>Tasks <small class="muted" id="visible-count"></small></h2>
       <div class="filters">
         <input id="search" type="search" placeholder="Search ID, title, references…">
-        <select id="status-filter"><option value="">All statuses</option></select>
-        <select id="priority-filter"><option value="">All priorities</option></select>
-        <select id="file-filter"><option value="">All documents</option></select>
+        <div class="toggle-row" id="status-filter" aria-label="Filter by status"><span class="toggle-label">Status</span></div>
+        <div class="toggle-row" id="priority-filter" aria-label="Filter by priority"><span class="toggle-label">Priority</span></div>
+        <div class="toggle-row" id="file-filter" aria-label="Filter by document"><span class="toggle-label">Document</span></div>
       </div>
       <div class="table-wrap">
         <table>
@@ -215,32 +196,32 @@
   const items = {{ items|tojson }};
   const byId = new Map(items.map(item => [item.id, item]));
   const rows = [...document.querySelectorAll("#tasks tr")];
-  const filters = ["search", "status-filter", "priority-filter", "file-filter"].map(id => document.getElementById(id));
-
-  function populateFilter(id, values) {
-    const select = document.getElementById(id);
-    [...new Set(values)].sort().forEach(value => {
-      const option = document.createElement("option");
-      option.value = value;
-      option.textContent = value;
-      select.append(option);
+  const selectedFilters = {status:"", priority:"", file:""};
+  function populateToggles(id, key, values, display = value => value) {
+    const container = document.getElementById(id);
+    ["", ...[...new Set(values)].sort()].forEach(value => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "filter-toggle";
+      button.dataset.value = value;
+      button.setAttribute("aria-pressed", value === "" ? "true" : "false");
+      button.textContent = value === "" ? "All" : display(value);
+      button.addEventListener("click", () => {
+        selectedFilters[key] = value;
+        container.querySelectorAll("button").forEach(toggle => toggle.setAttribute("aria-pressed", String(toggle === button)));
+        filterRows();
+      });
+      container.append(button);
     });
   }
-  populateFilter("status-filter", items.map(item => item.status_label));
-  populateFilter("priority-filter", items.map(item => item.priority));
-  populateFilter("file-filter", items.map(item => item.file));
-  document.getElementById("status-filter").addEventListener("change", event => {
-    const wanted = items.find(item => item.status_label === event.target.value)?.status ?? "";
-    event.target.dataset.normalized = wanted;
-    filterRows();
-  });
-  filters.forEach(filter => filter.addEventListener(filter.tagName === "INPUT" ? "input" : "change", filterRows));
+  populateToggles("status-filter", "status", items.map(item => item.status), value => items.find(item => item.status === value)?.status_label || value);
+  populateToggles("priority-filter", "priority", items.map(item => item.priority));
+  populateToggles("file-filter", "file", items.map(item => item.file), value => value.replace("docs/TODO/", ""));
+  document.getElementById("search").addEventListener("input", filterRows);
 
   function filterRows() {
     const query = document.getElementById("search").value.trim().toLowerCase();
-    const status = document.getElementById("status-filter").dataset.normalized || "";
-    const priority = document.getElementById("priority-filter").value;
-    const file = document.getElementById("file-filter").value;
+    const {status, priority, file} = selectedFilters;
     let visible = 0;
     rows.forEach(row => {
       const show = (!query || row.dataset.search.includes(query))

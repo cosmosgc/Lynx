@@ -13,6 +13,7 @@
     h1 { margin-bottom:4px; font-size:clamp(24px,4vw,34px); }
     a { color:var(--blue); }
     .muted { color:var(--muted); }
+    .nav { display:flex; flex-wrap:wrap; gap:8px; margin:16px 0 24px; }.nav a { border:1px solid var(--line); border-radius:7px; padding:7px 10px; color:var(--text); text-decoration:none; }.nav a:hover,.nav a[aria-current=page] { border-color:var(--blue); background:#17334b; }
     .toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:9px; margin:18px 0 12px; }
     input,select,button { color:var(--text); background:#11151b; border:1px solid var(--line); border-radius:7px; padding:9px 11px; font:inherit; }
     input { min-width:230px; flex:1; }
@@ -58,7 +59,7 @@
   <header>
     <h1>Full dependency graph</h1>
     <p class="muted">Every tracked task is shown. Arrows point from prerequisite to dependent task.</p>
-    <a href="/">← Back to backlog dashboard</a> · <a href="/task-order">Plan task order and copy prompt</a>
+    <nav class="nav" aria-label="Backlog navigation"><a href="/">Backlog</a><a href="/task-order">Plan</a><a href="/dependencies" aria-current="page">Dependencies</a><a href="/reports">Reports</a><a href="/todos">Source TODOs</a><a href="/history">History</a></nav>
   </header>
   <div class="toolbar">
     <input id="search" type="search" placeholder="Find task ID or title">

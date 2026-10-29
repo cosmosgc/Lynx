@@ -16,6 +16,10 @@
     .layout { display:grid; grid-template-columns:minmax(0,1.1fr) minmax(380px,.9fr); gap:15px; align-items:start; margin-top:20px; }
     .panel { min-width:0; background:var(--panel); border:1px solid var(--line); border-radius:9px; padding:16px; }
     .filters,.actions { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; align-items:center; }
+    .toggle-row { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:8px 0; }
+    .toggle-label { color:var(--muted); font-size:12px; }
+    .filter-toggle[aria-pressed=true] { border-color:var(--blue); background:#17334b; }
+    .nav { display:flex; flex-wrap:wrap; gap:8px; margin:16px 0 24px; }.nav a { border:1px solid var(--line); border-radius:7px; padding:7px 10px; color:var(--text); text-decoration:none; }.nav a:hover,.nav a[aria-current=page] { border-color:var(--blue); background:#17334b; }
     .suggestion-controls { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:12px 0; }
     .suggestion-controls label { color:var(--muted); }
     .suggestion-controls input { width:82px; }
@@ -60,7 +64,7 @@
   <header>
     <h1>Task order and prompt builder</h1>
     <p class="muted">Tasks are listed in prerequisite-first order. Status is read from the backlog Markdown and cannot be changed here.</p>
-    <a href="/">← Back to backlog dashboard</a> · <a href="/dependencies">Dependency graph</a> · <a href="/history">State change history</a>
+    <nav class="nav" aria-label="Backlog navigation"><a href="/">Backlog</a><a href="/task-order" aria-current="page">Plan</a><a href="/dependencies">Dependencies</a><a href="/reports">Reports</a><a href="/todos">Source TODOs</a><a href="/history">History</a></nav>
   </header>
   <div class="layout">
     <section class="panel">
@@ -94,9 +98,9 @@
       </section>
       <div class="filters">
         <input id="search" type="search" placeholder="Search ID or title">
-        <select id="category"><option value="">All categories</option></select>
-        <select id="status"><option value="">All statuses</option></select>
       </div>
+      <div class="toggle-row" id="category" aria-label="Filter by category"><span class="toggle-label">Category</span></div>
+      <div class="toggle-row" id="status" aria-label="Filter by status"><span class="toggle-label">Status</span></div>
       <div class="actions">
         <button id="select-visible" type="button">Select visible</button>
         <button id="clear" type="button">Clear selection</button>
@@ -157,23 +161,24 @@
   const selected = new Set();
   const rows = [...document.querySelectorAll(".task")];
   const checkboxById = new Map(rows.map(row => [row.dataset.id, row.querySelector("input")]));
+  const filters = {category:"", status:""};
 
-  function populateFilter(id, values) {
-    const select = document.getElementById(id);
-    [...new Set(values)].sort().forEach(value => {
-      const option = document.createElement("option");
-      option.value = value;
-      option.textContent = value;
-      select.append(option);
+  function populateToggles(id, key, values) {
+    const container = document.getElementById(id);
+    ["", ...[...new Set(values)].sort()].forEach(value => {
+      const button = document.createElement("button");
+      button.type = "button"; button.className = "filter-toggle"; button.dataset.value = value;
+      button.textContent = value || "All"; button.setAttribute("aria-pressed", value === "" ? "true" : "false");
+      button.addEventListener("click", () => { filters[key] = value; container.querySelectorAll("button").forEach(toggle => toggle.setAttribute("aria-pressed", String(toggle === button))); visibleRows(); });
+      container.append(button);
     });
   }
-  populateFilter("category", tasks.map(task => task.category));
-  populateFilter("status", tasks.map(task => task.status_label));
+  populateToggles("category", "category", tasks.map(task => task.category));
+  populateToggles("status", "status", tasks.map(task => task.status_label));
 
   function visibleRows() {
     const query = document.getElementById("search").value.trim().toLowerCase();
-    const category = document.getElementById("category").value;
-    const status = document.getElementById("status").value;
+    const {category, status} = filters;
     return rows.filter(row => {
       const task = byId.get(row.dataset.id);
       const visible = (!query || row.dataset.search.includes(query))
@@ -278,9 +283,7 @@
     else selected.delete(row.dataset.id);
     render();
   }));
-  ["search", "category", "status"].forEach(id => document.getElementById(id).addEventListener(
-    id === "search" ? "input" : "change", visibleRows
-  ));
+  document.getElementById("search").addEventListener("input", visibleRows);
   document.querySelectorAll(".prompt-options input, #commit-policy").forEach(control => {
     control.addEventListener("change", render);
   });

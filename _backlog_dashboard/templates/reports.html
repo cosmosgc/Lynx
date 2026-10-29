@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Manager report · Lynx backlog</title>
+  <style>
+    :root { color-scheme:dark; --bg:#11151b; --panel:#1a2029; --line:#303a47; --muted:#a3afbd; --text:#edf2f7; --blue:#76b7ff; --green:#66d19e; --yellow:#f0c674; --red:#ff8585; }
+    * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 system-ui,sans-serif; } main { max-width:1280px; margin:auto; padding:24px 20px 50px; }
+    h1,h2,h3,p { margin-top:0; } a { color:var(--blue); } .muted { color:var(--muted); }.nav { display:flex; flex-wrap:wrap; gap:8px; margin:16px 0 24px; }.nav a { border:1px solid var(--line); border-radius:7px; padding:7px 10px; text-decoration:none; }.nav a:hover,.nav a[aria-current=page] { border-color:var(--blue); background:#17334b; }
+    .cards,.grid { display:grid; gap:14px; }.cards { grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); margin-bottom:18px; }.grid { grid-template-columns:repeat(auto-fit,minmax(310px,1fr)); }.card,.panel { background:var(--panel); border:1px solid var(--line); border-radius:9px; padding:16px; }.card strong { display:block; font-size:28px; }.card span,.panel p { color:var(--muted); }.task-list { list-style:none; padding:0; margin:0; }.task-list li { border-top:1px solid var(--line); padding:9px 0; }.task-list li:first-child { border-top:0; }.badge { display:inline-block; border:1px solid var(--line); border-radius:99px; padding:2px 7px; font-size:12px; }.blocked { color:var(--red); }.ready { color:var(--blue); }.active { color:var(--green); }.report { width:100%; min-height:170px; color:var(--text); background:#11151b; border:1px solid var(--line); border-radius:7px; padding:10px; font:13px/1.5 ui-monospace,monospace; }
+  </style>
+</head>
+<body><main>
+  <header><h1>Manager report</h1><p class="muted">A current, shareable view of delivery work. It is computed from the Markdown backlog and source-marker inbox on every request.</p><nav class="nav" aria-label="Backlog navigation"><a href="/">Backlog</a><a href="/task-order">Plan</a><a href="/dependencies">Dependencies</a><a href="/reports" aria-current="page">Reports</a><a href="/todos">Source TODOs</a><a href="/history">History</a></nav></header>
+  <section class="cards"><div class="card"><strong>{{ report.summary.total }}</strong><span>Tracked tasks</span></div><div class="card"><strong>{{ report.summary.done }}</strong><span>Done · {{ report.summary.completion_percent }}%</span></div><div class="card"><strong>{{ report.active|length }}</strong><span>In progress</span></div><div class="card"><strong>{{ report.blocked|length }}</strong><span>Blocked</span></div><div class="card"><strong>{{ report.user_todos|length }}</strong><span>Source markers to triage</span></div></section>
+  <section class="grid">
+    <article class="panel"><h2>Active work</h2><ul class="task-list">{% for task in report.active %}<li><a href="/?task={{ task.id }}"><strong>{{ task.id }}</strong> — {{ task.title }}</a><br><span class="active">{{ task.status_label }}</span>{% if task.status_detail %} · {{ task.status_detail }}{% endif %}</li>{% else %}<li class="muted">No tasks are marked In progress.</li>{% endfor %}</ul></article>
+    <article class="panel"><h2>Recommended next</h2><ul class="task-list">{% for task in report.ready %}<li><a href="/task-order"><strong>{{ task.id }}</strong> — {{ task.title }}</a><br><span class="ready">{{ task.suggestion_reason }}</span></li>{% else %}<li class="muted">No dependency-unblocked task was found.</li>{% endfor %}</ul></article>
+    <article class="panel"><h2>Blocked work</h2><ul class="task-list">{% for task in report.blocked %}<li><a href="/?task={{ task.id }}"><strong>{{ task.id }}</strong> — {{ task.title }}</a><br><span class="blocked">{{ task.depends or task.status_detail or 'No blocker detail recorded.' }}</span></li>{% else %}<li class="muted">No tasks are marked Blocked.</li>{% endfor %}</ul></article>
+  </section>
+  <section class="panel" style="margin-top:14px"><h2>Copyable status report</h2><textarea class="report" readonly>Backlog report
+Tracked: {{ report.summary.total }} | Done: {{ report.summary.done }} ({{ report.summary.completion_percent }}%) | In progress: {{ report.active|length }} | Blocked: {{ report.blocked|length }}
+
+Active: {% for task in report.active %}{{ task.id }}{% if not loop.last %}, {% endif %}{% else %}none{% endfor %}
+Next: {% for task in report.ready %}{{ task.id }}{% if not loop.last %}, {% endif %}{% else %}none{% endfor %}
+Blocked: {% for task in report.blocked %}{{ task.id }}{% if not loop.last %}, {% endif %}{% else %}none{% endfor %}
+Source TODO/FIXME/XXX markers awaiting triage: {{ report.user_todos|length }}</textarea></section>
+</main></body></html>

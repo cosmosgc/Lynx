@@ -4,7 +4,9 @@ A small, local Flask app that reads the Markdown task sections under
 `docs/TODO/` and shows completion/status totals, priority, source references,
 acceptance criteria, and direct dependency/dependent links.
 The `/dependencies` view renders the complete task graph with filters, status
-colors, zoom controls, and task details.
+colors, zoom controls, and task details. The navigation also exposes a source
+TODO/FIXME/XXX triage inbox and a manager report with active, blocked, and
+recommended next work.
 The `/task-order` view gives a prerequisite-first route, multi-task selection,
 and an editable prompt builder with acceptance criteria and relevant files. Its
 next-N suggestion ranks actionable tasks by priority, in-progress continuity,
@@ -25,14 +27,18 @@ On Windows, install Flask once and double-click
 
 Open <http://127.0.0.1:5000>. The app binds to loopback only and reads the
 backlog on each page/API request, so Markdown updates appear after refresh.
+The local server also reloads Python and template changes automatically; wait
+for Flask's reload message, then refresh the browser. It intentionally leaves
+the interactive Flask debugger disabled.
 Task IDs used in `Depends on` and `References` are linked when a matching task
 exists. Dependencies that refer to decisions or other non-task items remain
 visible as text.
 
 Completion percentage is completed tasks divided by all parsed task sections.
 Statuses not recognized by the parser are counted as unspecified rather than
-silently treated as incomplete. This is a read-only view of the Markdown
-backlog: task statuses are changed in `docs/TODO/`, never in the Flask app.
+silently treated as incomplete. Source markers are a triage inbox, not canonical
+backlog tasks. This is a read-only view of the Markdown backlog: task statuses
+are changed in `docs/TODO/`, never in the Flask app.
 When the dashboard next reads the backlog, it records status transitions in
 `_backlog_dashboard/.data/task-state.sqlite3` and shows their UTC timestamps in
 the state history. The first read establishes a baseline; changes made between

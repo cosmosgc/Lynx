@@ -13,6 +13,7 @@
     h1 { font-size:clamp(24px,4vw,34px); margin-bottom:5px; }
     a { color:var(--blue); }
     .muted { color:var(--muted); }
+    .nav { display:flex; flex-wrap:wrap; gap:8px; margin:16px 0 24px; }.nav a { border:1px solid var(--line); border-radius:7px; padding:7px 10px; color:var(--text); text-decoration:none; }.nav a:hover,.nav a[aria-current=page] { border-color:var(--blue); background:#17334b; }
     .panel { margin-top:18px; padding:16px; background:var(--panel); border:1px solid var(--line); border-radius:9px; }
     .table-wrap { overflow:auto; }
     table { width:100%; border-collapse:collapse; }
@@ -40,7 +41,7 @@
   <header>
     <h1>Task state change history</h1>
     <p class="muted">The latest 500 status changes observed in the backlog Markdown. This app does not edit task status.</p>
-    <a href="/">← Back to backlog dashboard</a> · <a href="/task-order">View task order</a>
+    <nav class="nav" aria-label="Backlog navigation"><a href="/">Backlog</a><a href="/task-order">Plan</a><a href="/dependencies">Dependencies</a><a href="/reports">Reports</a><a href="/todos">Source TODOs</a><a href="/history" aria-current="page">History</a></nav>
   </header>
   {% if selected_task %}
   <section class="panel" id="task-detail" aria-labelledby="task-detail-heading">

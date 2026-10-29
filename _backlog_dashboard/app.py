@@ -20,6 +20,11 @@ TASK_ID = re.compile(r"\b[A-Z]{2,5}-\d{3}\b")
 PROJECT_PATH = re.compile(
     r"(?:^|[`/\\\s(])((?:crates|clients|tools|docs|server|scripts|BAT)/[A-Za-z0-9_./\\-]+|(?:Cargo\.toml|Cargo\.lock|README\.md|CHANGELOG\.md))"
 )
+USER_TODO = re.compile(r"\b(TODO|FIXME|XXX)\b\s*[:\-]?\s*(.*)", re.IGNORECASE)
+TODO_EXTENSIONS = {
+    ".bat", ".css", ".html", ".js", ".md", ".ps1", ".py", ".rs", ".sh", ".toml", ".yaml", ".yml",
+}
+TODO_IGNORED_DIRECTORIES = {".data", ".git", ".lynx", "__pycache__", "target"}
 STATUS_PREFIXES = (
     ("done", ("done", "complete", "completed")),
     ("in_progress", ("in progress", "in-progress")),
@@ -539,6 +544,53 @@ def load_phase_progress(readme_path: Path) -> list[dict[str, Any]]:
     ]
 
 
+def scan_user_todos(repository_root: Path) -> list[dict[str, str | int]]:
+    """Return explicit source TODO/FIXME/XXX markers outside the task backlog.
+
+    The scan intentionally stays local, skips generated/build directories, and
+    only reads text-oriented repository files. It is a triage inbox, not a
+    replacement for the Markdown backlog.
+    """
+    markers: list[dict[str, str | int]] = []
+    for source in repository_root.rglob("*"):
+        if not source.is_file() or source.suffix.lower() not in TODO_EXTENSIONS:
+            continue
+        relative = source.relative_to(repository_root)
+        if set(relative.parts) & TODO_IGNORED_DIRECTORIES or relative.parts[:2] == ("docs", "TODO"):
+            continue
+        try:
+            if source.stat().st_size > 1_000_000:
+                continue
+            lines = source.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError):
+            continue
+        for line_number, line in enumerate(lines, start=1):
+            match = USER_TODO.search(line)
+            if not match:
+                continue
+            detail = match.group(2).strip().strip("*/#- ") or "No detail provided."
+            markers.append(
+                {
+                    "kind": match.group(1).upper(),
+                    "text": detail,
+                    "file": relative.as_posix(),
+                    "line": line_number,
+                }
+            )
+    return sorted(markers, key=lambda item: (str(item["file"]), int(item["line"])))
+
+
+def manager_report(items: list[dict[str, Any]], markers: list[dict[str, str | int]]) -> dict[str, Any]:
+    """Build the small, actionable report used by the management view."""
+    return {
+        "summary": backlog_summary(items),
+        "active": [item for item in items if item["status"] == "in_progress"],
+        "ready": suggest_next_tasks(items, 5),
+        "blocked": [item for item in items if item["status"] == "blocked"],
+        "user_todos": markers,
+    }
+
+
 def create_app(
     todo_dir: Path | None = None,
     state_db_path: Path | None = None,
@@ -553,6 +605,9 @@ def create_app(
 
     def get_readme_path() -> Path:
         return source_todo_dir.resolve().parents[1] / "README.md"
+
+    def get_repository_root() -> Path:
+        return source_todo_dir.resolve().parents[1]
 
     def get_history(items: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
         task_items = items if items is not None else get_items()
@@ -586,7 +641,6 @@ def create_app(
     def index():
         try:
             items = get_items()
-            phases = load_phase_progress(get_readme_path())
         except (OSError, sqlite3.Error, UnicodeError, ValueError) as error:
             return render_template("error.html", error=str(error)), 500
         return render_template(
@@ -594,7 +648,6 @@ def create_app(
             items=items,
             summary=backlog_summary(items),
             categories=backlog_categories(items),
-            phases=phases,
         )
 
     @app.get("/dependencies")
@@ -642,6 +695,23 @@ def create_app(
             selected_task=selected_task,
         )
 
+    @app.get("/todos")
+    def todos():
+        try:
+            markers = scan_user_todos(get_repository_root())
+        except (OSError, UnicodeError) as error:
+            return render_template("error.html", error=str(error)), 500
+        return render_template("todos.html", markers=markers)
+
+    @app.get("/reports")
+    def reports():
+        try:
+            items = get_items()
+            report = manager_report(items, scan_user_todos(get_repository_root()))
+        except (OSError, sqlite3.Error, UnicodeError, ValueError) as error:
+            return render_template("error.html", error=str(error)), 500
+        return render_template("reports.html", report=report)
+
     @app.get("/api/items")
     def api_items():
         try:
@@ -655,8 +725,16 @@ def create_app(
                 "summary": backlog_summary(items),
                 "categories": backlog_categories(items),
                 "phases": phases,
+                "user_todos": scan_user_todos(get_repository_root()),
             }
         )
+
+    @app.get("/api/report")
+    def api_report():
+        try:
+            return jsonify(manager_report(get_items(), scan_user_todos(get_repository_root())))
+        except (OSError, sqlite3.Error, UnicodeError, ValueError) as error:
+            return jsonify({"error": str(error)}), 500
 
     @app.get("/source")
     def source():
@@ -666,7 +744,7 @@ def create_app(
         if (
             not relative
             or candidate != repository_root and repository_root not in candidate.parents
-            or candidate.suffix.lower() != ".md"
+            or candidate.suffix.lower() not in TODO_EXTENSIONS
             or not candidate.is_file()
         ):
             abort(404)
@@ -687,4 +765,7 @@ app = create_app()
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    # This dashboard is a loopback-only development tool. Reload Python code
+    # and templates after local edits, but keep Flask's interactive debugger
+    # disabled so the app never exposes an executable debug console.
+    app.run(host="127.0.0.1", port=5000, debug=False, use_reloader=True)
