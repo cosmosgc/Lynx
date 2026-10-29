@@ -32,8 +32,12 @@ Migrations are plain PostgreSQL SQL, applied in filename order by
 ./scripts/db-migrate.sh --status
 ```
 
-The runner is idempotent: applied migrations are skipped, and a checksum
-mismatch is an error.
+The runner is idempotent: applied migrations are skipped. Before applying any
+pending migration it checks all local applied files for checksum mismatches and
+aborts if any have changed, including when a pending file sorts earlier.
+`--status` / `-Status` reports mismatches without applying migrations. Do not
+change migration files or run another migration process concurrently: preflight
+and individual migration transactions do not share a single lock.
 
 ## Upgrades and compatibility
 

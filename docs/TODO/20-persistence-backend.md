@@ -314,6 +314,12 @@ partially migrated database fails later, in a less obvious place.
   idempotently.
 - Document the upgrade order: backup, migrate, start new binary, roll back.
 
+**Runner follow-on:** Both migration scripts preflight local applied-file
+checksums before running any pending migration, including out-of-order files.
+Mocked runner tests cover mismatch and status behavior without a database;
+live PostgreSQL verification remains needed. Preflight is not locked across the
+whole run, so operators must not concurrently change files or run migrations.
+
 **Acceptance criteria**
 
 - [ ] Starting against an unmigrated database fails with an actionable message.

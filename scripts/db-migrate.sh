@@ -51,7 +51,7 @@ has_schema="$(lynx_psql -c "SELECT to_regnamespace('lynx') IS NOT NULL;")"
 
 has_history="$(lynx_psql -c "SELECT to_regclass('lynx.schema_migrations') IS NOT NULL;")"
 
-if [[ "$status_only" == false ]]; then
+if [[ "$status_only" == false && "$has_history" != "t" ]]; then
     lynx_psql -f - <<'SQL'
 BEGIN;
 SELECT pg_advisory_xact_lock(1280522872);
@@ -79,6 +79,25 @@ fi
 applied_count=0
 skipped_count=0
 pending_count=0
+checksum_failures=""
+
+# Validate the entire local set before executing any migration, including when
+# a pending file sorts before an already-applied file with a bad checksum.
+for file in "${files[@]}"; do
+    name="$(basename "$file")"
+    version="${name%.sql}"
+    [[ "$version" =~ ^[0-9]{4}_[a-z0-9_]+$ ]] ||
+        lynx_die "migration '$name' must match NNNN_lower_snake_case.sql"
+    if [[ "$has_history" == "t" ]]; then
+        existing="$(lynx_psql -c "SELECT checksum FROM lynx.schema_migrations WHERE version = '$version';")"
+        if [[ -n "$existing" && "$existing" != "$(lynx_sha256_file "$file")" ]]; then
+            checksum_failures="${checksum_failures:+$checksum_failures, }$version"
+        fi
+    fi
+done
+if [[ -n "$checksum_failures" && "$status_only" == false ]]; then
+    lynx_die "applied migrations changed since they ran: $checksum_failures. Restore the files or write a new migration."
+fi
 checksum_failures=""
 
 printf 'Lynx migrations in %s\n' "$migration_dir"

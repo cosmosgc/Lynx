@@ -60,7 +60,7 @@ $hasHistory = Invoke-LynxPsqlScalar `
     -Sql "SELECT to_regclass('lynx.schema_migrations') IS NOT NULL;" `
     -Password $pg.Password
 
-if (-not $Status) {
+if (-not $Status -and $hasHistory -ne 't') {
     $bootstrapSql = @'
 BEGIN;
 SELECT pg_advisory_xact_lock(1280522872);
@@ -108,6 +108,25 @@ if ($applied.Count -gt 0) {
 $appliedCount = 0
 $skippedCount = 0
 $pendingCount = 0
+$checksumFailures = @()
+
+# Check every file before applying any pending migration, even one that sorts
+# before a changed applied migration.
+foreach ($file in $files) {
+    $version = [IO.Path]::GetFileNameWithoutExtension($file.Name)
+    if ($version -cnotmatch '^[0-9]{4}_[a-z0-9_]+$') {
+        throw "Migration '$($file.Name)' must match NNNN_lower_snake_case.sql."
+    }
+    if ($applied.ContainsKey($version)) {
+        $checksum = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($applied[$version] -ne $checksum) {
+            $checksumFailures += $version
+        }
+    }
+}
+if ($checksumFailures.Count -gt 0 -and -not $Status) {
+    throw "Applied migrations changed since they ran: $($checksumFailures -join ', '). Restore the files or write a new migration."
+}
 $checksumFailures = @()
 
 Write-Host "Lynx migrations in $migrationDirectory"
