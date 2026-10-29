@@ -1,5 +1,7 @@
 use engine_net::envelope::{Envelope, MessageId, MessageKind};
-use engine_net::protocol::{ErrorPayload, Feature, Handshake, Negotiated, negotiate};
+use engine_net::protocol::{
+    ErrorPayload, Feature, Handshake, Negotiated, PROTOCOL_VERSION, negotiate, protocol_version,
+};
 use serde_json::json;
 
 fn envelope(id: &str, kind: &str, body: serde_json::Value) -> Envelope {
@@ -8,6 +10,49 @@ fn envelope(id: &str, kind: &str, body: serde_json::Value) -> Envelope {
         MessageKind::parse(kind).unwrap(),
         body,
     )
+}
+
+#[test]
+fn declared_version_has_a_changelog_entry() {
+    assert_eq!(PROTOCOL_VERSION, protocol_version().to_string());
+    let changelog = include_str!("../../../docs/networking.md")
+        .split_once("### Protocol changelog\n")
+        .expect("protocol changelog heading")
+        .1
+        .split_once("\n## ")
+        .expect("section after protocol changelog")
+        .0;
+    assert!(
+        changelog
+            .lines()
+            .any(|line| line.starts_with(&format!("- **{PROTOCOL_VERSION}** — "))),
+        "current protocol version needs its own changelog entry"
+    );
+}
+
+#[test]
+fn current_server_accepts_same_major_and_rejects_other_majors() {
+    let server = Handshake::new(semver::Version::new(0, 1, 0), semver::Version::new(1, 0, 0));
+    for minor in [0, 1, u64::from(u16::MAX)] {
+        let mut client = server.clone();
+        client.protocol.minor = minor;
+        client.protocol.patch = 42;
+        let result = negotiate(&client, &server).unwrap();
+        assert_eq!(result.protocol, protocol_version());
+        assert_eq!(
+            result.warnings.len(),
+            usize::from(minor != server.protocol.minor)
+        );
+        assert!(!result.degraded);
+    }
+    for major in [0, 2] {
+        let mut client = server.clone();
+        client.protocol.major = major;
+        assert_eq!(
+            negotiate(&client, &server).unwrap_err().details()["kind"],
+            "protocol"
+        );
+    }
 }
 
 #[test]

@@ -6,6 +6,10 @@ The current server emits protocol **1.0.0** and accepts major **1**, any
 non-negative minor and patch. This is a parser compatibility promise, not a
 claim that future, unimplemented features work. No support window for a future
 major has been established; release owners must publish one before shipping it.
+This range is enforced by major equality, not by a bounded lag window: older
+and newer minors are admitted alike. Semantic-version prerelease and build
+metadata are not compared by negotiation; production releases should use stable
+versions and validate interoperability rather than rely on metadata rejection.
 The handshake carries independent protocol, engine and content semantic
 versions, locale (default `pt-BR`), and a set of named features (not a bitmap).
 
@@ -48,6 +52,10 @@ by their action validators, not arbitrary authority claims.
 Before removing support, announce the replacement and a dated minimum support
 window in release notes, provide migration guidance and telemetry, and retain
 the old path throughout that window. A concrete duration is not yet decided.
+Until such a window is published, no client-lag duration is promised; the
+current implementation admits all same-major minors but does not guarantee that
+an unknown future capability can be used. Introducing a bounded support range
+requires implementing and testing it before announcing enforcement.
 For rollback, deploy an older server only after confirming client messages and
 content remain compatible with it; disable new features first, retain matching
 content bundles, and test admission and resume. A major rollback rejects clients
@@ -64,9 +72,12 @@ persisted state or bypass server authority merely to regain compatibility.
 
 The `engine_net` golden tests pin the hello and version-error envelopes and the
 negotiated parameters payload. They do not yet cover every world message kind
-or enforce a version bump and changelog entry for breaking changes. Retain old
-fixtures when introducing new versions; do not update a fixture in place to
-conceal an incompatible change.
+or automatically detect every breaking change. A workspace test checks that the
+version constants agree and that the current version has a changelog entry; it
+does not compare changes against the merge base or require a bump when wire code
+changes. Reviewers must classify wire changes and require the appropriate bump,
+entry, and compatibility tests. Retain old fixtures when introducing new
+versions; do not update a fixture in place to conceal an incompatible change.
 
 ## Envelope
 
