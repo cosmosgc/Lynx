@@ -24,44 +24,40 @@ repositories. Most normalized tables are defined but not yet used by the runtime
 ## PST-001 — Account and character persistence
 
 - **Priority:** P0
-- **Status:** In progress
-- **Depends on:** —
+- **Status:** Done — Nakama-authenticated PostgreSQL character persistence
+- **Depends on:** -
 - **References:** migration `0001_core.sql`, `crates/game_api/src/service.rs`,
   `character.rs`, `crates/backend_memory`
 
-**Partial progress:** `backend_nakama::PostgresCharacterStore` provides
+**Implemented:** `backend_nakama::PostgresCharacterStore` provides
 account-scoped list, active-character lookup, transactional character creation,
-and idempotent tombstoning against `lynx.characters`. Creation serializes on the account row, enforces an
+idempotent tombstoning, and character-bound world entry/leave against
+`lynx.characters`. Creation serializes on the account row, enforces an
 eight-character limit, and writes a retry receipt and audit event atomically;
-other writers must follow the same locking protocol. It is a repository, not a
-`CharacterService` implementation: callers must authenticate the session and
-supply a non-secret retry key. `PostgresIdentityStore` looks up an existing
-account by its unique Nakama user ID, rejects malformed or unmapped IDs, and does
-not provision accounts. It is unwired: a future caller must obtain the ID from
-validated Nakama authentication, never client input. The current Nakama adapter's
-account ID is the Nakama user ID, not necessarily the Lynx account ID. Account
-provisioning, authenticated integration, creation and deletion through the API,
-world entry, and shared adapter contract tests remain outstanding. Tombstoning
-retains related records and does not coordinate live-world removal or property
-release. PostgreSQL integration tests require a configured, migrated, isolated
-test database.
+receipts survive deletion and adapter reconnection. `PostgresIdentityStore`
+accepts only canonical Nakama UUIDs and `provision_account` creates or resolves
+the canonical Lynx account mapping without accepting a client account field.
+`NakamaPostgresBackend` composes validated Nakama sessions with both stores and
+implements `AuthService`, `CharacterService`, `CharacterIntentService`, and
+`CharacterWorldService`. `CharacterWorldService` is character-bound rather than
+overloading the legacy zone-only `WorldService`; entry/leave persist a selected
+owned, active character's server-routed zone with an audit event.
+`backend_memory` implements the same non-durable contract for offline tests.
 
-**Implemented slice:** A validated Nakama UUID is now the canonical ID for a
-new Lynx account; `PostgresIdentityStore::provision_account` creates or resolves
-that mapping without accepting a client account field. `NakamaPostgresBackend`
-composes Nakama session validation with the identity and character stores, so
-its character operations resolve the authenticated account before accessing
-PostgreSQL. `CharacterWorldService` is character-bound rather than overloading
-the legacy zone-only `WorldService`: entry/leave persist a selected owned,
-active character's server-routed zone with an audit event. `backend_memory`
-implements the same non-durable contract for offline tests. The live world
-runtime still uses demo grants, and a complete shared contract suite plus a
-migrated PostgreSQL/Nakama integration run remain required before this task is
-done.
+**Validation:** The shared contract and ownership/restart scenarios pass against
+both adapters. The live PostgreSQL run uses a migrated isolated database and
+`LYNX_REQUIRE_POSTGRES_TEST=1`; it covers reopen persistence, duplicate
+creation retries, name reuse after deletion, cross-account select/delete
+rejection, concurrent deletion, and character-bound world entry/leave.
+`cargo test -p backend_nakama -p backend_memory -p backend_contract_tests`
+passes with that database configured, and scoped clippy/fmt are clean. Live
+`lynx_world` admission still uses development grants; replacing that admission
+path with this adapter is tracked by NET-001, not by the persistence criteria
+below.
 
 **Why:** The durable world snapshot restores zones, calendar, and factions, but
-accounts and characters still live in the in-memory backend. A restart loses
-character creation, selection, and ownership even when the world survives.
+accounts and characters previously lived only in the in-memory backend, so a
+restart lost creation, selection, and ownership even when the world survived.
 
 **Scope**
 
@@ -81,12 +77,12 @@ character creation, selection, and ownership even when the world survives.
 
 **Acceptance criteria**
 
-- [ ] Creating a character, restarting the service, and selecting it again
+- [x] Creating a character, restarting the service, and selecting it again
       returns the same character with the same owner.
-- [ ] A session cannot select, rename, or delete another account's character.
-- [ ] Duplicate create/select retries do not duplicate rows.
-- [ ] The persistent adapter and `backend_memory` pass the same contract tests.
-- [ ] No credential or session secret appears in logs or error chains.
+- [x] A session cannot select, rename, or delete another account's character.
+- [x] Duplicate create/select retries do not duplicate rows.
+- [x] The persistent adapter and `backend_memory` pass the same contract tests.
+- [x] No credential or session secret appears in logs or error chains.
 
 ---
 
