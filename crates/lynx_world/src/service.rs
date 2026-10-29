@@ -118,7 +118,7 @@ pub struct Service {
     metrics: Arc<Metrics>,
 }
 
-/// Process-local, unlabeled authority measurements.
+/// Process-local authority measurements with bounded labels.
 #[derive(Debug, Default)]
 pub struct Metrics {
     ticks: AtomicU64,
@@ -136,6 +136,36 @@ pub struct Metrics {
     outbound_full: AtomicU64,
     snapshot_success: AtomicU64,
     snapshot_failure: AtomicU64,
+    snapshot_write_duration: Mutex<SnapshotWriteDuration>,
+}
+
+// Cumulative histogram bounds in nanoseconds: 1 ms, 10 ms, 100 ms, 1 s, 10 s.
+const SNAPSHOT_WRITE_BOUNDS: [u64; 5] = [
+    1_000_000,
+    10_000_000,
+    100_000_000,
+    1_000_000_000,
+    10_000_000_000,
+];
+
+#[derive(Debug, Default)]
+struct SnapshotWriteDuration {
+    buckets: [u64; 5],
+    count: u64,
+    nanos: u64,
+}
+
+impl SnapshotWriteDuration {
+    fn observe(&mut self, duration: Duration) {
+        let nanos = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
+        for (bucket, bound) in self.buckets.iter_mut().zip(SNAPSHOT_WRITE_BOUNDS) {
+            if nanos <= bound {
+                *bucket += 1;
+            }
+        }
+        self.count += 1;
+        self.nanos = self.nanos.saturating_add(nanos);
+    }
 }
 
 impl Metrics {
@@ -177,6 +207,24 @@ impl Metrics {
             get(&self.tick_failures),
             get(&self.snapshot_success),
             get(&self.snapshot_failure)
+        );
+        let duration = self.snapshot_write_duration.lock().unwrap();
+        text.push_str("# HELP lynx_world_snapshot_write_duration_seconds Time spent in snapshot store save calls, including failures.\n# TYPE lynx_world_snapshot_write_duration_seconds histogram\n");
+        for (bound, count) in ["0.001", "0.01", "0.1", "1", "10"]
+            .iter()
+            .zip(duration.buckets)
+        {
+            let _ = writeln!(
+                text,
+                "lynx_world_snapshot_write_duration_seconds_bucket{{le=\"{bound}\"}} {count}"
+            );
+        }
+        let _ = write!(
+            text,
+            "lynx_world_snapshot_write_duration_seconds_bucket{{le=\"+Inf\"}} {}\nlynx_world_snapshot_write_duration_seconds_sum {:.9}\nlynx_world_snapshot_write_duration_seconds_count {}\n",
+            duration.count,
+            duration.nanos as f64 / 1_000_000_000.0,
+            duration.count
         );
         text
     }
@@ -346,7 +394,14 @@ impl Service {
         };
         let store = Arc::clone(&persistence.store);
         let world = WorldSnapshot::capture(&self.snapshot_inputs(), clock().value());
+        let started = Instant::now();
         let result = store.save(&world);
+        let elapsed = started.elapsed();
+        self.metrics
+            .snapshot_write_duration
+            .lock()
+            .unwrap()
+            .observe(elapsed);
         let counter = if result.is_ok() {
             &self.metrics.snapshot_success
         } else {
@@ -1579,6 +1634,12 @@ mod tests {
                 .render()
                 .contains("lynx_world_snapshot_writes_total{outcome=\"success\"} 0\n")
         );
+        assert!(
+            service
+                .metrics()
+                .render()
+                .contains("lynx_world_snapshot_write_duration_seconds_count 0\n")
+        );
         let store: Arc<dyn crate::persistence::SnapshotStore + Send + Sync> =
             Arc::new(FailingStore);
         let mut service = service.with_persistence(store, Duration::from_millis(1));
@@ -1596,6 +1657,12 @@ mod tests {
                 .render()
                 .contains("lynx_world_snapshot_writes_total{outcome=\"failure\"} 2\n")
         );
+        assert!(
+            service
+                .metrics()
+                .render()
+                .contains("lynx_world_snapshot_write_duration_seconds_count 2\n")
+        );
     }
 
     #[test]
@@ -1607,6 +1674,62 @@ mod tests {
         let text = service.metrics().render();
         assert!(text.contains("lynx_world_snapshot_writes_total{outcome=\"success\"} 1\n"));
         assert!(text.contains("lynx_world_snapshot_writes_total{outcome=\"failure\"} 0\n"));
+        assert!(text.contains("lynx_world_snapshot_write_duration_seconds_count 1\n"));
+        assert!(
+            text.contains("lynx_world_snapshot_write_duration_seconds_bucket{le=\"+Inf\"} 1\n")
+        );
+    }
+
+    #[test]
+    fn snapshot_write_histogram_has_cumulative_inclusive_buckets() {
+        let metrics = Metrics::default();
+        {
+            let mut duration = metrics.snapshot_write_duration.lock().unwrap();
+            duration.observe(Duration::from_millis(1));
+            duration.observe(Duration::from_millis(11));
+            duration.observe(Duration::from_secs(11));
+        }
+        let text = metrics.render();
+        assert!(text.contains("# TYPE lynx_world_snapshot_write_duration_seconds histogram\n"));
+        for (bound, count) in [
+            ("0.001", 1),
+            ("0.01", 1),
+            ("0.1", 2),
+            ("1", 2),
+            ("10", 2),
+            ("+Inf", 3),
+        ] {
+            assert!(text.contains(&format!(
+                "lynx_world_snapshot_write_duration_seconds_bucket{{le=\"{bound}\"}} {count}\n"
+            )));
+        }
+        assert!(text.contains("lynx_world_snapshot_write_duration_seconds_sum 11.012000000\n"));
+        assert!(text.contains("lynx_world_snapshot_write_duration_seconds_count 3\n"));
+    }
+
+    #[test]
+    fn snapshot_write_histogram_times_the_store_call() {
+        #[derive(Debug)]
+        struct SlowStore;
+        impl SnapshotStore for SlowStore {
+            fn load(&self) -> Result<Option<WorldSnapshot>, EngineError> {
+                Ok(None)
+            }
+
+            fn save(&self, _: &WorldSnapshot) -> Result<(), EngineError> {
+                std::thread::sleep(Duration::from_millis(5));
+                Ok(())
+            }
+        }
+
+        let (service, _, _) = service();
+        let mut service = service.with_persistence(Arc::new(SlowStore), Duration::from_secs(1));
+        service.try_save_snapshot().unwrap();
+        let metrics = service.metrics();
+        let duration = metrics.snapshot_write_duration.lock().unwrap();
+        assert_eq!(duration.count, 1);
+        assert_eq!(duration.buckets[0], 0);
+        assert!(duration.nanos >= 5_000_000);
     }
 
     #[tokio::test]
@@ -1616,6 +1739,7 @@ mod tests {
         let store: Arc<dyn crate::persistence::SnapshotStore + Send + Sync> =
             Arc::clone(&counts) as _;
         let service = service.with_persistence(store, Duration::from_millis(1));
+        let metrics = service.metrics();
 
         let (events, receiver) = mpsc::channel(8);
         let (shutdown, shutdown_rx) = watch::channel(false);
@@ -1641,6 +1765,10 @@ mod tests {
         assert!(
             state.saves > saves_while_up,
             "shutdown performs a final save"
+        );
+        assert_eq!(
+            metrics.snapshot_write_duration.lock().unwrap().count,
+            state.saves
         );
         let last = state.last.as_ref().unwrap();
         assert_eq!(last.zone.config.definition.as_str(), "zone.demo");

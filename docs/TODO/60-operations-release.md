@@ -50,7 +50,7 @@ invisible until players complain.
 Partial implementation: the admin listener exports tick execution time and
 overruns and failures, entities, attached and retained sessions, authority inputs and action
 requests/rejections, resume success/failure, outbound queue-full events, and
-bounded rate-limit rejections and snapshot write outcomes. The remaining metric families and limitations
+bounded rate-limit rejections, snapshot write outcomes, and store write latency. The remaining metric families and limitations
 are listed in operations; scheduler deadline misses are not yet measured.
 This task remains in progress until the full scope is verified.
 

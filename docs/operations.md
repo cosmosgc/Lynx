@@ -187,11 +187,13 @@ fixed enums. The single demo zone is exported without a zone label.
 | `lynx_world_resume_attempts_total{outcome}` | authority resume admissions, classified `success` or `failure`; excludes failures before authority admission |
 | `lynx_world_outbound_queue_full_total` | failed enqueues due to a full per-connection outbound queue |
 | `lynx_world_snapshot_writes_total{outcome}` | configured snapshot store write attempts, including startup and shutdown, by `success` or `failure`; no-store calls are excluded |
+| `lynx_world_snapshot_write_duration_seconds` | histogram of time in configured store `save` calls, including successful and failed writes at startup, periodically, and at shutdown; excludes snapshot capture and no-store calls. Cumulative buckets: 0.001, 0.01, 0.1, 1, 10, +Inf seconds |
 | `lynx_world_rate_limit_rejections_total{class,code}` | rate-limit rejections by bounded class and error code |
 
 Starting alert examples (tune against staging; not tested production rules):
 `increase(lynx_world_tick_overruns_total[5m]) > 0`,
-`sum(rate(lynx_world_rate_limit_rejections_total[5m])) > 1`, and
+`sum(rate(lynx_world_rate_limit_rejections_total[5m])) > 1`,
+`increase(lynx_world_snapshot_writes_total{outcome="failure"}[5m]) > 0`, and
 `up{job="lynx-world"} == 0` for five minutes. Monitor readiness separately.
 
 Unsupported requested families (do not interpret their absence as zero):
@@ -203,7 +205,7 @@ Unsupported requested families (do not interpret their absence as zero):
 - Resume failures broken down by `ErrorCode` (`expired`, `conflict`, etc.).
 - Pathfinding expansions, budget exhaustion, AI errors.
 - Database latency and errors.
-- Snapshot load failures and write latency; write outcomes above do not identify the store or error cause.
+- Snapshot load failures; write metrics above do not identify the store or error cause and do not include snapshot capture time.
 - Content version per zone.
 - Missing localization keys by locale (should be zero in release).
 
