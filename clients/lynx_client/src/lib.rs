@@ -23,6 +23,7 @@ impl Plugin for LynxClientPlugin {
         app.init_resource::<ClientFrameCount>()
             .add_systems(Update, count_frame)
             .add_systems(Update, online::poll_online)
+            .add_systems(Update, online::smooth_online.after(online::poll_online))
             .add_plugins((offline::OfflineFoundationPlugin, replay::ReplayPlugin));
     }
 }

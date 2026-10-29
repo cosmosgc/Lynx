@@ -57,9 +57,18 @@ servers.
 
 ## Authentication and sessions
 
-- Player authentication is delegated to Nakama. The world gateway validates the
-  session token on connect and on token refresh.
-- Until that integration lands, `lynx-world` accepts static bearer tokens for
+- Production player authentication is delegated to Nakama through the world
+  transport, before `WorldGateway::connect`. Every fresh bearer admission
+  validates the upstream session and server-resolves current active character
+  ownership from Lynx PostgreSQL; `X-Lynx-Character` is only a selection input.
+  Invalid/revoked/expired credentials return redacted `invalid_session`; foreign
+  selections return `character_forbidden`; outages return
+  `identity_unavailable`. Nakama refresh remains a client-to-Nakama operation.
+  Gateway resume tokens are independently validated for their short resume TTL,
+  not revalidated against Nakama; the default 30-second TTL bounds that
+  revocation observation gap. Production characters must already have one live
+  authoritative actor; database rows never spawn or substitute demo actors.
+- `lynx-world --auth-mode demo` accepts static bearer tokens for
   development. Configuration stores only SHA-256 hashes, compared in constant
   time; plaintext tokens are never written by the service. Each hash maps to one
   server-chosen demo account and character, and a character has at most one
@@ -72,11 +81,11 @@ servers.
 - `world_gateway` accepts claims only from trusted code that has already
   authenticated the player. A client cannot construct a session for another
   account or character, claim a staff role, or choose its own session ID.
-- The current gateway permits at most one connected session per character.
-  The planned server configuration can enforce uniqueness per character or per
-  account; the account-wide policy must use the authenticated account identity,
-  never a client-supplied account value. Retained sessions count against the
-  session cap, so reconnect windows cannot bypass admission limits.
+- The gateway session policy is `per_character` by default and supports
+  `per_account` through `--session-policy`. It uses only authenticated account
+  claims and rejects duplicates without replacing the existing session.
+  Retained resume sessions count under either policy and against the session
+  cap, so reconnect windows cannot bypass admission limits.
 - Resume tokens are opaque, server-issued, short-lived (default 30 s),
   single-use, and rotated on every resume. They are redacted from `Debug` and
   must never be logged or embedded in error details. The transport delivers the

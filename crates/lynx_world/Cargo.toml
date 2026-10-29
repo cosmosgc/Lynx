@@ -12,6 +12,7 @@ repository.workspace = true
 anyhow = { workspace = true }
 axum = { workspace = true }
 backend_memory = { workspace = true }
+backend_nakama = { workspace = true }
 clap = { workspace = true }
 dotenvy = "0.15.7"
 engine_core = { workspace = true }

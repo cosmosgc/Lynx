@@ -53,6 +53,9 @@ pub struct Hello {
 pub enum Credential {
     /// A static token bound to one demo character. Starts a new session.
     Static(Grant),
+    /// A production identity backend verified this account and selected
+    /// character before the WebSocket upgrade.
+    Identity(SessionClaims),
     /// A gateway-issued, single-use resume token.
     Resume(ResumeToken),
 }
@@ -125,6 +128,7 @@ pub struct Metrics {
     tick_failures: AtomicU64,
     tick_nanos: AtomicU64,
     tick_overruns: AtomicU64,
+    tick_deadline_misses: AtomicU64,
     entities: AtomicU64,
     connections: AtomicU64,
     inputs: AtomicU64,
@@ -185,6 +189,11 @@ impl Metrics {
             get(&self.entities),
             get(&self.connections),
             get(&self.inputs)
+        );
+        let _ = write!(
+            text,
+            "# HELP lynx_world_tick_deadline_misses_total Scheduled ticks that began after their configured deadline.\n# TYPE lynx_world_tick_deadline_misses_total counter\nlynx_world_tick_deadline_misses_total {}\n",
+            get(&self.tick_deadline_misses),
         );
         let _ = write!(
             text,
@@ -329,6 +338,7 @@ impl Service {
         let mut ticker = tokio::time::interval(self.tick);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         ticker.tick().await;
+        let mut next_deadline = Instant::now() + self.tick;
         let mut ticks_since_save = 0u64;
 
         loop {
@@ -342,6 +352,10 @@ impl Service {
                 // A continuously ready input queue must not starve the world clock.
                 // Delay prevents missed ticks from becoming an unbounded catch-up burst.
                 _ = ticker.tick() => {
+                    if Instant::now() > next_deadline {
+                        self.metrics.tick_deadline_misses.fetch_add(1, Ordering::Relaxed);
+                    }
+                    next_deadline += self.tick;
                     self.advance();
                     ticks_since_save = ticks_since_save.wrapping_add(1);
                     if let Some(persistence) = &self.persistence
@@ -461,15 +475,10 @@ impl Service {
         let now = clock();
         let opened = match credential {
             Credential::Static(grant) => {
-                if let Some(existing) = self.connected_principal(grant.principal) {
-                    return Err(EngineError::new(
-                        ErrorCode::Conflict,
-                        "the character already has a connected session",
-                    )
-                    .with_detail("connection", existing.to_string()));
-                }
-                let claims: SessionClaims = grant.claims()?;
-                self.server.open(claims, &hello.handshake, now)?
+                self.server.open(grant.claims()?, &hello.handshake, now)?
+            }
+            Credential::Identity(claims) => {
+                self.server.open(claims.clone(), &hello.handshake, now)?
             }
             Credential::Resume(token) => {
                 self.server
@@ -682,16 +691,6 @@ impl Service {
             let _ = writer.try_send(ServerFrame::Close);
             tracing::debug!(connection = %connection, "closing connection at shutdown");
         }
-    }
-
-    fn connected_principal(&self, principal: StableId) -> Option<ConnectionId> {
-        self.server.connections().find_map(|(connection, session)| {
-            self.server
-                .gateway()
-                .session(session)
-                .filter(|active| active.principal == principal)
-                .map(|_| connection)
-        })
     }
 
     fn last_ack(&self, connection: ConnectionId) -> Tick {
@@ -1705,6 +1704,15 @@ mod tests {
         }
         assert!(text.contains("lynx_world_snapshot_write_duration_seconds_sum 11.012000000\n"));
         assert!(text.contains("lynx_world_snapshot_write_duration_seconds_count 3\n"));
+    }
+
+    #[test]
+    fn scheduler_deadline_misses_are_prometheus_counters() {
+        let metrics = Metrics::default();
+        metrics.tick_deadline_misses.store(2, Ordering::Relaxed);
+        let text = metrics.render();
+        assert!(text.contains("# TYPE lynx_world_tick_deadline_misses_total counter\n"));
+        assert!(text.contains("lynx_world_tick_deadline_misses_total 2\n"));
     }
 
     #[test]

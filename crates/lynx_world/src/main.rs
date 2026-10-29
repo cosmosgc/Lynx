@@ -19,17 +19,25 @@
 
 use std::io::Read;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use backend_nakama::{
+    NakamaClient, NakamaConfig, NakamaPostgresBackend, PostgresCharacterStore,
+    PostgresIdentityStore,
+};
 use clap::{Parser, Subcommand};
-use lynx_world::auth::{self, Authenticator, Grant};
+use lynx_world::auth::{self, Authenticator, Grant, NakamaIdentityBackend};
 use lynx_world::backend;
-use lynx_world::config::ServeArgs;
+use lynx_world::config::{AuthMode, ServeArgs};
 use lynx_world::demo;
-use lynx_world::persistence::{FileSnapshotStore, PostgresSnapshotStore, SnapshotStore};
+use lynx_world::persistence::{
+    FileSnapshotStore, PostgresSnapshotStore, SnapshotStore, postgres_config_from_env,
+};
 use lynx_world::service::Service;
 use lynx_world::startup;
 use lynx_world::transport::{self, AppState, OriginPolicy};
+use postgres::NoTls;
 use tokio::sync::watch;
 use world_gateway::{SystemResumeTokens, WorldGateway};
 use world_server::WorldServer;
@@ -93,21 +101,32 @@ fn token_hash() -> Result<()> {
 #[allow(clippy::too_many_lines)] // Process startup intentionally assembles every trusted subsystem.
 async fn serve(args: ServeArgs) -> Result<()> {
     args.validate_demo_auth_bind()?;
-    tracing::warn!(
-        "static bearer token authentication is for development only, not production authentication"
-    );
-    if !args.bind.ip().is_loopback() {
+    if args.auth_mode == AuthMode::Demo {
         tracing::warn!(
-            address = %args.bind,
-            "dangerous development opt-in enabled: static demo authentication is exposed on a non-loopback listener; bearer tokens may be intercepted"
+            "static bearer token authentication is for development only, not production authentication"
         );
+        if !args.bind.ip().is_loopback() {
+            tracing::warn!(
+                address = %args.bind,
+                "dangerous development opt-in enabled: static demo authentication is exposed on a non-loopback listener; bearer tokens may be intercepted"
+            );
+        }
     }
     let origins = OriginPolicy::new(args.allowed_origins.clone())
         .context("invalid --allow-origin configuration")?;
     let gateway_config = args.gateway_config()?;
     let rate_limits = args.rate_limit_config()?;
-    let authenticator = Authenticator::new(&args.token_hashes()?)?.with_staff(args.staff);
-    let grants: Vec<Grant> = authenticator.grants().cloned().collect();
+    let authenticator = (args.auth_mode == AuthMode::Demo)
+        .then(|| Authenticator::new(&args.token_hashes()?).map(|auth| auth.with_staff(args.staff)))
+        .transpose()?;
+    let identity_backend = (args.auth_mode == AuthMode::Nakama)
+        .then(production_identity_backend)
+        .transpose()?;
+    let grants: Vec<Grant> = authenticator
+        .as_ref()
+        .map_or_else(Vec::new, |authenticator| {
+            authenticator.grants().cloned().collect()
+        });
     let snapshot_interval = args
         .snapshot_interval()
         .context("invalid snapshot interval")?;
@@ -171,8 +190,13 @@ async fn serve(args: ServeArgs) -> Result<()> {
 
     let (events, receivers) = transport::event_channel();
     let (shutdown, shutdown_rx) = watch::channel(false);
+    let state = match (authenticator, identity_backend) {
+        (Some(authenticator), None) => AppState::new(events, authenticator),
+        (None, Some(backend)) => AppState::with_identity_backend(events, backend),
+        _ => unreachable!("exactly one configured authentication mode is constructed"),
+    };
     let state = Arc::new(
-        AppState::new(events, authenticator)
+        state
             .with_metrics(service.metrics())
             .with_origin_policy(origins)
             .with_rate_limits(rate_limits),
@@ -190,6 +214,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .context("failed to read the listener address")?;
     tracing::info!(
         address = %local,
+        auth_mode = ?args.auth_mode,
         characters = grants.len(),
         tick_ms = args.tick_ms,
         message_burst = args.message_burst,
@@ -234,6 +259,33 @@ async fn serve(args: ServeArgs) -> Result<()> {
         Err(error) => tracing::error!(%error, "authority loop panicked"),
     }
     result.context("the HTTP server stopped with an error")
+}
+
+fn production_identity_backend() -> Result<Arc<NakamaIdentityBackend>> {
+    let base_url = std::env::var("LYNX_NAKAMA_URL")
+        .or_else(|_| std::env::var("NAKAMA_URL"))
+        .or_else(|_| std::env::var("NAKAMA_BASE_URL"))
+        .context("Nakama authentication requires LYNX_NAKAMA_URL")?;
+    let mut nakama_config = NakamaConfig::new(base_url);
+    nakama_config.http_key = std::env::var("LYNX_NAKAMA_HTTP_KEY").ok();
+    nakama_config.timeout = Duration::from_secs(10);
+    let nakama = NakamaClient::new(nakama_config)
+        .map_err(|_| anyhow::anyhow!("invalid Nakama identity configuration"))?;
+    let identities = PostgresIdentityStore::new(
+        postgres_config_from_env()
+            .context("invalid PostgreSQL identity configuration")?
+            .connect(NoTls)
+            .context("failed to connect the PostgreSQL identity store")?,
+    );
+    let characters = PostgresCharacterStore::new(
+        postgres_config_from_env()
+            .context("invalid PostgreSQL character configuration")?
+            .connect(NoTls)
+            .context("failed to connect the PostgreSQL character store")?,
+    );
+    Ok(Arc::new(NakamaIdentityBackend::new(
+        NakamaPostgresBackend::new(nakama, identities, characters),
+    )))
 }
 
 fn snapshot_store(args: &ServeArgs) -> Result<Option<Arc<dyn SnapshotStore + Send + Sync>>> {

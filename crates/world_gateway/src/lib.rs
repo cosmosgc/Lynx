@@ -25,8 +25,8 @@ pub use calendar::{
     CalendarResultView, CalendarSideView, CalendarStage, CalendarStateBody,
 };
 pub use gateway::{
-    Connection, ERROR_KIND, GatewayConfig, UI_ACTION_KIND, UI_CLOSE_KIND, UI_STATE_KIND, UiState,
-    WorldGateway,
+    ConcurrentSessionPolicy, Connection, ERROR_KIND, GatewayConfig, UI_ACTION_KIND, UI_CLOSE_KIND,
+    UI_STATE_KIND, UiState, WorldGateway,
 };
 pub use replication::{
     DoorSnapshot, EntitySnapshot, HealthSnapshot, InteractionSnapshot, OwnerState, SessionDelivery,

@@ -3308,6 +3308,7 @@ dependencies = [
  "anyhow",
  "axum",
  "backend_memory",
+ "backend_nakama",
  "clap",
  "dotenvy",
  "engine_core",

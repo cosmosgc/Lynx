@@ -117,7 +117,7 @@ this task owns the authoritative server side.
 ## SIM-002 — Client prediction and reconciliation contract
 
 - **Priority:** P0
-- **Status:** In progress — server foundation and isolated client reconciliation; integration outstanding
+- **Status:** In progress — bounded online reconciliation implemented; visual validation pending
 - **Depends on:** `SIM-001`, `CLT-005`
 - **References:** ADR 0014, `SIM-001`
 
@@ -137,12 +137,12 @@ input sequences and send bounded corrections the client can replay.
 
 **Acceptance criteria**
 
-- [ ] A simulated-latency/loss harness shows bounded divergence under normal
-      movement and recovery after a forced correction.
-- [ ] Corrections never grant the client authority over position, speed, or
-      collision.
-- [ ] Reconnect and zone-transfer paths reset prediction state explicitly.
-- [ ] The contract is documented in `docs/networking.md`.
+- [x] A simulated-latency/loss harness shows bounded divergence under normal
+       movement and recovery after a forced correction.
+- [x] Corrections never grant the client authority over position, speed, or
+       collision.
+- [x] Reconnect and zone-transfer paths reset prediction state explicitly.
+- [x] The contract is documented in `docs/networking.md`.
 
 **Foundation:** Initial and resumed snapshots carry the session-private current
 position and optional last queue-consumed sequence (including cancelled input).
@@ -151,16 +151,27 @@ that exact session only. Disconnect and delivery failure recover via a baseline,
 not replay of per-input results. Exhausting u64 requires a new session. Client
 replay/smoothing, velocity and non-reconnect reset policies remain open.
 
-The pure client reconciliation module predicts at most one absolute endpoint,
-bounded by a caller-configured presentation distance, and snaps to the private
-processed result or a fresh baseline. Queue acceptance is not processing; a
-definitive correlated queue rejection clears prediction, whereas ambiguous loss
-requires reconnect and a baseline. Resume preserves the highest locally issued
-or server-consumed sequence; a new session starts a new sequence domain. It is
-not connected to networking or rendering, does not smooth or replay multiple
-inputs, and does not implement teleport, death or zone-transfer integration.
-The local distance bound is not server movement validation. The caller must
-discard messages from old connections and distinguish resumed from new sessions.
+The client reconciliation module is wired through `WorldState` and the bounded
+background transport. It predicts the server-permitted single pending endpoint,
+keeps it in a one-entry replay buffer, and consumes only correlated private
+results. Its authoritative state is never mutable by presentation smoothing.
+Small correction error is interpolated by the renderer; correction beyond the
+local prediction distance snaps. Disconnect, fresh snapshots, teleport/death/
+zone-transfer callers use the explicit reset path. The latency/loss test proves
+that dropped replies cannot accumulate unbounded divergence and a forced server
+correction recovers to authority. The local distance bound is not server movement
+validation. The caller discards messages from old connections and distinguishes
+resumed from new sessions.
+
+**Visual validation (2026-10-29):**
+- Screen: `lynx_client --demo-online` online 2D presentation.
+- Journey: receive a private movement correction and observe the presentation
+  position converge without changing authoritative state.
+- Evidence: blocked — this headless environment has no developer window capture
+  or live demo service configured; the presentation seam was checked through
+  `lynx_client` headless reconciliation and online integration tests instead.
+- Automated checks: `cargo test -p lynx_client --no-default-features`.
+- Result: automated checks passed; visual acceptance remains open.
 
 ---
 

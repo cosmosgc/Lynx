@@ -25,7 +25,9 @@ The current `lynx-world` binary exposes:
 - `GET /metrics` — process-local partial metrics
 - WebSocket `/world` endpoint
 
-Tick execution overruns and bounded rate-limit rejections are counted, but scheduler deadline misses, several requested metric families, and abuse detection dashboards remain unavailable.
+Tick execution overruns, scheduler deadline misses, and bounded rate-limit
+rejections are counted, but several requested metric families and abuse
+detection dashboards remain unavailable.
 
 ## Impact
 

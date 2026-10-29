@@ -17,6 +17,8 @@ use engine_net::replication::SessionId;
 use game_api::AccountId;
 use serde::{Deserialize, Serialize};
 
+use crate::gateway::ConcurrentSessionPolicy;
+
 /// Shortest accepted resume token, in bytes.
 pub const MIN_RESUME_TOKEN_LEN: usize = 16;
 
@@ -261,6 +263,7 @@ struct SessionRecord {
 pub struct SessionRegistry {
     ttl: DurationMs,
     max_sessions: usize,
+    policy: ConcurrentSessionPolicy,
     sessions: BTreeMap<SessionId, SessionRecord>,
     tokens: BTreeMap<ResumeToken, SessionId>,
     source: Box<dyn ResumeTokenSource>,
@@ -272,6 +275,7 @@ impl fmt::Debug for SessionRegistry {
         f.debug_struct("SessionRegistry")
             .field("ttl", &self.ttl)
             .field("max_sessions", &self.max_sessions)
+            .field("policy", &self.policy)
             .field("sessions", &self.sessions.len())
             .field("retained_tokens", &self.tokens.len())
             .finish_non_exhaustive()
@@ -288,6 +292,7 @@ impl SessionRegistry {
     pub fn new<T: ResumeTokenSource + 'static>(
         ttl: DurationMs,
         max_sessions: usize,
+        policy: ConcurrentSessionPolicy,
         source: T,
     ) -> Result<Self, EngineError> {
         if ttl.0 == 0 {
@@ -305,6 +310,7 @@ impl SessionRegistry {
         Ok(Self {
             ttl,
             max_sessions,
+            policy,
             sessions: BTreeMap::new(),
             tokens: BTreeMap::new(),
             source: Box::new(source),
@@ -408,14 +414,13 @@ impl SessionRegistry {
 
     /// Create a connected session for authenticated claims.
     ///
-    /// A principal may have at most one connected session. Retained but
-    /// disconnected sessions for the same principal are discarded, so a fresh
-    /// login replaces an abandoned resume window.
+    /// The configured identity scope may have at most one retained session.
+    /// A retained resume window is never replaced by fresh authentication.
     ///
     /// # Errors
     ///
-    /// Returns [`ErrorCode::Conflict`] when the principal is already connected,
-    /// [`ErrorCode::CapacityExceeded`] when the table is full, and
+    /// Returns [`ErrorCode::Conflict`] when the configured identity scope
+    /// already has a connected or retained session, [`ErrorCode::CapacityExceeded`] when the table is full, and
     /// [`ErrorCode::Internal`] when the token source repeats a token.
     pub fn connect(
         &mut self,
@@ -427,28 +432,15 @@ impl SessionRegistry {
         claims.validate()?;
         let _ = self.sweep(now);
 
-        if self
-            .sessions
-            .values()
-            .any(|record| record.view.connected && record.view.principal == claims.principal)
-        {
+        if self.sessions.values().any(|record| match self.policy {
+            ConcurrentSessionPolicy::PerCharacter => record.view.principal == claims.principal,
+            ConcurrentSessionPolicy::PerAccount => record.view.account == claims.account,
+        }) {
             return Err(EngineError::new(
                 ErrorCode::Conflict,
-                "the character already has an active session",
+                "an identity covered by the session policy already has a retained session",
             )
-            .with_detail("principal", claims.principal.to_string()));
-        }
-
-        let stale: Vec<SessionId> = self
-            .sessions
-            .iter()
-            .filter(|(_, record)| {
-                !record.view.connected && record.view.principal == claims.principal
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in stale {
-            let _ = self.remove(&id);
+            .with_detail("policy", format!("{:?}", self.policy)));
         }
 
         if self.sessions.len() >= self.max_sessions {
@@ -679,7 +671,13 @@ mod tests {
     }
 
     fn registry() -> SessionRegistry {
-        SessionRegistry::new(DurationMs::new(1_000), 16, SequentialResumeTokens::new(7)).unwrap()
+        SessionRegistry::new(
+            DurationMs::new(1_000),
+            16,
+            ConcurrentSessionPolicy::PerCharacter,
+            SequentialResumeTokens::new(7),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -712,11 +710,39 @@ mod tests {
         let _ = registry
             .disconnect(&first.id, Tick(0), Millis::new(3))
             .unwrap();
-        // A fresh login replaces the retained window.
-        let (second, _) = registry
+        // A fresh login cannot replace a retained resume window.
+        let error = registry
             .connect(claims(1), entity(10), negotiated(), Millis::new(4))
+            .unwrap_err();
+        assert_eq!(error.code(), ErrorCode::Conflict);
+        assert!(registry.get(&first.id).is_some());
+    }
+
+    #[test]
+    fn account_policy_rejects_another_character_during_a_resume_window() {
+        let mut registry = SessionRegistry::new(
+            DurationMs::new(1_000),
+            16,
+            ConcurrentSessionPolicy::PerAccount,
+            SequentialResumeTokens::new(7),
+        )
+        .unwrap();
+        let account = AccountId::new("shared-account").unwrap();
+        let first = SessionClaims::new(account.clone(), character(1)).unwrap();
+        let second = SessionClaims::new(account, character(2)).unwrap();
+        let (session, _) = registry
+            .connect(first, entity(10), negotiated(), Millis::new(1))
             .unwrap();
-        assert_ne!(first.id, second.id);
+        registry
+            .disconnect(&session.id, Tick::ZERO, Millis::new(2))
+            .unwrap();
+        assert_eq!(
+            registry
+                .connect(second, entity(20), negotiated(), Millis::new(3))
+                .unwrap_err()
+                .code(),
+            ErrorCode::Conflict
+        );
     }
 
     #[test]

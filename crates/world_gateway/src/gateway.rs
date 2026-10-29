@@ -70,6 +70,21 @@ pub const UI_ACTION_KIND: &str = "ui.action";
 /// The authoritative panel state sent to a client.
 pub const UI_STATE_KIND: &str = "ui.state";
 
+/// Scope used to prevent simultaneous sessions for one authenticated identity.
+///
+/// Both policies include disconnected sessions that are still within their
+/// resume lifetime. This prevents a fresh login from silently invalidating a
+/// reconnect token owned by another client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConcurrentSessionPolicy {
+    /// A character may have one retained session; one account may play several
+    /// different characters concurrently.
+    PerCharacter,
+    /// An account may have one retained session regardless of character.
+    PerAccount,
+}
+
 /// Gateway tuning. All values are chosen by the server, never by a client.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GatewayConfig {
@@ -83,6 +98,8 @@ pub struct GatewayConfig {
     pub interest: InterestConfig,
     /// Maximum retained sessions, connected or disconnected.
     pub max_sessions: usize,
+    /// Identity scope used to reject duplicate retained sessions.
+    pub concurrent_session_policy: ConcurrentSessionPolicy,
 }
 
 impl Default for GatewayConfig {
@@ -93,6 +110,7 @@ impl Default for GatewayConfig {
             staff_view_radius_m: DEFAULT_VIEW_RADIUS_M,
             interest: InterestConfig::default(),
             max_sessions: 10_000,
+            concurrent_session_policy: ConcurrentSessionPolicy::PerCharacter,
         }
     }
 }
@@ -125,6 +143,13 @@ impl GatewayConfig {
     #[must_use]
     pub const fn with_max_sessions(mut self, max_sessions: usize) -> Self {
         self.max_sessions = max_sessions;
+        self
+    }
+
+    /// Set the server-owned duplicate-session policy.
+    #[must_use]
+    pub const fn with_concurrent_session_policy(mut self, policy: ConcurrentSessionPolicy) -> Self {
+        self.concurrent_session_policy = policy;
         self
     }
 
@@ -255,7 +280,12 @@ impl WorldGateway {
         tokens: T,
     ) -> Result<Self, EngineError> {
         config.validate()?;
-        let sessions = SessionRegistry::new(config.resume_ttl, config.max_sessions, tokens)?;
+        let sessions = SessionRegistry::new(
+            config.resume_ttl,
+            config.max_sessions,
+            config.concurrent_session_policy,
+            tokens,
+        )?;
         let interest = InterestManager::new(config.interest);
         let mut gateway = Self {
             zone,

@@ -11,8 +11,9 @@
 //! gateway session.
 
 use anyhow::{Result, bail};
+use backend_nakama::NakamaPostgresBackend;
 use engine_core::id::{IdKind, StableId};
-use game_api::AccountId;
+use game_api::{AccountId, ApiError, AuthService, CharacterId, SessionToken};
 use sha2::{Digest, Sha256};
 use world_gateway::SessionClaims;
 
@@ -58,6 +59,62 @@ pub trait IdentityBackend {
     ) -> Result<bool, IdentityError>;
 }
 
+/// Identity adapter for the selected Nakama/PostgreSQL production backend.
+///
+/// Nakama validates the bearer session while the Lynx PostgreSQL repository
+/// proves character ownership. Only sanitized [`IdentityError`] values cross
+/// this boundary, so neither a provider response nor a database error can be
+/// returned to a peer or put in an admission log.
+#[derive(Debug)]
+pub struct NakamaIdentityBackend {
+    backend: NakamaPostgresBackend,
+}
+
+impl NakamaIdentityBackend {
+    /// Wrap the production adapter used for authentication and ownership.
+    #[must_use]
+    pub const fn new(backend: NakamaPostgresBackend) -> Self {
+        Self { backend }
+    }
+}
+
+impl IdentityBackend for NakamaIdentityBackend {
+    fn validate_session(&self, credential: &str) -> Result<AccountId, IdentityError> {
+        let token =
+            SessionToken::new(credential.to_owned()).map_err(|_| IdentityError::InvalidSession)?;
+        self.backend
+            .account(&token)
+            .map(|account| account.id)
+            .map_err(identity_error)
+    }
+
+    fn owns_character(
+        &self,
+        account: &AccountId,
+        character: StableId,
+    ) -> Result<bool, IdentityError> {
+        let character =
+            CharacterId::new(character).map_err(|_| IdentityError::CharacterForbidden)?;
+        self.backend
+            .owns_active_character(account, character)
+            .map_err(identity_error)
+    }
+}
+
+fn identity_error(error: ApiError) -> IdentityError {
+    match error {
+        ApiError::Unauthenticated | ApiError::SessionExpired | ApiError::PermissionDenied => {
+            IdentityError::InvalidSession
+        }
+        ApiError::NotFound(_) | ApiError::InvalidRequest(_) => IdentityError::CharacterForbidden,
+        ApiError::Unavailable(_)
+        | ApiError::Transport(_)
+        | ApiError::Conflict(_)
+        | ApiError::RateLimited
+        | ApiError::Backend { .. } => IdentityError::Unavailable,
+    }
+}
+
 /// Authenticate and authorize a selection before creating a gateway session.
 ///
 /// The returned claims carry no staff authority. Refresh, ongoing revalidation,
@@ -67,7 +124,7 @@ pub trait IdentityBackend {
 ///
 /// Rejects invalid sessions, invalid or unowned characters, and backend failures.
 pub fn authenticate_selection(
-    backend: &impl IdentityBackend,
+    backend: &(impl IdentityBackend + ?Sized),
     credential: &str,
     character: StableId,
 ) -> Result<SessionClaims, IdentityError> {

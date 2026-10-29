@@ -8,9 +8,10 @@ detection, secrets, and security audit.
 versioned envelope; a `session.hello` handshake with a 10-second timeout; static
 hashed bearer tokens plus gateway-issued resume tokens; per-session interest
 filtering, resume windows, and session-scoped idempotency; health/readiness
-endpoints; frame, depth, and string bounds. There is no production identity
-integration, rate limiting, TLS, origin allowlist, durable session store, or
-moderation surface.
+endpoints; frame, depth, and string bounds; bounded admission, per-session and
+per-IP rate limits, and an optional exact-match Origin allowlist. There is no
+production identity integration, TLS, durable session store, or moderation
+surface.
 
 **Related design:** [networking](../networking.md), [security](../security.md),
 [operations](../operations.md),
@@ -23,7 +24,7 @@ moderation surface.
 ## NET-001 — Production authentication at the world edge
 
 - **Priority:** P0
-- **Status:** Blocked — live-zone character population boundary
+- **Status:** Done
 - **Depends on:** —
 - **References:** [networking §Transport](../networking.md#transport),
   [architecture §What is deliberately not here yet](../architecture.md#what-is-deliberately-not-here-yet),
@@ -51,44 +52,32 @@ characters the account may control.
 - Keep the gateway free of identity-provider types; pass trusted claims across
   the seam.
 
-**Implemented prerequisite:** `auth::IdentityBackend` and
-`authenticate_selection` define a provider-neutral, fail-closed selection seam.
-A trusted backend must validate the session (including expiry and revocation)
-and check authoritative ownership; only then are non-staff gateway claims
-returned. Errors are limited to stable, detail-free categories. Unit tests use
-a fake backend; this seam is not wired into admission and is not a production
-identity implementation. Static demo auth now requires loopback binding or the
-explicit `--dangerous-allow-non-loopback-demo-auth` development opt-in and logs
-startup warnings; proxies and tunnels can still expose a loopback listener.
-Provider integration, refresh/revalidation, audit, and lifetime/skew policy
-remain open. Backend implementations and callers must avoid logging credentials or backend details;
-the synchronous seam does not settle production I/O architecture.
-
-**Execution blocker:** ADR 0018 selects Nakama, and `PST-001` now implements
-account provisioning plus account-scoped character persistence and
-character-bound world-entry records. That entry service records the selected
-zone; it does not spawn or load an actor into the live authoritative zone.
-`lynx-world` admission still restores a world snapshot or builds the demo world,
-then spawns demo characters from static-token grants. Before wiring production
-admission, decide whether NET-001 is limited to owned characters already
-represented in the authoritative world, or should also include the separate
-world-population path for newly created characters. Never admit a character
-based only on a database row or substitute demo characters/in-memory ownership
-for production ownership.
+**Implementation:** `--auth-mode nakama` constructs the selected
+`NakamaPostgresBackend` behind `auth::IdentityBackend`. Fresh admissions validate
+the Nakama bearer session, parse exactly one `X-Lynx-Character` `chr_` selection,
+and resolve active ownership in the account-scoped PostgreSQL store before
+creating trusted non-staff gateway claims. Identity failures have stable redacted
+HTTP codes and foreign selections emit a structured admission audit record.
+Verification runs on Tokio's blocking pool, so provider and PostgreSQL I/O do
+not block socket tasks. Resume tokens remain local; their configured TTL bounds
+the upstream-revocation observation gap. The deliberate population policy is to
+admit only an already-present authoritative actor; persistent rows neither spawn
+actors nor fall back to demo characters. New-character loading and multi-zone
+routing remain separate backlog work.
 
 **Acceptance criteria**
 
-- [ ] An expired, revoked, malformed, or unknown session is rejected before a
+- [x] An expired, revoked, malformed, or unknown session is rejected before a
       gateway session is created.
-- [ ] Selecting a character owned by another account is rejected and audited.
-- [ ] The configured session policy rejects a duplicate character or account
+- [x] Selecting a character owned by another account is rejected and audited.
+- [x] The configured session policy rejects a duplicate character or account
       session as appropriate, including during resume windows, without
       disconnecting the existing session.
 - [x] Static-token mode cannot be enabled on a non-loopback listener without an
       explicit development flag.
-- [ ] An integration test with a fake identity backend covers login, expiry, and
+- [x] An integration test with a fake identity backend covers login, expiry, and
       ownership failure.
-- [ ] No token or credential appears in logs, errors, or debug output.
+- [x] No token or credential appears in logs, errors, or debug output.
 
 ---
 
@@ -404,7 +393,7 @@ behavior rather than only rejecting individual malformed messages.
 ## NET-012 — Connection admission and origin policy
 
 - **Priority:** P1
-- **Status:** In progress
+- **Status:** In progress — bounded TCP/HTTP and WebSocket admission; slow-read timeout remains
 - **Depends on:** —
 - **References:** [networking §Transport](../networking.md#transport),
   `crates/lynx_world/src/transport.rs`
@@ -427,19 +416,23 @@ enables an exact-match Origin allowlist; repeat the option for additional
 origins. Unlisted, malformed, and multiple Origin headers receive HTTP 403
 `origin_forbidden` before upgrade. Requests without Origin remain allowed for
 native clients; Origin is not authentication. With no options, origin checking
-is disabled. The service caps live/pending upgraded connections at 1,024 total
+is disabled. The TCP listener also caps accepted HTTP connections at 1,024
+before a request is parsed, so a slow-header flood receives listener-backlog
+backpressure instead of consuming unbounded file descriptors. The service caps
+live/pending upgraded connections at 1,024 total
 and 16 per peer IP, rejects admission once draining begins, bounds aggregate
 world-route headers at 16 KiB, closes idle connections after 120 seconds, and
 limits socket writes and authority-queue waits to five seconds. Rejections are
 exposed through bounded-cardinality metrics. Idle and slow-write behavior still
-lack deterministic end-to-end tests; an authority-queue timeout closes cleanly
-but does not emit a distinct metric.
+lack deterministic end-to-end tests; raw HTTP slow-read timeout remains open,
+and an authority-queue timeout closes cleanly but does not emit a distinct
+metric.
 
 **Acceptance criteria**
 
-- [ ] A connection flood cannot exhaust memory or file descriptors. Upgraded
-      connections, headers, and per-connection queues are bounded, but raw
-      accepted TCP/HTTP connections are not independently capped.
+- [x] A connection flood cannot exhaust memory or file descriptors: accepted
+      TCP/HTTP connections, upgraded connections, headers, and per-connection
+      queues are independently bounded.
 - [x] Browser clients from unlisted origins are rejected when origin policy is
       enabled.
 - [x] Draining stops new admissions; existing connections close on client

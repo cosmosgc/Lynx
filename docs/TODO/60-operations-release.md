@@ -47,11 +47,11 @@ invisible until players complain.
 - [ ] Missing metrics are documented as unsupported, not silently omitted.
 - [ ] Readiness and metrics can be scraped without opening the world port.
 
-Partial implementation: the admin listener exports tick execution time and
-overruns and failures, entities, attached and retained sessions, authority inputs and action
+Partial implementation: the admin listener exports tick execution time, scheduler
+deadline misses, overruns and failures, entities, attached and retained sessions, authority inputs and action
 requests/rejections, resume success/failure, outbound queue-full events, and
-bounded rate-limit rejections, snapshot write outcomes, and store write latency. The remaining metric families and limitations
-are listed in operations; scheduler deadline misses are not yet measured.
+bounded admission and rate-limit rejections, snapshot write outcomes, and store write latency. The remaining metric families and limitations
+are listed in operations.
 This task remains in progress until the full scope is verified.
 
 ---

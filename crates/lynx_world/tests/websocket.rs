@@ -7,15 +7,17 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use engine_core::id::{IdKind, StableId};
 use engine_core::time::Tick;
 use engine_net::envelope::{Envelope, MessageId, MessageKind};
 use engine_net::framing::{decode_frame, encode_frame};
 use futures_util::{SinkExt, StreamExt};
-use lynx_world::auth::{Authenticator, digest};
+use game_api::AccountId;
+use lynx_world::auth::{Authenticator, Grant, IdentityBackend, IdentityError, digest};
 use lynx_world::demo;
 use lynx_world::rate_limit::{RateLimitConfig, TokenBucketConfig};
 use lynx_world::service::{HELLO_KIND, Hello, Service, TOKEN_KIND};
-use lynx_world::transport::{self, AppState, OriginPolicy};
+use lynx_world::transport::{self, AppState, CHARACTER_HEADER, OriginPolicy};
 use serde_json::json;
 use tokio::sync::{oneshot, watch};
 use tokio_tungstenite::tungstenite::Message;
@@ -26,6 +28,32 @@ use world_gateway::{GatewayConfig, SystemResumeTokens, WorldGateway};
 use world_server::{DELTA_KIND, READY_KIND, SNAPSHOT_KIND, WorldServer};
 
 const TOKEN: &str = "websocket-integration-token";
+
+#[derive(Debug)]
+struct FakeIdentity {
+    account: AccountId,
+    owned: StableId,
+}
+
+impl IdentityBackend for FakeIdentity {
+    fn validate_session(&self, credential: &str) -> Result<AccountId, IdentityError> {
+        match credential {
+            "valid-session" => Ok(self.account.clone()),
+            "unavailable-session" => Err(IdentityError::Unavailable),
+            // This covers expired, revoked, malformed, and unknown upstream
+            // session values without exposing the provider distinction.
+            _ => Err(IdentityError::InvalidSession),
+        }
+    }
+
+    fn owns_character(
+        &self,
+        account: &AccountId,
+        character: StableId,
+    ) -> Result<bool, IdentityError> {
+        Ok(account == &self.account && character == self.owned)
+    }
+}
 
 #[tokio::test]
 async fn origin_allowlist_rejects_before_websocket_upgrade() {
@@ -233,6 +261,84 @@ async fn a_client_can_authenticate_play_and_receive_correlated_errors() {
     })
     .await
     .expect("the websocket integration test timed out");
+}
+
+#[tokio::test]
+async fn production_admission_verifies_identity_ownership_and_existing_actor() {
+    let account = AccountId::new("production-account").unwrap();
+    let owned = StableId::from_parts(IdKind::Character, 1, 41);
+    let foreign = StableId::from_parts(IdKind::Character, 1, 42);
+    let grants = vec![Grant {
+        account: account.clone(),
+        principal: owned,
+        staff: false,
+    }];
+    let gateway = WorldGateway::new(
+        demo::build_zone(&grants).unwrap(),
+        demo::handshake().unwrap(),
+        GatewayConfig::default(),
+        SystemResumeTokens::new(),
+    )
+    .unwrap();
+    let service = Service::new(WorldServer::new(gateway), Duration::from_millis(20));
+    let (events, receiver) = transport::event_channel();
+    let (shutdown, shutdown_rx) = watch::channel(false);
+    let state = Arc::new(AppState::with_identity_backend(
+        events,
+        Arc::new(FakeIdentity { account, owned }),
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let service_task = tokio::spawn(service.run(receiver, shutdown_rx));
+    let (server_shutdown, server_shutdown_rx) = oneshot::channel();
+    let server_task = tokio::spawn(transport::serve_with_shutdown(
+        listener,
+        state,
+        async move { let _ = server_shutdown_rx.await; },
+    ));
+
+    let request = |token: &str, character: Option<StableId>| {
+        let mut request = format!("ws://{address}/world").into_client_request().unwrap();
+        request.headers_mut().insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        if let Some(character) = character {
+            request.headers_mut().insert(
+                CHARACTER_HEADER,
+                HeaderValue::from_str(&character.to_string()).unwrap(),
+            );
+        }
+        request
+    };
+    for (token, character, status, code) in [
+        ("expired-session", Some(owned), 401, "invalid_session"),
+        ("valid-session", Some(foreign), 403, "character_forbidden"),
+        ("valid-session", None, 403, "character_forbidden"),
+        ("unavailable-session", Some(owned), 503, "identity_unavailable"),
+    ] {
+        let error = connect_async(request(token, character)).await.unwrap_err();
+        let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
+            panic!("production admission must reject before the upgrade");
+        };
+        assert_eq!(response.status(), status);
+        let body = response.body().as_deref().unwrap();
+        assert_eq!(body, format!(r#"{{"error":"{code}"}}"#).as_bytes());
+        assert!(!body.windows(token.len()).any(|value| value == token.as_bytes()));
+    }
+
+    let (mut socket, response) = connect_async(request("valid-session", Some(owned))).await.unwrap();
+    assert_eq!(response.status(), 101);
+    send_envelope(&mut socket, &envelope("hello", HELLO_KIND, serde_json::to_value(Hello {
+        handshake: demo::handshake().unwrap(),
+        last_ack_tick: Tick::ZERO,
+    }).unwrap())).await;
+    assert_eq!(next_envelope(&mut socket).await.kind.as_str(), READY_KIND);
+    drop(socket);
+    shutdown.send(true).unwrap();
+    server_shutdown.send(()).unwrap();
+    service_task.await.unwrap();
+    server_task.await.unwrap().unwrap();
 }
 
 #[tokio::test]

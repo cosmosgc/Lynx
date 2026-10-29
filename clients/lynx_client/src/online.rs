@@ -76,6 +76,12 @@ impl OnlineClient {
         &self.world
     }
 
+    /// Advance presentation-only correction smoothing. This never produces a
+    /// request or mutates the authoritative world view.
+    pub fn smooth_presentation(&mut self, fraction: f32) {
+        self.world.reconciliation_mut().smooth(fraction);
+    }
+
     pub fn disconnect(&mut self) {
         if let Some(mut client) = self.client.take() {
             client.close();
@@ -175,5 +181,13 @@ impl OnlineClient {
 pub(crate) fn poll_online(client: Option<ResMut<OnlineClient>>) {
     if let Some(mut client) = client {
         client.poll();
+    }
+}
+
+/// Keep smoothing bounded and independent from transport polling. A fixed
+/// fraction avoids a local frame clock becoming gameplay input.
+pub(crate) fn smooth_online(client: Option<ResMut<OnlineClient>>) {
+    if let Some(mut client) = client {
+        client.smooth_presentation(0.25);
     }
 }

@@ -268,7 +268,7 @@ fn connect(gateway: &mut WorldGateway, account: &str, principal: StableId) -> Co
 
 #[test]
 fn session_lifecycle_cancels_queued_movement() {
-    for lifecycle in ["close", "disconnect", "resume", "replace"] {
+    for lifecycle in ["close", "disconnect", "resume"] {
         let mut f = fixture();
         let alice = connect(&mut f.gateway, "alice", f.alice_principal);
         let bob = connect(&mut f.gateway, "bob", f.bob_principal);
@@ -292,7 +292,6 @@ fn session_lifecycle_cancels_queued_movement() {
                 Vec3::new(150.5, 0.0, 150.0),
             ))
             .unwrap();
-        let mut replacement = None;
         if lifecycle == "close" {
             f.gateway.close_session(&alice.session).unwrap();
         } else {
@@ -309,10 +308,6 @@ fn session_lifecycle_cancels_queued_movement() {
                         .queue_movement(alice_move.clone())
                         .is_err()
                 );
-            } else if lifecycle == "replace" {
-                let next = connect(&mut f.gateway, "alice", f.alice_principal);
-                assert_ne!(alice.session, next.session);
-                replacement = Some(next);
             }
         }
         let outcomes = f.gateway.zone_mut().advance_movement_tick(1000, 2.0).1;
@@ -323,20 +318,6 @@ fn session_lifecycle_cancels_queued_movement() {
             f.gateway.zone().entity(alice.actor).unwrap().position(),
             Vec3::new(10.0, 0.0, 10.0)
         );
-        if let Some(next) = replacement {
-            assert!(f.gateway.zone_mut().queue_movement(alice_move).is_err());
-            f.gateway
-                .zone_mut()
-                .queue_movement(movement(
-                    &next,
-                    f.alice_principal,
-                    Vec3::new(10.5, 0.0, 10.0),
-                ))
-                .unwrap();
-            // Closing the old, already replaced session must not cancel new work.
-            assert!(f.gateway.close_session(&alice.session).is_none());
-            assert!(f.gateway.zone_mut().advance_movement_tick(1000, 2.0).1[0].applied);
-        }
     }
 }
 
@@ -1541,7 +1522,7 @@ fn reconnect_resumes_then_expires_and_rotates_the_token() {
 }
 
 #[test]
-fn lost_rotated_token_requires_fresh_authentication_without_reenabling_replay() {
+fn a_retained_session_cannot_be_replaced_by_fresh_authentication() {
     let mut f = fixture();
     let first = connect(&mut f.gateway, "account-alice", f.alice_principal);
     let attack = action(
@@ -1594,33 +1575,28 @@ fn lost_rotated_token_requires_fresh_authentication_without_reenabling_replay() 
         ErrorCode::SessionExpired
     );
 
-    // A trusted fresh login replaces the detached session and revokes its token.
-    let fresh = f
+    // A fresh login cannot replace the detached session and revoke its token.
+    let error = f
         .gateway
         .connect(
             claims("account-alice", f.alice_principal),
             &handshake(),
             Millis::new(1_302),
         )
+        .unwrap_err();
+    assert_eq!(error.code(), ErrorCode::Conflict);
+    let reattached = f
+        .gateway
+        .resume(&resumed.token, &handshake(), Tick::ZERO, Millis::new(1_303))
         .unwrap();
-    assert_ne!(fresh.session, first.session);
-    assert!(!fresh.resumed);
-    assert_eq!(
-        f.gateway
-            .resume(&resumed.token, &handshake(), Tick::ZERO, Millis::new(1_303))
-            .unwrap_err()
-            .code(),
-        ErrorCode::SessionExpired
-    );
-    assert!(f.gateway.session(&first.session).is_none());
-    assert!(fresh.snapshot.interest.set.contains(&f.alice_actor));
+    assert_eq!(reattached.session, first.session);
+    assert!(reattached.snapshot.interest.set.contains(&f.alice_actor));
 
-    // Idempotency is session-scoped: blindly retrying an uncertain action after
-    // fresh authentication can apply it again, even with the same request ID.
+    // The old session's idempotency scope survives its resume window.
     assert!(
         result_of(
             &f.gateway
-                .handle(&fresh.session, &attack, Millis::new(1_304))
+                .handle(&reattached.session, &attack, Millis::new(1_304))
                 .unwrap()
         )
         .is_applied()
@@ -1633,7 +1609,7 @@ fn lost_rotated_token_requires_fresh_authentication_without_reenabling_replay() 
             .health
             .unwrap()
             .current,
-        98
+        99
     );
 }
 

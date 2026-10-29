@@ -52,8 +52,10 @@ convenience; it is not the reference path.
 
 ## Running the world service
 
-`lynx-world` accepts only SHA-256 hashes of high-entropy bearer tokens. Create a
-hash without writing the token to a file or shell history:
+`lynx-world` defaults to `--auth-mode demo`, which accepts only SHA-256 hashes
+of high-entropy bearer tokens. This is loopback development mode, not a
+production login. Create a hash without writing the token to a file or shell
+history:
 
 ```bash
 printf '%s' "$LYNX_DEMO_TOKEN" | cargo run -p lynx-world -- token-hash
@@ -74,13 +76,31 @@ flags:
 | `--resume-ttl-ms` | `30000` | reconnect window |
 | `--view-radius-m` | `60` | server-chosen interest radius |
 | `--max-sessions` | `1024` | connected plus retained sessions |
-| Concurrent-session policy | per character (current fixed behavior) | planned server setting: limit sessions per character or per account |
+| `--session-policy` | `per-character` | retained-session uniqueness: `per-character` or `per-account` |
+| `--auth-mode` | `demo` | `demo` static development tokens, or `nakama` production identity admission |
 | `--staff` | off | mark every demo grant as staff; enables calendar lifecycle commands (loopback development only) |
 | `--token-hash` | — | repeat once per demo character |
 | `--state-file <path>` | off | write durable world snapshots to this JSON file and load it at startup |
 | `--state-postgres` | off | store durable world snapshots in PostgreSQL instead; reads `LYNX_PG_HOST`, `LYNX_PG_PORT`, `LYNX_PG_DATABASE`, `LYNX_PG_USER`, `LYNX_PG_PASSWORD` (mutually exclusive with `--state-file`) |
 | `--fresh` | off | ignore any saved snapshot, rebuild the authored demo, and overwrite it at startup; requires `--state-file` or `--state-postgres` (development reset) |
 | `--snapshot-ms <ms>` | 10000 | how often the configured snapshot store is rewritten (must be at least the tick interval) |
+
+For production authentication, use `--auth-mode nakama`, set
+`LYNX_NAKAMA_URL` (and optional `LYNX_NAKAMA_HTTP_KEY`) plus the normal
+`LYNX_PG_*` variables, and provision a zone snapshot whose live actors already
+correspond to the characters allowed to enter it. The service opens separate
+PostgreSQL connections for the trusted identity mapping and character lookup.
+Clients send the Nakama bearer session in `Authorization` and exactly one
+`X-Lynx-Character: chr_…` request header. The header does not establish
+ownership; the service validates it against the account returned by Nakama.
+Do not use `--staff` in Nakama mode. The service refuses it because production
+staff roles are not part of this admission path.
+
+Nakama validation occurs on every fresh WebSocket admission. Resume tokens are
+local, single-use secrets and do not recontact Nakama; keep
+`--resume-ttl-ms` short (30 seconds by default) to bound the period in which an
+upstream revocation is not observed. A selected database character without one
+live actor is refused; world population is not performed by admission.
 
 At startup the service also publishes one open faction conflict over the demo
 zone. Player sessions may enroll through `calendar.command` and inspect the
@@ -178,6 +198,7 @@ fixed enums. The single demo zone is exported without a zone label.
 | `lynx_world_tick_failures_total` | ticks returning an authority error |
 | `lynx_world_tick_duration_seconds_total` | total time executing ticks, seconds |
 | `lynx_world_tick_overruns_total` | ticks whose execution exceeded the interval; not scheduler deadline misses |
+| `lynx_world_tick_deadline_misses_total` | scheduled ticks that began after their configured deadline; distinct from execution overruns |
 | `lynx_world_entities` | current demo-zone entities, refreshed on authority work |
 | `lynx_world_connections` | attached connections, refreshed on authority work |
 | `lynx_world_inputs_total` | envelopes delivered to authority, not action throughput |
@@ -186,6 +207,7 @@ fixed enums. The single demo zone is exported without a zone label.
 | `lynx_world_action_rejections_total{code}` | authority action rejection replies, including gameplay rejections, by fixed `ErrorCode`; excludes transport rate limits |
 | `lynx_world_resume_attempts_total{outcome}` | authority resume admissions, classified `success` or `failure`; excludes failures before authority admission |
 | `lynx_world_outbound_queue_full_total` | failed enqueues due to a full per-connection outbound queue |
+| `lynx_world_admission_rejections_total{reason}` | rejected WebSocket upgrades by bounded capacity/draining reason |
 | `lynx_world_snapshot_writes_total{outcome}` | configured snapshot store write attempts, including startup and shutdown, by `success` or `failure`; no-store calls are excluded |
 | `lynx_world_snapshot_write_duration_seconds` | histogram of time in configured store `save` calls, including successful and failed writes at startup, periodically, and at shutdown; excludes snapshot capture and no-store calls. Cumulative buckets: 0.001, 0.01, 0.1, 1, 10, +Inf seconds |
 | `lynx_world_rate_limit_rejections_total{class,code}` | rate-limit rejections by bounded class and error code |
@@ -198,7 +220,7 @@ Starting alert examples (tune against staging; not tested production rules):
 
 Unsupported requested families (do not interpret their absence as zero):
 
-- Scheduler deadline misses and tick duration distributions.
+- Tick duration distributions.
 - A separate count of disconnected reconnect windows and expiry sweeps.
 - Action rejections before authority delivery, action latency, and applied action counts (requests may be retries).
 - Replication bytes and queue depth, plus per-session delivery counts.

@@ -153,6 +153,9 @@ impl WorldState {
     pub fn reconciliation(&self) -> &Reconciliation {
         &self.reconciliation
     }
+    pub(crate) fn reconciliation_mut(&mut self) -> &mut Reconciliation {
+        &mut self.reconciliation
+    }
 
     pub(crate) fn is_pending_reply(&self, envelope: &Envelope) -> bool {
         self.pending

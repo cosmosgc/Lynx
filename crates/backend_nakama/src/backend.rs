@@ -64,6 +64,21 @@ impl NakamaPostgresBackend {
         let id = SystemIdGenerator::new().generate(IdKind::Item);
         CharacterCreationKey::new(format!("legacy-{id}"))
     }
+
+    /// Check whether a trusted, already-authenticated Lynx account owns an
+    /// active character. This is deliberately not exposed as a client API:
+    /// callers must obtain `account` from a validated Nakama session.
+    pub fn owns_active_character(
+        &self,
+        account: &game_api::AccountId,
+        character: CharacterId,
+    ) -> Result<bool, ApiError> {
+        match self.characters.select_character(account, character) {
+            Ok(_) => Ok(true),
+            Err(ApiError::NotFound(_) | ApiError::PermissionDenied) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
 }
 
 impl HealthService for NakamaPostgresBackend {

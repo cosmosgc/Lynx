@@ -68,7 +68,7 @@ fn present_online(
             OnlineEntity(public.entity),
         ));
     }
-    if let Some(position) = state.reconciliation().authoritative_position() {
+    if let Some(position) = state.reconciliation().presentation_position() {
         for mut camera in &mut cameras {
             let position = screen_position(position.x, position.z);
             camera.translation.x = position.x;

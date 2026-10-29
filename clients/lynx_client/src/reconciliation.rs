@@ -1,6 +1,7 @@
-//! Pure, single-in-flight movement prediction. This module does not send input
-//! or validate server movement rules; callers must route only messages from the
-//! current authenticated connection and correlate queue errors to requests.
+//! Pure, bounded movement prediction and presentation reconciliation. This
+//! module does not send input or validate server movement rules; callers must
+//! route only messages from the current authenticated connection and correlate
+//! queue errors to requests.
 
 /// A world-space position in metres.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -54,7 +55,9 @@ struct Pending {
 #[derive(Debug)]
 pub struct Reconciliation {
     max_distance: f32,
+    snap_distance: f32,
     authoritative: Option<Position>,
+    presentation: Option<Position>,
     tick: u64,
     last_issued: Option<u64>,
     pending: Option<Pending>,
@@ -67,7 +70,12 @@ impl Reconciliation {
         }
         Ok(Self {
             max_distance,
+            // A correction larger than the largest locally permitted endpoint
+            // is never interpolated. It is a discontinuity in the authoritative
+            // world (for example a teleport), not a client simulation result.
+            snap_distance: max_distance,
             authoritative: None,
+            presentation: None,
             tick: 0,
             last_issued: None,
             pending: None,
@@ -78,6 +86,7 @@ impl Reconciliation {
     /// is possible until a fresh session-private baseline is installed.
     pub fn disconnect(&mut self) {
         self.authoritative = None;
+        self.presentation = None;
         self.pending = None;
     }
 
@@ -99,6 +108,7 @@ impl Reconciliation {
             SessionDomain::New => last_consumed,
         };
         self.authoritative = Some(position);
+        self.presentation = Some(position);
         self.tick = tick;
         self.pending = None;
         Ok(())
@@ -112,6 +122,34 @@ impl Reconciliation {
     pub fn predicted_position(&self) -> Option<Position> {
         self.authoritative
             .map(|position| self.pending.map_or(position, |p| p.request.destination))
+    }
+
+    /// Position for rendering. It is deliberately separate from prediction and
+    /// authoritative state: smoothing can never change a movement request or a
+    /// collision decision.
+    pub fn presentation_position(&self) -> Option<Position> {
+        self.presentation
+    }
+
+    /// Move the visual position toward the latest prediction or correction.
+    /// `fraction` is caller-owned frame interpolation in the inclusive range
+    /// 0..=1; invalid values do not alter presentation state.
+    pub fn smooth(&mut self, fraction: f32) {
+        if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
+            return;
+        }
+        let Some(target) = self.predicted_position() else {
+            return;
+        };
+        let Some(current) = self.presentation else {
+            self.presentation = Some(target);
+            return;
+        };
+        self.presentation = Some(Position {
+            x: current.x + (target.x - current.x) * fraction,
+            y: current.y + (target.y - current.y) * fraction,
+            z: current.z + (target.z - current.z) * fraction,
+        });
     }
 
     /// Predict an absolute endpoint. The limit is a local visual bound, not a
@@ -143,6 +181,9 @@ impl Reconciliation {
             request,
             queued: false,
         });
+        // Predicting is presentation-only. The displayed endpoint can be
+        // immediate; a later private server result will correct it.
+        self.presentation = Some(destination);
         Ok(request)
     }
 
@@ -191,11 +232,37 @@ impl Reconciliation {
         if tick < self.tick {
             return Err(Error::StaleTick);
         }
+        let previous_prediction = self.predicted_position();
         self.authoritative = Some(position);
         self.tick = tick;
         self.pending = None;
+        let must_snap = previous_prediction
+            .is_none_or(|predicted| distance(predicted, position) > self.snap_distance);
+        if must_snap {
+            self.presentation = Some(position);
+        }
         Ok(())
     }
+
+    /// Reset prediction for a server-declared discontinuity. Teleport, death,
+    /// zone transfer, and a new session must call this with the fresh private
+    /// snapshot instead of replaying inputs from the old world.
+    pub fn reset(
+        &mut self,
+        position: Position,
+        tick: u64,
+        last_consumed: Option<u64>,
+        domain: SessionDomain,
+    ) -> Result<(), Error> {
+        self.baseline(position, tick, last_consumed, domain)
+    }
+}
+
+fn distance(a: Position, b: Position) -> f32 {
+    let dx = a.x - b.x;
+    let dy = a.y - b.y;
+    let dz = a.z - b.z;
+    (dx.mul_add(dx, dy.mul_add(dy, dz * dz))).sqrt()
 }
 
 #[cfg(test)]
@@ -288,5 +355,38 @@ mod tests {
         c.baseline(pos(0.4), 15, Some(r.sequence), SessionDomain::Resume)
             .unwrap();
         assert_eq!(c.predicted_position(), Some(pos(0.4)));
+    }
+
+    #[test]
+    fn latency_loss_and_forced_correction_are_bounded_and_recover() {
+        let mut c = client();
+        // A delayed queue acknowledgement leaves exactly one bounded local
+        // prediction; dropping it cannot manufacture additional movement.
+        let request = c.predict(pos(1.0)).unwrap();
+        for _ in 0..32 {
+            c.smooth(0.25);
+            assert_eq!(c.predicted_position(), Some(pos(1.0)));
+            assert_eq!(c.predict(pos(2.0)), Err(Error::InFlight));
+        }
+        c.queued(request.sequence).unwrap();
+        // A forced authoritative correction does not preserve a client outcome.
+        c.processed(request.sequence, 11, pos(0.25), false).unwrap();
+        c.smooth(0.5);
+        assert_eq!(c.authoritative_position(), Some(pos(0.25)));
+        assert!(c.presentation_position().unwrap().x > 0.25);
+        c.smooth(1.0);
+        assert_eq!(c.presentation_position(), Some(pos(0.25)));
+        assert_eq!(c.predict(pos(1.25)).unwrap().sequence, 2);
+    }
+
+    #[test]
+    fn discontinuities_reset_history_and_snap_presentation() {
+        let mut c = client();
+        let request = c.predict(pos(1.0)).unwrap();
+        c.queued(request.sequence).unwrap();
+        c.reset(pos(50.0), 20, None, SessionDomain::New).unwrap();
+        assert_eq!(c.authoritative_position(), Some(pos(50.0)));
+        assert_eq!(c.presentation_position(), Some(pos(50.0)));
+        assert_eq!(c.predict(pos(50.5)).unwrap().sequence, 1);
     }
 }

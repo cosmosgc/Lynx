@@ -9,9 +9,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use clap::Args;
+use clap::{Args, ValueEnum};
 use engine_core::time::DurationMs;
-use world_gateway::GatewayConfig;
+use world_gateway::{ConcurrentSessionPolicy, GatewayConfig};
 
 use crate::rate_limit::{RateLimitConfig, TokenBucketConfig};
 
@@ -25,6 +25,33 @@ pub const TOKEN_HASH_ENV: &str = "LYNX_WORLD_TOKEN_HASHES";
 /// Default interval between world snapshot writes, in milliseconds.
 pub const DEFAULT_SNAPSHOT_MS: u64 = 10_000;
 
+/// Authentication path selected for one world process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum AuthMode {
+    /// Hashed static tokens and demo actors. Development only.
+    Demo,
+    /// Nakama sessions plus PostgreSQL-owned character selection.
+    Nakama,
+}
+
+/// Scope used to prevent concurrent retained sessions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SessionPolicyArg {
+    /// Limit a character to one retained session.
+    PerCharacter,
+    /// Limit an account to one retained session across all characters.
+    PerAccount,
+}
+
+impl From<SessionPolicyArg> for ConcurrentSessionPolicy {
+    fn from(value: SessionPolicyArg) -> Self {
+        match value {
+            SessionPolicyArg::PerCharacter => Self::PerCharacter,
+            SessionPolicyArg::PerAccount => Self::PerAccount,
+        }
+    }
+}
+
 /// Arguments for `lynx-world serve`.
 #[derive(Debug, Clone, Args)]
 #[allow(clippy::struct_excessive_bools)] // CLI flags are independent process options.
@@ -36,6 +63,12 @@ pub struct ServeArgs {
     /// Trusted admin listener for health and metrics; unauthenticated.
     #[arg(long, default_value = "127.0.0.1:8091")]
     pub admin_bind: SocketAddr,
+
+    /// Authentication provider. Demo mode is loopback-only unless the
+    /// dangerous development opt-in is present; Nakama mode validates each
+    /// fresh bearer session and requires `X-Lynx-Character` on `/world`.
+    #[arg(long, value_enum, default_value_t = AuthMode::Demo)]
+    pub auth_mode: AuthMode,
 
     /// Allow static demo authentication on a non-loopback listener. Dangerous:
     /// this is for controlled development only, not production authentication.
@@ -57,6 +90,10 @@ pub struct ServeArgs {
     /// Maximum retained sessions, connected or disconnected.
     #[arg(long, default_value_t = 1_024)]
     pub max_sessions: usize,
+
+    /// Duplicate-session scope, including disconnected resume windows.
+    #[arg(long, value_enum, default_value_t = SessionPolicyArg::PerCharacter)]
+    pub session_policy: SessionPolicyArg,
 
     /// Authenticated total-message token-bucket burst capacity. Per-kind
     /// budgets remain bounded server defaults.
@@ -112,6 +149,12 @@ impl ServeArgs {
     ///
     /// Returns an error for a non-loopback bind without the dangerous opt-in.
     pub fn validate_demo_auth_bind(&self) -> Result<()> {
+        if self.auth_mode != AuthMode::Demo {
+            if self.staff {
+                bail!("--staff is available only with --auth-mode demo");
+            }
+            return Ok(());
+        }
         if !self.bind.ip().is_loopback() && !self.dangerous_allow_non_loopback_demo_auth {
             bail!(
                 "static demo authentication requires a loopback --bind; \
@@ -141,7 +184,8 @@ impl ServeArgs {
         let config = GatewayConfig::new(DurationMs::new(self.resume_ttl_ms))
             .with_view_radius(self.view_radius_m)
             .with_staff_view_radius(self.view_radius_m)
-            .with_max_sessions(self.max_sessions);
+            .with_max_sessions(self.max_sessions)
+            .with_concurrent_session_policy(self.session_policy.into());
         config.validate().context("invalid gateway configuration")?;
         Ok(config)
     }
@@ -215,6 +259,9 @@ impl ServeArgs {
     ///
     /// Returns an error for a malformed hash.
     pub fn token_hashes(&self) -> Result<Vec<[u8; 32]>> {
+        if self.auth_mode != AuthMode::Demo {
+            return Ok(Vec::new());
+        }
         let mut values = self.token_hashes.clone();
         if let Ok(environment) = std::env::var(TOKEN_HASH_ENV) {
             values.extend(
@@ -248,11 +295,13 @@ mod tests {
         ServeArgs {
             admin_bind: "127.0.0.1:8091".parse().unwrap(),
             bind: DEFAULT_BIND.parse().unwrap(),
+            auth_mode: AuthMode::Demo,
             dangerous_allow_non_loopback_demo_auth: false,
             tick_ms: 50,
             resume_ttl_ms: 30_000,
             view_radius_m: 60.0,
             max_sessions: 1_024,
+            session_policy: SessionPolicyArg::PerCharacter,
             message_burst: 100,
             message_rate: 100,
             allowed_origins: Vec::new(),
@@ -342,6 +391,10 @@ mod tests {
         assert_eq!(gateway.resume_ttl, DurationMs::new(30_000));
         assert_eq!(gateway.view_radius_m, 60.0);
         assert_eq!(gateway.max_sessions, 1_024);
+        assert_eq!(
+            gateway.concurrent_session_policy,
+            ConcurrentSessionPolicy::PerCharacter
+        );
         assert!(sample().rate_limit_config().is_ok());
     }
 
@@ -389,5 +442,20 @@ mod tests {
         if std::env::var(TOKEN_HASH_ENV).is_err() {
             assert!(value.token_hashes().is_err());
         }
+    }
+
+    #[test]
+    fn nakama_mode_does_not_require_demo_hashes_or_loopback() {
+        let mut args = sample();
+        args.auth_mode = AuthMode::Nakama;
+        args.bind = "0.0.0.0:8090".parse().unwrap();
+        args.token_hashes.clear();
+        args.session_policy = SessionPolicyArg::PerAccount;
+        assert!(args.validate_demo_auth_bind().is_ok());
+        assert!(args.token_hashes().unwrap().is_empty());
+        assert_eq!(
+            args.gateway_config().unwrap().concurrent_session_policy,
+            ConcurrentSessionPolicy::PerAccount
+        );
     }
 }

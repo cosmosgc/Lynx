@@ -1,32 +1,39 @@
 //! Axum/WebSocket transport for the world service.
 //!
-//! The HTTP layer owns exactly three things: static hashed-token admission,
-//! health endpoints, and moving length-prefixed envelopes between WebSocket
-//! connections. It never interprets gameplay intent.
+//! The HTTP layer owns admission, health endpoints, and moving length-prefixed
+//! envelopes between WebSocket connections. It never interprets gameplay
+//! intent.
 
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::io;
 use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use axum::Json;
+use axum::extract::connect_info::Connected;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use axum::serve::Listener;
 use axum::{Router, serve};
 use engine_core::error::{EngineError, ErrorCode};
+use engine_core::id::StableId;
 use engine_net::envelope::Envelope;
 use engine_net::framing::{FRAME_HEADER_BYTES, MAX_FRAME_BYTES, decode_frame, encode_frame};
 use engine_net::protocol::ErrorPayload;
 use serde_json::{Value, json};
-use tokio::sync::{mpsc, oneshot};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use world_gateway::{ERROR_KIND, ResumeToken};
 
-use crate::auth::Authenticator;
+use crate::auth::{Authenticator, IdentityBackend, IdentityError, authenticate_selection};
 use crate::rate_limit::{RateLimitConfig, RateLimits};
 use crate::service::{Admitted, Credential, HELLO_KIND, Hello, Metrics, ServerEvent, ServerFrame};
 
@@ -40,9 +47,16 @@ const OUTBOUND_QUEUE: usize = 64;
 const INBOUND_QUEUE: usize = 256;
 const MAX_CONNECTIONS: usize = 1024;
 const MAX_CONNECTIONS_PER_IP: usize = 16;
+/// Hard cap for accepted TCP/HTTP connections, including requests that never
+/// reach `/world`. The operating-system backlog applies backpressure once this
+/// cap is full, rather than letting a slow-header flood consume more descriptors.
+const MAX_ACCEPTED_CONNECTIONS: usize = 1_024;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const AUTHORITY_QUEUE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Required production selection header. It is a character identifier, not an
+/// authority grant: ownership is resolved from the authenticated session.
+pub const CHARACTER_HEADER: &str = "x-lynx-character";
 /// Maximum aggregate HTTP request header size accepted by the world route.
 pub const MAX_REQUEST_HEADER_BYTES: usize = 16 * 1024;
 
@@ -60,6 +74,85 @@ struct Capacity {
 struct Permit {
     capacity: Arc<Mutex<Capacity>>,
     ip: IpAddr,
+}
+
+/// A TCP listener which keeps an owned permit for the full HTTP connection.
+/// Route admission alone is too late: a peer can otherwise hold a descriptor
+/// while sending an incomplete HTTP request.
+struct ConnectionLimitedListener {
+    listener: tokio::net::TcpListener,
+    permits: Arc<Semaphore>,
+}
+
+struct LimitedStream {
+    stream: tokio::net::TcpStream,
+    _permit: OwnedSemaphorePermit,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PeerAddress(SocketAddr);
+
+impl AsyncRead for LimitedStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for LimitedStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
+}
+
+impl Listener for ConnectionLimitedListener {
+    type Io = LimitedStream;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        let permit = Arc::clone(&self.permits)
+            .acquire_owned()
+            .await
+            .expect("connection admission listener owns its semaphore");
+        let (stream, address) = loop {
+            match self.listener.accept().await {
+                Ok(connection) => break connection,
+                Err(error) => tracing::warn!(%error, "TCP connection accept failed"),
+            }
+        };
+        (
+            LimitedStream {
+                stream,
+                _permit: permit,
+            },
+            address,
+        )
+    }
+
+    fn local_addr(&self) -> io::Result<Self::Addr> {
+        self.listener.local_addr()
+    }
+}
+
+impl<'a> Connected<axum::serve::IncomingStream<'a, ConnectionLimitedListener>> for PeerAddress {
+    fn connect_info(stream: axum::serve::IncomingStream<'a, ConnectionLimitedListener>) -> Self {
+        Self(*stream.remote_addr())
+    }
 }
 
 impl Drop for Permit {
@@ -106,15 +199,37 @@ pub fn event_channel() -> (mpsc::Sender<ServerEvent>, mpsc::Receiver<ServerEvent
 }
 
 /// Shared state for every route.
-#[derive(Debug)]
 pub struct AppState {
     events: mpsc::Sender<ServerEvent>,
-    authenticator: Authenticator,
+    admission: AdmissionAuthenticator,
     ready: AtomicBool,
     origins: OriginPolicy,
     limits: RateLimits,
     metrics: Arc<Metrics>,
     capacity: Arc<Mutex<Capacity>>,
+}
+
+enum AdmissionAuthenticator {
+    Demo(Authenticator),
+    Identity(Arc<dyn IdentityBackend + Send + Sync>),
+}
+
+impl std::fmt::Debug for AdmissionAuthenticator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Demo(authenticator) => f.debug_tuple("Demo").field(authenticator).finish(),
+            Self::Identity(_) => f.write_str("Identity([REDACTED BACKEND])"),
+        }
+    }
+}
+
+impl std::fmt::Debug for AppState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppState")
+            .field("admission", &self.admission)
+            .field("ready", &self.ready.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
 }
 
 /// Optional exact-match browser Origin allowlist. Requests without Origin are
@@ -178,12 +293,38 @@ impl AppState {
     pub fn new(events: mpsc::Sender<ServerEvent>, authenticator: Authenticator) -> Self {
         Self {
             events,
-            authenticator,
+            admission: AdmissionAuthenticator::Demo(authenticator),
             ready: AtomicBool::new(true),
             origins: OriginPolicy::default(),
             limits: RateLimits::new(RateLimitConfig::default()),
             metrics: Arc::new(Metrics::default()),
             capacity: Arc::new(Mutex::new(Capacity::default())),
+        }
+    }
+
+    /// Create production admission state backed by trusted session and
+    /// ownership verification. The backend is never exposed to transport
+    /// clients and credential text is never retained in this state.
+    #[must_use]
+    pub fn with_identity_backend(
+        events: mpsc::Sender<ServerEvent>,
+        backend: Arc<dyn IdentityBackend + Send + Sync>,
+    ) -> Self {
+        Self {
+            events,
+            admission: AdmissionAuthenticator::Identity(backend),
+            ready: AtomicBool::new(true),
+            origins: OriginPolicy::default(),
+            limits: RateLimits::new(RateLimitConfig::default()),
+            metrics: Arc::new(Metrics::default()),
+            capacity: Arc::new(Mutex::new(Capacity::default())),
+        }
+    }
+
+    fn configured_demo_characters(&self) -> usize {
+        match &self.admission {
+            AdmissionAuthenticator::Demo(authenticator) => authenticator.grants().count(),
+            AdmissionAuthenticator::Identity(_) => 0,
         }
     }
 
@@ -254,8 +395,11 @@ pub async fn serve_with_shutdown(
 ) -> std::io::Result<()> {
     let shutdown_state = Arc::clone(&state);
     serve(
-        listener,
-        router(state).into_make_service_with_connect_info::<SocketAddr>(),
+        ConnectionLimitedListener {
+            listener,
+            permits: Arc::new(Semaphore::new(MAX_ACCEPTED_CONNECTIONS)),
+        },
+        router(state).into_make_service_with_connect_info::<PeerAddress>(),
     )
     .with_graceful_shutdown(async move {
         shutdown.await;
@@ -274,7 +418,7 @@ async fn readyz(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>)
             StatusCode::OK,
             Json(json!({
                 "status": "ready",
-                "characters": state.authenticator.grants().count(),
+                "characters": state.configured_demo_characters(),
             })),
         )
     } else {
@@ -292,11 +436,8 @@ async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         let capacity = state.capacity.lock().expect("capacity lock poisoned");
         let _ = writeln!(
             body,
-            "# TYPE lynx_world_connections gauge\nlynx_world_connections {}\n# TYPE lynx_world_admission_rejections_total counter\nlynx_world_admission_rejections_total{{reason=\"draining\"}} {}\nlynx_world_admission_rejections_total{{reason=\"total_capacity\"}} {}\nlynx_world_admission_rejections_total{{reason=\"ip_capacity\"}} {}",
-            capacity.total,
-            capacity.rejected_draining,
-            capacity.rejected_total,
-            capacity.rejected_ip
+            "# HELP lynx_world_admission_rejections_total World-upgrade admission rejections by bounded reason.\n# TYPE lynx_world_admission_rejections_total counter\nlynx_world_admission_rejections_total{{reason=\"draining\"}} {}\nlynx_world_admission_rejections_total{{reason=\"total_capacity\"}} {}\nlynx_world_admission_rejections_total{{reason=\"ip_capacity\"}} {}",
+            capacity.rejected_draining, capacity.rejected_total, capacity.rejected_ip
         );
     }
     body.push_str("# HELP lynx_world_rate_limit_rejections_total Rate limit rejections by bounded class and error code.\n# TYPE lynx_world_rate_limit_rejections_total counter\n");
@@ -319,7 +460,7 @@ async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
 async fn world(
     State(state): State<Arc<AppState>>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ConnectInfo(peer): ConnectInfo<PeerAddress>,
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
@@ -330,7 +471,7 @@ async fn world(
         )
             .into_response();
     }
-    let permit = match acquire(&state.capacity, peer.ip()) {
+    let permit = match acquire(&state.capacity, peer.0.ip()) {
         Ok(permit) => permit,
         Err(reason) => {
             return (
@@ -343,7 +484,7 @@ async fn world(
     if let Err(error) = state
         .limits
         .admission()
-        .handshake(peer.ip(), Instant::now())
+        .handshake(peer.0.ip(), Instant::now())
     {
         return admission_rejected(&error);
     }
@@ -359,32 +500,44 @@ async fn world(
         return match state
             .limits
             .admission()
-            .failed_auth(peer.ip(), Instant::now())
+            .failed_auth(peer.0.ip(), Instant::now())
         {
             Ok(()) => unauthorized(),
             Err(error) => admission_rejected(&error),
         };
     };
-    let credential = match state.authenticator.grant_for(presented) {
-        Some(grant) => Credential::Static(grant.clone()),
-        None => match ResumeToken::new(presented.to_owned()) {
-            Ok(token) => Credential::Resume(token),
-            Err(_) => {
-                return match state
-                    .limits
-                    .admission()
-                    .failed_auth(peer.ip(), Instant::now())
-                {
-                    Ok(()) => unauthorized(),
-                    Err(error) => admission_rejected(&error),
-                };
-            }
+    let credential = match &state.admission {
+        AdmissionAuthenticator::Demo(authenticator) => match authenticator.grant_for(presented) {
+            Some(grant) => Credential::Static(grant.clone()),
+            None => match ResumeToken::new(presented.to_owned()) {
+                Ok(token) => Credential::Resume(token),
+                Err(_) => return failed_auth(&state, peer.0.ip()),
+            },
         },
+        AdmissionAuthenticator::Identity(backend) => {
+            let character = match selected_character(&headers) {
+                Ok(character) => character,
+                Err(error) => return identity_rejected(&state, peer.0.ip(), error, None),
+            };
+            let credential = presented.to_owned();
+            let backend = Arc::clone(backend);
+            let verified = tokio::task::spawn_blocking(move || {
+                authenticate_selection(backend.as_ref(), &credential, character)
+            })
+            .await
+            .unwrap_or(Err(IdentityError::Unavailable));
+            match verified {
+                Ok(claims) => Credential::Identity(claims),
+                Err(error) => {
+                    return identity_rejected(&state, peer.0.ip(), error, Some(character));
+                }
+            }
+        }
     };
     if let Err(error) = state
         .limits
         .admission()
-        .connection_churn(peer.ip(), Instant::now())
+        .connection_churn(peer.0.ip(), Instant::now())
     {
         return admission_rejected(&error);
     }
@@ -440,6 +593,45 @@ fn unauthorized() -> Response {
         .into_response()
 }
 
+fn failed_auth(state: &AppState, ip: IpAddr) -> Response {
+    match state.limits.admission().failed_auth(ip, Instant::now()) {
+        Ok(()) => unauthorized(),
+        Err(error) => admission_rejected(&error),
+    }
+}
+
+fn identity_rejected(
+    state: &AppState,
+    ip: IpAddr,
+    error: IdentityError,
+    character: Option<StableId>,
+) -> Response {
+    if error == IdentityError::CharacterForbidden
+        && let Some(character) = character
+    {
+        // This structured record is the admission audit event. It deliberately
+        // excludes the bearer credential and the backend's failure details.
+        tracing::warn!(
+            event = "world_admission_denied",
+            reason = error.code(),
+            character = %character,
+            "world character selection denied"
+        );
+    }
+    if error != IdentityError::Unavailable {
+        let limited = failed_auth(state, ip);
+        if limited.status() == StatusCode::TOO_MANY_REQUESTS {
+            return limited;
+        }
+    }
+    let status = match error {
+        IdentityError::InvalidSession => StatusCode::UNAUTHORIZED,
+        IdentityError::CharacterForbidden => StatusCode::FORBIDDEN,
+        IdentityError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    (status, Json(json!({ "error": error.code() }))).into_response()
+}
+
 /// Extract a bearer token without accepting a malformed authorization header.
 fn bearer(headers: &HeaderMap) -> Option<&str> {
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
@@ -452,6 +644,23 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
         return None;
     }
     Some(token)
+}
+
+fn selected_character(headers: &HeaderMap) -> Result<StableId, IdentityError> {
+    let mut values = headers.get_all(CHARACTER_HEADER).iter();
+    let Some(value) = values.next() else {
+        return Err(IdentityError::CharacterForbidden);
+    };
+    if values.next().is_some() {
+        return Err(IdentityError::CharacterForbidden);
+    }
+    let value = value
+        .to_str()
+        .map_err(|_| IdentityError::CharacterForbidden)?;
+    let character = StableId::parse(value).map_err(|_| IdentityError::CharacterForbidden)?;
+    (character.kind() == engine_core::id::IdKind::Character)
+        .then_some(character)
+        .ok_or(IdentityError::CharacterForbidden)
 }
 
 async fn connection(mut socket: WebSocket, credential: Credential, state: Arc<AppState>) {
@@ -806,6 +1015,15 @@ mod tests {
             .unwrap();
         let text = std::str::from_utf8(&body).unwrap();
         assert!(text.ends_with('\n'));
+        assert_eq!(
+            text.matches("# TYPE lynx_world_connections gauge\n")
+                .count(),
+            1,
+            "a metric family must have one TYPE declaration"
+        );
+        assert!(text.contains(
+            "# HELP lynx_world_admission_rejections_total World-upgrade admission rejections by bounded reason.\n# TYPE lynx_world_admission_rejections_total counter\n"
+        ));
         for line in text.lines().filter(|line| !line.starts_with('#')) {
             let (name, value) = line.split_once(' ').unwrap();
             assert!(name.starts_with("lynx_world_"));

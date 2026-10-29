@@ -120,6 +120,36 @@ Every message is a JSON object:
 
 ## Admission, rate limits, and slow clients
 
+### World-edge identity admission
+
+`lynx-world serve --auth-mode nakama` validates `Authorization: Bearer` with
+Nakama and resolves the resulting trusted account against the Lynx PostgreSQL
+character store before the request upgrades. A fresh production admission must
+also carry exactly one `X-Lynx-Character: chr_…` header. That header selects a
+character; it grants no authority. The server checks current active ownership
+and constructs non-staff `SessionClaims` itself. Invalid, expired, revoked, or
+unknown sessions receive HTTP 401 `invalid_session`; missing, malformed, or
+foreign selections receive HTTP 403 `character_forbidden`; an identity-service
+failure receives HTTP 503 `identity_unavailable`. Responses, logs, and metrics
+never include the bearer credential or a backend failure detail. A denied valid
+character selection creates the structured `world_admission_denied` audit log
+event with only its stable reason and selected character ID.
+
+The production adapter validates Nakama on every **fresh** bearer admission;
+the client refreshes an expired Nakama credential through the normal Nakama
+session-refresh flow, then opens a fresh world connection. Gateway-issued
+resume tokens are independent, opaque, and rotate on use. A resume does not
+contact Nakama, so revocation or expiry is observed no later than the configured
+resume TTL (30 seconds by default) or the next fresh admission. No client clock
+or token claim supplies account, character, staff, or expiry authority.
+
+Production admission only connects a selected character that is already
+represented by exactly one live actor in the authoritative zone. A PostgreSQL
+row never creates an actor, and the demo loader is not used for production
+characters. A missing actor fails with the gateway's `not_found` result after
+the protocol hello and creates no gateway session. Character loading/spawning
+and multi-zone routing remain separate work.
+
 `lynx-world` applies bounded token buckets before work reaches the authority
 loop:
 
@@ -139,7 +169,10 @@ loop:
   protection. `/metrics` returns rejection counts by normalized family and
   stable error code.
 
-Before upgrade, the world route also limits pending/live connections to 1,024
+The TCP listener caps accepted HTTP connections at 1,024 before parsing a
+request; when full, the operating-system listener backlog applies backpressure
+instead of allocating another file descriptor for a slow-header peer. Before
+upgrade, the world route independently limits pending/live WebSockets to 1,024
 globally and 16 per peer IP, and rejects aggregate request headers larger than
 16 KiB with HTTP 431 (`request_headers_too_large`). These checks run before
 session admission. Capacity failures return HTTP 503 with `total_capacity` or
@@ -309,11 +342,12 @@ connection and the authoritative zone. It adds no socket and no runtime.
   staff flag) and the client handshake. The server issues the session ID and
   the resume token. The server's configured concurrent-session policy is
   either per character or per account; a duplicate under that policy returns
-  `Conflict` and does not replace the existing session. Per-character policy
+   `Conflict` and does not replace the existing session, including while the
+   existing session is detached within its resume window. Per-character policy
   allows separate clients to connect under one account using different
   characters; per-account policy allows only one active character session for
-  that account. The current gateway implementation enforces per-character
-  uniqueness; per-account enforcement is planned. An incompatible handshake
+   that account. `--session-policy per-character` is the default;
+   `--session-policy per-account` enables account-wide uniqueness. An incompatible handshake
   creates no session.
 - **Action bodies are intent only.** `action.request` accepts `verb`, optional
   `target`, optional `params`, and optional `client_tick`. Unknown fields —
@@ -422,10 +456,23 @@ See [ADR 0013](adr/0013-world-gateway-and-reconnect.md).
 - On a processing rejection, a client should correct from the supplied position;
   admission errors are structured protocol errors. No reward is ever granted
   from predicted state.
+- The reference client retains one in-flight endpoint because the server admits
+  one pending input per actor. That one-entry replay buffer is bounded under
+  latency or loss: a client must not retry an ambiguously delivered endpoint.
+  It keeps authoritative state separate from a presentation position. A private
+  result replaces authoritative state; visual error at or below the configured
+  prediction distance is interpolated toward that result, while a larger error
+  snaps immediately. This local threshold is not a server speed, collision, or
+  teleport rule.
+- Teleport, death, zone transfer, disconnect, and any new-session baseline
+  discard the pending endpoint and snap presentation to the new private
+  snapshot. A resumed session preserves the highest local/server sequence
+  watermark; a new control session begins a new sequence domain. Messages from
+  an older connection generation are discarded before reconciliation.
 - Remote entities interpolate; the client never extrapolates authoritative
   outcomes such as damage or loot.
-- Client replay buffers, smoothing, velocity, teleports and zone-transfer reset
-  policy are not yet implemented by this server foundation.
+- Velocity is not currently transmitted or used by the reference client. It
+  must remain server-derived if a future protocol version adds it.
 
 ## Reconnect and recovery
 
