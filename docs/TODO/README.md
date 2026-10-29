@@ -96,7 +96,7 @@ the quick audit; update it when a gap is found or closed.
 | PostgreSQL adapter is plain TCP, no TLS | [operations](../operations.md) | `PST-007`, `NET-003` |
 | Sessions and resume windows are process-local | [networking](../networking.md#reconnect-and-recovery) | `PST-006` |
 | Session and token abuse defenses, including revocation and attack alerting, remain incomplete | [networking backlog](30-networking-security.md#net-007--session-and-token-abuse-defenses) | `NET-007` |
-| No metrics endpoint or dashboards | [operations](../operations.md#metrics-and-logs) | `OPS-001`, `OPS-002` |
+| Partial `/metrics` endpoint exists; dashboard definitions and alerts remain missing | [operations](../operations.md#metrics-and-logs) | `OPS-001`, `OPS-002` |
 | No editor, inspector, link graph, or navigation authoring | [content authoring](../content-authoring.md) | `CNT-001`–`CNT-007` |
 | MCP server and external client are planned only | [AI tooling](../ai-tooling.md) | `CNT-009`, `CNT-010` |
 | User content has schemas/moderation requirements but no implementation | [security](../security.md#content-and-user-generated-content) | `CNT-008`, `NET-009` |

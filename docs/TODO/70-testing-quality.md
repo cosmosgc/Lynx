@@ -9,8 +9,9 @@ toolchain upgrades, and flaky-test control.
 fmt/Clippy/test gates, a generated-project CI check, and a PostgreSQL migration
 job. The Ubuntu Rust job configures the live PostgreSQL test and requires its
 configuration; local runs can skip it when unconfigured. CI run confirmation is
-still pending. There is no coverage report, fuzz target, load harness, or
-CI documentation link gate; a local Markdown link check is available.
+still pending. There is no coverage report, fuzz target, or load harness. A
+Markdown link checker and its tests run locally and in the configured CI
+workflow; hosted CI confirmation is still pending.
 
 **Related design:** [project guide §26 definition of done](../lightweight_mmorpg_engine_project_guide.md#26-definition-of-done),
 [security](../security.md), [testing conventions](../../README.md#design-rules).
