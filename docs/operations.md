@@ -191,6 +191,10 @@ scrape_configs:
 Exported metrics are process-local and reset on restart. No client-controlled
 strings or identities are labels. Rate-limit class and code labels come from
 fixed enums. The single demo zone is exported without a zone label.
+The endpoint uses Prometheus text format 0.0.4 on both listeners. Transport
+counter samples are encoded with `prometheus-client` from a scrape-time snapshot;
+the authority metrics retain their existing collector. Sample ordering is not
+part of the endpoint contract.
 
 | Metric | Meaning |
 |---|---|

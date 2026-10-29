@@ -85,7 +85,7 @@ impl IdentityBackend for NakamaIdentityBackend {
         self.backend
             .account(&token)
             .map(|account| account.id)
-            .map_err(identity_error)
+            .map_err(|error| identity_error(&error))
     }
 
     fn owns_character(
@@ -97,11 +97,11 @@ impl IdentityBackend for NakamaIdentityBackend {
             CharacterId::new(character).map_err(|_| IdentityError::CharacterForbidden)?;
         self.backend
             .owns_active_character(account, character)
-            .map_err(identity_error)
+            .map_err(|error| identity_error(&error))
     }
 }
 
-fn identity_error(error: ApiError) -> IdentityError {
+fn identity_error(error: &ApiError) -> IdentityError {
     match error {
         ApiError::Unauthenticated | ApiError::SessionExpired | ApiError::PermissionDenied => {
             IdentityError::InvalidSession

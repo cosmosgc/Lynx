@@ -56,7 +56,6 @@ recommendation, not a commitment; re-order when a dependency or risk changes.
 | 0 | [OPS-006](60-operations-release.md#ops-006--ci-matrix-and-live-integration-coverage) — CI integration coverage | The migration head check and live PostgreSQL test are configured; confirm them in CI and complete the remaining platform coverage. |
 | 1 | [CLT-004](40-bevy-client.md#clt-004--scene-camera-and-input-abstraction) — scene, camera, and input | The client workspace exists, but the scene is still an offline placeholder; the vertical slice needs an integrated client. |
 | 2 | [SIM-002](10-simulation-gameplay.md#sim-002--client-prediction-and-reconciliation-contract) — movement reconciliation | Server movement authority is done; client reconciliation still needs networking, rendering, and reset integration. |
-| 3 | [NET-001](30-networking-security.md#net-001--production-authentication-at-the-world-edge) — production auth | Blocked on the live-zone character population boundary; production admission and ownership validation remain important. |
 
 Chat wiring ([SIM-008](10-simulation-gameplay.md#sim-008--world-chat-and-presence))
 is the cheapest Phase 3 completion and can run in parallel.
@@ -89,7 +88,7 @@ the quick audit; update it when a gap is found or closed.
 | Client scene, input, and camera have an offline foundation and early online presentation; full integration is outstanding | [client backlog](40-bevy-client.md#clt-004--scene-camera-and-input-abstraction) | `CLT-004`–`CLT-014` |
 | World chat exists in `game_api` but is not routed by the gateway | [README](../../README.md#phase-3--interaction-and-mind-system--in-progress) | `SIM-008` |
 | Durable per-aggregate inventory and transfer ledger are not implemented | [persistence backlog](20-persistence-backend.md#pst-002--inventory-and-transfer-ledger-persistence) | `PST-002` |
-| Persistent account/character adapter is not wired into world admission; other Nakama services remain incomplete | [persistence backlog](20-persistence-backend.md#pst-001--account-and-character-persistence), [networking backlog](30-networking-security.md#net-001--production-authentication-at-the-world-edge) | `PST-010`, `NET-001` |
+| Production admission requires an already-live actor; authoritative character population and other Nakama services remain incomplete | [persistence backlog](20-persistence-backend.md#pst-001--account-and-character-persistence), [networking](../networking.md#world-edge-identity-admission) | `PST-010`, `SIM-014` |
 | `zone_leases` and `zone_events` exist but are unused | migrations 0003 | `PST-004`, `PST-005` |
 | Snapshot replay is not implemented; recovery target unproven | [architecture](../architecture.md#failure-and-recovery) | `PST-005` |
 | PostgreSQL adapter is plain TCP, no TLS | [operations](../operations.md) | `PST-007`, `NET-003` |

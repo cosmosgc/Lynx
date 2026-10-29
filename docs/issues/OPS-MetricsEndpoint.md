@@ -32,7 +32,7 @@ detection dashboards remain unavailable.
 ## Impact
 
 - Existing counters give only partial visibility into health, performance, and abuse.
-- Scheduler delays and several failure modes remain unmeasured; dashboards and tested alert rules are missing.
+- Several failure modes remain unmeasured; dashboards and tested alert rules are missing.
 - This remains a P1 operational risk for production use.
 
 ## Acceptance criteria

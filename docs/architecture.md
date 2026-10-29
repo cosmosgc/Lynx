@@ -209,9 +209,11 @@ format, validation rules, and formatting policy are specified in
   (`--state-postgres`). The file store remains available as an alternative; neither
   store persists sessions or resume tokens.
 - `backend_nakama` provides PostgreSQL-backed account mapping and character
-  services, including character-bound world-entry records. The world edge does
-  not yet use those services for production admission (NET-001). Inventory,
-  normalized faction/calendar persistence, and event replay remain backlog work.
+  services, including character-bound world-entry records. `lynx-world` uses
+  them for production session and ownership admission, but admits only actors
+  already present in the authoritative zone; character population remains a
+  separate concern. Inventory, normalized faction/calendar persistence, and
+  event replay remain backlog work.
 - The zone snapshot persists transfer receipts so retries stay idempotent across
   a restart. A general durable SQL idempotency ledger is not yet implemented.
 - Content definitions are versioned bundles; instances record the content

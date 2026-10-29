@@ -452,7 +452,7 @@ mod tests {
         args.token_hashes.clear();
         args.session_policy = SessionPolicyArg::PerAccount;
         assert!(args.validate_demo_auth_bind().is_ok());
-        assert!(args.token_hashes().unwrap().is_empty());
+        assert_eq!(args.token_hashes().unwrap(), Vec::<[u8; 32]>::new());
         assert_eq!(
             args.gateway_config().unwrap().concurrent_session_policy,
             ConcurrentSessionPolicy::PerAccount

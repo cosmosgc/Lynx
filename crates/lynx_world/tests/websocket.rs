@@ -294,11 +294,15 @@ async fn production_admission_verifies_identity_ownership_and_existing_actor() {
     let server_task = tokio::spawn(transport::serve_with_shutdown(
         listener,
         state,
-        async move { let _ = server_shutdown_rx.await; },
+        async move {
+            let _ = server_shutdown_rx.await;
+        },
     ));
 
     let request = |token: &str, character: Option<StableId>| {
-        let mut request = format!("ws://{address}/world").into_client_request().unwrap();
+        let mut request = format!("ws://{address}/world")
+            .into_client_request()
+            .unwrap();
         request.headers_mut().insert(
             header::AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
@@ -315,7 +319,12 @@ async fn production_admission_verifies_identity_ownership_and_existing_actor() {
         ("expired-session", Some(owned), 401, "invalid_session"),
         ("valid-session", Some(foreign), 403, "character_forbidden"),
         ("valid-session", None, 403, "character_forbidden"),
-        ("unavailable-session", Some(owned), 503, "identity_unavailable"),
+        (
+            "unavailable-session",
+            Some(owned),
+            503,
+            "identity_unavailable",
+        ),
     ] {
         let error = connect_async(request(token, character)).await.unwrap_err();
         let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
@@ -324,15 +333,30 @@ async fn production_admission_verifies_identity_ownership_and_existing_actor() {
         assert_eq!(response.status(), status);
         let body = response.body().as_deref().unwrap();
         assert_eq!(body, format!(r#"{{"error":"{code}"}}"#).as_bytes());
-        assert!(!body.windows(token.len()).any(|value| value == token.as_bytes()));
+        assert!(
+            !body
+                .windows(token.len())
+                .any(|value| value == token.as_bytes())
+        );
     }
 
-    let (mut socket, response) = connect_async(request("valid-session", Some(owned))).await.unwrap();
+    let (mut socket, response) = connect_async(request("valid-session", Some(owned)))
+        .await
+        .unwrap();
     assert_eq!(response.status(), 101);
-    send_envelope(&mut socket, &envelope("hello", HELLO_KIND, serde_json::to_value(Hello {
-        handshake: demo::handshake().unwrap(),
-        last_ack_tick: Tick::ZERO,
-    }).unwrap())).await;
+    send_envelope(
+        &mut socket,
+        &envelope(
+            "hello",
+            HELLO_KIND,
+            serde_json::to_value(Hello {
+                handshake: demo::handshake().unwrap(),
+                last_ack_tick: Tick::ZERO,
+            })
+            .unwrap(),
+        ),
+    )
+    .await;
     assert_eq!(next_envelope(&mut socket).await.kind.as_str(), READY_KIND);
     drop(socket);
     shutdown.send(true).unwrap();

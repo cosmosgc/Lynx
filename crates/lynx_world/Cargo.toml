@@ -21,6 +21,7 @@ engine_sim = { workspace = true }
 game_api = { workspace = true }
 getrandom = { workspace = true }
 postgres = { version = "0.19.14", features = ["with-serde_json-1"] }
+prometheus-client = "0.24"
 semver = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

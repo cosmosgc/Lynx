@@ -431,24 +431,18 @@ async fn readyz(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>)
 
 async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let mut body = state.metrics.render();
-    {
-        use std::fmt::Write;
+    let admission = {
         let capacity = state.capacity.lock().expect("capacity lock poisoned");
-        let _ = writeln!(
-            body,
-            "# HELP lynx_world_admission_rejections_total World-upgrade admission rejections by bounded reason.\n# TYPE lynx_world_admission_rejections_total counter\nlynx_world_admission_rejections_total{{reason=\"draining\"}} {}\nlynx_world_admission_rejections_total{{reason=\"total_capacity\"}} {}\nlynx_world_admission_rejections_total{{reason=\"ip_capacity\"}} {}",
-            capacity.rejected_draining, capacity.rejected_total, capacity.rejected_ip
-        );
-    }
-    body.push_str("# HELP lynx_world_rate_limit_rejections_total Rate limit rejections by bounded class and error code.\n# TYPE lynx_world_rate_limit_rejections_total counter\n");
-    for row in state.limits.metrics() {
-        use std::fmt::Write;
-        let _ = writeln!(
-            body,
-            "lynx_world_rate_limit_rejections_total{{class=\"{}\",code=\"{}\"}} {}",
-            row.kind, row.code, row.count
-        );
-    }
+        [
+            capacity.rejected_draining,
+            capacity.rejected_total,
+            capacity.rejected_ip,
+        ]
+    };
+    body.push_str(&encode_transport_metrics(
+        admission,
+        &state.limits.metrics(),
+    ));
     (
         [(
             header::CONTENT_TYPE,
@@ -456,6 +450,73 @@ async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         )],
         body,
     )
+}
+
+// Encode a scrape snapshot so the existing bounded counters remain the source
+// of truth. The client emits OpenMetrics counter metadata without `_total`;
+// Prometheus 0.0.4 associates metadata with the full sample name instead.
+fn encode_transport_metrics(
+    admission: [u64; 3],
+    rows: &[crate::rate_limit::RejectionMetric],
+) -> String {
+    use prometheus_client::encoding::EncodeLabelSet;
+    use prometheus_client::metrics::{counter::Counter, family::Family};
+    use prometheus_client::registry::Registry;
+
+    #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+    struct Reason {
+        reason: &'static str,
+    }
+    #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+    struct Rate {
+        class: &'static str,
+        code: &'static str,
+    }
+
+    let mut registry = Registry::default();
+    let admissions = Family::<Reason, Counter>::default();
+    for (reason, count) in ["draining", "total_capacity", "ip_capacity"]
+        .into_iter()
+        .zip(admission)
+    {
+        admissions.get_or_create(&Reason { reason }).inc_by(count);
+    }
+    registry.register(
+        "lynx_world_admission_rejections",
+        "World-upgrade admission rejections by bounded reason",
+        admissions,
+    );
+    let rates = Family::<Rate, Counter>::default();
+    for row in rows {
+        rates
+            .get_or_create(&Rate {
+                class: row.kind,
+                code: row.code,
+            })
+            .inc_by(row.count);
+    }
+    registry.register(
+        "lynx_world_rate_limit_rejections",
+        "Rate limit rejections by bounded class and error code",
+        rates,
+    );
+    let mut text = String::new();
+    prometheus_client::encoding::text::encode_registry(&mut text, &registry)
+        .expect("writing to a String cannot fail");
+    for name in [
+        "lynx_world_admission_rejections",
+        "lynx_world_rate_limit_rejections",
+    ] {
+        text = text.replace(&format!("# HELP {name} "), &format!("# HELP {name}_total "));
+        text = text.replace(
+            &format!("# TYPE {name} counter"),
+            &format!("# TYPE {name}_total counter"),
+        );
+    }
+    if rows.is_empty() {
+        text.push_str("# HELP lynx_world_rate_limit_rejections_total Rate limit rejections by bounded class and error code.\n# TYPE lynx_world_rate_limit_rejections_total counter\n");
+    }
+    text
 }
 
 async fn world(
@@ -996,6 +1057,70 @@ mod tests {
             }
         }
         task.abort();
+    }
+
+    #[test]
+    fn transport_encoding_preserves_samples_and_unique_metadata() {
+        use crate::rate_limit::RejectionMetric;
+        let rows = [RejectionMetric {
+            kind: "movement",
+            code: "rate_limited",
+            count: 7,
+        }];
+        let text = encode_transport_metrics([2, 3, 4], &rows);
+        for name in [
+            "lynx_world_admission_rejections_total",
+            "lynx_world_rate_limit_rejections_total",
+        ] {
+            assert_eq!(text.matches(&format!("# HELP {name} ")).count(), 1);
+            assert_eq!(text.matches(&format!("# TYPE {name} counter\n")).count(), 1);
+        }
+        assert!(text.contains("lynx_world_admission_rejections_total{reason=\"draining\"} 2\n"));
+        assert!(
+            text.contains("lynx_world_admission_rejections_total{reason=\"total_capacity\"} 3\n")
+        );
+        assert!(text.contains("lynx_world_admission_rejections_total{reason=\"ip_capacity\"} 4\n"));
+        assert!(text.contains(
+            "lynx_world_rate_limit_rejections_total{class=\"movement\",code=\"rate_limited\"} 7\n"
+        ));
+        assert!(!text.contains("# EOF"));
+    }
+
+    #[tokio::test]
+    async fn gameplay_and_admin_metrics_match_over_http() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (events, _receiver) = event_channel();
+        let state = Arc::new(AppState::new(
+            events,
+            Authenticator::new(&[crate::auth::digest("test-secret")]).unwrap(),
+        ));
+        let mut responses = Vec::new();
+        for app in [router(Arc::clone(&state)), admin_router(Arc::clone(&state))] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+            stream
+                .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).await.unwrap();
+            assert!(response.contains("200 OK"));
+            assert!(
+                response
+                    .to_ascii_lowercase()
+                    .contains("content-type: text/plain; version=0.0.4; charset=utf-8")
+            );
+            responses.push(response.split_once("\r\n\r\n").unwrap().1.to_owned());
+            task.abort();
+        }
+        let mut left: Vec<_> = responses[0].lines().collect();
+        let mut right: Vec<_> = responses[1].lines().collect();
+        left.sort_unstable();
+        right.sort_unstable();
+        assert_eq!(left, right);
+        assert!(responses[0].contains("# TYPE lynx_world_admission_rejections_total counter\n"));
     }
 
     #[tokio::test]
