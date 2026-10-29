@@ -378,6 +378,80 @@ def order_tasks(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return ordered
 
 
+def suggest_next_tasks(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """Choose an actionable next-task route by priority, continuity, and unlock value."""
+    if limit <= 0:
+        return []
+
+    by_id = {item["id"]: item for item in items}
+    source_order = {item["id"]: index for index, item in enumerate(items)}
+    priority_points = {"P0": 40, "P1": 30, "P2": 20, "P3": 10}
+    eligible_statuses = {"ready", "in_progress", "blocked"}
+    completed = {item["id"] for item in items if item["status"] == "done"}
+    selected: set[str] = set()
+    suggestions: list[dict[str, Any]] = []
+
+    def unlock_count(task: dict[str, Any], resolved: set[str]) -> int:
+        newly_unblocked = 0
+        for dependent_id in task["dependent_ids"]:
+            dependent = by_id[dependent_id]
+            if dependent["status"] not in eligible_statuses:
+                continue
+            if dependent["external_dependencies"]:
+                continue
+            if dependent["status"] == "blocked" and not dependent["dependency_ids"]:
+                continue
+            if set(dependent["dependency_ids"]).issubset(resolved | {task["id"]}):
+                newly_unblocked += 1
+        return newly_unblocked
+
+    while len(suggestions) < limit:
+        resolved = completed | selected
+        candidates = []
+        for task in items:
+            if task["id"] in resolved or task["status"] not in eligible_statuses:
+                continue
+            if task["external_dependencies"]:
+                continue
+            dependencies = task["dependency_ids"]
+            if task["status"] == "blocked" and not dependencies:
+                continue
+            if not set(dependencies).issubset(resolved):
+                continue
+
+            priority = priority_points.get(task["priority"], 0)
+            continuation = 10 if task["status"] == "in_progress" else 0
+            unlocks = unlock_count(task, resolved)
+            unlock_points = min(20, unlocks * 5)
+            score = priority + continuation + unlock_points
+            reasons = [f"{task['priority']} priority (+{priority})"]
+            if continuation:
+                reasons.append("continue in-progress work (+10)")
+            if unlocks:
+                reasons.append(f"unlocks {unlocks} dependent task(s) (+{unlock_points})")
+            candidates.append(
+                (
+                    -score,
+                    -priority,
+                    source_order[task["id"]],
+                    task,
+                    score,
+                    "; ".join(reasons),
+                )
+            )
+
+        if not candidates:
+            break
+        candidates.sort(key=lambda candidate: candidate[:3])
+        _, _, _, task, score, reason = candidates[0]
+        selected.add(task["id"])
+        suggestions.append(
+            {**task, "suggestion_score": score, "suggestion_reason": reason}
+        )
+
+    return suggestions
+
+
 def backlog_summary(items: list[dict[str, Any]]) -> dict[str, Any]:
     statuses = Counter(item["status"] for item in items)
     priorities = Counter(item["priority"] for item in items)
@@ -469,8 +543,9 @@ def create_app(
     def get_readme_path() -> Path:
         return source_todo_dir.resolve().parents[1] / "README.md"
 
-    def get_history() -> list[dict[str, Any]]:
-        items_by_id = {item["id"]: item for item in get_items()}
+    def get_history(items: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+        task_items = items if items is not None else get_items()
+        items_by_id = {item["id"]: item for item in task_items}
         with _state_connection(database_path) as connection:
             rows = connection.execute(
                 """
@@ -483,6 +558,7 @@ def create_app(
             changes = [dict(row) for row in rows]
         for change in changes:
             task = items_by_id.get(change["task_id"])
+            change["task_exists"] = task is not None
             change["title"] = task["title"] if task else "Task no longer in backlog"
             change["old_status_label"] = STATUS_LABELS.get(
                 change["old_status"], change["old_status"]
@@ -521,15 +597,36 @@ def create_app(
             items = order_tasks(get_items())
         except (OSError, sqlite3.Error, UnicodeError, ValueError) as error:
             return render_template("error.html", error=str(error)), 500
-        return render_template("task_order.html", items=items)
+        try:
+            suggestion_limit = int(request.args.get("next", "5"))
+        except ValueError:
+            abort(400)
+        if not 1 <= suggestion_limit <= 100:
+            abort(400)
+        return render_template(
+            "task_order.html",
+            items=items,
+            suggestions=suggest_next_tasks(items, suggestion_limit),
+            suggestion_limit=suggestion_limit,
+        )
 
     @app.get("/history")
     def history():
         try:
-            changes = get_history()
+            items = get_items()
+            changes = get_history(items)
         except (OSError, sqlite3.Error, UnicodeError, ValueError) as error:
             return render_template("error.html", error=str(error)), 500
-        return render_template("history.html", changes=changes)
+        selected_id = request.args.get("task", "").strip()
+        items_by_id = {item["id"]: item for item in items}
+        selected_task = items_by_id.get(selected_id) if selected_id else None
+        if selected_id and selected_task is None:
+            abort(404)
+        return render_template(
+            "history.html",
+            changes=changes,
+            selected_task=selected_task,
+        )
 
     @app.get("/api/items")
     def api_items():

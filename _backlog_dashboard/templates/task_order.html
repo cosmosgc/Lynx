@@ -16,6 +16,11 @@
     .layout { display:grid; grid-template-columns:minmax(0,1.1fr) minmax(380px,.9fr); gap:15px; align-items:start; margin-top:20px; }
     .panel { min-width:0; background:var(--panel); border:1px solid var(--line); border-radius:9px; padding:16px; }
     .filters,.actions { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; align-items:center; }
+    .suggestion-controls { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:12px 0; }
+    .suggestion-controls label { color:var(--muted); }
+    .suggestion-controls input { width:82px; }
+    .suggestions { padding-left:22px; }
+    .suggestions li { margin:8px 0; }
     input,select,button,textarea { color:var(--text); background:#11151b; border:1px solid var(--line); border-radius:7px; padding:9px 10px; font:inherit; }
     input[type=search] { flex:1; min-width:180px; }
     select,button { cursor:pointer; }
@@ -23,6 +28,7 @@
     button.primary { background:#17334b; border-color:#35618a; }
     .task-list { max-height:72vh; overflow:auto; }
     .task { display:grid; grid-template-columns:22px 1fr auto; gap:9px; align-items:start; border-top:1px solid var(--line); padding:10px 3px; }
+    .task[hidden] { display:none; }
     .task input { margin:4px 0 0; }
     .task-title strong { margin-right:5px; }
     .task-meta { color:var(--muted); font-size:12px; text-align:right; }
@@ -61,6 +67,31 @@
       <h2>Choose tasks</h2>
       <p class="section-note">Select one or more items. “Add prerequisites” includes every tracked dependency needed by your selection.</p>
       <p class="section-note">Status changes made in the backlog Markdown are recorded on the next dashboard refresh.</p>
+      <form class="suggestion-controls" method="get" action="/task-order">
+        <label for="suggest-count">Suggest next N tasks</label>
+        <input id="suggest-count" name="next" type="number" min="1" max="100" value="{{ suggestion_limit }}">
+        <button type="submit">Calculate suggestion</button>
+      </form>
+      <section class="detail-block" aria-labelledby="suggestion-heading">
+        <h3 id="suggestion-heading">Suggested next {{ suggestion_limit }} task(s)</h3>
+        <p class="section-note">Only Ready/In progress tasks and dependency-unblocked tasks are considered. Done, proposed, icebox, and tasks with external blockers are skipped.</p>
+        <p class="section-note">Score = priority (P0 40, P1 30, P2 20, P3 10) + 10 for continuing In progress work + 5 per newly unlocked dependent (cap 20). Ties prefer higher priority, then backlog order.</p>
+        {% if suggestions %}
+        <ol class="suggestions" id="suggestions">
+          {% for task in suggestions %}
+          <li data-suggestion-id="{{ task.id }}">
+            <strong>{{ task.id }}</strong> — {{ task.title }}
+            <span class="badge">{{ task.suggestion_score }} points</span>
+            <div class="section-note">{{ task.suggestion_reason }}</div>
+          </li>
+          {% endfor %}
+        </ol>
+        <button id="use-suggestion" type="button">Use suggestion</button>
+        {% else %}
+        <p class="muted" id="suggestion-empty">No actionable tasks match the current dependencies and statuses.</p>
+        <button id="use-suggestion" type="button" disabled>Use suggestion</button>
+        {% endif %}
+      </section>
       <div class="filters">
         <input id="search" type="search" placeholder="Search ID or title">
         <select id="category"><option value="">All categories</option></select>
@@ -121,6 +152,7 @@
 </main>
 <script>
   const tasks = {{ items|tojson }};
+  const suggestedIds = {{ suggestions|map(attribute='id')|list|tojson }};
   const byId = new Map(tasks.map(task => [task.id, task]));
   const selected = new Set();
   const rows = [...document.querySelectorAll(".task")];
@@ -270,6 +302,12 @@
         if (!selected.has(id)) { selected.add(id); pending.push(id); }
       });
     }
+    checkboxById.forEach((checkbox, id) => { checkbox.checked = selected.has(id); });
+    render();
+  });
+  document.getElementById("use-suggestion").addEventListener("click", () => {
+    selected.clear();
+    suggestedIds.forEach(id => selected.add(id));
     checkboxById.forEach((checkbox, id) => { checkbox.checked = selected.has(id); });
     render();
   });

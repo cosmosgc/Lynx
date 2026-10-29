@@ -9,6 +9,7 @@ from _backlog_dashboard.app import (
     load_backlog,
     load_phase_progress,
     order_tasks,
+    suggest_next_tasks,
 )
 
 
@@ -183,6 +184,41 @@ Phase 1  Engine skeleton             [██████████████
         self.assertNotIn(b"Change status for", response.data)
         self.assertIn(b"State change history", response.data)
 
+    def test_task_order_filter_hiding_overrides_task_grid_display(self):
+        response = self.make_app().test_client().get("/task-order")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b".task[hidden] { display:none; }", response.data)
+        self.assertIn(b"row.hidden = !visible", response.data)
+
+    def test_suggestions_use_priority_continuity_and_unblocked_dependents(self):
+        source = self.todo / "10-sample.md"
+        markdown = source.read_text(encoding="utf-8").replace(
+            "- **Depends on:** `D5`, —",
+            "- **Depends on:** —",
+        )
+        source.write_text(markdown, encoding="utf-8")
+        suggestions = suggest_next_tasks(order_tasks(load_backlog(self.todo)), 2)
+
+        self.assertEqual([task["id"] for task in suggestions], ["SIM-001", "SIM-002"])
+        self.assertEqual(suggestions[0]["suggestion_score"], 55)
+        self.assertIn("continue in-progress work (+10)", suggestions[0]["suggestion_reason"])
+        self.assertIn("unlocks 1 dependent task(s) (+5)", suggestions[0]["suggestion_reason"])
+        self.assertEqual(suggestions[1]["suggestion_score"], 30)
+
+    def test_task_order_renders_suggestion_and_rejects_invalid_count(self):
+        client = self.make_app().test_client()
+        response = client.get("/task-order?next=2")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Suggested next 2 task(s)", response.data)
+        self.assertIn(b"20 points", response.data)
+        self.assertIn(b"data-suggestion-id=\"SIM-003\"", response.data)
+        self.assertIn(b"Use suggestion", response.data)
+        self.assertEqual(client.get("/task-order?next=0").status_code, 400)
+        self.assertEqual(client.get("/task-order?next=101").status_code, 400)
+        self.assertEqual(client.get("/task-order?next=many").status_code, 400)
+
     def test_markdown_status_changes_are_observed_and_logged(self):
         client = self.make_app().test_client()
         initial = client.get("/api/items")
@@ -215,7 +251,31 @@ Phase 1  Engine skeleton             [██████████████
         history = reloaded.get("/history")
         self.assertEqual(history.status_code, 200)
         self.assertIn(b"Status changed from In progress to Done", history.data)
-        self.assertEqual(history.data.count(b"SIM-001"), 1)
+        self.assertEqual(history.data.count(b"<strong>SIM-001</strong>"), 1)
+
+    def test_history_task_link_renders_selected_task_details(self):
+        client = self.make_app().test_client()
+        client.get("/api/items")
+        source = self.todo / "10-sample.md"
+        markdown = source.read_text(encoding="utf-8").replace(
+            "- **Status:** In progress — basic slice",
+            "- **Status:** Done",
+        )
+        source.write_text(markdown, encoding="utf-8")
+        client.get("/api/items")
+
+        history = client.get("/history")
+        self.assertIn(b'href="/history?task=SIM-001#task-detail"', history.data)
+        detail = client.get("/history?task=SIM-001#task-detail")
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn(b"SIM-001 ", detail.data)
+        self.assertIn(b"A server-authoritative movement loop is required.", detail.data)
+        self.assertIn(b"Keep validation deterministic.", detail.data)
+        self.assertIn(b"Dependent tasks", detail.data)
+        self.assertIn(b"SIM-002", detail.data)
+        self.assertIn(b"Network coverage.", detail.data)
+        self.assertIn(b"docs/TODO/10-sample.md:3", detail.data)
+        self.assertEqual(client.get("/history?task=UNKNOWN-999").status_code, 404)
 
     def test_flask_app_does_not_expose_a_status_update_endpoint(self):
         client = self.make_app().test_client()

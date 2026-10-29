@@ -6,7 +6,10 @@ acceptance criteria, and direct dependency/dependent links.
 The `/dependencies` view renders the complete task graph with filters, status
 colors, zoom controls, and task details.
 The `/task-order` view gives a prerequisite-first route, multi-task selection,
-and an editable prompt builder with acceptance criteria and relevant files.
+and an editable prompt builder with acceptance criteria and relevant files. Its
+next-N suggestion ranks actionable tasks by priority, in-progress continuity,
+and the number of dependent tasks they unlock; unresolved external blockers are
+excluded.
 Prompt options control delegation/parallelism, status tracking, validation,
 blocker handling, and whether to create WIP, per-task, batch, or no commits.
 
@@ -34,6 +37,8 @@ When the dashboard next reads the backlog, it records status transitions in
 `_backlog_dashboard/.data/task-state.sqlite3` and shows their UTC timestamps in
 the state history. The first read establishes a baseline; changes made between
 dashboard reads are detected as a transition to the latest status.
+Task IDs in the history view open the parsed task details while keeping the
+history list available.
 
 Run the focused tests:
 
