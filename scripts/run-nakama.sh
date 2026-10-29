@@ -3,8 +3,8 @@
 #
 # The checked-in server/nakama/local.yml holds non-secret development settings.
 # This script renders a gitignored overlay in .lynx/ with the database address,
-# console credentials, server key, and log level from the environment, then
-# starts the pinned Nakama binary.
+# console, token-key, runtime-key, metrics, and log overrides from the
+# environment, then starts the pinned Nakama binary.
 #
 # The database address is built from LYNX_PG_* and must already exist; run
 # scripts/setup-postgres.sh and scripts/db-migrate.sh first.
@@ -73,10 +73,17 @@ validate_secret 'LYNX_NAKAMA_SERVER_KEY' "$server_key"
 validate_secret 'LYNX_NAKAMA_SESSION_ENCRYPTION_KEY' "$session_encryption_key"
 validate_secret 'LYNX_NAKAMA_REFRESH_ENCRYPTION_KEY' "$refresh_encryption_key"
 validate_secret 'LYNX_NAKAMA_RUNTIME_HTTP_KEY' "$runtime_http_key"
+effective_session_encryption_key="${session_encryption_key:-defaultencryptionkey}"
+effective_refresh_encryption_key="${refresh_encryption_key:-defaultrefreshencryptionkey}"
+[[ "$effective_session_encryption_key" != "$effective_refresh_encryption_key" ]] ||
+    lynx_die 'LYNX_NAKAMA_SESSION_ENCRYPTION_KEY and LYNX_NAKAMA_REFRESH_ENCRYPTION_KEY must differ'
 
 if [[ -n "$metrics_port" ]]; then
-    [[ "$metrics_port" =~ ^[0-9]{1,5}$ ]] && ((10#$metrics_port <= 65535)) ||
+    if [[ ! "$metrics_port" =~ ^[0-9]{1,5}$ ]]; then
         lynx_die 'LYNX_NAKAMA_METRICS_PORT must be an integer from 0 to 65535'
+    elif ((10#$metrics_port > 65535)); then
+        lynx_die 'LYNX_NAKAMA_METRICS_PORT must be an integer from 0 to 65535'
+    fi
 fi
 
 # Percent-encode credentials so '@', ':', '/', and '%' in a password cannot

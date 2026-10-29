@@ -6,8 +6,9 @@
 .DESCRIPTION
     The checked-in server/nakama/local.yml holds non-secret development
     settings. This script renders a gitignored overlay in .lynx/ with the
-    database address, console credentials, server key, and log level from the
-    environment, then starts the pinned Nakama binary.
+    database address plus optional console, token-key, runtime-key, metrics,
+    and log overrides from the environment, then starts the pinned Nakama
+    binary.
 
     The database address is built from LYNX_PG_* and must already exist; run
     scripts/setup-postgres.ps1 and scripts/db-migrate.ps1 first.
@@ -88,6 +89,12 @@ Assert-NakamaSecret 'LYNX_NAKAMA_SERVER_KEY' $serverKey
 Assert-NakamaSecret 'LYNX_NAKAMA_SESSION_ENCRYPTION_KEY' $sessionEncryptionKey
 Assert-NakamaSecret 'LYNX_NAKAMA_REFRESH_ENCRYPTION_KEY' $refreshEncryptionKey
 Assert-NakamaSecret 'LYNX_NAKAMA_RUNTIME_HTTP_KEY' $runtimeHttpKey
+
+$effectiveSessionEncryptionKey = if ($sessionEncryptionKey) { $sessionEncryptionKey } else { 'defaultencryptionkey' }
+$effectiveRefreshEncryptionKey = if ($refreshEncryptionKey) { $refreshEncryptionKey } else { 'defaultrefreshencryptionkey' }
+if ($effectiveSessionEncryptionKey -eq $effectiveRefreshEncryptionKey) {
+    throw 'LYNX_NAKAMA_SESSION_ENCRYPTION_KEY and LYNX_NAKAMA_REFRESH_ENCRYPTION_KEY must differ.'
+}
 
 if ($metricsPort) {
     [int]$parsedMetricsPort = 0

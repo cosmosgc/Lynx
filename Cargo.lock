@@ -3346,6 +3346,8 @@ dependencies = [
  "engine_core",
  "engine_net",
  "futures-util",
+ "game_api",
+ "getrandom 0.4.3",
  "lynx-world",
  "lynx_client_net",
  "semver",

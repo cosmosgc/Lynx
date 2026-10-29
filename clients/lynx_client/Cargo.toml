@@ -16,7 +16,9 @@ window = ["bevy/bevy_window", "bevy/bevy_winit", "bevy/x11", "bevy/2d_bevy_rende
 bevy = { workspace = true, features = ["std", "async_executor"] }
 engine_core.workspace = true
 engine_net.workspace = true
+game_api.workspace = true
 lynx_client_net = { path = "../lynx_client_net" }
+getrandom.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, optional = true }

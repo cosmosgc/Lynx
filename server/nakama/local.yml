@@ -1,8 +1,8 @@
 # Nakama 3.41 development configuration.
 #
 # This file contains no secrets. scripts/run-nakama.* supply the database
-# address, server key, console credentials, and log level from the
-# environment.
+# address and optional credential, token-key, runtime-key, metrics, and log
+# overrides from the environment.
 name: "lynx-local"
 
 data_dir: ".lynx/nakama"

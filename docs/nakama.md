@@ -14,7 +14,7 @@ does not own authoritative zones or durable world state.
 
 | Nakama capability | Lynx ownership and current status | Notes |
 |---|---|---|
-| Device, social, custom, and platform authentication; sessions and refresh tokens | **Partially integrated** | `backend_nakama` validates a fresh bearer session at the world edge. `lynx_client_net` provides a blocking device-login, refresh, and logout transport seam; UI, secure token/device persistence, and character selection remain pending. Static world tokens are development-only. |
+| Device, social, custom, and platform authentication; sessions and refresh tokens | **Partially integrated** | `backend_nakama` validates a fresh bearer session at the world edge. `lynx_client_net` provides device login, refresh, and logout transport; the client has a development-only `--login <character-id>` path. A login form, character-list UI, secure credential persistence, and refresh/logout UI remain pending. Static world tokens are development-only. |
 | Account metadata and user profiles | **Partially integrated** | The world edge reads the authenticated account identity. Profile management is not exposed by the Lynx client or `game_api` adapter. |
 | Friends, groups, chat, presence, status, notifications | **Planned, not integrated** | Nakama is the selected platform owner, but Lynx has no production adapter/client flow for these services yet. Do not use Nakama presence as authoritative zone presence. See [social and chat boundary](#social-and-chat-boundary). |
 | Matchmaking and relayed multiplayer | **Planned, not integrated** | The Rust world service owns sessions, interest, replication, and authority. Nakama matchmaking may later form groups before a world admission. |
@@ -27,8 +27,10 @@ does not own authoritative zones or durable world state.
 
 1. A client obtains a Nakama session through a supported Nakama authentication
    flow. `lynx_client_net::NakamaAuthClient` supports device acquisition,
-   refresh, and logout from a dedicated I/O task; it does not persist secrets
-   or provide UI.
+   refresh, and per-session logout. The current client invokes device login
+   before opening its window; it does not persist secrets or provide a login or
+   character-selection UI. Its client refuses remote plaintext HTTP and ambient
+   HTTP(S) proxies so bearer and Basic credentials are not redirected.
 2. For a fresh world admission, the client sends the Nakama bearer session in
    `Authorization` and exactly one selected Lynx character in
    `X-Lynx-Character`.
@@ -36,6 +38,14 @@ does not own authoritative zones or durable world state.
    the trusted account to Lynx PostgreSQL data, and verifies character ownership.
 4. The Rust gateway creates and controls the world session. Its local resume
    token is single-use, short-lived, and distinct from a Nakama session token.
+
+The current login command is a transport integration seam, not a complete
+first-time player flow. World admission requires a persisted Lynx character
+owned by the authenticated Nakama account and an actor for that character in
+the active world. The command creates a new ephemeral device identity but does
+not create or list characters, so new accounts cannot normally finish admission
+yet. Character provisioning and a stable, securely stored device identity are
+still required for a usable player login flow.
 
 See [networking](networking.md#world-edge-identity-admission) for admission and
 revocation semantics, and [operations](operations.md#running-the-world-service)

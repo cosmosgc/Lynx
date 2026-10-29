@@ -62,7 +62,31 @@ only. This browser and credential storage are planned features and are not
 implemented yet. The initial scope is user-added servers, history, and pins;
 public server discovery is not specified.
 
-## Development-only online demo
+## Development-only login and online demo
+
+For a fresh Nakama device login, provide `LYNX_NAKAMA_URL` (for local
+development, `http://127.0.0.1:7350`) and the public client server key in
+`LYNX_NAKAMA_SERVER_KEY`, then run `cargo run -p lynx_client -- --login <character-id>`.
+The client creates a random device ID for this launch, authenticates on a worker
+thread before opening the window, then sends the returned access token and
+selected character to the world gateway. Set `LYNX_WORLD_URL` for the gateway
+(defaults to `ws://127.0.0.1:8090/world`). Nakama HTTP permits plaintext only
+to loopback; remote Nakama and world endpoints require HTTPS/WSS. Keep the
+server key out of source control and use disposable development credentials.
+
+This initial seam has no login form or character-list API: choose a character
+ID already known to you. Because device IDs and session tokens are intentionally
+not persisted, each launch creates a new device account; the account cannot be
+recovered by this client after exit. There is no refresh/logout UI or OS secure
+credential-store integration. The world gateway additionally requires that the
+authenticated Nakama account already own a persisted Lynx character with a live
+world actor. This client cannot create/list characters, so a newly generated
+device account cannot normally complete world admission yet; character-service
+provisioning and a stable secure device identity are follow-up work. Startup
+authentication errors are coarse and printed without server response bodies or
+credentials.
+
+### Static-token demo
 
 Start the demo world server with a configured static token hash (see the server
 documentation), then set `LYNX_DEMO_TOKEN` in the client process environment to
@@ -106,11 +130,14 @@ bearer. Omit it for the static demo or a gateway resume token. The server checks
 ownership. HTTP 401, 403, 429 and 503 map to coarse authentication, character,
 rate-limit and unavailable failures, without retaining response details; 503
 does not distinguish capacity from identity failure. Neither field is included
-in `Config` debug output. This is an integration seam, not a login UI or identity
-client. No OS credential-store integration exists: remembering credentials is not
-available, and no plaintext substitute is used. The client does not yet acquire
-or refresh Nakama sessions, retain/rotate resume tokens, or implement logout
-revocation. Closing the transport detaches the session, which may remain resumable.
+in `Config` debug output. The explicit `--login` development mode below now
+acquires a Nakama device session, but the reusable transport API remains a seam
+rather than a login UI or account manager. The HTTP auth client supports refresh
+and per-session logout, but the application does not yet expose those operations
+in its UI. No OS credential-store integration exists: remembering credentials is
+unavailable, and no plaintext substitute is used. The application does not yet
+retain or rotate world resume tokens. Closing the transport detaches the session,
+which may remain resumable.
 
 The demo server's static bearer tokens are development authentication, not a
 production identity system. Use local `ws://` only on trusted networks; `wss://`

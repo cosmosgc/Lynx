@@ -224,6 +224,27 @@ interfaces and has no separate metrics bind-address setting: only enable it
 behind a host firewall, private network, or similarly restrictive network
 policy. Lynx currently does not proxy, scrape, or alert on these metrics.
 
+Run the read-only local smoke check from PowerShell after Nakama is already
+running:
+
+```powershell
+pwsh -NoProfile -File .\scripts\test-nakama.ps1
+```
+
+It runs the startup script's `-Check` preflight (which does not start Nakama or
+write the overlay), verifies configured security keys against the existing
+gitignored overlay without displaying their values, checks `GET /healthcheck`,
+and checks `GET /metrics` only when `LYNX_NAKAMA_METRICS_PORT` is nonzero. If
+the binary is installed outside `PATH`, pass its path explicitly, for example:
+
+```powershell
+pwsh -NoProfile -File .\scripts\test-nakama.ps1 -NakamaBin 'D:\Development\MMORPG\Nakama\nakama.exe'
+```
+
+The smoke check never starts, stops, or restarts Nakama. A metrics check after
+changing the port requires a separately authorized Nakama restart; the script
+only checks the currently running listener.
+
 ```yaml
 scrape_configs:
   - job_name: nakama
