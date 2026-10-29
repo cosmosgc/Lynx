@@ -4,10 +4,11 @@
 //! health endpoints, and moving length-prefixed envelopes between WebSocket
 //! connections. It never interprets gameplay intent.
 
+use std::collections::BTreeMap;
 use std::future::Future;
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::Json;
@@ -37,6 +38,63 @@ const OUTBOUND_QUEUE: usize = 64;
 
 /// Events queued from all transports before backpressure reaches sockets.
 const INBOUND_QUEUE: usize = 256;
+const MAX_CONNECTIONS: usize = 1024;
+const MAX_CONNECTIONS_PER_IP: usize = 16;
+const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Default)]
+struct Capacity {
+    draining: bool,
+    total: usize,
+    ips: BTreeMap<IpAddr, usize>,
+    rejected_draining: u64,
+    rejected_total: u64,
+    rejected_ip: u64,
+}
+
+#[derive(Debug)]
+struct Permit {
+    capacity: Arc<Mutex<Capacity>>,
+    ip: IpAddr,
+}
+
+impl Drop for Permit {
+    fn drop(&mut self) {
+        let mut capacity = self.capacity.lock().expect("capacity lock poisoned");
+        capacity.total -= 1;
+        let count = capacity.ips.get_mut(&self.ip).expect("permit IP exists");
+        *count -= 1;
+        if *count == 0 {
+            capacity.ips.remove(&self.ip);
+        }
+    }
+}
+
+fn acquire(capacity: &Arc<Mutex<Capacity>>, ip: IpAddr) -> Result<Permit, &'static str> {
+    let mut state = capacity.lock().expect("capacity lock poisoned");
+    let reason = if state.draining {
+        state.rejected_draining = state.rejected_draining.saturating_add(1);
+        Some("draining")
+    } else if state.total >= MAX_CONNECTIONS {
+        state.rejected_total = state.rejected_total.saturating_add(1);
+        Some("total_capacity")
+    } else if state.ips.get(&ip).copied().unwrap_or(0) >= MAX_CONNECTIONS_PER_IP {
+        state.rejected_ip = state.rejected_ip.saturating_add(1);
+        Some("ip_capacity")
+    } else {
+        None
+    };
+    if let Some(reason) = reason {
+        return Err(reason);
+    }
+    state.total += 1;
+    *state.ips.entry(ip).or_default() += 1;
+    Ok(Permit {
+        capacity: Arc::clone(capacity),
+        ip,
+    })
+}
 
 /// Create the channel connecting transports to the authority loop.
 #[must_use]
@@ -53,6 +111,7 @@ pub struct AppState {
     origins: OriginPolicy,
     limits: RateLimits,
     metrics: Arc<Metrics>,
+    capacity: Arc<Mutex<Capacity>>,
 }
 
 /// Optional exact-match browser Origin allowlist. Requests without Origin are
@@ -121,6 +180,7 @@ impl AppState {
             origins: OriginPolicy::default(),
             limits: RateLimits::new(RateLimitConfig::default()),
             metrics: Arc::new(Metrics::default()),
+            capacity: Arc::new(Mutex::new(Capacity::default())),
         }
     }
 
@@ -150,7 +210,12 @@ impl AppState {
 
     /// Mark readiness for load balancers and operators.
     pub fn set_ready(&self, ready: bool) {
-        self.ready.store(ready, Ordering::Relaxed);
+        let mut capacity = self.capacity.lock().expect("capacity lock poisoned");
+        if !ready {
+            capacity.draining = true;
+        }
+        self.ready
+            .store(ready && !capacity.draining, Ordering::Relaxed);
     }
 }
 
@@ -184,11 +249,15 @@ pub async fn serve_with_shutdown(
     state: Arc<AppState>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
+    let shutdown_state = Arc::clone(&state);
     serve(
         listener,
         router(state).into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown)
+    .with_graceful_shutdown(async move {
+        shutdown.await;
+        shutdown_state.set_ready(false);
+    })
     .await
 }
 
@@ -215,6 +284,18 @@ async fn readyz(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>)
 
 async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let mut body = state.metrics.render();
+    {
+        use std::fmt::Write;
+        let capacity = state.capacity.lock().expect("capacity lock poisoned");
+        let _ = writeln!(
+            body,
+            "# TYPE lynx_world_connections gauge\nlynx_world_connections {}\n# TYPE lynx_world_admission_rejections_total counter\nlynx_world_admission_rejections_total{{reason=\"draining\"}} {}\nlynx_world_admission_rejections_total{{reason=\"total_capacity\"}} {}\nlynx_world_admission_rejections_total{{reason=\"ip_capacity\"}} {}",
+            capacity.total,
+            capacity.rejected_draining,
+            capacity.rejected_total,
+            capacity.rejected_ip
+        );
+    }
     body.push_str("# HELP lynx_world_rate_limit_rejections_total Rate limit rejections by bounded class and error code.\n# TYPE lynx_world_rate_limit_rejections_total counter\n");
     for row in state.limits.metrics() {
         use std::fmt::Write;
@@ -239,6 +320,16 @@ async fn world(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
+    let permit = match acquire(&state.capacity, peer.ip()) {
+        Ok(permit) => permit,
+        Err(reason) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": reason})),
+            )
+                .into_response();
+        }
+    };
     if let Err(error) = state
         .limits
         .admission()
@@ -291,7 +382,10 @@ async fn world(
     upgrade
         .max_message_size(MAX_FRAME_BYTES + FRAME_HEADER_BYTES)
         .max_frame_size(MAX_FRAME_BYTES + FRAME_HEADER_BYTES)
-        .on_upgrade(move |socket| connection(socket, credential, state))
+        .on_upgrade(move |socket| async move {
+            let _permit = permit;
+            connection(socket, credential, state).await;
+        })
 }
 
 fn admission_rejected(error: &EngineError) -> Response {
@@ -433,9 +527,13 @@ async fn pump(
     session: &engine_net::replication::SessionId,
     out_rx: &mut mpsc::Receiver<ServerFrame>,
 ) -> End {
+    let idle = tokio::time::sleep(IDLE_TIMEOUT);
+    tokio::pin!(idle);
     loop {
         tokio::select! {
+            () = &mut idle => return End::Clean,
             incoming = socket.recv() => {
+                idle.as_mut().reset(tokio::time::Instant::now() + IDLE_TIMEOUT);
                 match incoming {
                     Some(Ok(Message::Binary(bytes))) => {
                         match decode_frame(&bytes) {
@@ -495,7 +593,7 @@ async fn pump(
                         }
                     }
                     Some(ServerFrame::Close) | None => {
-                        let _ = socket.send(Message::Close(None)).await;
+                        let _ = tokio::time::timeout(WRITE_TIMEOUT, socket.send(Message::Close(None))).await;
                         return End::Clean;
                     }
                 }
@@ -562,14 +660,14 @@ async fn reject(socket: &mut WebSocket, error: &EngineError) {
     if let Ok(envelope) = error_envelope(error) {
         let _ = send_envelope(socket, &envelope).await;
     }
-    let _ = socket.send(Message::Close(None)).await;
+    let _ = tokio::time::timeout(WRITE_TIMEOUT, socket.send(Message::Close(None))).await;
 }
 
 async fn send_envelope(socket: &mut WebSocket, envelope: &Envelope) -> Result<(), ()> {
     let frame = encode_frame(envelope).map_err(|_| ())?;
-    socket
-        .send(Message::Binary(frame.into()))
+    tokio::time::timeout(WRITE_TIMEOUT, socket.send(Message::Binary(frame.into())))
         .await
+        .map_err(|_| ())?
         .map_err(|_| ())
 }
 
@@ -588,6 +686,56 @@ fn error_envelope(error: &EngineError) -> Result<Envelope, EngineError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capacity_is_bounded_released_and_draining_is_sticky() {
+        let capacity = Arc::new(Mutex::new(Capacity::default()));
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        let mut permits = Vec::new();
+        for _ in 0..MAX_CONNECTIONS_PER_IP {
+            permits.push(acquire(&capacity, ip).unwrap());
+        }
+        assert_eq!(acquire(&capacity, ip).unwrap_err(), "ip_capacity");
+        drop(permits.pop());
+        permits.push(acquire(&capacity, ip).unwrap());
+        drop(permits);
+        assert_eq!(capacity.lock().unwrap().total, 0);
+        assert!(capacity.lock().unwrap().ips.is_empty());
+        let (events, _) = event_channel();
+        let state = AppState::new(
+            events,
+            Authenticator::new(&[crate::auth::digest("test")]).unwrap(),
+        );
+        state.set_ready(false);
+        state.set_ready(true);
+        assert_eq!(acquire(&state.capacity, ip).unwrap_err(), "draining");
+        assert!(!state.ready.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn total_capacity_is_independent_of_per_ip() {
+        let capacity = Arc::new(Mutex::new(Capacity::default()));
+        let permits: Vec<_> = (0..MAX_CONNECTIONS)
+            .map(|n| {
+                acquire(
+                    &capacity,
+                    IpAddr::from([
+                        10,
+                        0,
+                        u8::try_from(n / 256).unwrap(),
+                        u8::try_from(n % 256).unwrap(),
+                    ]),
+                )
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            acquire(&capacity, "192.0.2.1".parse().unwrap()).unwrap_err(),
+            "total_capacity"
+        );
+        drop(permits);
+        assert_eq!(capacity.lock().unwrap().total, 0);
+    }
 
     #[tokio::test]
     async fn admin_listener_scrapes_without_gameplay_route() {
