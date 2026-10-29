@@ -1,0 +1,85 @@
+name: Release artifacts
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: Package ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-24.04
+            archive: lynx-world-linux-x86_64.tar.gz
+          - name: windows-x86_64
+            os: windows-latest
+            archive: lynx-world-windows-x86_64.zip
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+      - name: Verify tag matches the package version
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          test "$tag" = "$version"
+      - name: Build server
+        run: cargo build --release -p lynx-world
+      - name: Assemble archive (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          stage="lynx-world-${GITHUB_REF_NAME}-linux-x86_64"
+          mkdir "$stage"
+          cp target/release/lynx-world "$stage/"
+          cat > "$stage/BUILD-INFO.txt" <<EOF
+          release_tag=${GITHUB_REF_NAME}
+          engine_version=${GITHUB_REF_NAME#v}
+          protocol_version=$(sed -n 's/^pub const PROTOCOL_VERSION: &str = "\(.*\)";$/\1/p' crates/engine_net/src/protocol.rs)
+          content_version=not-bundled
+          EOF
+          cp docs/operations.md "$stage/OPERATIONS.md"
+          tar -czf "${{ matrix.archive }}" "$stage"
+          sha256sum "${{ matrix.archive }}" > "${{ matrix.archive }}.sha256"
+      - name: Assemble archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $stage = "lynx-world-$env:GITHUB_REF_NAME-windows-x86_64"
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item target/release/lynx-world.exe "$stage/"
+          @"
+          release_tag=$env:GITHUB_REF_NAME
+          engine_version=$($env:GITHUB_REF_NAME.TrimStart('v'))
+          protocol_version=$((Select-String -Path crates/engine_net/src/protocol.rs -Pattern 'PROTOCOL_VERSION').Line -replace '.*"(.*)".*', '$1')
+          content_version=not-bundled
+          "@ | Set-Content "$stage/BUILD-INFO.txt" -NoNewline
+          Copy-Item docs/operations.md "$stage/OPERATIONS.md"
+          Compress-Archive -Path $stage -DestinationPath "${{ matrix.archive }}"
+          (Get-FileHash "${{ matrix.archive }}" -Algorithm SHA256).Hash.ToLower() + "  ${{ matrix.archive }}" | Set-Content "${{ matrix.archive }}.sha256" -NoNewline
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            ${{ matrix.archive }}
+            ${{ matrix.archive }}.sha256
+  publish:
+    needs: package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - name: Publish checked artifacts and generated release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" release/* --generate-notes --verify-tag

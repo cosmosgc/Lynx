@@ -133,7 +133,7 @@ This task remains in progress until the full scope is verified.
 ## OPS-005 — Release artifacts and packaging
 
 - **Priority:** P2
-- **Status:** In progress — hosted Linux, Windows, PostgreSQL, and Markdown gates confirmed; smoke, macOS, and timing work remain
+- **Status:** In progress — tagged Linux/Windows artifact workflow and operator lifecycle documented; hosted release verification, client packages, and macOS remain
 - **Depends on:** —
 - **References:** [platforms](../platforms.md), `CLT-012`
 
@@ -152,6 +152,12 @@ This task remains in progress until the full scope is verified.
 - [ ] The build stamp matches the source tag and content version.
 - [ ] A clean machine can install, run, upgrade, and uninstall.
 - [ ] Release notes list breaking changes and migrations.
+
+**Implementation:** `.github/workflows/release.yml` builds version-matched,
+tagged Linux and Windows server archives, emits a checksum and build stamp, and
+publishes them with GitHub-generated notes. `docs/release.md` documents checksum
+verification, install, upgrade, rollback, and removal. The workflow must run on
+a real tag before these acceptance criteria can be checked.
 
 ---
 
