@@ -7,7 +7,16 @@ fn main() {
         replay::{ReplayFixture, ReplayInput},
         windowed::{OfflineWindowPlugin, OnlineWindowPlugin},
     };
+    use std::ffi::OsStr;
 
+    if std::env::args_os().nth(1).as_deref() == Some(OsStr::new("--logout")) {
+        if std::env::args_os().nth(2).is_some() {
+            eprintln!("Usage: lynx_client --logout");
+            std::process::exit(2);
+        }
+        logout_device();
+        return;
+    }
     let mut args = std::env::args_os().skip(1);
     let mode = match (args.next(), args.next(), args.next()) {
         (None, None, None) => (None, None),
@@ -16,7 +25,7 @@ fn main() {
         (Some(mode), Some(path), None) if mode == "--replay" => (None, Some(path)),
         _ => {
             eprintln!(
-                "Usage: lynx_client [--demo-online | --login <character-id> | --replay <fixture.json>]"
+                "Usage: lynx_client [--demo-online | --login <character-id> | --logout | --replay <fixture.json>]"
             );
             std::process::exit(2);
         }
@@ -81,9 +90,54 @@ fn main() {
 }
 
 #[cfg(feature = "window")]
-fn authenticate_device(character: &str) -> (String, Option<String>) {
-    use game_api::DeviceLogin;
+fn logout_device() {
+    use lynx_client::nakama_credentials::{
+        NakamaLoginError, NakamaLogoutOutcome, OsNakamaCredentialStore, logout_saved_account,
+    };
     use lynx_client_net::{NakamaAuthClient, NakamaAuthConfig};
+
+    let required = |key: &str| {
+        std::env::var(key).unwrap_or_else(|_| {
+            eprintln!("Missing required environment setting {key}.");
+            std::process::exit(2);
+        })
+    };
+    let base_url = required("LYNX_NAKAMA_URL");
+    let server_key = required("LYNX_NAKAMA_SERVER_KEY");
+    let credential_server_url = base_url.clone();
+    let result = std::thread::spawn(move || {
+        let auth = NakamaAuthClient::new(NakamaAuthConfig::new(base_url, server_key))
+            .map_err(NakamaLoginError::Authentication)?;
+        logout_saved_account(&auth, &credential_server_url, &OsNakamaCredentialStore)
+    })
+    .join();
+    match result {
+        Ok(Ok(NakamaLogoutOutcome::NoSavedCredentials)) => {
+            println!("No Nakama credentials are saved for this server.");
+        }
+        Ok(Ok(NakamaLogoutOutcome::Revoked)) => {
+            println!("Nakama session revoked and credentials removed.");
+        }
+        Ok(Ok(NakamaLogoutOutcome::ExpiredCredentialsCleared)) => {
+            println!("Expired Nakama credentials removed; no active session remained.");
+        }
+        Ok(Err(error)) => {
+            eprintln!(
+                "Nakama logout failed ({error:?}); saved credentials were retained when possible."
+            );
+            std::process::exit(1);
+        }
+        Err(_) => {
+            eprintln!("Nakama logout worker failed.");
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(feature = "window")]
+fn authenticate_device(character: &str) -> (String, Option<String>) {
+    use lynx_client::nakama_credentials::{OsNakamaCredentialStore, authenticate_or_resume};
+    use lynx_client_net::{CharacterApiClient, NakamaAuthClient, NakamaAuthConfig};
     let required = |key: &str| {
         std::env::var(key).unwrap_or_else(|_| {
             eprintln!("Missing required environment setting {key}.");
@@ -96,27 +150,28 @@ fn authenticate_device(character: &str) -> (String, Option<String>) {
     }
     let base_url = required("LYNX_NAKAMA_URL");
     let server_key = required("LYNX_NAKAMA_SERVER_KEY");
-    // New, intentionally ephemeral identity: this avoids persisting a device ID,
-    // but means this account cannot be recovered after the process exits.
-    let mut random = [0_u8; 16];
-    if getrandom::fill(&mut random).is_err() {
-        eprintln!("Could not generate a temporary device identifier.");
-        std::process::exit(2);
-    }
-    let hex = b"0123456789abcdef";
-    let mut device_id = String::with_capacity(random.len() * 2);
-    for byte in random {
-        device_id.push(char::from(hex[usize::from(byte >> 4)]));
-        device_id.push(char::from(hex[usize::from(byte & 0x0f)]));
-    }
-    let result = std::thread::spawn(move || {
-        let auth = NakamaAuthClient::new(NakamaAuthConfig::new(base_url, server_key))?;
-        auth.authenticate_device(&DeviceLogin {
-            device_id,
-            username: None,
-            create: true,
-            locale: engine_core::Locale::default(),
-        })
+    let character_api_url =
+        std::env::var("LYNX_WORLD_API_URL").unwrap_or_else(|_| "http://127.0.0.1:8090".into());
+    let character_id = character.to_owned();
+    let credential_server_url = base_url.clone();
+    let result = std::thread::spawn(move || -> Result<_, String> {
+        let auth = NakamaAuthClient::new(NakamaAuthConfig::new(base_url, server_key))
+            .map_err(|error| format!("{error:?}"))?;
+        let session = authenticate_or_resume(
+            &auth,
+            &credential_server_url,
+            &OsNakamaCredentialStore,
+            engine_core::Locale::default(),
+        )
+        .map_err(|error| format!("{error:?}"))?;
+        let character_api =
+            CharacterApiClient::new(character_api_url).map_err(|error| format!("{error:?}"))?;
+        let token = game_api::SessionToken::new(session.access_token())
+            .map_err(|_| "invalid access session".to_owned())?;
+        character_api
+            .select_character(&token, &character_id)
+            .map_err(|error| format!("{error:?}"))?;
+        Ok(session)
     })
     .join();
     match result {
@@ -126,7 +181,7 @@ fn authenticate_device(character: &str) -> (String, Option<String>) {
         ),
         Ok(Err(error)) => {
             eprintln!(
-                "Nakama login failed ({error:?}); check local configuration, network, and account availability."
+                "Login or character selection failed ({error}); check server configuration, network, and account ownership."
             );
             std::process::exit(1);
         }

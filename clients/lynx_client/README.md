@@ -64,27 +64,30 @@ public server discovery is not specified.
 
 ## Development-only login and online demo
 
-For a fresh Nakama device login, provide `LYNX_NAKAMA_URL` (for local
-development, `http://127.0.0.1:7350`) and the public client server key in
-`LYNX_NAKAMA_SERVER_KEY`, then run `cargo run -p lynx_client -- --login <character-id>`.
-The client creates a random device ID for this launch, authenticates on a worker
-thread before opening the window, then sends the returned access token and
-selected character to the world gateway. Set `LYNX_WORLD_URL` for the gateway
-(defaults to `ws://127.0.0.1:8090/world`). Nakama HTTP permits plaintext only
-to loopback; remote Nakama and world endpoints require HTTPS/WSS. Keep the
-server key out of source control and use disposable development credentials.
+For Nakama device login, set `LYNX_NAKAMA_URL` (local default
+`http://127.0.0.1:7350`) and the public client server key in
+`LYNX_NAKAMA_SERVER_KEY`, then run
+`cargo run -p lynx_client -- --login <character-id>`. The device ID and rotating
+refresh token are stored in the OS credential manager (Windows Credential
+Manager, macOS Keychain, or Linux Secret Service); the access token stays in
+memory. If that secure store is unavailable, login fails closed without a
+plaintext fallback. Existing stored devices refresh their session before the
+client opens the window. The client verifies character ownership through
+`LYNX_WORLD_API_URL` (default `http://127.0.0.1:8090`) before sending the access
+token and selected character to the WebSocket gateway. Set `LYNX_WORLD_URL` for
+the gateway (default `ws://127.0.0.1:8090/world`). Nakama HTTP permits plaintext
+only to loopback; remote Nakama and world endpoints require HTTPS/WSS. The
+Nakama server key is public client configuration, but must not be confused with
+the private runtime HTTP key.
 
-This initial seam has no login form or character-list API: choose a character
-ID already known to you. Because device IDs and session tokens are intentionally
-not persisted, each launch creates a new device account; the account cannot be
-recovered by this client after exit. There is no refresh/logout UI or OS secure
-credential-store integration. The world gateway additionally requires that the
-authenticated Nakama account already own a persisted Lynx character with a live
-world actor. This client cannot create/list characters, so a newly generated
-device account cannot normally complete world admission yet; character-service
-provisioning and a stable secure device identity are follow-up work. Startup
-authentication errors are coarse and printed without server response bodies or
-credentials.
+There is no login form, character-list UI, or automatic character creation; pass
+the ID of an existing character. `cargo run -p lynx_client -- --logout` revokes
+the saved Nakama session and removes its OS credential entry. The authenticated
+world character API also supports server-side list/create/select operations,
+but the current client does not yet expose a character-creation UI or retry-safe
+creation command. Character selection verifies ownership and playability; the
+world still requires a corresponding live actor in its active snapshot. Startup
+errors are coarse and printed without response bodies or credentials.
 
 ### Static-token demo
 

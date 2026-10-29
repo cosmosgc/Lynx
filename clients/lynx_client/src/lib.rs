@@ -2,6 +2,8 @@
 
 use bevy::prelude::*;
 
+#[cfg(feature = "window")]
+pub mod nakama_credentials;
 pub mod offline;
 pub mod online;
 pub mod reconciliation;

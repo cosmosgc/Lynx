@@ -17,10 +17,10 @@ use std::time::{Duration, Instant};
 use axum::Json;
 use axum::extract::connect_info::Connected;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, State};
+use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::serve::Listener;
 use axum::{Router, serve};
 use backend_nakama::BackendTelemetrySnapshot;
@@ -30,12 +30,16 @@ use engine_core::id::StableId;
 use engine_net::envelope::Envelope;
 use engine_net::framing::{FRAME_HEADER_BYTES, MAX_FRAME_BYTES, decode_frame, encode_frame};
 use engine_net::protocol::ErrorPayload;
+use game_api::{ApiError, CharacterCreationKey, CharacterId, CreateCharacter, SessionToken};
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use world_gateway::{ERROR_KIND, ResumeToken};
 
-use crate::auth::{Authenticator, IdentityBackend, IdentityError, authenticate_selection};
+use crate::auth::{
+    Authenticator, CharacterManagementBackend, IdentityBackend, IdentityError,
+    authenticate_selection,
+};
 use crate::rate_limit::{RateLimitConfig, RateLimits};
 use crate::service::{Admitted, Credential, HELLO_KIND, Hello, Metrics, ServerEvent, ServerFrame};
 
@@ -204,6 +208,7 @@ pub fn event_channel() -> (mpsc::Sender<ServerEvent>, mpsc::Receiver<ServerEvent
 pub struct AppState {
     events: mpsc::Sender<ServerEvent>,
     admission: AdmissionAuthenticator,
+    characters: Option<Arc<dyn CharacterManagementBackend + Send + Sync>>,
     ready: AtomicBool,
     origins: OriginPolicy,
     limits: RateLimits,
@@ -230,6 +235,7 @@ impl std::fmt::Debug for AppState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AppState")
             .field("admission", &self.admission)
+            .field("character_management", &self.characters.is_some())
             .field("ready", &self.ready.load(Ordering::Relaxed))
             .field("backend_telemetry", &self.backend_telemetry.is_some())
             .finish_non_exhaustive()
@@ -298,6 +304,7 @@ impl AppState {
         Self {
             events,
             admission: AdmissionAuthenticator::Demo(authenticator),
+            characters: None,
             ready: AtomicBool::new(true),
             origins: OriginPolicy::default(),
             limits: RateLimits::new(RateLimitConfig::default()),
@@ -318,6 +325,7 @@ impl AppState {
         Self {
             events,
             admission: AdmissionAuthenticator::Identity(backend),
+            characters: None,
             ready: AtomicBool::new(true),
             origins: OriginPolicy::default(),
             limits: RateLimits::new(RateLimitConfig::default()),
@@ -325,6 +333,16 @@ impl AppState {
             backend_telemetry: None,
             capacity: Arc::new(Mutex::new(Capacity::default())),
         }
+    }
+
+    /// Enable authenticated character management on the player HTTP listener.
+    #[must_use]
+    pub fn with_character_backend(
+        mut self,
+        backend: Arc<dyn CharacterManagementBackend + Send + Sync>,
+    ) -> Self {
+        self.characters = Some(backend);
+        self
     }
 
     /// Attach a scrape-time snapshot provider for bounded production backend
@@ -386,6 +404,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
+        .route("/characters", get(list_characters).post(create_character))
+        .route("/characters/{character}/select", post(select_character))
         .route("/world", get(world))
         .with_state(state)
 }
@@ -473,6 +493,140 @@ async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         )],
         body,
     )
+}
+
+fn character_backend(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<
+    (
+        Arc<dyn CharacterManagementBackend + Send + Sync>,
+        SessionToken,
+    ),
+    Box<Response>,
+> {
+    let Some(backend) = &state.characters else {
+        return Err(Box::new(
+            (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response(),
+        ));
+    };
+    let Some(token) = bearer(headers) else {
+        return Err(Box::new(
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "unauthorized"})),
+            )
+                .into_response(),
+        ));
+    };
+    let token = SessionToken::new(token.to_owned()).map_err(|_| {
+        Box::new(
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "unauthorized"})),
+            )
+                .into_response(),
+        )
+    })?;
+    Ok((Arc::clone(backend), token))
+}
+
+async fn list_characters(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let (backend, token) = match character_backend(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match tokio::task::spawn_blocking(move || backend.characters(&token)).await {
+        Ok(Ok(characters)) => {
+            (StatusCode::OK, Json(json!({"characters": characters}))).into_response()
+        }
+        Ok(Err(error)) => character_api_error(&error),
+        Err(_) => character_unavailable(),
+    }
+}
+
+async fn create_character(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<CreateCharacter>,
+) -> Response {
+    if let Err(error) = request.validate() {
+        return character_api_error(&error);
+    }
+    let Some(key) = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "idempotency_key_required"})),
+        )
+            .into_response();
+    };
+    let key = match CharacterCreationKey::new(key) {
+        Ok(key) => key,
+        Err(error) => return character_api_error(&error),
+    };
+    let (backend, token) = match character_backend(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match tokio::task::spawn_blocking(move || backend.create_character(&token, &key, &request))
+        .await
+    {
+        Ok(Ok(receipt)) => (StatusCode::CREATED, Json(json!(receipt))).into_response(),
+        Ok(Err(error)) => character_api_error(&error),
+        Err(_) => character_unavailable(),
+    }
+}
+
+async fn select_character(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(character): Path<String>,
+) -> Response {
+    let character = match CharacterId::parse(&character) {
+        Ok(character) => character,
+        Err(error) => return character_api_error(&error),
+    };
+    let (backend, token) = match character_backend(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match tokio::task::spawn_blocking(move || backend.select_character(&token, character)).await {
+        Ok(Ok(character)) => (StatusCode::OK, Json(json!(character))).into_response(),
+        Ok(Err(error)) => character_api_error(&error),
+        Err(_) => character_unavailable(),
+    }
+}
+
+fn character_api_error(error: &ApiError) -> Response {
+    let (status, code) = match error {
+        ApiError::Unauthenticated | ApiError::SessionExpired => {
+            (StatusCode::UNAUTHORIZED, "unauthorized")
+        }
+        // Missing, deleted, suspended, and foreign characters deliberately share
+        // one response to avoid exposing another account's character state.
+        ApiError::NotFound(_) | ApiError::PermissionDenied => {
+            (StatusCode::NOT_FOUND, "character_not_found")
+        }
+        ApiError::InvalidRequest(_) => (StatusCode::BAD_REQUEST, "invalid_request"),
+        ApiError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
+        ApiError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
+        ApiError::Unavailable(_) | ApiError::Transport(_) | ApiError::Backend { .. } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "character_service_unavailable",
+        ),
+    };
+    (status, Json(json!({"error": code}))).into_response()
+}
+
+fn character_unavailable() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error": "character_service_unavailable"})),
+    )
+        .into_response()
 }
 
 fn encode_content_version(snapshot: &ContentVersionSnapshot) -> String {
@@ -1064,6 +1218,166 @@ fn error_envelope(error: &EngineError) -> Result<Envelope, EngineError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_core::id::{IdKind, StableId};
+    use game_api::{AccountId, Character, CharacterCreationReceipt, CharacterStatus};
+
+    const CHARACTER_TOKEN: &str = "character-api-secret";
+
+    struct FakeCharacters;
+
+    impl CharacterManagementBackend for FakeCharacters {
+        fn characters(&self, token: &SessionToken) -> Result<Vec<Character>, ApiError> {
+            if token.expose_secret() != CHARACTER_TOKEN {
+                return Err(ApiError::Unauthenticated);
+            }
+            Ok(vec![fake_character()])
+        }
+
+        fn create_character(
+            &self,
+            token: &SessionToken,
+            key: &CharacterCreationKey,
+            request: &CreateCharacter,
+        ) -> Result<CharacterCreationReceipt, ApiError> {
+            if token.expose_secret() != CHARACTER_TOKEN {
+                return Err(ApiError::Unauthenticated);
+            }
+            assert_eq!(key.as_str(), "retry-key-1");
+            assert_eq!(request.name, "Hero");
+            Ok(CharacterCreationReceipt {
+                character_id: fake_character().id,
+            })
+        }
+
+        fn select_character(
+            &self,
+            token: &SessionToken,
+            character: CharacterId,
+        ) -> Result<Character, ApiError> {
+            if token.expose_secret() != CHARACTER_TOKEN {
+                return Err(ApiError::Unauthenticated);
+            }
+            if character != fake_character().id {
+                return Err(ApiError::NotFound("not disclosed".into()));
+            }
+            Ok(fake_character())
+        }
+    }
+
+    fn fake_character() -> Character {
+        Character {
+            id: CharacterId::new(StableId::from_parts(IdKind::Character, 1, 42)).unwrap(),
+            account_id: AccountId::new("account-1").unwrap(),
+            name: "Hero".into(),
+            zone_id: None,
+            status: CharacterStatus::Active,
+            created_at: None,
+        }
+    }
+
+    fn character_state() -> Arc<AppState> {
+        let (events, _) = event_channel();
+        Arc::new(
+            AppState::new(
+                events,
+                Authenticator::new(&[crate::auth::digest("unused")]).unwrap(),
+            )
+            .with_character_backend(Arc::new(FakeCharacters)),
+        )
+    }
+
+    fn bearer_headers(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        headers
+    }
+
+    async fn response_json(response: Response) -> (StatusCode, Value) {
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 16_384)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn character_list_requires_a_session_and_returns_backend_records() {
+        let state = character_state();
+        let (status, body) =
+            response_json(list_characters(State(Arc::clone(&state)), HeaderMap::new()).await).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"], "unauthorized");
+
+        let (status, body) =
+            response_json(list_characters(State(state), bearer_headers(CHARACTER_TOKEN)).await)
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["characters"][0]["name"], "Hero");
+        assert_eq!(body["characters"][0]["account_id"], "account-1");
+    }
+
+    #[tokio::test]
+    async fn creation_is_idempotent_and_selection_only_returns_a_record() {
+        let state = character_state();
+        let request = || {
+            Json(CreateCharacter {
+                name: "Hero".into(),
+            })
+        };
+        let (status, body) = response_json(
+            create_character(
+                State(Arc::clone(&state)),
+                bearer_headers(CHARACTER_TOKEN),
+                request(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "idempotency_key_required");
+
+        let mut headers = bearer_headers(CHARACTER_TOKEN);
+        headers.insert("idempotency-key", "retry-key-1".parse().unwrap());
+        let (status, body) =
+            response_json(create_character(State(Arc::clone(&state)), headers, request()).await)
+                .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(body["character_id"], fake_character().id.to_string());
+
+        let (status, body) = response_json(
+            select_character(
+                State(state),
+                bearer_headers(CHARACTER_TOKEN),
+                Path(fake_character().id.to_string()),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "active");
+        assert!(body.get("spawn").is_none());
+    }
+
+    #[tokio::test]
+    async fn foreign_selection_is_non_disclosing() {
+        let other = StableId::from_parts(IdKind::Character, 1, 43).to_string();
+        let (status, body) = response_json(
+            select_character(
+                State(character_state()),
+                bearer_headers(CHARACTER_TOKEN),
+                Path(other),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"], "character_not_found");
+        assert!(!body.to_string().contains("not disclosed"));
+        assert!(!body.to_string().contains(CHARACTER_TOKEN));
+    }
 
     #[test]
     fn capacity_is_bounded_released_and_draining_is_sticky() {

@@ -241,9 +241,22 @@ the binary is installed outside `PATH`, pass its path explicitly, for example:
 pwsh -NoProfile -File .\scripts\test-nakama.ps1 -NakamaBin 'D:\Development\MMORPG\Nakama\nakama.exe'
 ```
 
+To verify metrics on an already-running instance whose metrics listener uses a
+non-default port, pass its exact endpoint explicitly; this is read-only and
+does not change configuration or process state:
+
+```powershell
+pwsh -NoProfile -File .\scripts\test-nakama.ps1 `
+  -NakamaBin 'D:\Development\MMORPG\Nakama\nakama.exe' `
+  -HealthUrl 'http://127.0.0.1:7350' `
+  -MetricsUrl 'http://127.0.0.1:7354/metrics'
+```
+
 The smoke check never starts, stops, or restarts Nakama. A metrics check after
 changing the port requires a separately authorized Nakama restart; the script
-only checks the currently running listener.
+only checks the currently running listener. Ubuntu CI runs ShellCheck over all
+operations shell scripts, including `scripts/run-nakama.sh`, independently of
+the Rust test job.
 
 ```yaml
 scrape_configs:

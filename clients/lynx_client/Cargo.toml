@@ -19,6 +19,7 @@ engine_net.workspace = true
 game_api.workspace = true
 lynx_client_net = { path = "../lynx_client_net" }
 getrandom.workspace = true
+keyring = { version = "4.2.0", default-features = false, features = ["v1"] }
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, optional = true }

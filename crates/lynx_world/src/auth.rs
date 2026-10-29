@@ -13,7 +13,10 @@
 use anyhow::{Result, bail};
 use backend_nakama::NakamaPostgresBackend;
 use engine_core::id::{IdKind, StableId};
-use game_api::{AccountId, ApiError, AuthService, CharacterId, SessionToken};
+use game_api::{
+    AccountId, ApiError, AuthService, Character, CharacterCreationKey, CharacterCreationReceipt,
+    CharacterId, CharacterIntentService, CharacterService, CreateCharacter, SessionToken,
+};
 use sha2::{Digest, Sha256};
 use world_gateway::SessionClaims;
 
@@ -57,6 +60,30 @@ pub trait IdentityBackend {
         account: &AccountId,
         character: StableId,
     ) -> Result<bool, IdentityError>;
+}
+
+/// Authenticated, account-scoped character operations exposed by the world HTTP edge.
+///
+/// Implementations must validate the supplied session and derive ownership from
+/// the trusted identity provider. The HTTP client never supplies an account ID.
+pub trait CharacterManagementBackend {
+    /// List non-deleted characters for the session owner.
+    fn characters(&self, token: &SessionToken) -> Result<Vec<Character>, ApiError>;
+
+    /// Create one durable character intent and return its retry-safe receipt.
+    fn create_character(
+        &self,
+        token: &SessionToken,
+        key: &CharacterCreationKey,
+        request: &CreateCharacter,
+    ) -> Result<CharacterCreationReceipt, ApiError>;
+
+    /// Select a currently playable character owned by this session.
+    fn select_character(
+        &self,
+        token: &SessionToken,
+        character: CharacterId,
+    ) -> Result<Character, ApiError>;
 }
 
 /// Identity adapter for the selected Nakama/PostgreSQL production backend.
@@ -104,6 +131,30 @@ impl IdentityBackend for NakamaIdentityBackend {
         self.backend
             .owns_active_character(account, character)
             .map_err(|error| identity_error(&error))
+    }
+}
+
+impl CharacterManagementBackend for NakamaIdentityBackend {
+    fn characters(&self, token: &SessionToken) -> Result<Vec<Character>, ApiError> {
+        self.backend.characters(token)
+    }
+
+    fn create_character(
+        &self,
+        token: &SessionToken,
+        key: &CharacterCreationKey,
+        request: &CreateCharacter,
+    ) -> Result<CharacterCreationReceipt, ApiError> {
+        self.backend
+            .create_character_idempotent(token, key, request)
+    }
+
+    fn select_character(
+        &self,
+        token: &SessionToken,
+        character: CharacterId,
+    ) -> Result<Character, ApiError> {
+        self.backend.select_character(token, character)
     }
 }
 

@@ -8,11 +8,16 @@
 
 .PARAMETER HealthUrl
     Nakama HTTP base URL (default http://127.0.0.1:7350).
+
+.PARAMETER MetricsUrl
+    Optional explicit Nakama metrics endpoint URL. Use this to smoke-check an
+    already-running instance without changing its environment or configuration.
 #>
 [CmdletBinding()]
 param(
     [string]$NakamaBin,
-    [string]$HealthUrl = 'http://127.0.0.1:7350'
+    [string]$HealthUrl = 'http://127.0.0.1:7350',
+    [string]$MetricsUrl
 )
 
 . (Join-Path $PSScriptRoot 'common.ps1')
@@ -72,10 +77,15 @@ if ([int]$health.StatusCode -ne 200) {
 Write-Host "PASS health: GET $healthEndpoint returned HTTP 200"
 
 $metricsPort = Get-LynxSetting 'LYNX_NAKAMA_METRICS_PORT' ''
-if (-not $metricsPort -or $metricsPort -eq '0') {
-    Write-Host 'SKIP metrics: LYNX_NAKAMA_METRICS_PORT is unset or 0 (metrics disabled)'
-} else {
+$metricsEndpoint = ''
+if ($MetricsUrl) {
+    $metricsEndpoint = $MetricsUrl
+} elseif ($metricsPort -and $metricsPort -ne '0') {
     $metricsEndpoint = "http://127.0.0.1:$metricsPort/metrics"
+} else {
+    Write-Host 'SKIP metrics: LYNX_NAKAMA_METRICS_PORT is unset or 0 (metrics disabled)'
+}
+if ($metricsEndpoint) {
     try {
         $metrics = Invoke-WebRequest -Uri $metricsEndpoint -UseBasicParsing -TimeoutSec 5
     } catch {
