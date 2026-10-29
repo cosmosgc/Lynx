@@ -20,7 +20,7 @@ CI documentation link gate; a local Markdown link check is available.
 ## QUA-001 — Movement and combat integration suite
 
 - **Priority:** P0
-- **Status:** Blocked — `SIM-001`, `SIM-003`
+- **Status:** In progress — gateway authority, replay, and reconnect coverage added; invariant matrix incomplete
 - **Depends on:** `SIM-001`, `SIM-003`
 - **References:** `SIM-001`, `SIM-003`
 
@@ -37,9 +37,22 @@ CI documentation link gate; a local Markdown link check is available.
 
 - [ ] Every authority invariant in `SIM-001`/`SIM-003` has a failing-before,
       passing-after test.
-- [ ] Tests exercise the wire/gateway seam and the simulation together.
-- [ ] Reconnect and death paths are covered.
+- [x] Tests exercise the wire/gateway seam and the simulation together.
+- [x] Reconnect and death paths are covered.
 - [ ] The suite runs in CI without a GPU or external service.
+
+**Coverage and remaining gaps:** `crates/world_gateway/tests/gateway.rs` drives
+real protocol envelopes through the gateway and zone. It covers forged combat
+fields, server-derived damage, cooldown, range and line of sight, death and
+controller release, pending movement at death, wall clipping, speed budget,
+session-bound inputs, observer agreement, reconnect during movement and combat,
+idempotent attack retries, and a repeated mixed-input replay. The tests require
+no GPU or service; CI's workspace test command includes them, but a CI run has
+not been confirmed. The full invariant matrix and historical failing-before
+evidence remain open: integrated cases are still needed for stunned/zero-speed
+movement, occupancy and swept-body collision, faction policy, and additional
+queue/sequence boundaries. Zone transfer is not yet available. Simulation unit
+tests cover some of these separately, but do not substitute for this suite.
 
 ---
 

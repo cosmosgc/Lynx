@@ -667,6 +667,311 @@ fn result_of(replies: &[Envelope]) -> ActionResult {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One connected scenario spans combat, death, and resume.
+fn combat_authority_cooldown_death_and_resume() {
+    let mut f = fixture();
+    let target = f.alice_barrel;
+    f.gateway
+        .zone_mut()
+        .entity_mut(f.alice_actor)
+        .unwrap()
+        .combat = Some(CombatStats::new(9, 0));
+    let barrel = f.gateway.zone_mut().entity_mut(target).unwrap();
+    barrel.combat = Some(CombatStats::new(0, 4));
+    barrel.health.as_mut().unwrap().current = 10;
+    barrel.interactable.as_mut().unwrap().cooldown_ticks = 2;
+    let alice = connect(&mut f.gateway, "alice", f.alice_principal);
+    let send = |gateway: &mut WorldGateway, session: &SessionId, id: &str, body| {
+        gateway
+            .handle(session, &action(id, body), Millis::new(2_000))
+            .unwrap()
+    };
+    for body in [
+        json!({"verb":"attack", "target":target.to_string(), "damage":9999}),
+        json!({"verb":"attack", "target":target.to_string(), "params":{"damage":9999}}),
+    ] {
+        let replies = send(&mut f.gateway, &alice.session, "forged", body);
+        assert!(replies[0].kind.as_str() == "protocol.error" || !result_of(&replies).is_applied());
+        assert_eq!(
+            f.gateway
+                .zone()
+                .entity(target)
+                .unwrap()
+                .health
+                .unwrap()
+                .current,
+            10
+        );
+    }
+    let attack = |id| action(id, json!({"verb":"attack", "target":target.to_string()}));
+    let first = result_of(
+        &f.gateway
+            .handle(&alice.session, &attack("hit1"), Millis::new(2001))
+            .unwrap(),
+    );
+    assert!(
+        matches!(first.effects(), [ActionEffect::Damaged { source, target: victim, amount: 5, remaining: 5 }] if *source == alice.actor && *victim == target)
+    );
+    let rejected = result_of(
+        &f.gateway
+            .handle(&alice.session, &attack("cooldown"), Millis::new(2002))
+            .unwrap(),
+    );
+    assert_eq!(rejected.error().unwrap().code(), ErrorCode::Cooldown);
+    assert_eq!(
+        f.gateway
+            .zone()
+            .entity(target)
+            .unwrap()
+            .health
+            .unwrap()
+            .current,
+        5
+    );
+    f.gateway
+        .disconnect(&alice.session, Tick::ZERO, Millis::new(2100))
+        .unwrap();
+    let resumed = f
+        .gateway
+        .resume(&alice.token, &handshake(), Tick::ZERO, Millis::new(2200))
+        .unwrap();
+    assert_eq!(
+        result_of(
+            &f.gateway
+                .handle(&resumed.session, &attack("hit1"), Millis::new(2201))
+                .unwrap()
+        ),
+        first
+    );
+    assert_eq!(
+        result_of(
+            &f.gateway
+                .handle(
+                    &resumed.session,
+                    &attack("still-cooldown"),
+                    Millis::new(2202)
+                )
+                .unwrap()
+        )
+        .error()
+        .unwrap()
+        .code(),
+        ErrorCode::Cooldown
+    );
+    f.gateway.tick(Millis::new(2203)).unwrap();
+    f.gateway.tick(Millis::new(2204)).unwrap();
+    let lethal = result_of(
+        &f.gateway
+            .handle(&resumed.session, &attack("hit2"), Millis::new(2205))
+            .unwrap(),
+    );
+    assert!(
+        matches!(lethal.effects(), [ActionEffect::Damaged { amount: 5, remaining: 0, .. }, ActionEffect::EntityDied { source, target: victim }] if *source == alice.actor && *victim == target)
+    );
+    f.gateway.tick(Millis::new(2206)).unwrap();
+    f.gateway.tick(Millis::new(2207)).unwrap();
+    let dead = result_of(
+        &f.gateway
+            .handle(&resumed.session, &attack("dead"), Millis::new(2208))
+            .unwrap(),
+    );
+    assert_eq!(dead.error().unwrap().code(), ErrorCode::InvalidState);
+    assert_eq!(
+        f.gateway
+            .zone()
+            .entity(target)
+            .unwrap()
+            .health
+            .unwrap()
+            .current,
+        0
+    );
+}
+
+#[test]
+fn gateway_rejects_wall_clipping_and_attacks_through_walls_or_out_of_range() {
+    let mut f = fixture();
+    f.gateway.zone_mut().nav_mut().set_blocked(11, 10, true);
+    let target = f.gateway.zone_mut().entity_mut(f.alice_barrel).unwrap();
+    target.interactable.as_mut().unwrap().requires_line_of_sight = true;
+    let alice = connect(&mut f.gateway, "alice", f.alice_principal);
+    let request = envelope(
+        "wall-move",
+        "movement.request",
+        json!({"sequence":1,"destination":{"x":11.0,"y":0.0,"z":10.0}}),
+    );
+    assert_eq!(
+        f.gateway
+            .handle(&alice.session, &request, Millis::new(1001))
+            .unwrap()[0]
+            .kind
+            .as_str(),
+        "movement.queued"
+    );
+    let updates = f
+        .gateway
+        .tick_with_interval(Millis::new(1002), 1000)
+        .unwrap();
+    let movement = delivery(&updates, &alice.session)
+        .movement
+        .as_ref()
+        .unwrap();
+    assert_eq!(movement.applied, Some(false));
+    assert_eq!(movement.position, Vec3::new(10.0, 0.0, 10.0));
+    for (name, target, code) in [
+        ("wall", f.alice_barrel, ErrorCode::NotVisible),
+        ("far", f.bob_barrel, ErrorCode::OutOfRange),
+    ] {
+        let result = result_of(
+            &f.gateway
+                .handle(
+                    &alice.session,
+                    &action(name, json!({"verb":"attack","target":target.to_string()})),
+                    Millis::new(1003),
+                )
+                .unwrap(),
+        );
+        assert_eq!(result.error().unwrap().code(), code);
+        assert_eq!(
+            f.gateway
+                .zone()
+                .entity(target)
+                .unwrap()
+                .health
+                .unwrap()
+                .current,
+            100
+        );
+    }
+}
+
+#[test]
+fn mixed_wire_inputs_replay_deterministically() {
+    fn run() -> Vec<serde_json::Value> {
+        let mut f = fixture();
+        let alice = connect(&mut f.gateway, "alice", f.alice_principal);
+        let mut trace = Vec::new();
+        for (sequence, x) in [(1, 10.1), (2, 10.2), (3, 11.0)] {
+            let request = envelope(
+                "move",
+                "movement.request",
+                json!({"sequence":sequence,"destination":{"x":x,"y":0.0,"z":10.0}}),
+            );
+            let reply = f
+                .gateway
+                .handle(&alice.session, &request, Millis::new(2000))
+                .unwrap();
+            trace.push(serde_json::to_value(reply).unwrap());
+            let updates = f
+                .gateway
+                .tick_with_interval(Millis::new(2001), 100)
+                .unwrap();
+            let movement = delivery(&updates, &alice.session)
+                .movement
+                .as_ref()
+                .unwrap();
+            trace.push(serde_json::to_value(movement).unwrap());
+            if sequence == 2 {
+                let attack = action(
+                    "attack",
+                    json!({"verb":"attack","target":f.alice_barrel.to_string()}),
+                );
+                trace.push(
+                    serde_json::to_value(
+                        f.gateway
+                            .handle(&alice.session, &attack, Millis::new(2002))
+                            .unwrap(),
+                    )
+                    .unwrap(),
+                );
+            }
+        }
+        trace.push(json!({"position": f.gateway.zone().entity(alice.actor).unwrap().position(), "health":f.gateway.zone().entity(f.alice_barrel).unwrap().health.unwrap().current}));
+        trace
+    }
+    let expected = run();
+    assert_eq!(expected, run());
+    assert_eq!(expected.last().unwrap()["health"], 99);
+    assert_eq!(expected[6]["applied"], false);
+}
+
+#[test]
+fn killed_player_loses_control_and_pending_movement_does_not_apply() {
+    let mut f = fixture();
+    let bob_entity = f.gateway.zone_mut().entity_mut(f.bob_actor).unwrap();
+    bob_entity.transform.position = Vec3::new(11.0, 0.0, 10.0);
+    bob_entity.health.as_mut().unwrap().current = 1;
+    bob_entity.interactable = Some(Interactable::new(3.0, [Verb::Attack]).without_line_of_sight());
+    let alice = connect(&mut f.gateway, "alice", f.alice_principal);
+    let bob = connect(&mut f.gateway, "bob", f.bob_principal);
+    let movement = envelope(
+        "bob-move",
+        "movement.request",
+        json!({"sequence":1,"destination":{"x":11.1,"y":0.0,"z":10.0}}),
+    );
+    assert_eq!(
+        f.gateway
+            .handle(&bob.session, &movement, Millis::new(1001))
+            .unwrap()[0]
+            .kind
+            .as_str(),
+        "movement.queued"
+    );
+    let kill = action(
+        "kill",
+        json!({"verb":"attack","target":bob.actor.to_string()}),
+    );
+    let result = result_of(
+        &f.gateway
+            .handle(&alice.session, &kill, Millis::new(1002))
+            .unwrap(),
+    );
+    assert!(
+        matches!(result.effects(), [ActionEffect::Damaged { remaining: 0, .. }, ActionEffect::EntityDied { target, .. }] if *target == bob.actor)
+    );
+    assert!(matches!(
+        f.gateway
+            .zone()
+            .entity(bob.actor)
+            .unwrap()
+            .mind
+            .as_ref()
+            .unwrap()
+            .controller,
+        engine_sim::mind::Controller::None
+    ));
+    let updates = f
+        .gateway
+        .tick_with_interval(Millis::new(1003), 100)
+        .unwrap();
+    let outcome = delivery(&updates, &bob.session).movement.as_ref().unwrap();
+    assert_eq!(outcome.applied, Some(false));
+    assert_eq!(outcome.position, Vec3::new(11.0, 0.0, 10.0));
+    let attack = action(
+        "dead-attack",
+        json!({"verb":"attack","target":f.alice_barrel.to_string()}),
+    );
+    assert!(
+        !result_of(
+            &f.gateway
+                .handle(&bob.session, &attack, Millis::new(1004))
+                .unwrap()
+        )
+        .is_applied()
+    );
+    assert_eq!(
+        f.gateway
+            .zone()
+            .entity(f.alice_barrel)
+            .unwrap()
+            .health
+            .unwrap()
+            .current,
+        100
+    );
+}
+
+#[test]
 fn action_actor_and_principal_come_from_the_session() {
     let mut fixture = fixture();
     let alice = connect(
