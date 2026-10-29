@@ -20,7 +20,7 @@ CI documentation link gate; a local Markdown link check is available.
 ## QUA-001 — Movement and combat integration suite
 
 - **Priority:** P0
-- **Status:** In progress — gateway authority, replay, and reconnect coverage added; invariant matrix incomplete
+- **Status:** In progress — gateway authority, replay, and reconnect coverage expanded; invariant matrix incomplete
 - **Depends on:** `SIM-001`, `SIM-003`
 - **References:** `SIM-001`, `SIM-003`
 
@@ -46,13 +46,18 @@ real protocol envelopes through the gateway and zone. It covers forged combat
 fields, server-derived damage, cooldown, range and line of sight, death and
 controller release, pending movement at death, wall clipping, speed budget,
 session-bound inputs, observer agreement, reconnect during movement and combat,
-idempotent attack retries, and a repeated mixed-input replay. The tests require
-no GPU or service; CI's workspace test command includes them, but a CI run has
-not been confirmed. The full invariant matrix and historical failing-before
-evidence remain open: integrated cases are still needed for stunned/zero-speed
-movement, occupancy and swept-body collision, faction policy, and additional
-queue/sequence boundaries. Zone transfer is not yet available. Simulation unit
-tests cover some of these separately, but do not substitute for this suite.
+idempotent attack retries, and a repeated mixed-input replay. It also checks
+stunned and zero-speed actors at both queue and processing time, occupied cells
+and swept-body collision, same-faction denial and different-faction attacks, and
+stale/pending sequence rejection without consuming a rejected newer sequence.
+The gateway test suite passed locally against commit `1e3de17` with these test
+changes. The tests require no GPU or service; CI's workspace test command
+includes them, but a CI run has not been confirmed. The full invariant matrix
+and historical failing-before evidence remain open. In particular, integrated
+coverage still needs contested occupancy ordering, authored directional faction
+overrides, broader queue/budget boundaries, and an explicit capability-change
+case. Zone transfer is not yet available. Simulation unit tests cover some of
+these separately, but do not substitute for this suite.
 
 ---
 

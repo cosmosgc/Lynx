@@ -12,7 +12,10 @@ use engine_net::protocol::{ErrorPayload, Handshake};
 use engine_net::replication::{ReplicationBatch, SessionId};
 use engine_sim::action::{ActionEffect, ActionResult, Verb};
 use engine_sim::combat::CombatStats;
-use engine_sim::entity::{Door, EntityRecord, Interactable, InteractionPermission, UiProvider};
+use engine_sim::entity::{
+    Door, EntityRecord, FactionMembership, Interactable, InteractionPermission, MovementProfile,
+    MovementStatus, UiProvider,
+};
 use engine_sim::mind::Mind;
 use engine_sim::minigame::Minigame;
 use engine_sim::movement::MovementIntent;
@@ -410,6 +413,240 @@ fn batch_has_entity(batch: &ReplicationBatch, entity: StableId) -> bool {
         .updates
         .iter()
         .any(|update| update.entity == Some(entity))
+}
+
+fn move_request(sequence: u64, x: f32, z: f32) -> Envelope {
+    envelope(
+        "move-test",
+        "movement.request",
+        json!({"sequence": sequence, "destination": {"x": x, "y": 0.0, "z": z}}),
+    )
+}
+
+#[test]
+fn gateway_revalidates_stunned_and_zero_speed_movement() {
+    for profile in [
+        MovementProfile {
+            status: MovementStatus::Stunned,
+            ..MovementProfile::default()
+        },
+        MovementProfile {
+            speed_multiplier: 0.0,
+            ..MovementProfile::default()
+        },
+    ] {
+        let mut f = fixture();
+        let alice = connect(&mut f.gateway, "alice", f.alice_principal);
+        let request = move_request(1, 10.1, 10.0);
+        f.gateway
+            .zone_mut()
+            .entity_mut(alice.actor)
+            .unwrap()
+            .movement = Some(profile);
+        assert_eq!(
+            f.gateway
+                .handle(&alice.session, &request, Millis::new(1001))
+                .unwrap()[0]
+                .kind
+                .as_str(),
+            "protocol.error"
+        );
+        // A queue-time rejection must not consume the sequence.
+        f.gateway
+            .zone_mut()
+            .entity_mut(alice.actor)
+            .unwrap()
+            .movement = Some(MovementProfile::default());
+        assert_eq!(
+            f.gateway
+                .handle(&alice.session, &request, Millis::new(1002))
+                .unwrap()[0]
+                .kind
+                .as_str(),
+            "movement.queued"
+        );
+        f.gateway
+            .zone_mut()
+            .entity_mut(alice.actor)
+            .unwrap()
+            .movement = Some(profile);
+        let updates = f
+            .gateway
+            .tick_with_interval(Millis::new(1003), 100)
+            .unwrap();
+        let result = delivery(&updates, &alice.session)
+            .movement
+            .as_ref()
+            .unwrap();
+        assert_eq!(result.applied, Some(false));
+        assert_eq!(result.last_consumed_sequence, Some(1));
+        assert_eq!(result.position, Vec3::new(10.0, 0.0, 10.0));
+        f.gateway
+            .zone_mut()
+            .entity_mut(alice.actor)
+            .unwrap()
+            .movement = Some(MovementProfile::default());
+        assert_eq!(
+            f.gateway
+                .handle(&alice.session, &request, Millis::new(1004))
+                .unwrap()[0]
+                .kind
+                .as_str(),
+            "protocol.error"
+        );
+    }
+}
+
+#[test]
+fn gateway_rejects_occupied_cells_and_swept_body_intersections() {
+    // The swept case ends in a different cell from the blocker and has a clear
+    // endpoint; only the segment intersects its body.
+    for (blocker, radius, destination) in [
+        (Vec3::new(11.9, 0.0, 10.9), 0.05, (11.1, 10.0)),
+        (Vec3::new(10.5, 0.0, 9.9), 0.1, (11.1, 10.0)),
+    ] {
+        let mut f = fixture();
+        f.gateway
+            .zone_mut()
+            .spawn(
+                EntityRecord::new(id(IdKind::Entity, 90), text("prop.blocker"), blocker)
+                    .with_movement(MovementProfile::new(radius)),
+            )
+            .unwrap();
+        let alice = connect(&mut f.gateway, "alice", f.alice_principal);
+        let request = move_request(1, destination.0, destination.1);
+        assert_eq!(
+            f.gateway
+                .handle(&alice.session, &request, Millis::new(1001))
+                .unwrap()[0]
+                .kind
+                .as_str(),
+            "movement.queued"
+        );
+        let updates = f
+            .gateway
+            .tick_with_interval(Millis::new(1002), 1000)
+            .unwrap();
+        let result = delivery(&updates, &alice.session)
+            .movement
+            .as_ref()
+            .unwrap();
+        assert_eq!(result.applied, Some(false));
+        assert_eq!(result.position, Vec3::new(10.0, 0.0, 10.0));
+        assert_eq!(result.last_consumed_sequence, Some(1));
+    }
+}
+
+#[test]
+fn gateway_queue_rejection_does_not_consume_newer_sequence() {
+    let mut f = fixture();
+    let alice = connect(&mut f.gateway, "alice", f.alice_principal);
+    let first = move_request(5, 10.1, 10.0);
+    let next = move_request(7, 10.2, 10.0);
+    for (request, expected) in [(&first, "movement.queued"), (&next, "protocol.error")] {
+        assert_eq!(
+            f.gateway
+                .handle(&alice.session, request, Millis::new(1001))
+                .unwrap()[0]
+                .kind
+                .as_str(),
+            expected
+        );
+    }
+    f.gateway
+        .tick_with_interval(Millis::new(1002), 100)
+        .unwrap();
+    assert_eq!(
+        f.gateway
+            .handle(
+                &alice.session,
+                &move_request(4, 10.2, 10.0),
+                Millis::new(1003)
+            )
+            .unwrap()[0]
+            .kind
+            .as_str(),
+        "protocol.error"
+    );
+    assert_eq!(
+        f.gateway
+            .handle(&alice.session, &next, Millis::new(1004))
+            .unwrap()[0]
+            .kind
+            .as_str(),
+        "movement.queued"
+    );
+    let updates = f
+        .gateway
+        .tick_with_interval(Millis::new(1005), 100)
+        .unwrap();
+    let result = delivery(&updates, &alice.session)
+        .movement
+        .as_ref()
+        .unwrap();
+    assert_eq!(result.last_consumed_sequence, Some(7));
+    assert_eq!(result.applied, Some(true));
+    assert_eq!(result.position, Vec3::new(10.2, 0.0, 10.0));
+}
+
+#[test]
+fn gateway_enforces_server_owned_faction_policy() {
+    let mut f = fixture();
+    let guard = FactionMembership::new(text("faction.guard"));
+    f.gateway
+        .zone_mut()
+        .entity_mut(f.alice_actor)
+        .unwrap()
+        .faction = Some(guard.clone());
+    f.gateway
+        .zone_mut()
+        .entity_mut(f.alice_barrel)
+        .unwrap()
+        .faction = Some(guard);
+    let alice = connect(&mut f.gateway, "alice", f.alice_principal);
+    let attack = |name| {
+        action(
+            name,
+            json!({"verb":"attack", "target":f.alice_barrel.to_string()}),
+        )
+    };
+    let result = result_of(
+        &f.gateway
+            .handle(&alice.session, &attack("friendly"), Millis::new(1001))
+            .unwrap(),
+    );
+    assert!(!result.is_applied());
+    assert_eq!(
+        f.gateway
+            .zone()
+            .entity(f.alice_barrel)
+            .unwrap()
+            .health
+            .unwrap()
+            .current,
+        100
+    );
+    f.gateway
+        .zone_mut()
+        .entity_mut(f.alice_barrel)
+        .unwrap()
+        .faction = Some(FactionMembership::new(text("faction.bandit")));
+    let result = result_of(
+        &f.gateway
+            .handle(&alice.session, &attack("enemy"), Millis::new(1002))
+            .unwrap(),
+    );
+    assert!(result.is_applied());
+    assert_eq!(
+        f.gateway
+            .zone()
+            .entity(f.alice_barrel)
+            .unwrap()
+            .health
+            .unwrap()
+            .current,
+        99
+    );
 }
 
 #[test]
