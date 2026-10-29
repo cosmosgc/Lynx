@@ -24,6 +24,8 @@ pub const ACTION_CACHE_LIMIT: usize = 2_048;
 pub const LINK_CACHE_LIMIT: usize = 1_024;
 /// Maximum targets one activation may fan out to.
 pub const MAX_LINK_TARGETS: usize = 32;
+/// Maximum retained server-only movement diagnostics.
+pub const MOVEMENT_DIAGNOSTIC_LIMIT: usize = 256;
 
 /// Work limits for one simulation tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,6 +187,7 @@ pub struct Zone {
     pub(crate) stats: TickStats,
     pub(crate) movement_pending: BTreeMap<StableId, MovementIntent>,
     pub(crate) movement_sequences: BTreeMap<StableId, MovementSequence>,
+    pub(crate) movement_diagnostics: VecDeque<Diagnostic>,
 }
 
 impl fmt::Debug for Zone {
@@ -247,6 +250,7 @@ impl Zone {
             stats: TickStats::default(),
             movement_pending: BTreeMap::new(),
             movement_sequences: BTreeMap::new(),
+            movement_diagnostics: VecDeque::new(),
         })
     }
 
@@ -311,6 +315,9 @@ impl Zone {
     /// [`ErrorCode::CapacityExceeded`] when the zone is full.
     pub fn spawn(&mut self, entity: EntityRecord) -> Result<StableId, EngineError> {
         entity.id.expect_kind(IdKind::Entity)?;
+        if let Some(movement) = entity.movement {
+            movement.validate()?;
+        }
         if self.entities.contains_key(&entity.id) {
             return Err(
                 EngineError::new(ErrorCode::Conflict, "entity id is already in this zone")
@@ -406,6 +413,7 @@ impl Zone {
                 message: diagnostic.message,
             })
             .collect();
+        diagnostics.extend(self.movement_diagnostics.iter().cloned());
 
         for entity in self.entities.values() {
             if !self.config.contains(entity.position()) {

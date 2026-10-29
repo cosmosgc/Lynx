@@ -5,9 +5,9 @@ use engine_core::id::StableId;
 use engine_core::math::Vec3;
 use engine_core::time::Tick;
 
-use crate::entity::EntityRecord;
+use crate::entity::{EntityRecord, MovementProfile};
 use crate::mind::{ControlCapability, Controller};
-use crate::zone::{TickStats, Zone};
+use crate::zone::{Diagnostic, MOVEMENT_DIAGNOSTIC_LIMIT, TickStats, Zone};
 
 /// A proposed absolute horizontal endpoint, not an authoritative transform.
 /// The principal and session must be resolved by a trusted caller.
@@ -52,6 +52,9 @@ pub struct MovementOutcome {
 
 fn authorized(entity: &EntityRecord, intent: &MovementIntent) -> bool {
     entity.is_alive()
+        && entity
+            .movement_profile()
+            .is_some_and(MovementProfile::can_move)
         && entity.mind.as_ref().is_some_and(|mind| {
             mind.can(ControlCapability::Move)
                 && matches!(&mind.controller, Controller::Player { character, session }
@@ -132,7 +135,13 @@ impl Zone {
     /// `elapsed_ms` and `speed_m_per_s` are trusted server-owned tick policy,
     /// never client input. Each intent gets one budget; unused budget does not
     /// accumulate. The ordinary `advance_tick` does not process this queue.
-    /// No occupancy or fine-geometry collision is performed.
+    ///
+    /// Every endpoint is revalidated against control, liveness, locomotion
+    /// status, zone bounds, the nav grid, destination-cell occupancy, and
+    /// circular bodies along the segment. Mutations are applied in stable entity
+    /// order, so a later intent sees earlier accepted positions and contested
+    /// space has one deterministic winner. Rejections add a bounded,
+    /// server-only diagnostic without exposing geometry to the client.
     pub fn advance_movement_tick(
         &mut self,
         elapsed_ms: u32,
@@ -142,17 +151,28 @@ impl Zone {
         let mut outcomes = Vec::with_capacity(pending.len());
         for (actor, intent) in pending {
             let applied = self.entities.get(&actor).is_some_and(|entity| {
+                let Some(profile) = entity.movement_profile() else {
+                    return false;
+                };
                 authorized(entity, &intent)
                     && self.config.contains(intent.destination)
                     && self.nav.allows_displacement(
                         entity.position(),
                         intent.destination,
-                        speed_m_per_s,
+                        speed_m_per_s * profile.speed_multiplier,
                         elapsed_ms,
+                    )
+                    && self.destination_is_clear(
+                        actor,
+                        entity.position(),
+                        intent.destination,
+                        profile.radius_m,
                     )
             });
             if applied && let Some(entity) = self.entities.get_mut(&actor) {
                 entity.transform.position = intent.destination;
+            } else {
+                self.record_movement_rejection(actor);
             }
             // Despawn removes pending input, so the actor still exists here.
             let position = self
@@ -172,4 +192,76 @@ impl Zone {
         }
         (self.advance_tick(), outcomes)
     }
+
+    /// Reject destination-cell occupancy and horizontal body intersections.
+    ///
+    /// Iteration uses the zone's stable entity order. A tick applies accepted
+    /// moves in that same order, so contested movement has one deterministic
+    /// winner without a wall-clock race. This server-only check deliberately
+    /// returns only a boolean: clients receive an applied/rejected outcome, not
+    /// a map of blockers or hidden collision geometry.
+    fn destination_is_clear(
+        &self,
+        actor: StableId,
+        from: Vec3,
+        destination: Vec3,
+        actor_radius: f32,
+    ) -> bool {
+        let Some(destination_cell) = self.nav.cell_of(destination) else {
+            return false;
+        };
+        self.entities
+            .values()
+            .filter(|entity| entity.id != actor)
+            .all(|other| {
+                let Some(profile) = other.movement_profile() else {
+                    return true;
+                };
+                if !profile.occupies {
+                    return true;
+                }
+                if self.nav.cell_of(other.position()) == Some(destination_cell) {
+                    return false;
+                }
+                segment_clear(
+                    from,
+                    destination,
+                    other.position(),
+                    actor_radius + profile.radius_m,
+                )
+            })
+    }
+
+    fn record_movement_rejection(&mut self, actor: StableId) {
+        if self.movement_diagnostics.len() >= MOVEMENT_DIAGNOSTIC_LIMIT {
+            let _ = self.movement_diagnostics.pop_front();
+        }
+        self.movement_diagnostics.push_back(Diagnostic {
+            code: "movement.rejected".into(),
+            entity: Some(actor),
+            message: "a queued movement intent was rejected by server validation".into(),
+        });
+    }
+}
+
+/// Whether a horizontal movement segment remains outside a blocking circle.
+fn segment_clear(from: Vec3, to: Vec3, center: Vec3, radius: f32) -> bool {
+    let start_x = f64::from(from.x);
+    let start_z = f64::from(from.z);
+    let delta_x = f64::from(to.x) - start_x;
+    let delta_z = f64::from(to.z) - start_z;
+    let length_squared = delta_x * delta_x + delta_z * delta_z;
+    let projection = if length_squared == 0.0 {
+        0.0
+    } else {
+        ((f64::from(center.x) - start_x) * delta_x + (f64::from(center.z) - start_z) * delta_z)
+            / length_squared
+    }
+    .clamp(0.0, 1.0);
+    let closest_x = start_x + projection * delta_x;
+    let closest_z = start_z + projection * delta_z;
+    let offset_x = f64::from(center.x) - closest_x;
+    let offset_z = f64::from(center.z) - closest_z;
+    let combined_radius = f64::from(radius);
+    offset_x * offset_x + offset_z * offset_z >= combined_radius * combined_radius
 }

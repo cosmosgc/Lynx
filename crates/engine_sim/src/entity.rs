@@ -222,6 +222,80 @@ pub struct FactionMembership {
     pub reputation: ReputationBook,
 }
 
+/// Server-owned condition that determines whether an entity can locomote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MovementStatus {
+    /// The entity may move subject to control, navigation, and collision rules.
+    #[default]
+    Mobile,
+    /// The entity is immobilized by an authoritative effect.
+    Stunned,
+}
+
+/// Authoritative movement collision and status inputs for an entity.
+///
+/// This component is never populated from a movement request. Controlled
+/// entities without it use [`Self::default`] for backwards-compatible player
+/// occupancy; static entities must opt in to block movement.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct MovementProfile {
+    /// Horizontal collision radius in world meters.
+    pub radius_m: f32,
+    /// Whether this entity occupies a navigation cell and blocks body overlap.
+    pub occupies: bool,
+    /// Server-owned speed multiplier for statuses, equipment, and content.
+    pub speed_multiplier: f32,
+    /// Server-owned locomotion status.
+    pub status: MovementStatus,
+}
+
+impl MovementProfile {
+    /// Create a mobile, occupying collision body.
+    #[must_use]
+    pub const fn new(radius_m: f32) -> Self {
+        Self {
+            radius_m,
+            occupies: true,
+            speed_multiplier: 1.0,
+            status: MovementStatus::Mobile,
+        }
+    }
+
+    /// Validate content or persisted movement inputs.
+    ///
+    /// # Errors
+    /// Returns [`ErrorCode::InvalidRequest`] for a non-finite/negative radius
+    /// or non-finite, negative speed multiplier.
+    pub fn validate(self) -> Result<(), EngineError> {
+        if !self.radius_m.is_finite() || self.radius_m < 0.0 {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "movement collision radius must be finite and non-negative",
+            ));
+        }
+        if !self.speed_multiplier.is_finite() || self.speed_multiplier < 0.0 {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "movement speed multiplier must be finite and non-negative",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether this profile permits movement.
+    #[must_use]
+    pub const fn can_move(self) -> bool {
+        matches!(self.status, MovementStatus::Mobile) && self.speed_multiplier > 0.0
+    }
+}
+
+impl Default for MovementProfile {
+    fn default() -> Self {
+        Self::new(0.35)
+    }
+}
+
 impl FactionMembership {
     /// Join a faction with no reputation overrides.
     #[must_use]
@@ -250,6 +324,9 @@ pub struct EntityRecord {
     pub interactable: Option<Interactable>,
     /// Controller slot.
     pub mind: Option<Mind>,
+    /// Server-owned collision and locomotion status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub movement: Option<MovementProfile>,
     /// Inventory, when the entity can hold items.
     pub inventory: Option<Inventory>,
     /// Faction identity and reputation.
@@ -282,6 +359,7 @@ impl EntityRecord {
             combat: None,
             interactable: None,
             mind: None,
+            movement: None,
             inventory: None,
             faction: None,
             door: None,
@@ -320,6 +398,24 @@ impl EntityRecord {
     pub fn with_mind(mut self, mind: Mind) -> Self {
         self.mind = Some(mind);
         self
+    }
+
+    /// Attach authoritative collision and locomotion state.
+    #[must_use]
+    pub const fn with_movement(mut self, movement: MovementProfile) -> Self {
+        self.movement = Some(movement);
+        self
+    }
+
+    /// Effective body for collision and occupancy.
+    ///
+    /// Controlled entities receive the conservative default body so legacy
+    /// player snapshots cannot pass through one another. Static entities opt in
+    /// by carrying an explicit profile.
+    #[must_use]
+    pub fn movement_profile(&self) -> Option<MovementProfile> {
+        self.movement
+            .or_else(|| self.mind.as_ref().map(|_| MovementProfile::default()))
     }
 
     /// Attach an inventory.
