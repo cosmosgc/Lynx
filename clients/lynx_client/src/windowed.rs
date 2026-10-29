@@ -175,7 +175,7 @@ mod tests {
     use super::*;
     use crate::{
         headless_app,
-        offline::{Action, ActiveActions},
+        offline::{Action, ActiveActions, OfflineInputEnabled},
     };
 
     #[test]
@@ -213,6 +213,28 @@ mod tests {
             .release(KeyCode::KeyW);
         app.update();
         assert!(app.world().resource::<ActiveActions>().0.is_empty());
+        assert_eq!(
+            app.world().resource::<OfflineScene>().avatar_position,
+            Vec3::NEG_Z
+        );
+    }
+
+    #[test]
+    fn held_keyboard_input_resumes_after_gate_reopens() {
+        let mut app = headless_app();
+        app.init_resource::<ButtonInput<KeyCode>>()
+            .add_plugins(OfflineWindowPlugin);
+        app.world_mut().resource_mut::<OfflineInputEnabled>().0 = false;
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyW);
+        app.update();
+        assert_eq!(
+            app.world().resource::<OfflineScene>().avatar_position,
+            Vec3::ZERO
+        );
+        app.world_mut().resource_mut::<OfflineInputEnabled>().0 = true;
+        app.update();
         assert_eq!(
             app.world().resource::<OfflineScene>().avatar_position,
             Vec3::NEG_Z

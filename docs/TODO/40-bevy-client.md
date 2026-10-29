@@ -192,6 +192,10 @@ input design still require the QUA-017 decisions. No acceptance criterion has
 been verified by this increment. The default offline action resolver also exposes
 per-update press/release transitions after combining bindings, including changes
 to bindings while a control is held; these are not gameplay commands.
+An opt-in local input gate can discard offline controls before action resolution;
+it emits default-resolver releases, but does not automatically handle window focus
+or UI capture. Replay frames still advance while gated, and held keyboard input
+resumes when re-enabled. This does not establish the final input architecture.
 
 ---
 

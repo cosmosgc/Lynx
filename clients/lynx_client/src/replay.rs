@@ -78,7 +78,10 @@ fn replay_controls(mut replay: Option<ResMut<ReplayInput>>, mut pressed: ResMut<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{headless_app, offline::OfflineScene};
+    use crate::{
+        headless_app,
+        offline::{OfflineInputEnabled, OfflineScene},
+    };
 
     #[test]
     fn fixture_drives_deterministic_offline_updates() {
@@ -101,5 +104,22 @@ mod tests {
     fn malformed_or_unknown_input_is_rejected() {
         assert!(ReplayFixture::from_json(r#"{"frames":[{"pressed":["Unknown"]}]}"#).is_err());
         assert!(ReplayFixture::from_json(r#"{"frames":[],"server_state":{}}"#).is_err());
+    }
+
+    #[test]
+    fn suppressed_replay_frames_are_consumed_not_delayed() {
+        let fixture =
+            ReplayFixture::from_json(r#"{"frames":[{"pressed":["W"]},{"pressed":["D"]}]}"#)
+                .unwrap();
+        let mut app = headless_app();
+        app.insert_resource(ReplayInput::new(fixture));
+        app.world_mut().resource_mut::<OfflineInputEnabled>().0 = false;
+        app.update();
+        app.world_mut().resource_mut::<OfflineInputEnabled>().0 = true;
+        app.update();
+        assert_eq!(
+            app.world().resource::<OfflineScene>().avatar_position,
+            Vec3::X
+        );
     }
 }

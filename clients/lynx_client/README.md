@@ -14,7 +14,7 @@ A developer has confirmed that the default scene opens in a window on Windows.
 For offline experiments, `OfflineFoundationPlugin` composes `OfflineCorePlugin`
 with `DefaultActionPlugin` and `FollowCameraPlugin`. An app can instead install
 the core and provide its own action and camera systems in `OfflineSet::Actions`
-and `OfflineSet::Camera`; the ordered sets run input, actions, placeholder
+and `OfflineSet::Camera`; the ordered sets run input, input filtering, actions, placeholder
 movement, camera, then presentation. Alternative action systems must update or
 clear `ActiveActions` and `ActionTransitions` each update. The default resolver
 reports per-update press/release edges after combining bindings, so releasing one
@@ -24,6 +24,15 @@ local presentation state, not queued input or gameplay commands. This is a
 testable local seam, not the final camera/input architecture or an online
 gameplay interface. The asset import and camera/input decisions remain gated by
 QUA-017.
+
+The offline core also exposes `OfflineInputEnabled` (default true). Set it in
+or before `OfflineSet::Input` to discard supplied controls before action
+resolution, for example when an experimental UI captures input. The default
+resolver emits releases on the first disabled update. This gate does not
+automatically observe window focus or UI state; a held keyboard key is supplied
+again when re-enabled. Replay continues consuming frames while disabled rather
+than postponing them. Custom action adapters must honor the filtered controls
+themselves. This affects only offline presentation, not online server state.
 
 ## Planned server browser
 

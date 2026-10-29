@@ -57,6 +57,17 @@ impl Default for InputBindings {
 #[derive(Debug, Default, Resource)]
 pub struct PressedControls(pub HashSet<Control>);
 
+/// Local presentation input gate, for example while a placeholder UI has focus.
+/// Disabled input is discarded each update; adapters may supply it again on resume.
+#[derive(Debug, Resource)]
+pub struct OfflineInputEnabled(pub bool);
+
+impl Default for OfflineInputEnabled {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
 /// Resolved actions available to presentation or future gameplay adapters.
 #[derive(Debug, Default, Resource)]
 pub struct ActiveActions(pub HashSet<Action>);
@@ -111,6 +122,7 @@ pub struct OfflineFoundationPlugin;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, SystemSet)]
 pub enum OfflineSet {
     Input,
+    InputFilter,
     Actions,
     Simulation,
     Camera,
@@ -131,6 +143,7 @@ impl Plugin for OfflineCorePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<InputBindings>()
             .init_resource::<PressedControls>()
+            .init_resource::<OfflineInputEnabled>()
             .init_resource::<ActiveActions>()
             .init_resource::<ActionTransitions>()
             .init_resource::<OfflineScene>()
@@ -139,6 +152,7 @@ impl Plugin for OfflineCorePlugin {
                 Update,
                 (
                     OfflineSet::Input,
+                    OfflineSet::InputFilter,
                     OfflineSet::Actions,
                     OfflineSet::Simulation,
                     OfflineSet::Camera,
@@ -146,6 +160,7 @@ impl Plugin for OfflineCorePlugin {
                 )
                     .chain(),
             )
+            .add_systems(Update, suppress_input.in_set(OfflineSet::InputFilter))
             .add_systems(Update, move_placeholder.in_set(OfflineSet::Simulation));
     }
 }
@@ -168,6 +183,13 @@ impl Plugin for FollowCameraPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FollowCamera>()
             .add_systems(Update, follow_camera.in_set(OfflineSet::Camera));
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters.
+fn suppress_input(enabled: Res<OfflineInputEnabled>, mut pressed: ResMut<PressedControls>) {
+    if !enabled.0 {
+        pressed.0.clear();
     }
 }
 
@@ -370,5 +392,50 @@ mod tests {
         let edges = app.world().resource::<ActionTransitions>();
         assert_eq!(edges.released, HashSet::from([Action::MoveForward]));
         assert_eq!(edges.pressed, HashSet::from([Action::Chat]));
+    }
+
+    #[test]
+    fn input_gate_releases_actions_and_discards_suppressed_input() {
+        let mut app = headless_app();
+        app.world_mut()
+            .resource_mut::<PressedControls>()
+            .0
+            .insert(Control::W);
+        app.update();
+        app.world_mut().resource_mut::<OfflineInputEnabled>().0 = false;
+        app.update();
+        assert!(app.world().resource::<PressedControls>().0.is_empty());
+        assert!(app.world().resource::<ActiveActions>().0.is_empty());
+        assert_eq!(
+            app.world().resource::<ActionTransitions>().released,
+            HashSet::from([Action::MoveForward])
+        );
+        app.world_mut()
+            .resource_mut::<PressedControls>()
+            .0
+            .insert(Control::W);
+        app.update();
+        assert!(
+            app.world()
+                .resource::<ActionTransitions>()
+                .released
+                .is_empty()
+        );
+        assert_eq!(
+            app.world().resource::<OfflineScene>().avatar_position,
+            Vec3::NEG_Z
+        );
+        app.world_mut().resource_mut::<OfflineInputEnabled>().0 = true;
+        app.update();
+        assert!(app.world().resource::<ActiveActions>().0.is_empty());
+        app.world_mut()
+            .resource_mut::<PressedControls>()
+            .0
+            .insert(Control::W);
+        app.update();
+        assert_eq!(
+            app.world().resource::<ActionTransitions>().pressed,
+            HashSet::from([Action::MoveForward])
+        );
     }
 }
