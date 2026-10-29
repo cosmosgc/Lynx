@@ -194,6 +194,12 @@ degrade, and how breaking changes are staged.
 - [ ] Golden fixtures catch accidental wire changes.
 - [ ] Downgrade/rollback behavior is documented.
 
+**Progress:** The networking policy documents current negotiation and rollback
+limits. `engine_net` tests cover a version/content matrix, feature degradation,
+unknown feature rejection, and golden hello, mismatch error, and negotiated
+parameters. Full world-message fixtures, automated version/changelog enforcement,
+and end-to-end compatibility verification remain outstanding.
+
 ---
 
 ## NET-005 — Multi-zone gateway routing

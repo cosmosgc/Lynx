@@ -8,8 +8,9 @@
 //! ordering guarantees and makes backpressure explicit.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::fmt::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use engine_core::error::{EngineError, ErrorCode};
@@ -126,6 +127,12 @@ pub struct Metrics {
     entities: AtomicU64,
     connections: AtomicU64,
     inputs: AtomicU64,
+    retained_sessions: AtomicU64,
+    actions: AtomicU64,
+    action_rejections: Mutex<BTreeMap<&'static str, u64>>,
+    resume_success: AtomicU64,
+    resume_failure: AtomicU64,
+    outbound_full: AtomicU64,
 }
 
 impl Metrics {
@@ -137,7 +144,7 @@ impl Metrics {
     )]
     pub fn render(&self) -> String {
         let get = |value: &AtomicU64| value.load(Ordering::Relaxed);
-        format!(
+        let mut text = format!(
             "# HELP lynx_world_ticks_total Authority ticks attempted.\n# TYPE lynx_world_ticks_total counter\nlynx_world_ticks_total {}\n# HELP lynx_world_tick_duration_seconds_total Time spent executing ticks in seconds.\n# TYPE lynx_world_tick_duration_seconds_total counter\nlynx_world_tick_duration_seconds_total {:.9}\n# HELP lynx_world_tick_overruns_total Ticks taking longer than the configured interval.\n# TYPE lynx_world_tick_overruns_total counter\nlynx_world_tick_overruns_total {}\n# HELP lynx_world_entities Current entities in the demo zone.\n# TYPE lynx_world_entities gauge\nlynx_world_entities {}\n# HELP lynx_world_connections Current attached connections.\n# TYPE lynx_world_connections gauge\nlynx_world_connections {}\n# HELP lynx_world_inputs_total Envelopes delivered to the authority.\n# TYPE lynx_world_inputs_total counter\nlynx_world_inputs_total {}\n",
             get(&self.ticks),
             get(&self.tick_nanos) as f64 / 1_000_000_000.0,
@@ -145,7 +152,32 @@ impl Metrics {
             get(&self.entities),
             get(&self.connections),
             get(&self.inputs)
-        )
+        );
+        let _ = write!(
+            text,
+            "# HELP lynx_world_retained_sessions Current sessions including disconnected resumable sessions.\n# TYPE lynx_world_retained_sessions gauge\nlynx_world_retained_sessions {}\n# HELP lynx_world_action_requests_total Action requests delivered to the authority.\n# TYPE lynx_world_action_requests_total counter\nlynx_world_action_requests_total {}\n# HELP lynx_world_resume_attempts_total Resume admissions by outcome.\n# TYPE lynx_world_resume_attempts_total counter\nlynx_world_resume_attempts_total{{outcome=\"success\"}} {}\nlynx_world_resume_attempts_total{{outcome=\"failure\"}} {}\n# HELP lynx_world_outbound_queue_full_total Outbound queue full events.\n# TYPE lynx_world_outbound_queue_full_total counter\nlynx_world_outbound_queue_full_total {}\n# HELP lynx_world_action_rejections_total Authority action rejections by error code.\n# TYPE lynx_world_action_rejections_total counter\n",
+            get(&self.retained_sessions),
+            get(&self.actions),
+            get(&self.resume_success),
+            get(&self.resume_failure),
+            get(&self.outbound_full)
+        );
+        for (code, count) in self.action_rejections.lock().unwrap().iter() {
+            let _ = writeln!(
+                text,
+                "lynx_world_action_rejections_total{{code=\"{code}\"}} {count}"
+            );
+        }
+        text
+    }
+
+    fn reject_action(&self, code: ErrorCode) {
+        *self
+            .action_rejections
+            .lock()
+            .unwrap()
+            .entry(code.as_str())
+            .or_default() += 1;
     }
 }
 
@@ -198,6 +230,10 @@ impl Service {
         self.metrics
             .connections
             .store(self.server.connections().count() as u64, Ordering::Relaxed);
+        self.metrics.retained_sessions.store(
+            self.server.gateway().retained_sessions() as u64,
+            Ordering::Relaxed,
+        );
     }
 
     /// Write world snapshots on a fixed interval and at shutdown.
@@ -323,6 +359,14 @@ impl Service {
                 reply,
             } => {
                 let result = self.admit(&credential, &hello, &outbound);
+                if matches!(credential, Credential::Resume(_)) {
+                    let counter = if result.is_ok() {
+                        &self.metrics.resume_success
+                    } else {
+                        &self.metrics.resume_failure
+                    };
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
                 let _ = reply.send(result);
             }
             ServerEvent::Frame {
@@ -400,9 +444,47 @@ impl Service {
             return;
         }
         self.metrics.inputs.fetch_add(1, Ordering::Relaxed);
+        let action = envelope.kind.as_str() == "action.request";
+        if action {
+            self.metrics.actions.fetch_add(1, Ordering::Relaxed);
+        }
         match self.server.receive(connection, envelope, clock()) {
-            Ok(outbound) => self.dispatch(outbound),
+            Ok(outbound) => {
+                if action {
+                    for output in &outbound {
+                        if let Outbound::Message { envelope, .. } = output
+                            && envelope.kind.as_str() == ERROR_KIND
+                            && let Some(value) = envelope.body.get("code")
+                            && let Ok(code) = serde_json::from_value::<ErrorCode>(value.clone())
+                        {
+                            self.metrics.reject_action(code);
+                        }
+                        if let Outbound::Message { envelope, .. } = output
+                            && envelope.kind.as_str() == "action.result"
+                            && let Ok(result) = serde_json::from_value::<
+                                engine_sim::action::ActionResult,
+                            >(envelope.body.clone())
+                            && let Some(error) = result.error()
+                        {
+                            self.metrics.reject_action(error.code());
+                        }
+                        if matches!(
+                            output,
+                            Outbound::Closed {
+                                reason: CloseReason::SessionExpired,
+                                ..
+                            }
+                        ) {
+                            self.metrics.reject_action(ErrorCode::SessionExpired);
+                        }
+                    }
+                }
+                self.dispatch(outbound);
+            }
             Err(error) => {
+                if action {
+                    self.metrics.reject_action(error.code());
+                }
                 tracing::warn!(
                     connection = %connection,
                     code = ?error.code(),
@@ -498,6 +580,7 @@ impl Service {
         match writer.try_send(frame) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(_)) => {
+                self.metrics.outbound_full.fetch_add(1, Ordering::Relaxed);
                 tracing::warn!(
                     connection = %connection,
                     reason = "slow_client_outbound_queue_full",
@@ -639,6 +722,87 @@ mod tests {
             connection: admitted.connection,
         });
         assert!(metrics.render().contains("lynx_world_connections 0\n"));
+        assert!(
+            metrics
+                .render()
+                .contains("lynx_world_retained_sessions 1\n")
+        );
+    }
+
+    #[test]
+    fn metrics_count_action_errors_and_resume_outcomes() {
+        let (mut service, grant, _) = service();
+        let metrics = service.metrics();
+        let hello = Hello {
+            handshake: demo::handshake().unwrap(),
+            last_ack_tick: Tick::ZERO,
+        };
+        let (outbound, mut receiver) = mpsc::channel(16);
+        let (reply, mut result) = oneshot::channel();
+        service.handle(ServerEvent::Admit {
+            credential: Credential::Static(grant),
+            hello: hello.clone(),
+            outbound,
+            reply,
+        });
+        let admitted = result.try_recv().unwrap().unwrap();
+        receiver.try_recv().unwrap();
+        receiver.try_recv().unwrap();
+        let ServerFrame::Envelope(token) = receiver.try_recv().unwrap() else {
+            panic!("expected token")
+        };
+        let token = ResumeToken::new(token.body["resume"].as_str().unwrap()).unwrap();
+        for (id, body) in [
+            ("malformed", serde_json::json!({})),
+            ("rejected", serde_json::json!({"verb": "open"})),
+        ] {
+            service.handle(ServerEvent::Frame {
+                connection: admitted.connection,
+                envelope: Envelope::new(
+                    MessageId::parse(id).unwrap(),
+                    message_kind("action.request"),
+                    body,
+                ),
+            });
+        }
+        let ServerFrame::Envelope(malformed) = receiver.try_recv().unwrap() else {
+            panic!("expected error reply")
+        };
+        assert_eq!(malformed.kind.as_str(), ERROR_KIND);
+        let ServerFrame::Envelope(rejected) = receiver.try_recv().unwrap() else {
+            panic!("expected action result")
+        };
+        assert_eq!(rejected.kind.as_str(), "action.result");
+        let result: engine_sim::action::ActionResult =
+            serde_json::from_value(rejected.body).unwrap();
+        let code = result.error().unwrap().code();
+        service.handle(ServerEvent::Leave {
+            connection: admitted.connection,
+        });
+        for credential in [
+            Credential::Resume(token),
+            Credential::Resume(ResumeToken::new("unknown-secret-token").unwrap()),
+        ] {
+            let (outbound, _receiver) = mpsc::channel(16);
+            let (reply, mut result) = oneshot::channel();
+            service.handle(ServerEvent::Admit {
+                credential,
+                hello: hello.clone(),
+                outbound,
+                reply,
+            });
+            let _ = result.try_recv().unwrap();
+        }
+        let text = metrics.render();
+        assert!(text.contains("lynx_world_action_requests_total 2\n"));
+        assert!(text.contains("lynx_world_action_rejections_total{code=\"invalid_request\"} "));
+        assert!(text.contains(&format!(
+            "lynx_world_action_rejections_total{{code=\"{}\"}} ",
+            code.as_str()
+        )));
+        assert!(text.contains("lynx_world_resume_attempts_total{outcome=\"success\"} 1\n"));
+        assert!(text.contains("lynx_world_resume_attempts_total{outcome=\"failure\"} 1\n"));
+        assert!(!text.contains("unknown-secret-token"));
     }
 
     fn service() -> (Service, Grant, Vec<Grant>) {
@@ -812,6 +976,12 @@ mod tests {
         }
         // The movement is queued before its acknowledgement encounters backpressure.
         service.receive(admitted.connection, &movement(1));
+        assert!(
+            service
+                .metrics
+                .render()
+                .contains("lynx_world_outbound_queue_full_total 1\n")
+        );
         assert!(!service.writers.contains_key(&admitted.connection));
         assert!(
             service

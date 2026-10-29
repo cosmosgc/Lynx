@@ -12,7 +12,7 @@ versions, locale (default `pt-BR`), and a set of named features (not a bitmap).
 | Client against 1.0 server | Outcome |
 |---|---|
 | 1.0.x | accepted; patch is informational |
-| 1.N.x, N > 0 | accepted with a minor warning; only shared known features are negotiated |
+| 1.N.x, N > 0 | accepted with a minor warning if the handshake is readable; only shared known features are negotiated |
 | other protocol major | `version_mismatch` before session creation |
 | different content major | `version_mismatch` before session creation |
 | same content major, different minor | accepted with warning; content patch is informational |
@@ -61,6 +61,12 @@ persisted state or bypass server authority merely to regain compatibility.
   major check, named feature intersection, and current world message kinds.
   Nested calendar action unknown fields are rejected as an authority-boundary
   validation correction; no new wire fields or features are introduced.
+
+The `engine_net` golden tests pin the hello and version-error envelopes and the
+negotiated parameters payload. They do not yet cover every world message kind
+or enforce a version bump and changelog entry for breaking changes. Retain old
+fixtures when introducing new versions; do not update a fixture in place to
+conceal an incompatible change.
 
 ## Envelope
 

@@ -130,6 +130,22 @@ pub fn inspect_env() -> Result<SchemaStatus, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedded_migrations_cover_the_repository_in_order() {
+        let directory =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../server/migrations");
+        let mut files: Vec<_> = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "sql"))
+            .map(|path| path.file_stem().unwrap().to_str().unwrap().to_owned())
+            .collect();
+        files.sort();
+        let embedded: Vec<_> = MIGRATIONS.iter().map(|(version, _)| *version).collect();
+        assert_eq!(files, embedded, "embed every migration in filename order");
+    }
+
     #[test]
     fn compatibility_is_exact_and_checks_checksums() {
         let mut rows: Vec<_> = MIGRATIONS
@@ -146,5 +162,33 @@ mod tests {
         assert_eq!(status.checksum_mismatches, ["0001_core"]);
         assert_eq!(status.unknown_count, 1);
         assert!(!status.diagnostic().contains("secret"));
+    }
+
+    #[test]
+    fn missing_history_and_non_contiguous_history_are_actionable() {
+        let missing = compare(true, &[]);
+        assert!(missing.history_missing);
+        assert_eq!(missing.pending.len(), MIGRATIONS.len());
+        assert!(missing.diagnostic().contains("scripts/db-migrate"));
+
+        let rows = vec![(MIGRATIONS[1].0.to_owned(), checksum_hex(MIGRATIONS[1].1))];
+        let partial = compare(false, &rows);
+        assert_eq!(partial.applied, ["0002_content"]);
+        assert!(partial.pending.contains(&"0001_core"));
+        assert!(!partial.compatible());
+    }
+
+    #[test]
+    fn unknown_migration_is_rejected_even_with_complete_known_history() {
+        let mut rows: Vec<_> = MIGRATIONS
+            .iter()
+            .map(|(version, bytes)| ((*version).to_owned(), checksum_hex(bytes)))
+            .collect();
+        rows.push(("0007_future".into(), "a".repeat(64)));
+        let status = compare(false, &rows);
+        assert_eq!(status.pending, [] as [&str; 0]);
+        assert_eq!(status.checksum_mismatches, [] as [&str; 0]);
+        assert_eq!(status.unknown_count, 1);
+        assert!(!status.compatible());
     }
 }

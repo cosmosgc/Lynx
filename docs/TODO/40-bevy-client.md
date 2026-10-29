@@ -20,7 +20,7 @@ client/editor crates. Phases 1, 2, 4, and 7 still require further client work.
 ## CLT-001 — Client workspace and crate layout
 
 - **Priority:** P0
-- **Status:** In progress — visual smoke verification remains
+- **Status:** Done
 - **Depends on:** —
 - **References:** ADR 0001, [architecture §What is deliberately not here yet](../architecture.md#what-is-deliberately-not-here-yet)
 
@@ -46,15 +46,14 @@ client/editor crates. Phases 1, 2, 4, and 7 still require further client work.
       without a display/GPU.
 - [x] No engine domain crate depends on Bevy.
 - [x] The Bevy pin is recorded and an upgrade note exists.
-- [ ] Visually verify that `cargo run -p lynx_client` opens a window on a
+- [x] Visually verify that `cargo run -p lynx_client` opens a window on a
       developer machine.
 
 **Progress:** Bevy 0.20.0 is available on crates.io and pinned in the workspace.
 The client provides a shared plugin and deterministic headless update test; see
 [`clients/lynx_client/README.md`](../../clients/lynx_client/README.md) for run,
 headless build/test, and upgrade instructions. On Windows, workspace build and
-tests and the no-default-features client test passed; the default executable
-created a window handle, but a visual smoke test is still needed. Ubuntu and
+tests and the no-default-features client test passed. Ubuntu and
 Windows CI jobs run explicit no-default-features headless client build and test
 steps before workspace Clippy, so unrelated lint failures cannot suppress the
 focused GPU-free verification. Hosted CI run
@@ -62,8 +61,9 @@ focused GPU-free verification. Hosted CI run
 headless client test/build steps on Ubuntu and Windows, although the full run
 failed later at workspace Clippy and predates the current local changes.
 The JSON offline presentation replay harness is documented in the client README.
-Local workspace fmt, Clippy, build, and test checks pass; visual smoke testing
-on a developer machine remains outstanding.
+Local workspace fmt, Clippy, build, and test checks passed for the prior
+implementation. A developer confirmed that `cargo run -p lynx_client` opens a
+window displaying the default offline placeholder scene.
 
 ---
 
@@ -151,7 +151,7 @@ on a developer machine remains outstanding.
 ## CLT-004 — Scene, camera, and input abstraction
 
 - **Priority:** P0
-- **Status:** In progress — offline placeholder; Windows visual verification remains
+- **Status:** In progress — offline placeholder
 - **Depends on:** `CLT-001`
 - **References:** [project guide §24](../lightweight_mmorpg_engine_project_guide.md#24-initial-vertical-slice-keep-it-small),
   `QUA-017` (camera/input ADR)
@@ -183,12 +183,15 @@ without a display. Movement is a fixed distance per update, frame-rate dependent
 and is neither gameplay nor prediction. The 2D camera follows the rig target,
 not its 3D offset. There is no asset loading, demo zone, billboard character,
 collision, rebinding UI, or online connection. This is not a completed camera
-and input integration. An actual Windows visual smoke test remains outstanding.
+and input integration. A developer confirmed that the default placeholder scene
+opens in a window; this does not verify the demo zone or billboard path.
 The offline core now permits the existing action resolver and follow rig to be
 replaced independently, with ordered headless-tested seams; this is not an
 accepted camera/input architecture. Asset import policy and the final camera/
 input design still require the QUA-017 decisions. No acceptance criterion has
-been verified by this increment.
+been verified by this increment. The default offline action resolver also exposes
+per-update press/release transitions after combining bindings, including changes
+to bindings while a control is held; these are not gameplay commands.
 
 ---
 

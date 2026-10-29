@@ -9,16 +9,21 @@ the `InputBindings` resource; there is no rebinding UI.
 This is not the demo zone or a billboard character implementation. Movement
 is a fixed distance per update, so its speed depends on frame rate. There is no
 content loading, collision, UI, or gameplay authority. The 2D camera follows the rig's target rather than its 3D offset.
-Visual verification on Windows is still required.
+A developer has confirmed that the default scene opens in a window on Windows.
 
 For offline experiments, `OfflineFoundationPlugin` composes `OfflineCorePlugin`
 with `DefaultActionPlugin` and `FollowCameraPlugin`. An app can instead install
 the core and provide its own action and camera systems in `OfflineSet::Actions`
 and `OfflineSet::Camera`; the ordered sets run input, actions, placeholder
 movement, camera, then presentation. Alternative action systems must update or
-clear `ActiveActions` each update. This is a testable local seam, not the final
-camera/input architecture or an online gameplay interface. The asset import and
-camera/input decisions remain gated by QUA-017.
+clear `ActiveActions` and `ActionTransitions` each update. The default resolver
+reports per-update press/release edges after combining bindings, so releasing one
+of two controls bound to the same action does not release the action. Rebinding
+a held control releases its old action and presses its new one. These edges are
+local presentation state, not queued input or gameplay commands. This is a
+testable local seam, not the final camera/input architecture or an online
+gameplay interface. The asset import and camera/input decisions remain gated by
+QUA-017.
 
 ## Planned server browser
 

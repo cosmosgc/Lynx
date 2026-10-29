@@ -1,0 +1,1 @@
+{"protocol":"1.0.0","content":"1.2.0","locale":"pt-BR","features":["chat"],"degraded":true,"warnings":["protocol minor version differs (client 1.1.0, server 1.0.0)","one or more requested features are unavailable"]}

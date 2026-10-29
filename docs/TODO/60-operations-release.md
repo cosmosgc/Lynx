@@ -48,10 +48,11 @@ invisible until players complain.
 - [ ] Readiness and metrics can be scraped without opening the world port.
 
 Partial implementation: the admin listener exports tick execution time and
-overruns, entities, attached connections, authority inputs, and bounded
-rate-limit rejections. The remaining metric families and limitations are listed
-in operations; scheduler deadline misses and action-specific counts are not
-yet measured. This task remains in progress until the full scope is verified.
+overruns, entities, attached and retained sessions, authority inputs and action
+requests/rejections, resume success/failure, outbound queue-full events, and
+bounded rate-limit rejections. The remaining metric families and limitations
+are listed in operations; scheduler deadline misses are not yet measured.
+This task remains in progress until the full scope is verified.
 
 ---
 

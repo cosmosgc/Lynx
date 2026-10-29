@@ -61,6 +61,13 @@ pub struct PressedControls(pub HashSet<Control>);
 #[derive(Debug, Default, Resource)]
 pub struct ActiveActions(pub HashSet<Action>);
 
+/// Action edges for the current update, derived after bindings are resolved.
+#[derive(Debug, Default, Resource)]
+pub struct ActionTransitions {
+    pub pressed: HashSet<Action>,
+    pub released: HashSet<Action>,
+}
+
 /// A small in-memory scene, not a loaded zone or authoritative world.
 #[derive(Debug, Resource)]
 pub struct OfflineScene {
@@ -125,6 +132,7 @@ impl Plugin for OfflineCorePlugin {
         app.init_resource::<InputBindings>()
             .init_resource::<PressedControls>()
             .init_resource::<ActiveActions>()
+            .init_resource::<ActionTransitions>()
             .init_resource::<OfflineScene>()
             .init_resource::<CameraPose>()
             .configure_sets(
@@ -168,12 +176,16 @@ fn resolve_actions(
     bindings: Res<InputBindings>,
     pressed: Res<PressedControls>,
     mut actions: ResMut<ActiveActions>,
+    mut transitions: ResMut<ActionTransitions>,
 ) {
-    actions.0 = pressed
+    let next: HashSet<_> = pressed
         .0
         .iter()
         .filter_map(|key| bindings.0.get(key).copied())
         .collect();
+    transitions.pressed = next.difference(&actions.0).copied().collect();
+    transitions.released = actions.0.difference(&next).copied().collect();
+    actions.0 = next;
 }
 
 #[allow(clippy::needless_pass_by_value)] // Bevy system parameter.
@@ -288,5 +300,75 @@ mod tests {
             .avatar_position
             .length();
         assert!((distance - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn action_edges_follow_resolved_actions_not_individual_controls() {
+        let mut app = headless_app();
+        app.world_mut()
+            .resource_mut::<InputBindings>()
+            .0
+            .insert(Control::I, Action::MoveForward);
+        app.world_mut()
+            .resource_mut::<PressedControls>()
+            .0
+            .insert(Control::W);
+        app.update();
+        let edges = app.world().resource::<ActionTransitions>();
+        assert_eq!(edges.pressed, HashSet::from([Action::MoveForward]));
+        assert!(edges.released.is_empty());
+
+        app.world_mut()
+            .resource_mut::<PressedControls>()
+            .0
+            .extend([Control::I]);
+        app.update();
+        let edges = app.world().resource::<ActionTransitions>();
+        assert!(edges.pressed.is_empty());
+        assert!(edges.released.is_empty());
+
+        app.world_mut()
+            .resource_mut::<PressedControls>()
+            .0
+            .remove(&Control::W);
+        app.update();
+        assert!(
+            app.world()
+                .resource::<ActionTransitions>()
+                .released
+                .is_empty()
+        );
+
+        app.world_mut().resource_mut::<PressedControls>().0.clear();
+        app.update();
+        assert_eq!(
+            app.world().resource::<ActionTransitions>().released,
+            HashSet::from([Action::MoveForward])
+        );
+        app.update();
+        assert!(
+            app.world()
+                .resource::<ActionTransitions>()
+                .released
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn rebinding_held_control_produces_release_and_press() {
+        let mut app = headless_app();
+        app.world_mut()
+            .resource_mut::<PressedControls>()
+            .0
+            .insert(Control::W);
+        app.update();
+        app.world_mut()
+            .resource_mut::<InputBindings>()
+            .0
+            .insert(Control::W, Action::Chat);
+        app.update();
+        let edges = app.world().resource::<ActionTransitions>();
+        assert_eq!(edges.released, HashSet::from([Action::MoveForward]));
+        assert_eq!(edges.pressed, HashSet::from([Action::Chat]));
     }
 }
