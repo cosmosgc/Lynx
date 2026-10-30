@@ -55,8 +55,15 @@ budget counters, bounded admission/rate-limit rejections, snapshot write outcome
 and store write latency. Nakama mode also exports bounded backend adapter counts,
 errors and duration histograms. Content state is explicitly reported as absent
 until the service loads a bundle. Pathfinding and localization diagnostics remain
-opt-in and are not wired to current world-service call sites. See operations for
-metric semantics and unsupported families.
+opt-in and are not wired to current world-service call sites. Repository search
+on 2026-10-30 found no `find_path`/`find_path_observed` calls under
+`crates/lynx_world/src`, and no `CatalogSet`/`resolve_with_diagnostics` use
+there; only engine navigation and localization unit tests call those APIs. Thus
+there is no current runtime event to instrument without first adding gameplay
+pathfinding or catalog resolution. See operations for metric semantics and
+unsupported families. The existing live session/input/tick metrics regression
+passed locally with `cargo test -p lynx-world metrics_follow_real_session_input_and_tick`
+(1 passed).
 
 This task remains in progress until pathfinding/localization are integrated or
 formally removed from scope, and the full validation gates are verified.
