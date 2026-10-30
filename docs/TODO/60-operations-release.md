@@ -269,19 +269,28 @@ manual baseline, not automated duration/flakiness tracking.
 - [ ] Security updates have a documented turnaround target.
 
 **Initial implementation:** `.github/workflows/ci.yml` runs pinned
-`cargo-deny` against the committed lockfile on pull requests and pushes.
-`deny.toml` denies known advisories, unapproved licenses, duplicate versions,
-wildcard requirements, and unknown dependency sources. New dependency sources
-and license families require explicit review; there are no blanket advisory or
-license exceptions. Any exception must identify the exact crate/advisory or
-license, rationale, accountable owner (GitHub handle), and ISO-8601 expiry in
-the relevant exception list with an explanatory comment. Expired exceptions
-must be removed or re-approved before expiry. Never put credentials or other
-secrets in audit configuration or logs. Triage security updates within 2
-business days and target remediation or documented mitigation within 7 calendar
-days for critical/high advisories and 30 calendar days for other severities.
-Review dependencies monthly and after RustSec alerts. This policy does not
-assert the current graph is vulnerability-free; hosted CI must run the audit.
+`cargo-deny` 0.19.0 against the committed lockfile on pull requests and pushes;
+this version understands CVSS 4.0 advisories. `deny.toml` fails known
+vulnerability advisories, unapproved licenses, wildcard version requirements,
+and unknown dependency sources. It warns on duplicate transitive versions,
+which are numerous across platform-specific and otherwise independently
+versioned dependencies; workspace path dependencies use explicit versions where
+they are publishable. The audit allows the project's current OSI-approved
+`CDLA-Permissive-2.0` and `MIT-0` licenses. Unmaintained advisories fail when
+they apply to a direct workspace dependency; transitive-only unmaintained
+advisories are surfaced without failing CI pending upstream migration.
+
+New dependency sources and license families require explicit review; there are
+no ignored vulnerability advisories or blanket license exceptions. Any future
+exception must identify the exact crate/advisory or license, rationale,
+accountable owner (GitHub handle), and ISO-8601 expiry in the relevant exception
+list with an explanatory comment. Expired exceptions must be removed or
+re-approved before expiry. Never put credentials or other secrets in audit
+configuration or logs. Triage security updates within 2 business days and
+target remediation or documented mitigation within 7 calendar days for
+critical/high advisories and 30 calendar days for other severities. Review
+dependencies monthly and after RustSec alerts. `cargo deny --locked check`
+passes locally with these rules; duplicate-version warnings remain visible.
 Release SBOM generation/attachment is still missing.
 
 ---

@@ -19,7 +19,7 @@ engine_core.workspace = true
 engine_net.workspace = true
 game_api.workspace = true
 dotenvy.workspace = true
-lynx_client_net = { path = "../lynx_client_net" }
+lynx_client_net = { path = "../lynx_client_net", version = "0.1.0" }
 getrandom.workspace = true
 keyring = { version = "4.2.0", default-features = false, features = ["v1"] }
 serde.workspace = true

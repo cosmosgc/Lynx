@@ -42,15 +42,15 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }
 
-engine_core = { path = "crates/engine_core" }
-engine_sim = { path = "crates/engine_sim" }
-engine_content = { path = "crates/engine_content" }
-engine_net = { path = "crates/engine_net" }
-backend_nakama = { path = "crates/backend_nakama" }
-backend_memory = { path = "crates/backend_memory" }
-game_api = { path = "crates/game_api" }
-world_gateway = { path = "crates/world_gateway" }
-world_server = { path = "crates/world_server" }
+engine_core = { path = "crates/engine_core", version = "0.1.0" }
+engine_sim = { path = "crates/engine_sim", version = "0.1.0" }
+engine_content = { path = "crates/engine_content", version = "0.1.0" }
+engine_net = { path = "crates/engine_net", version = "0.1.0" }
+backend_nakama = { path = "crates/backend_nakama", version = "0.1.0" }
+backend_memory = { path = "crates/backend_memory", version = "0.1.0" }
+game_api = { path = "crates/game_api", version = "0.1.0" }
+world_gateway = { path = "crates/world_gateway", version = "0.1.0" }
+world_server = { path = "crates/world_server", version = "0.1.0" }
 
 axum = { version = "0.8.9", features = ["ws"] }
 tokio = { version = "1.54.1", features = [

@@ -19,7 +19,7 @@ clap = { workspace = true }
 engine_content = { workspace = true }
 engine_core = { workspace = true }
 game_api = { workspace = true }
-lynx-world = { path = "../../crates/lynx_world" }
+lynx-world = { path = "../../crates/lynx_world", version = "0.1.0" }
 serde_json = { workspace = true }
 semver = { workspace = true }
 
