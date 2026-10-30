@@ -185,3 +185,18 @@ fn unknown_feature_names_fail_but_unknown_envelope_fields_are_ignored() {
     assert_eq!(decoded.body, json!({}));
     assert!(!decoded.encode().unwrap().contains("future_envelope_field"));
 }
+
+#[test]
+fn unknown_handshake_fields_are_ignored_but_unknown_features_are_rejected() {
+    let handshake = Handshake::new(semver::Version::new(0, 1, 0), semver::Version::new(0, 1, 0));
+    let mut value = serde_json::to_value(&handshake).unwrap();
+    value["future_diagnostic"] = json!({"build": "next"});
+    assert_eq!(
+        serde_json::from_value::<Handshake>(value).unwrap(),
+        handshake
+    );
+
+    let mut value = serde_json::to_value(&handshake).unwrap();
+    value["features"] = json!(["future_feature"]);
+    assert!(serde_json::from_value::<Handshake>(value).is_err());
+}

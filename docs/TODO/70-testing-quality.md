@@ -96,7 +96,7 @@ tests cover some of these separately, but do not substitute for this suite.
 ## QUA-003 — Protocol golden and compatibility tests
 
 - **Priority:** P1
-- **Status:** Ready
+- **Status:** In progress — handshake/error negotiation goldens and compatibility/unknown-field behavior are covered; world-message fixtures and breaking-change gate remain open
 - **Depends on:** —
 - **References:** `NET-004`, `engine_net::protocol`
 
@@ -115,6 +115,16 @@ tests cover some of these separately, but do not substitute for this suite.
 - [ ] Accidental field/format changes fail CI.
 - [ ] Compatibility matrix outcomes match the documented policy.
 - [ ] Fixtures are versioned with the protocol.
+
+**Progress:** `crates/engine_net/tests/protocol_golden.rs` pins hello, version
+mismatch error, and negotiated handshake wire forms and exercises the major,
+minor, content, and feature compatibility outcomes. It now also records the
+serde contract that unknown envelope and handshake fields are ignored while
+unknown feature names are rejected. This is intentionally bounded: the protocol
+does not yet have checked-in fixtures for all world-message kinds, nor a diff
+gate requiring a version/changelog update for breaking wire changes. Fixtures
+currently use a `1.0.0` filename but are not yet an exhaustive per-kind,
+versioned fixture set.
 
 ---
 
