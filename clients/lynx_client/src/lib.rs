@@ -11,6 +11,7 @@ pub mod offline;
 pub mod online;
 pub mod reconciliation;
 pub mod replay;
+pub mod server_browser;
 #[cfg(feature = "window")]
 pub mod windowed;
 pub mod world_state;

@@ -118,8 +118,12 @@ echo, stores account identity plus rotating refresh tokens in the OS credential
 store, supports logout, and reaches the character HTTP API. Access tokens remain
 in memory. The `--account` Bevy screen signs in to existing email accounts and
 reuses the secure refresh token; new accounts use `account_portal/`. The server browser/profiles/history, localized
-errors, and world resume-token lifecycle remain open. Plaintext transport is
-restricted to literal loopback IPs, not arbitrary trusted LANs.
+errors, and world resume-token lifecycle remain open. The new `server_browser`
+module provides validated IP/DNS profiles, stable per-server keys, pin ordering,
+and a bounded recent list, with strict JSON serialization containing no
+credential fields. It is not yet wired to a UI or OS-backed profile file; remote
+transport still requires WSS. Focused model tests pass (3/3). `NET-001` and
+`CLT-001` remain prerequisites and are not assumed complete.
 
 ---
 
