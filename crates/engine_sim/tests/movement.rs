@@ -160,6 +160,82 @@ fn identical_inputs_produce_identical_results() {
 }
 
 #[test]
+fn seeded_multi_entity_replay_has_byte_identical_snapshots() {
+    const ACTORS: u128 = 8;
+    const TICKS: u64 = 24;
+
+    let mut forward = clear_setup();
+    let mut reverse = clear_setup();
+    let actor_ids: Vec<_> = (1..=ACTORS)
+        .map(|seed| {
+            let actor = id(IdKind::Entity, seed);
+            if seed != 1 {
+                spawn_player(
+                    &mut forward,
+                    seed,
+                    seed,
+                    &format!("session-{seed}"),
+                    pos(0.5, 0.5),
+                    MovementProfile::default(),
+                );
+            }
+            actor
+        })
+        .collect();
+    for seed in (2..=ACTORS).rev() {
+        spawn_player(
+            &mut reverse,
+            seed,
+            seed,
+            &format!("session-{seed}"),
+            pos(0.5, 0.5),
+            MovementProfile::default(),
+        );
+    }
+
+    // A small fixed-seed generator keeps this workload reproducible without
+    // introducing a random dependency into the simulation crate.
+    let mut state = 0x5eed_u64;
+    let mut sequences = [0_u64; ACTORS as usize];
+    for _ in 0..TICKS {
+        for (index, actor) in actor_ids.iter().enumerate() {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            let x = ((state >> 32) % 4) as f32 + 0.5;
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            let z = ((state >> 32) % 4) as f32 + 0.5;
+            sequences[index] += 1;
+            let sequence = sequences[index];
+            let session = if index == 0 {
+                "session".to_owned()
+            } else {
+                format!("session-{}", index + 1)
+            };
+            for zone in [&mut forward, &mut reverse] {
+                zone.queue_movement(player_intent(
+                    *actor,
+                    index as u128 + 1,
+                    &session,
+                    sequence,
+                    pos(x, z),
+                ))
+                .unwrap();
+            }
+        }
+
+        let left = forward.advance_movement_tick(500, 2.0);
+        let right = reverse.advance_movement_tick(500, 2.0);
+        assert_eq!(left, right);
+        let left_snapshot = serde_json::to_vec(&forward.snapshot()).unwrap();
+        let right_snapshot = serde_json::to_vec(&reverse.snapshot()).unwrap();
+        assert_eq!(left_snapshot, right_snapshot);
+    }
+}
+
+#[test]
 fn cancellation_is_session_scoped_and_keeps_sequence_consumed() {
     let mut z = setup();
     let actor = id(IdKind::Entity, 1);

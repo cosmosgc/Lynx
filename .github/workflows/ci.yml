@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   shellcheck:
@@ -55,6 +56,7 @@ jobs:
   rust:
     name: Rust checks (Ubuntu)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:17
@@ -82,6 +84,9 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Start CI duration measurement
+        run: python3 scripts/ci-job-duration.py start rust-ubuntu
 
       - name: Install PostgreSQL client
         run: |
@@ -135,12 +140,20 @@ jobs:
             jq -e '.ok == true and .validation.ok == true and .cargo.exit_code == 0' "$RUNNER_TEMP/$command.json"
           done
 
+      - name: Report CI duration
+        if: always()
+        run: python3 scripts/ci-job-duration.py finish rust-ubuntu
+
   windows:
     name: Rust checks (Windows)
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - name: Check out repository
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Start CI duration measurement
+        run: python scripts/ci-job-duration.py start rust-windows
 
       - name: Check formatting
         run: cargo fmt --all --check
@@ -161,6 +174,10 @@ jobs:
 
       - name: Build workspace
         run: cargo build --workspace
+
+      - name: Report CI duration
+        if: always()
+        run: python scripts/ci-job-duration.py finish rust-windows
 
   migrations:
     name: PostgreSQL 17 migrations
@@ -266,3 +283,22 @@ jobs:
           fi
           test "$before" = "$(psql "${psql_args[@]}" -c "$history_query")"
           psql "${psql_args[@]}" -c "UPDATE lynx.schema_migrations SET checksum = '$original' WHERE version = '0001_core'"
+
+  ci-history:
+    name: CI duration and outcome trend
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    needs: [rust, windows, migrations]
+    if: always()
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Report recent Rust job duration and outcome history
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CI_HISTORY_BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: python3 scripts/ci-history.py

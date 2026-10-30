@@ -217,7 +217,18 @@ derives its head from the migration files.
 **Observed hosted baseline (2026-10-29):** the green run took just under ten
 minutes overall; Ubuntu workspace tests took about three minutes and Clippy
 about 90 seconds. Windows workspace tests exceeded ten minutes. This is a
-manual baseline, not automated duration/flakiness tracking.
+historical baseline. The Ubuntu and Windows Rust jobs now publish their elapsed
+time in the Actions run summary and have a 30-minute hard timeout. A separate
+read-only CI history job compares those jobs' current durations with the median
+of up to 20 prior completed runs on the same branch, and reports prior job
+failure rates in the run summary. This is observational (no growth threshold,
+retries, or change to pass/fail outcomes); the failure rate is a workflow-job
+reliability signal, not test-level flakiness. Test-level flakiness still follows
+the manual QUA-016 tracking policy. A connected client smoke remains open
+because the current client checks are GPU-free headless tests, not a
+connect/render/move integration flow. macOS remains unsupported in CI. Local
+setup and tests remain native and do not require Docker; the PostgreSQL service
+is confined to hosted CI.
 
 ---
 

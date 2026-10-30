@@ -487,9 +487,12 @@ manual policy until automated flaky-test reporting is introduced.
 **Hosted duration baseline (2026-10-29):** OPS-006 recorded just under ten
 minutes overall, approximately three minutes for Ubuntu workspace tests and
 90 seconds for Clippy; Windows workspace tests exceeded ten minutes. These
-observations are a historical baseline only, not a CI bound. The current
-workflow does not publish per-job durations or enforce a duration budget, so
-no threshold is inferred from this single run.
+observations are a historical baseline. OPS-006 now publishes elapsed time for
+the Ubuntu and Windows Rust jobs in each Actions run summary and bounds either
+job with a 30-minute timeout. This is visibility and a hard ceiling, not
+automated trend detection or an unexplained-growth failure threshold. No
+threshold is inferred from the single historical run. Flaky failures remain
+manually tracked under the policy above; CI does not silently retry tests.
 
 ---
 

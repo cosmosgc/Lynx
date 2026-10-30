@@ -28,6 +28,10 @@ const MIGRATIONS: &[(&str, &[u8])] = &[
         "0006_world_snapshots",
         include_bytes!("../../../server/migrations/0006_world_snapshots.sql"),
     ),
+    (
+        "0007_zone_fencing",
+        include_bytes!("../../../server/migrations/0007_zone_fencing.sql"),
+    ),
 ];
 
 /// Schema compatibility against the migrations embedded in this binary.
@@ -155,7 +159,7 @@ mod tests {
         assert!(compare(false, &rows).compatible());
         assert!(!compare(true, &[]).compatible());
         rows.pop();
-        assert_eq!(compare(false, &rows).pending, ["0006_world_snapshots"]);
+        assert_eq!(compare(false, &rows).pending, ["0007_zone_fencing"]);
         rows[0].1 = "bad".into();
         rows.push(("0007_future".into(), "secret".into()));
         let status = compare(false, &rows);

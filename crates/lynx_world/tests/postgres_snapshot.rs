@@ -12,7 +12,8 @@ use engine_core::time::{DurationMs, Millis};
 use lynx_world::auth::{Authenticator, Grant, digest};
 use lynx_world::demo;
 use lynx_world::persistence::{
-    PostgresSnapshotStore, SnapshotStore, WorldSnapshot, WorldSnapshotInputs,
+    PostgresSnapshotStore, PostgresZoneLeaseStore, SnapshotStore, WorldSnapshot,
+    WorldSnapshotInputs,
 };
 use lynx_world::startup;
 use world_gateway::{GatewayConfig, SystemResumeTokens, WorldGateway};
@@ -62,6 +63,87 @@ fn test_world_id() -> String {
         .unwrap()
         .as_nanos();
     format!("test-{nanos}")
+}
+
+#[test]
+fn postgres_zone_lease_takeover_fences_old_owner_and_sequences_events() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+    if std::env::var("LYNX_PG_PASSWORD").is_err() {
+        anyhow::ensure!(
+            std::env::var_os("LYNX_REQUIRE_POSTGRES_TEST").is_none(),
+            "PostgreSQL test required but not configured"
+        );
+        eprintln!("skipping PostgreSQL zone lease test: LYNX_PG_PASSWORD is not configured");
+        return Ok(());
+    }
+    let store = PostgresZoneLeaseStore::from_env()?;
+    let zone = format!(
+        "zone_{:026}",
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+    );
+    let first = store
+        .acquire(&zone, "owner-a", std::time::Duration::from_millis(30))?
+        .unwrap();
+    assert!(
+        store
+            .acquire(&zone, "owner-b", std::time::Duration::from_secs(10))?
+            .is_none()
+    );
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let second = store
+        .acquire(&zone, "owner-b", std::time::Duration::from_secs(10))?
+        .unwrap();
+    assert!(second.fencing_token > first.fencing_token);
+    let payload = serde_json::json!({"value": 1});
+    let stale = store
+        .append_event(
+            &zone,
+            "owner-a",
+            first.fencing_token,
+            1,
+            "test",
+            None,
+            &payload,
+            1,
+        )
+        .unwrap_err();
+    assert_eq!(stale.code(), engine_core::error::ErrorCode::Conflict);
+    assert_eq!(
+        store.append_event(
+            &zone,
+            "owner-b",
+            second.fencing_token,
+            2,
+            "test",
+            None,
+            &payload,
+            1
+        )?,
+        0
+    );
+    assert_eq!(
+        store.append_event(
+            &zone,
+            "owner-b",
+            second.fencing_token,
+            3,
+            "test",
+            None,
+            &payload,
+            1
+        )?,
+        1
+    );
+    let events = store.events_after(&zone, -1)?;
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    assert!(store.release(&zone, "owner-b", second.fencing_token)?);
+    Ok(())
 }
 
 #[test]

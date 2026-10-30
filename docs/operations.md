@@ -165,9 +165,16 @@ state is in memory and a restart logs everyone out and resets the zone.
 With `--state-postgres`, the whole-world snapshot lives in
 `lynx.world_snapshots` (one row per world, written atomically by an upsert, so
 a failed write keeps the previous world) and the connection comes from the
-same `LYNX_PG_*` variables the setup scripts use. Plain TCP only: keep the
-database on loopback or a trusted private network and terminate TLS in front
-of it; a remote, unencrypted database is not supported.
+same `LYNX_PG_*` variables the setup scripts use. Connection establishment is
+limited to five seconds, and PostgreSQL statement, lock, and idle-transaction
+timeouts are configured to five, two, and five seconds respectively. Initial
+connection attempts use a bounded three-attempt backoff. Queries are not
+automatically retried because a lost response can make a write outcome
+ambiguous. Remote hosts are refused by default; set
+`LYNX_PG_ALLOW_INSECURE_REMOTE=true` only for a deliberately trusted network.
+This adapter currently uses plain TCP and does not provide TLS; use a local
+TLS-terminating tunnel/proxy for remote database access. This opt-in does not
+encrypt traffic.
 
 A snapshot is a whole-world overwrite, so falling back to the authored demo
 would otherwise mean deleting the snapshot by hand. `--fresh` does that
@@ -381,6 +388,68 @@ Unsupported or incomplete requested families (do not interpret their absence as 
   after a process restart within 60 seconds from snapshot plus event log.
 - Retain audit records according to policy; never let retention delete records
   under active moderation review.
+
+### Manual logical restore drill (PostgreSQL)
+
+This drill makes a custom-format logical dump of the configured Lynx database,
+restores it into a newly-created scratch database, and checks that representative
+durable data and the append-only audit trigger are present. Run it from a trusted
+operator host with PostgreSQL client tools (`pg_dump`, `pg_restore`, `createdb`,
+`dropdb`, and `psql`) installed. Set `LYNX_PG_*` as for the service (or populate
+the repository-root `.env`); for `pg_dump`/`psql`, `LYNX_PG_PASSWORD` is consumed
+through `PGPASSWORD`, not a command-line argument. Database creation and cleanup
+use the configured libpq superuser authentication (`LYNX_PG_SUPERUSER`, default
+`postgres`), as in `setup-postgres.*`. Do not run this against a production
+host without an approved change window and scratch-database capacity.
+
+PowerShell example (each invocation is explicit; the generated database name is
+restricted to the `lynx_restore_check_` prefix):
+
+```powershell
+$ErrorActionPreference = 'Stop'
+$scratch = 'lynx_restore_check_' + [guid]::NewGuid().ToString('N')
+$maintenance = if ($env:LYNX_PG_MAINTENANCE_DB) { $env:LYNX_PG_MAINTENANCE_DB } else { 'postgres' }
+$archive = Join-Path (Resolve-Path .) ('backups/lynx-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.dump')
+New-Item -ItemType Directory -Force (Split-Path $archive) | Out-Null
+$env:PGPASSWORD = $env:LYNX_PG_PASSWORD
+pg_dump --host $env:LYNX_PG_HOST --port $env:LYNX_PG_PORT --username $env:LYNX_PG_USER --dbname $env:LYNX_PG_DATABASE --format custom --file $archive --verbose
+if ($LASTEXITCODE -ne 0) { throw 'pg_dump failed' }
+Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
+try {
+    createdb --host $env:LYNX_PG_HOST --port $env:LYNX_PG_PORT --username $env:LYNX_PG_SUPERUSER --maintenance-db $maintenance --owner $env:LYNX_PG_USER --template template0 $scratch
+    if ($LASTEXITCODE -ne 0) { throw 'createdb failed' }
+    $env:PGPASSWORD = $env:LYNX_PG_PASSWORD
+    pg_restore --host $env:LYNX_PG_HOST --port $env:LYNX_PG_PORT --username $env:LYNX_PG_USER --dbname $scratch --no-owner --no-privileges --exit-on-error --verbose $archive
+    if ($LASTEXITCODE -ne 0) { throw 'pg_restore failed' }
+    $env:PGPASSWORD = $env:LYNX_PG_PASSWORD
+    psql --host $env:LYNX_PG_HOST --port $env:LYNX_PG_PORT --username $env:LYNX_PG_USER --dbname $scratch --no-psqlrc --set ON_ERROR_STOP=1 --command "SELECT 'characters=' || count(*) FROM lynx.characters; SELECT 'audit_events=' || count(*) FROM lynx.audit_events; SELECT 'world_snapshots=' || count(*) FROM lynx.world_snapshots; SELECT 'audit_append_only_trigger=' || count(*) FROM pg_trigger WHERE tgrelid = 'lynx.audit_events'::regclass AND tgname = 'audit_events_append_only' AND NOT tgisinternal;"
+    if ($LASTEXITCODE -ne 0) { throw 'restore verification query failed' }
+} finally {
+    # Drop only the uniquely generated scratch DB, never LYNX_PG_DATABASE.
+    Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
+    dropdb --host $env:LYNX_PG_HOST --port $env:LYNX_PG_PORT --username $env:LYNX_PG_SUPERUSER --maintenance-db $maintenance --if-exists $scratch
+    if ($LASTEXITCODE -ne 0) { Write-Warning "Could not remove scratch database '$scratch'; remove it manually after confirming its name." }
+}
+```
+
+The displayed row counts are evidence to record and compare with the source
+before the drill; they are not expected to be nonzero in an empty development
+database. Require `audit_append_only_trigger=1`. Repeat that query for every
+append-only table introduced by later migrations, and test the application
+against restored staging data before declaring a production recovery drill
+passed. Never use `--clean` or point restore tools at the configured source
+database. Keep the archive encrypted with restrictive filesystem permissions,
+copy it off-host before counting it as a backup, and retain a checksum alongside
+it. A failed dump/restore/query is a failed drill; the command exits nonzero
+except that cleanup failure emits a warning and needs operator follow-up.
+
+This is a manual logical-dump procedure, not a scheduled backup or a verified
+production recovery: WAL archiving, encrypted off-host copies, retention duration,
+alert routing, restore duration, and the stated RPO/RTO still require an exercised
+target-environment policy. The world snapshot is in `lynx.world_snapshots` when
+`--state-postgres` is used; for `--state-file`, protect and copy that JSON file
+separately. The existing world-service readiness endpoint is not a database or
+character/audit continuity check.
 
 ## Deploy and rollback
 

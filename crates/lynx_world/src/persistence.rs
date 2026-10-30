@@ -25,7 +25,28 @@ use engine_sim::snapshot::ZoneSnapshot;
 
 mod postgres;
 
-pub use postgres::{PostgresSnapshotStore, postgres_config_from_env};
+pub use postgres::{PostgresSnapshotStore, PostgresZoneLeaseStore, postgres_config_from_env};
+
+/// A currently-held zone lease. The fencing token changes on every takeover.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZoneLease {
+    pub zone_id: String,
+    pub owner: String,
+    pub fencing_token: i64,
+    pub expires_at: std::time::SystemTime,
+}
+
+/// An event written to the per-zone append-only log.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ZoneEvent {
+    pub sequence: i64,
+    pub tick: i64,
+    pub occurred_at: std::time::SystemTime,
+    pub kind: String,
+    pub actor_id: Option<String>,
+    pub payload: serde_json::Value,
+    pub schema_version: i32,
+}
 
 /// The schema version written by this service build.
 pub const WORLD_SNAPSHOT_VERSION: SchemaVersion = SchemaVersion::new(1, 0);

@@ -15,5 +15,9 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
+[[bench]]
+name = "tick"
+harness = false
+
 [lints]
 workspace = true

@@ -148,6 +148,8 @@ pub struct Metrics {
     queue_depth: AtomicU64,
     queue_capacity: AtomicU64,
     replication_enqueued_bytes: AtomicU64,
+    replication_snapshots_enqueued: AtomicU64,
+    replication_deltas_enqueued: AtomicU64,
     ai_ticks: AtomicU64,
     ai_decisions: AtomicU64,
     ai_controller_scan_limit: AtomicU64,
@@ -252,6 +254,12 @@ impl Metrics {
             text,
             "# HELP lynx_world_replication_enqueued_bytes_total Encoded snapshot and delta frame bytes successfully enqueued, not socket delivery bytes.\n# TYPE lynx_world_replication_enqueued_bytes_total counter\nlynx_world_replication_enqueued_bytes_total {}",
             get(&self.replication_enqueued_bytes)
+        );
+        let _ = write!(
+            text,
+            "# HELP lynx_world_replication_enqueued_frames_total Successfully enqueued replication frames by kind.\n# TYPE lynx_world_replication_enqueued_frames_total counter\nlynx_world_replication_enqueued_frames_total{{kind=\"snapshot\"}} {}\nlynx_world_replication_enqueued_frames_total{{kind=\"delta\"}} {}\n",
+            get(&self.replication_snapshots_enqueued),
+            get(&self.replication_deltas_enqueued)
         );
         let _ = writeln!(
             text,
@@ -819,6 +827,19 @@ impl Service {
         let Some(writer) = self.writers.get_mut(&connection) else {
             return;
         };
+        let replication_kind = match &frame {
+            ServerFrame::Envelope(envelope)
+                if envelope.kind.as_str() == world_server::SNAPSHOT_KIND =>
+            {
+                Some("snapshot")
+            }
+            ServerFrame::Envelope(envelope)
+                if envelope.kind.as_str() == world_server::DELTA_KIND =>
+            {
+                Some("delta")
+            }
+            _ => None,
+        };
         let frame = match frame {
             ServerFrame::Envelope(envelope)
                 if matches!(
@@ -834,16 +855,22 @@ impl Service {
             }
             frame => frame,
         };
-        let replication_bytes = match &frame {
-            ServerFrame::Encoded(bytes) => Some(bytes.len() as u64),
+        let replication_bytes = match (&frame, replication_kind) {
+            (ServerFrame::Encoded(bytes), Some(kind)) => Some((bytes.len() as u64, kind)),
             _ => None,
         };
         match writer.try_send(frame) {
             Ok(()) => {
-                if let Some(bytes) = replication_bytes {
+                if let Some((bytes, kind)) = replication_bytes {
                     self.metrics
                         .replication_enqueued_bytes
                         .fetch_add(bytes, Ordering::Relaxed);
+                    let counter = if kind == "snapshot" {
+                        &self.metrics.replication_snapshots_enqueued
+                    } else {
+                        &self.metrics.replication_deltas_enqueued
+                    };
+                    counter.fetch_add(1, Ordering::Relaxed);
                 }
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -964,6 +991,12 @@ mod tests {
         assert!(initial.contains("lynx_world_session_attaches_total 1\n"));
         assert!(initial.contains("lynx_world_outbound_queue_depth 3\n"));
         assert!(initial.contains("lynx_world_outbound_queue_capacity 16\n"));
+        assert!(
+            initial.contains("lynx_world_replication_enqueued_frames_total{kind=\"snapshot\"} 1\n")
+        );
+        assert!(
+            initial.contains("lynx_world_replication_enqueued_frames_total{kind=\"delta\"} 0\n")
+        );
         assert!(metrics.replication_enqueued_bytes.load(Ordering::Relaxed) > 0);
         let mut queued_bytes = 0;
         while let Ok(frame) = receiver.try_recv() {
@@ -992,6 +1025,7 @@ mod tests {
         assert!(text.contains("lynx_world_entities 5\n"));
         assert!(text.contains("lynx_world_connections 1\n"));
         assert!(text.contains("lynx_world_inputs_total 1\n"));
+        assert!(text.contains("lynx_world_replication_enqueued_frames_total{kind=\"delta\"} 0\n"));
         assert!(!text.contains(TOKEN));
         assert!(!text.contains("private-message"));
         service.handle(ServerEvent::Leave {

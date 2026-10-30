@@ -13,12 +13,218 @@
 
 use std::fmt;
 use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 use engine_core::error::{EngineError, ErrorCode};
 use postgres::{Client, Config, NoTls};
 use serde_json::Value;
 
-use super::{SnapshotStore, WorldSnapshot};
+use super::{SnapshotStore, WorldSnapshot, ZoneEvent, ZoneLease};
+
+/// PostgreSQL lease and event-log operations for one zone at a time.
+pub struct PostgresZoneLeaseStore {
+    client: Mutex<Client>,
+}
+
+impl fmt::Debug for PostgresZoneLeaseStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PostgresZoneLeaseStore")
+            .finish_non_exhaustive()
+    }
+}
+
+impl PostgresZoneLeaseStore {
+    /// Connect after verifying that the configured database schema is current.
+    pub fn from_env() -> Result<Self, EngineError> {
+        Self::connect(&postgres_config_from_env()?)
+    }
+
+    /// Connect with an explicit PostgreSQL configuration.
+    pub fn connect(config: &Config) -> Result<Self, EngineError> {
+        let mut client = connect_with_retry(config).map_err(|_| {
+            EngineError::new(
+                ErrorCode::Internal,
+                "the PostgreSQL zone store could not connect",
+            )
+        })?;
+        let status = crate::schema::inspect(&mut client)
+            .map_err(|message| EngineError::new(ErrorCode::Internal, message))?;
+        if !status.compatible() {
+            return Err(EngineError::new(ErrorCode::Internal, status.diagnostic()));
+        }
+        Ok(Self {
+            client: Mutex::new(client),
+        })
+    }
+
+    /// Acquire an absent/expired zone lease. Expired takeovers increment its token.
+    pub fn acquire(
+        &self,
+        zone_id: &str,
+        owner: &str,
+        ttl: std::time::Duration,
+    ) -> Result<Option<ZoneLease>, EngineError> {
+        validate_zone_owner(zone_id, owner, ttl)?;
+        let ttl_ms = i64::try_from(ttl.as_millis()).map_err(|_| invalid_lease())?;
+        let mut client = self.client.lock().map_err(|_| store_unavailable())?;
+        let row = client.query_opt(
+            "INSERT INTO lynx.zone_leases (zone_id, owner, expires_at) VALUES ($1, $2, clock_timestamp() + ($3 * interval '1 millisecond')) ON CONFLICT (zone_id) DO UPDATE SET owner = EXCLUDED.owner, acquired_at = clock_timestamp(), expires_at = EXCLUDED.expires_at, fencing_token = lynx.zone_leases.fencing_token + 1 WHERE lynx.zone_leases.expires_at <= clock_timestamp() RETURNING zone_id, owner, fencing_token, expires_at",
+            &[&zone_id, &owner, &ttl_ms],
+        ).map_err(|error| store_error("the zone lease could not be acquired", &error))?;
+        Ok(row.map(|row| ZoneLease {
+            zone_id: row.get(0),
+            owner: row.get(1),
+            fencing_token: row.get(2),
+            expires_at: row.get(3),
+        }))
+    }
+
+    /// Extend a still-live lease only if owner and fencing token still match.
+    pub fn renew(
+        &self,
+        zone_id: &str,
+        owner: &str,
+        token: i64,
+        ttl: std::time::Duration,
+    ) -> Result<Option<ZoneLease>, EngineError> {
+        validate_zone_owner(zone_id, owner, ttl)?;
+        let ttl_ms = i64::try_from(ttl.as_millis()).map_err(|_| invalid_lease())?;
+        let mut client = self.client.lock().map_err(|_| store_unavailable())?;
+        let row = client.query_opt("UPDATE lynx.zone_leases SET expires_at = clock_timestamp() + ($4 * interval '1 millisecond') WHERE zone_id = $1 AND owner = $2 AND fencing_token = $3 AND expires_at > clock_timestamp() RETURNING zone_id, owner, fencing_token, expires_at", &[&zone_id, &owner, &token, &ttl_ms]).map_err(|error| store_error("the zone lease could not be renewed", &error))?;
+        Ok(row.map(|row| ZoneLease {
+            zone_id: row.get(0),
+            owner: row.get(1),
+            fencing_token: row.get(2),
+            expires_at: row.get(3),
+        }))
+    }
+
+    /// Expire a lease without deleting its generation history.
+    pub fn release(&self, zone_id: &str, owner: &str, token: i64) -> Result<bool, EngineError> {
+        let mut client = self.client.lock().map_err(|_| store_unavailable())?;
+        let count = client.execute("UPDATE lynx.zone_leases SET expires_at = clock_timestamp() WHERE zone_id = $1 AND owner = $2 AND fencing_token = $3 AND expires_at > clock_timestamp()", &[&zone_id, &owner, &token]).map_err(|error| store_error("the zone lease could not be released", &error))?;
+        Ok(count == 1)
+    }
+
+    /// Append an event atomically with lease validation and gap-free sequencing.
+    pub fn append_event(
+        &self,
+        zone_id: &str,
+        owner: &str,
+        token: i64,
+        tick: i64,
+        kind: &str,
+        actor_id: Option<&str>,
+        payload: &Value,
+        schema_version: i32,
+    ) -> Result<i64, EngineError> {
+        if !valid_zone_id(zone_id)
+            || owner.is_empty()
+            || tick < 0
+            || kind.is_empty()
+            || kind.len() > 128
+            || schema_version < 1
+            || !payload.is_object()
+        {
+            return Err(invalid_lease());
+        }
+        let mut client = self.client.lock().map_err(|_| store_unavailable())?;
+        let mut tx = client
+            .transaction()
+            .map_err(|error| store_error("the zone event could not be appended", &error))?;
+        let held = tx.query_opt("SELECT 1 FROM lynx.zone_leases WHERE zone_id = $1 AND owner = $2 AND fencing_token = $3 AND expires_at > clock_timestamp() FOR UPDATE", &[&zone_id, &owner, &token]).map_err(|error| store_error("the zone lease could not be checked", &error))?;
+        if held.is_none() {
+            return Err(stale_lease());
+        }
+        let seq: i64 = tx
+            .query_one(
+                "SELECT COALESCE(MAX(sequence) + 1, 0) FROM lynx.zone_events WHERE zone_id = $1",
+                &[&zone_id],
+            )
+            .map_err(|error| store_error("the zone event sequence could not be read", &error))?
+            .get(0);
+        tx.execute("INSERT INTO lynx.zone_events (zone_id, sequence, tick, occurred_at, kind, actor_id, payload, schema_version) VALUES ($1, $2, $3, clock_timestamp(), $4, $5, $6, $7)", &[&zone_id, &seq, &tick, &kind, &actor_id, payload, &schema_version]).map_err(|error| store_error("the zone event could not be appended", &error))?;
+        tx.commit()
+            .map_err(|error| store_error("the zone event could not be committed", &error))?;
+        Ok(seq)
+    }
+
+    /// Fetch ordered events strictly after a sequence (use `-1` for all events).
+    pub fn events_after(
+        &self,
+        zone_id: &str,
+        sequence: i64,
+    ) -> Result<Vec<ZoneEvent>, EngineError> {
+        if !valid_zone_id(zone_id) {
+            return Err(invalid_lease());
+        }
+        let mut client = self.client.lock().map_err(|_| store_unavailable())?;
+        let rows = client.query("SELECT sequence, tick, occurred_at, kind, actor_id, payload, schema_version FROM lynx.zone_events WHERE zone_id = $1 AND sequence > $2 ORDER BY sequence", &[&zone_id, &sequence]).map_err(|error| store_error("the zone events could not be read", &error))?;
+        Ok(rows
+            .into_iter()
+            .map(|r| ZoneEvent {
+                sequence: r.get(0),
+                tick: r.get(1),
+                occurred_at: r.get(2),
+                kind: r.get(3),
+                actor_id: r.get(4),
+                payload: r.get(5),
+                schema_version: r.get(6),
+            })
+            .collect())
+    }
+}
+
+fn valid_zone_id(value: &str) -> bool {
+    value.strip_prefix("zone_").is_some_and(|suffix| {
+        suffix.len() == 26
+            && suffix.bytes().all(|b| {
+                b.is_ascii_digit()
+                    || (b'A'..=b'H').contains(&b)
+                    || (b'J'..=b'K').contains(&b)
+                    || (b'M'..=b'N').contains(&b)
+                    || (b'P'..=b'T').contains(&b)
+                    || (b'V'..=b'Z').contains(&b)
+            })
+    })
+}
+fn validate_zone_owner(
+    zone: &str,
+    owner: &str,
+    ttl: std::time::Duration,
+) -> Result<(), EngineError> {
+    if !valid_zone_id(zone)
+        || owner.is_empty()
+        || owner.len() > 256
+        || ttl.is_zero()
+        || ttl.as_millis() > i64::MAX as u128
+    {
+        Err(invalid_lease())
+    } else {
+        Ok(())
+    }
+}
+fn invalid_lease() -> EngineError {
+    EngineError::new(
+        ErrorCode::InvalidRequest,
+        "the zone lease request is invalid",
+    )
+}
+fn stale_lease() -> EngineError {
+    EngineError::new(
+        ErrorCode::Conflict,
+        "the zone lease is no longer authoritative",
+    )
+}
+fn store_unavailable() -> EngineError {
+    EngineError::new(
+        ErrorCode::Internal,
+        "the PostgreSQL zone store is unavailable",
+    )
+}
+fn store_error(message: &'static str, _error: &postgres::Error) -> EngineError {
+    EngineError::new(ErrorCode::Internal, message)
+}
 
 const SELECT_SNAPSHOT: &str = "\
 SELECT schema_major, schema_minor, saved_at_ms, payload, payload_hash \
@@ -83,7 +289,7 @@ impl PostgresSnapshotStore {
                 "the world snapshot ID is invalid",
             ));
         }
-        let mut client = config.connect(NoTls).map_err(|_| {
+        let mut client = connect_with_retry(config).map_err(|_| {
             EngineError::new(
                 ErrorCode::Internal,
                 "the PostgreSQL snapshot store could not connect",
@@ -134,6 +340,12 @@ impl PostgresSnapshotStore {
 /// Read the shared PostgreSQL configuration without exposing its values.
 pub fn postgres_config_from_env() -> Result<Config, EngineError> {
     let host = environment_or("LYNX_PG_HOST", "127.0.0.1");
+    if !is_loopback_host(&host) && !environment_is_true("LYNX_PG_ALLOW_INSECURE_REMOTE") {
+        return Err(EngineError::new(
+            ErrorCode::Internal,
+            "remote PostgreSQL connections require TLS support or explicit insecure opt-in",
+        ));
+    }
     let port = environment_or("LYNX_PG_PORT", "5432")
         .parse::<u16>()
         .map_err(|error| {
@@ -151,8 +363,37 @@ pub fn postgres_config_from_env() -> Result<Config, EngineError> {
         .dbname(&database)
         .user(&user)
         .password(&password)
-        .application_name("lynx-world");
+        .application_name("lynx-world")
+        .connect_timeout(Duration::from_secs(5))
+        .options("-c statement_timeout=5000 -c lock_timeout=2000 -c idle_in_transaction_session_timeout=5000");
     Ok(config)
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+fn environment_is_true(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| value.eq_ignore_ascii_case("true"))
+}
+
+/// Retry connection establishment with a bounded exponential backoff. Queries
+/// are not replayed because a lost response can make a write's outcome unknown.
+fn connect_with_retry(config: &Config) -> Result<Client, postgres::Error> {
+    const ATTEMPTS: usize = 3;
+    let mut delay = Duration::from_millis(100);
+    let mut last_error = None;
+    for attempt in 0..ATTEMPTS {
+        match config.connect(NoTls) {
+            Ok(client) => return Ok(client),
+            Err(error) => last_error = Some(error),
+        }
+        if attempt + 1 < ATTEMPTS {
+            std::thread::sleep(delay);
+            delay *= 2;
+        }
+    }
+    Err(last_error.expect("at least one connection attempt"))
 }
 
 impl SnapshotStore for PostgresSnapshotStore {
@@ -167,6 +408,9 @@ impl SnapshotStore for PostgresSnapshotStore {
 
         let payload: Value = row.get("payload");
         let stored_hash: String = row.get("payload_hash");
+        let stored_schema_major: i32 = row.get("schema_major");
+        let stored_schema_minor: i32 = row.get("schema_minor");
+        let stored_saved_at_ms: i64 = row.get("saved_at_ms");
         let canonical = canonical_json(&payload)?;
         if crate::auth::hash_hex(&canonical) != stored_hash {
             return Err(snapshot_error(
@@ -178,6 +422,17 @@ impl SnapshotStore for PostgresSnapshotStore {
             snapshot_error("the stored world snapshot is not valid")
                 .with_detail("error", error.to_string())
         })?;
+        if !snapshot_metadata_matches(
+            snapshot.schema_version,
+            snapshot.saved_at_ms,
+            stored_schema_major,
+            stored_schema_minor,
+            stored_saved_at_ms,
+        ) {
+            return Err(snapshot_error(
+                "the stored world snapshot metadata does not match its payload",
+            ));
+        }
         snapshot.validate()?;
         Ok(Some(snapshot))
     }
@@ -251,20 +506,30 @@ fn snapshot_error(message: &'static str) -> EngineError {
     EngineError::new(ErrorCode::InvalidRequest, message)
 }
 
-fn query_error(error: &postgres::Error) -> EngineError {
+fn snapshot_metadata_matches(
+    version: engine_core::schema::SchemaVersion,
+    saved_at_ms: i64,
+    stored_major: i32,
+    stored_minor: i32,
+    stored_saved_at_ms: i64,
+) -> bool {
+    i32::from(version.major) == stored_major
+        && i32::from(version.minor) == stored_minor
+        && saved_at_ms == stored_saved_at_ms
+}
+
+fn query_error(_error: &postgres::Error) -> EngineError {
     EngineError::new(
         ErrorCode::Internal,
         "the world snapshot could not be read from PostgreSQL",
     )
-    .with_detail("error", error.to_string())
 }
 
-fn write_error(error: &postgres::Error) -> EngineError {
+fn write_error(_error: &postgres::Error) -> EngineError {
     EngineError::new(
         ErrorCode::Internal,
         "the world snapshot could not be written to PostgreSQL",
     )
-    .with_detail("error", error.to_string())
 }
 
 #[cfg(test)]
@@ -290,5 +555,23 @@ mod tests {
             canonical_json(&first).unwrap(),
             canonical_json(&second).unwrap()
         );
+    }
+
+    #[test]
+    fn snapshot_row_metadata_must_match_the_payload() {
+        let version = engine_core::schema::SchemaVersion::new(1, 2);
+        assert!(snapshot_metadata_matches(version, 123, 1, 2, 123));
+        assert!(!snapshot_metadata_matches(version, 123, 2, 2, 123));
+        assert!(!snapshot_metadata_matches(version, 123, 1, 3, 123));
+        assert!(!snapshot_metadata_matches(version, 123, 1, 2, 124));
+    }
+
+    #[test]
+    fn only_loopback_hosts_are_insecure_by_default() {
+        assert!(is_loopback_host("localhost"));
+        assert!(is_loopback_host("127.0.0.1"));
+        assert!(is_loopback_host("::1"));
+        assert!(!is_loopback_host("db.internal"));
+        assert!(!is_loopback_host("192.168.1.2"));
     }
 }

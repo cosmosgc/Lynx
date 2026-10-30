@@ -196,6 +196,30 @@ authority enqueue closes that connection. Draining rejects new upgrades while
 existing connections close through normal service shutdown or these transport
 limits.
 
+### Replication delivery target and overload policy
+
+The current measurable target is **tick-side enqueue**, not client receipt:
+the authority schedules a 50 ms tick and records overruns/deadline misses, while
+the transport reports encoded snapshot/delta bytes and successfully enqueued
+frame counts. Each encoded envelope is capped at 64 KiB and each connection's
+outbound queue is fixed at 64 frames (not runtime-configurable). Queue depth and
+capacity are sampled as process-wide sums; frame/byte counters are process-wide
+counters and do not identify individual sessions. They must not be interpreted
+as socket delivery acknowledgements or end-to-end latency measurements.
+
+When a queue fills, the server drops that connection instead of waiting on it;
+it does not silently discard/coalesce a delta or reorder critical updates. The
+detached session can resume only through a newly generated full snapshot, which
+resynchronizes interest and replicated state. Thus the current policy preserves
+the tick and isolates the slow consumer, but deliberately sacrifices that
+connection's availability. `lynx_world_outbound_queue_full_total`, session
+detach counters, queue gauges, encoded byte totals, per-kind successful enqueue
+counts, and tick timing counters expose the relevant process-level signals.
+Per-session queue/outcome metrics, configurable queue sizing, a measured
+end-to-end delivery SLO, and a representative target-entity-count load test
+remain follow-up work; the present fixed limits are guardrails, not a validated
+capacity claim.
+
 ## World service wire messages
 
 `world_server` owns the connection-oriented message kinds:
