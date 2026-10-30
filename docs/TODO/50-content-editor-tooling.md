@@ -280,7 +280,7 @@ are not implemented. This must not be improvised after uploads exist.
 ## CNT-011 — CLI expansion
 
 - **Priority:** P1
-- **Status:** In progress — project workflow and manifest build available; automation contracts incomplete
+- **Status:** In progress — command handlers are modularized; automation contracts incomplete
 - **Depends on:** —
 - **References:** `tools/project_cli/src/main.rs`,
   [AI tooling](../ai-tooling.md)

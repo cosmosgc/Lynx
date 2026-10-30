@@ -20,6 +20,16 @@ testing a Lynx project never requires an MCP server.
 | External MCP client | Planned | Explicit per-workspace configuration |
 | Shell execution | Not exposed by default | Allowlist or user approval per command |
 
+### CLI implementation layout
+
+The `lynx` command uses explicit compile-time command registration in
+`tools/project_cli/src/main.rs`. Command handlers live under
+`tools/project_cli/src/commands/`, grouped by workflow: `scaffold`, `project`,
+`content`, `doctor`, and `output`. Add new commands to the Clap command tree and
+dispatcher explicitly; modules are not discovered by scanning the filesystem.
+This keeps the supported command surface auditable and stable across packaging
+and working-directory changes.
+
 ## Planned MCP tools
 
 Read-only:
