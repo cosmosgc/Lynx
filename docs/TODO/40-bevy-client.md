@@ -70,7 +70,7 @@ window displaying the default offline placeholder scene.
 ## CLT-002 — Login and session bootstrap
 
 - **Priority:** P0
-- **Status:** Ready
+- **Status:** In progress — secure Nakama credential/session groundwork exists; server browser and world-session lifecycle remain
 - **Depends on:** `NET-001`, `CLT-001`
 - **References:** [networking §Transport](../networking.md#transport)
 

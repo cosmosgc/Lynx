@@ -61,11 +61,6 @@ fn run(base: &Path, candidate: &Path, extra: &[&str]) -> Value {
         .args(extra)
         .output()
         .unwrap();
-    assert!(
-        output.status.success(),
-        "publish-check failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
@@ -100,6 +95,7 @@ fn an_approved_candidate_is_allowed() {
 
     let output = run(&base_path, &candidate_path, &[]);
     assert_eq!(output["ok"], json!(true));
+    assert_eq!(output["exit_code"], 0);
     assert_eq!(output["command"], json!("content publish-check"));
     assert_eq!(output["author"], json!("alice"));
     assert_eq!(output["state"], json!("approved"));
@@ -123,6 +119,7 @@ fn self_approval_is_blocked_by_default() {
 
     let output = run(&base_path, &candidate_path, &[]);
     assert_eq!(output["ok"], json!(false));
+    assert_eq!(output["exit_code"], 1);
     assert!(
         output["diagnostics"]
             .as_array()

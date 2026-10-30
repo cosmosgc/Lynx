@@ -196,9 +196,10 @@ fn content_build_writes_a_validated_stable_manifest() {
         .arg("--json")
         .output()
         .unwrap();
-    assert!(failed.status.success(), "validation is a structured report");
+    assert_eq!(failed.status.code(), Some(2), "validation exit code");
     let report: Value = serde_json::from_slice(&failed.stdout).unwrap();
     assert_eq!(report["ok"], false);
+    assert_eq!(report["exit_code"], 2);
     assert!(report["manifest"].is_null());
     assert_eq!(
         fs::read_to_string(project.join("content/manifest.json")).unwrap(),

@@ -112,6 +112,7 @@ fn diff_manifests(args: &DiffArgs) -> Result<Value> {
     let result = diff(&base, &next);
     let mut output = serde_json::to_value(&result)?;
     output["ok"] = Value::Bool(result.is_compatible());
+    output["compatible"] = Value::Bool(result.is_compatible());
     output["command"] = Value::String("content diff".to_string());
     output["base"] = Value::String(base_path.to_string_lossy().into_owned());
     output["next"] = Value::String(next_path.to_string_lossy().into_owned());

@@ -98,15 +98,30 @@ path; generated projects are not yet portable standalone packages. Cargo may
 also need registry access and a compatible Rust toolchain. CI exercises the
 creator workflow against a generated project on Ubuntu.
 
-With `--json`, these commands return an object with `ok` (boolean), `command`
-(`"build"`, `"run"` or `"test"`), `project` (path string), `validation` (the validation
-report), and `cargo` (null if validation failed, otherwise an object containing
-`exit_code` (integer or null if terminated by signal), `stdout`, and `stderr`
-(strings)). Output is captured until Cargo exits and stdin is closed; this is
-not an interactive or streaming runner. Successful execution exits 0;
-validation or Cargo failure exits 1 after printing the report. Failure to start
-Cargo or another internal error exits 1 with a message on stderr, not a JSON
-report. These exit conventions do not yet apply consistently to other commands.
+`--json` is global and emits a JSON object for every successful command
+dispatch. Every report has `command`, `ok`, and `exit_code`; command-specific
+fields are:
+
+| Command | Additional report fields |
+|---|---|
+| `new` | `project`, `template`, `files` |
+| `doctor` | `project` and `backend` status objects (including optional schema diagnostics) |
+| `validate` | `project`, `path`, `errors`, `warnings`, and content counts |
+| `build`, `run`, `test` | `project`, `validation`, `cargo` (`null` if validation blocks; otherwise `exit_code`, `stdout`, `stderr`) |
+| `content build` | `project`, `output`, `validation`, `manifest` |
+| `content hash` | `path`, `sha256` |
+| `content diff` | `base`, `next`, compatibility diagnostics and version-bump data |
+| `content publish-check` | `manifest`, `base`, author/state/revision and publish diagnostics |
+
+Process exit codes are 0 for success, 2 for content/project validation failure,
+3 for compatibility failure, and 1 for other command or internal failures. A
+validation failure nested in the project-execution report remains code 2;
+Cargo execution failure is code 1. Build/run/test capture output until Cargo
+exits and close stdin; they are not interactive or streaming runners. If a
+command fails before it can construct its report (for example, Cargo cannot be
+started), the CLI currently writes the error to stderr and exits 1 rather than
+emitting JSON. This report schema is versioned with the CLI source; consumers
+should ignore unknown fields.
 
 `lynx content build --project <dir> --content-version <semver> --engine <version-req>`
 validates first, then writes a deterministic `content/manifest.json` by default.

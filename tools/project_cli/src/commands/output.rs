@@ -1,5 +1,64 @@
 use serde_json::Value;
 
+/// Stable process status for machine automation: validation failures are 2,
+/// compatibility failures are 3, and command/internal failures are 1.
+pub(crate) fn exit_code(output: &Value) -> i32 {
+    if has_incompatibility(output) {
+        3
+    } else if output["validation"]["ok"] == false || has_validation_failure(output) {
+        2
+    } else if output["ok"] == false {
+        1
+    } else {
+        0
+    }
+}
+
+fn has_incompatibility(value: &Value) -> bool {
+    match value {
+        Value::Object(fields) => {
+            fields.get("compatible") == Some(&Value::Bool(false))
+                || fields.values().any(has_incompatibility)
+        }
+        Value::Array(values) => values.iter().any(has_incompatibility),
+        _ => false,
+    }
+}
+
+fn has_validation_failure(value: &Value) -> bool {
+    match value {
+        Value::Object(fields) => {
+            (fields
+                .get("errors")
+                .is_some_and(|errors| errors.as_array().is_some_and(|errors| !errors.is_empty())))
+                || fields.values().any(has_validation_failure)
+        }
+        Value::Array(values) => values.iter().any(has_validation_failure),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::exit_code;
+    use serde_json::json;
+
+    #[test]
+    fn automation_exit_codes_distinguish_validation_incompatibility_and_failure() {
+        assert_eq!(exit_code(&json!({"ok": true})), 0);
+        assert_eq!(
+            exit_code(&json!({"ok": false, "validation": {"ok": false}})),
+            2
+        );
+        assert_eq!(exit_code(&json!({"ok": false, "compatible": false})), 3);
+        assert_eq!(
+            exit_code(&json!({"ok": false, "schema": {"compatible": false}})),
+            3
+        );
+        assert_eq!(exit_code(&json!({"ok": false})), 1);
+    }
+}
+
 pub(crate) fn render_human_output(output: &Value) -> String {
     if matches!(output["command"].as_str(), Some("build" | "run" | "test")) {
         let command = output["command"].as_str().unwrap_or("");

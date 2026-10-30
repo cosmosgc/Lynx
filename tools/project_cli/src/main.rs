@@ -150,7 +150,7 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
 
-    let output = match cli.command {
+    let mut output = match cli.command {
         Commands::New(args) => commands::scaffold::new_project(&args)?,
         Commands::Doctor(args) => commands::doctor::doctor(&args)?,
         Commands::Validate(args) => commands::project::validate_project(&args)?,
@@ -160,15 +160,17 @@ fn run() -> Result<()> {
         Commands::Test(args) => commands::project::project_command(&args, "test")?,
     };
 
+    let exit_code = commands::output::exit_code(&output);
+    output["exit_code"] = serde_json::Value::from(exit_code);
+
     if cli.json {
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         println!("{}", commands::output::render_human_output(&output));
     }
 
-    if matches!(output["command"].as_str(), Some("build" | "run" | "test")) && output["ok"] == false
-    {
-        std::process::exit(1);
+    if exit_code != 0 {
+        std::process::exit(exit_code);
     }
     Ok(())
 }

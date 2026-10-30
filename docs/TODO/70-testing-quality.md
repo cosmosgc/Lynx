@@ -50,12 +50,14 @@ session-bound inputs, observer agreement, reconnect during movement and combat,
 idempotent attack retries, and a repeated mixed-input replay. It also checks
 stunned and zero-speed actors at both queue and processing time, occupied cells
 and swept-body collision, same-faction denial and different-faction attacks, and
-stale/pending sequence rejection without consuming a rejected newer sequence.
+stale/pending sequence rejection without consuming a rejected newer sequence. A
+new gateway-level regression also checks an over-budget movement endpoint and a
+dead actor's attack without state mutation.
 Contested destinations resolve in stable actor order regardless of request
 arrival order, and revoking Move after queuing causes processing-time rejection
-and consumes the sequence. The gateway test suite passed locally with these
-tests. The tests require no GPU or service; CI's workspace test command
-includes them and passed in hosted CI. The full invariant matrix
+and consumes the sequence. The updated gateway test suite passed locally. The
+tests require no GPU or service; CI's workspace test command includes them. The
+full invariant matrix
 and historical failing-before evidence remain open. In particular, integrated
 coverage still needs authored directional faction overrides and broader
 queue/budget boundaries. Zone transfer is not yet available. Simulation unit

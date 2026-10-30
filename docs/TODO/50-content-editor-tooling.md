@@ -306,13 +306,19 @@ contracts are still needed.
 - [x] A generated project can be built, validated, run, and tested from the CLI
       while its generated path dependencies remain available.
 - [ ] Every command has `--json` output with a documented schema.
-- [ ] Exit codes distinguish validation failure, incompatibility, and internal
-      error.
+- [x] Exit codes distinguish validation failure, incompatibility, and internal
+      error (2, 3, and 1 respectively; success is 0).
 - [x] Hosted CI exercises the generated-project build, validation, run, and
       test commands.
 
 The Ubuntu CI workflow exercises these commands and completed green in the
 hosted CI run confirmed on 2026-10-29.
+
+The CLI now includes `exit_code` in successful command reports and applies
+consistent process statuses to structured outcomes. JSON report shapes and the
+exit-code contract are documented in [AI tooling](../ai-tooling.md). Failures
+that occur before a report can be built still use stderr rather than a JSON
+error object, so the all-path JSON contract remains open.
 
 ---
 

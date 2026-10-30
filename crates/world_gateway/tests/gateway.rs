@@ -479,6 +479,66 @@ fn gateway_revalidates_stunned_and_zero_speed_movement() {
 }
 
 #[test]
+fn gateway_enforces_speed_budget_and_dead_actor_combat_authority() {
+    let mut f = fixture();
+    let alice = connect(&mut f.gateway, "alice", f.alice_principal);
+
+    // At the server's 2 m/s policy, a 100 ms tick permits only 0.2 m.
+    let burst = move_request(1, 10.3, 10.0);
+    assert_eq!(
+        f.gateway
+            .handle(&alice.session, &burst, Millis::new(1001))
+            .unwrap()[0]
+            .kind
+            .as_str(),
+        "movement.queued"
+    );
+    let updates = f
+        .gateway
+        .tick_with_interval(Millis::new(1002), 100)
+        .unwrap();
+    let movement = delivery(&updates, &alice.session)
+        .movement
+        .as_ref()
+        .unwrap();
+    assert_eq!(movement.applied, Some(false));
+    assert_eq!(movement.position, Vec3::new(10.0, 0.0, 10.0));
+
+    // A dead controller cannot turn a valid wire attack into damage.
+    f.gateway
+        .zone_mut()
+        .entity_mut(alice.actor)
+        .unwrap()
+        .health
+        .as_mut()
+        .unwrap()
+        .current = 0;
+    let result = result_of(
+        &f.gateway
+            .handle(
+                &alice.session,
+                &action(
+                    "dead-actor-attack",
+                    json!({"verb":"attack","target":f.alice_barrel.to_string()}),
+                ),
+                Millis::new(1003),
+            )
+            .unwrap(),
+    );
+    assert_eq!(result.error().unwrap().code(), ErrorCode::InvalidState);
+    assert_eq!(
+        f.gateway
+            .zone()
+            .entity(f.alice_barrel)
+            .unwrap()
+            .health
+            .unwrap()
+            .current,
+        100
+    );
+}
+
+#[test]
 fn gateway_revalidates_revoked_move_capability() {
     let mut f = fixture();
     let alice = connect(&mut f.gateway, "alice", f.alice_principal);

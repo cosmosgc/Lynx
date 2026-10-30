@@ -36,7 +36,7 @@ fn write_manifest(path: &Path, value: &Value) {
     fs::write(path, serde_json::to_vec_pretty(value).unwrap()).unwrap();
 }
 
-fn run_diff(base: &Path, next: &Path) -> Value {
+fn run_diff(base: &Path, next: &Path, expected_exit: i32) -> Value {
     let output = Command::new(env!("CARGO_BIN_EXE_lynx"))
         .args([
             "content",
@@ -49,15 +49,11 @@ fn run_diff(base: &Path, next: &Path) -> Value {
         ])
         .output()
         .unwrap();
-    assert!(
-        output.status.success(),
-        "diff command failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_eq!(output.status.code(), Some(expected_exit), "diff exit code");
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
-fn run_diff_human(base: &Path, next: &Path) -> String {
+fn run_diff_human(base: &Path, next: &Path, expected_exit: i32) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_lynx"))
         .args([
             "content",
@@ -69,11 +65,7 @@ fn run_diff_human(base: &Path, next: &Path) -> String {
         ])
         .output()
         .unwrap();
-    assert!(
-        output.status.success(),
-        "diff command failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_eq!(output.status.code(), Some(expected_exit), "diff exit code");
     String::from_utf8(output.stdout).unwrap()
 }
 
@@ -93,8 +85,9 @@ fn compatible_addition_reports_the_required_bump() {
     }));
     write_manifest(&next_path, &next);
 
-    let output = run_diff(&base_path, &next_path);
+    let output = run_diff(&base_path, &next_path, 0);
     assert_eq!(output["ok"], json!(true));
+    assert_eq!(output["exit_code"], 0);
     assert_eq!(output["command"], json!("content diff"));
     assert_eq!(output["required_bump"], json!("minor"));
     assert_eq!(output["added"][0]["id"], json!("prop.barrel"));
@@ -109,8 +102,9 @@ fn changed_bytes_without_a_bump_are_rejected() {
     write_manifest(&base_path, &manifest("1.0.0", "b"));
     write_manifest(&next_path, &manifest("1.0.0", "d"));
 
-    let output = run_diff(&base_path, &next_path);
+    let output = run_diff(&base_path, &next_path, 3);
     assert_eq!(output["ok"], json!(false));
+    assert_eq!(output["exit_code"], 3);
     assert_eq!(output["required_bump"], json!("minor"));
     assert!(
         output["report"]["diagnostics"]
@@ -129,7 +123,7 @@ fn human_output_summarizes_the_change() {
     write_manifest(&base_path, &manifest("1.0.0", "b"));
     write_manifest(&next_path, &manifest("1.0.0", "d"));
 
-    let text = run_diff_human(&base_path, &next_path);
+    let text = run_diff_human(&base_path, &next_path, 3);
     assert!(text.contains("Content diff 1.0.0 -> 1.0.0: incompatible"));
     assert!(text.contains("- changed: prop.door"));
     assert!(text.contains("content.diff.version_bump_too_small"));
