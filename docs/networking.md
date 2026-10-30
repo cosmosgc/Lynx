@@ -205,6 +205,8 @@ limits.
 | `session.hello` | client → server | client handshake and last acknowledged tick |
 | `world.ready` | server → client | session ID, actor, resumed flag, negotiated protocol |
 | `world.snapshot` | server → client | tick, full interest view delta, filtered replication |
+| `chat.channels` | client → server | empty object; authenticated discovery currently returns `chat.channels.result` with an empty `channels` array |
+| `chat.send`, `chat.history` | client → server | unavailable; rejected without storing or echoing player content |
 | `world.delta` | server → client | tick, interest delta, filtered replication |
 | `movement.request` / `movement.queued` | client → server / server → client | endpoint intent and queue admission (not processing) |
 | `world.token` | server → client | the session's current resume secret |
@@ -537,7 +539,39 @@ See [ADR 0013](adr/0013-world-gateway-and-reconnect.md).
   control access to those too. Production authentication must validate a real
   session and look up character ownership before opening a gateway session.
 - The binary carries no TLS. Terminate TLS at a reverse proxy or equivalent
-  transport, and keep the listener on loopback while developing.
+  transport, and keep the listener on loopback while developing. The repository
+  reference is [`deploy/nginx/lynx-world.conf`](../deploy/nginx/lynx-world.conf):
+  it upgrades only `/world`, passes the bearer `Authorization` and character
+  selection headers, bounds header handling, and sets proxy timeouts above the
+  server's 120-second idle timeout. Replace the example hostname and certificate
+  paths and validate the configuration with `nginx -t` before deployment.
+
+### TLS termination and proxy trust boundary
+
+The reference topology is client HTTPS/WSS → Nginx → `lynx-world` over loopback
+HTTP. Bind the world listener to `127.0.0.1` (or an equivalently isolated private
+interface) so untrusted clients cannot bypass TLS termination. Nginx must be
+the only reachable proxy to that listener. The proxy passes `Authorization`
+unchanged because it is the authentication credential; do not log it. TLS
+certificates and renewal are owned by the deployment, not this service.
+
+`lynx-world` does not currently read `Forwarded`, `X-Forwarded-For`, or
+`X-Real-IP`. Rate limits and audit peer addresses therefore use the TCP peer
+address observed by the service; behind a proxy, this is the proxy address, not
+the browser. The reference config strips common forwarding headers and does not
+attempt to assert client IP. Do not trust client-supplied forwarding headers or
+use them for access control. If client-IP propagation is added later, it must
+be explicitly enabled with a configured trusted-proxy set and tested to ignore
+those headers from all other peers.
+
+The sample provides TLS but no HTTP listener, redirect, HSTS, or cookies. If a
+deployment adds a public HTTP listener, redirect only at its controlled edge
+and emit HSTS only on HTTPS after confirming the domain policy (including
+subdomains/preload implications). World authentication uses bearer headers,
+not cookies; clients must protect bearer and resume tokens as secrets and avoid
+placing them in URLs, logs, or browser-persistent storage. Native TLS in
+`lynx-world` is not implemented; non-proxy deployments must provide an
+equivalent TLS transport boundary rather than expose plaintext publicly.
 
 Raw UDP with a reliable layer remains a possible future transport. Gameplay
 messages do not change: only the framing and socket adapter do. The WebSocket

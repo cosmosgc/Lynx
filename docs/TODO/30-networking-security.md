@@ -123,14 +123,15 @@ movement requests and starve the authority loop.
 ## NET-003 — TLS and reverse-proxy boundary
 
 - **Priority:** P1
-- **Status:** Ready
+- **Status:** In progress
 - **Depends on:** —
 - **References:** [networking §Transport](../networking.md#transport),
   [operations](../operations.md), `PST-007`
 
 **Why:** The binary carries no TLS; the documented deployment terminates TLS at
-a proxy. That is a valid design, but the repository lacks a concrete, tested
-proxy configuration and a native-TLS escape hatch for non-proxy deployments.
+a proxy. A reference Nginx configuration and trust-boundary documentation now
+exist. Native TLS remains unimplemented and the proxy configuration has not yet
+been validated in a deployed/test Nginx environment.
 
 **Scope**
 
@@ -146,12 +147,23 @@ proxy configuration and a native-TLS escape hatch for non-proxy deployments.
 
 **Acceptance criteria**
 
-- [ ] A reference proxy config upgrades `/world` and preserves the
+- [x] A reference proxy config upgrades `/world` and preserves the
       `Authorization` header.
-- [ ] Spoofed forwarding headers from untrusted peers are ignored.
+- [x] Spoofed forwarding headers from untrusted peers are ignored (the service
+      does not consume forwarding headers; the reference proxy strips common
+      variants).
 - [ ] Native TLS, if implemented, verifies certificates and refuses plaintext
       when configured.
-- [ ] The deployment boundary and trust assumptions are documented.
+- [x] The deployment boundary and trust assumptions are documented.
+
+**Progress:** `deploy/nginx/lynx-world.conf` is a TLS-terminating `/world`
+reference with WebSocket upgrade, Authorization and character-header pass-through,
+bounded header handling, and explicit timeouts. The service uses the socket peer
+IP and does not trust forwarding headers; proxy-origin client IP support is not
+implemented. HSTS/redirect and bearer-token handling guidance is documented.
+Native TLS is deliberately not added. Proxy syntax/runtime validation and
+certificate-backed deployment verification remain outstanding, so this item
+stays in progress.
 
 ---
 

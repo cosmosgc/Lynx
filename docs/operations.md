@@ -89,6 +89,25 @@ cargo run -p lynx-world -- serve \
   --token-hash <sha256-hex>
 ```
 
+### Public TLS deployment
+
+The world binary has no TLS support. For a public endpoint, terminate HTTPS/WSS
+at a maintained reverse proxy and keep `lynx-world --bind 127.0.0.1:8090` on
+loopback. [`deploy/nginx/lynx-world.conf`](../deploy/nginx/lynx-world.conf) is a
+reference Nginx server configuration for `/world`; replace its hostname and
+certificate paths, install it in the appropriate Nginx context, then run
+`nginx -t` before reload. It preserves `Authorization`, uses WebSocket upgrade,
+and bounds headers/timeouts. Restrict access to the upstream so external peers
+cannot bypass TLS or authentication controls. Do not publish the unauthenticated
+admin listener; retain its loopback default.
+
+The service ignores `Forwarded`, `X-Forwarded-For`, and `X-Real-IP`; behind the
+proxy, IP admission limits see the proxy's address. Do not enable trust in
+client-supplied forwarding headers. See [networking](networking.md#tls-termination-and-proxy-trust-boundary)
+for the complete trust boundary and HSTS/redirect guidance. TLS termination
+does not replace Nakama authentication: production must still use
+`--auth-mode nakama`.
+
 Each configured hash creates one demo character. Tokens may also be supplied
 comma- or whitespace-separated through `LYNX_WORLD_TOKEN_HASHES`. Relevant
 flags:
