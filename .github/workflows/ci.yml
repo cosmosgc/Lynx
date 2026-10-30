@@ -204,7 +204,11 @@ jobs:
         shell: bash
         run: |
           LYNX_TEST_SCHEMA_SCENARIO=missing cargo test -p lynx-world --test schema_gate
+          set +e
           cargo run --quiet -p project_cli -- --json doctor --backend > "$RUNNER_TEMP/doctor-missing.json"
+          doctor_status=$?
+          set -e
+          test "$doctor_status" -eq 1
           jq -e '.backend.schema.history_missing == true and (.backend.schema.pending | length) == 6 and (.backend.schema.applied | length) == 0' "$RUNNER_TEMP/doctor-missing.json"
           PGPASSWORD="$LYNX_PG_PASSWORD" psql -X -q -tA -v ON_ERROR_STOP=1 -h "$LYNX_PG_HOST" -p "$LYNX_PG_PORT" -U "$LYNX_PG_USER" -d "$LYNX_PG_DATABASE" -c "SELECT to_regclass('lynx.schema_migrations') IS NULL" | grep -Fx t
 
@@ -238,7 +242,11 @@ jobs:
           psql "${psql_args[@]}" -c "INSERT INTO lynx.schema_migrations(version, checksum) VALUES ('0007_future', repeat('a', 64))"
           LYNX_TEST_SCHEMA_SCENARIO=newer cargo test -p lynx-world --test schema_gate
           before="$(psql "${psql_args[@]}" -c "$history_query")"
+          set +e
           cargo run --quiet -p project_cli -- --json doctor --backend > "$RUNNER_TEMP/doctor-newer.json"
+          doctor_status=$?
+          set -e
+          test "$doctor_status" -eq 1
           jq -e '.backend.schema.unknown_count == 1 and (.backend.schema.applied | length) == 6 and (.backend.schema.pending | length) == 0' "$RUNNER_TEMP/doctor-newer.json"
           test "$before" = "$(psql "${psql_args[@]}" -c "$history_query")"
           psql "${psql_args[@]}" -c "DELETE FROM lynx.schema_migrations WHERE version = '0007_future'"
@@ -246,7 +254,11 @@ jobs:
           psql "${psql_args[@]}" -c "UPDATE lynx.schema_migrations SET checksum = repeat('0', 64) WHERE version = '0001_core'"
           LYNX_TEST_SCHEMA_SCENARIO=checksum cargo test -p lynx-world --test schema_gate
           before="$(psql "${psql_args[@]}" -c "$history_query")"
+          set +e
           cargo run --quiet -p project_cli -- --json doctor --backend > "$RUNNER_TEMP/doctor-checksum.json"
+          doctor_status=$?
+          set -e
+          test "$doctor_status" -eq 1
           jq -e '.backend.schema.checksum_mismatches == ["0001_core"]' "$RUNNER_TEMP/doctor-checksum.json"
           if ./scripts/db-migrate.sh; then
             echo 'Runner accepted a checksum mismatch' >&2
