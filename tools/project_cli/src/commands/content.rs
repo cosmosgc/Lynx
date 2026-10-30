@@ -3,7 +3,7 @@ use crate::{ContentArgs, ContentBuildArgs, ContentCommand, DiffArgs, PublishChec
 use anyhow::{Context, Result, bail};
 use engine_content::{
     ContentLoader, ContentManifest, ContentSet, PublishingPolicy, check_publish, diff, sha256_hex,
-
+    starter_component_registry,
 };
 use serde_json::{Value, json};
 use std::fs;
@@ -42,7 +42,7 @@ fn build_content(args: &ContentBuildArgs) -> Result<Value> {
         .context("--engine must be a semantic-version requirement")?;
     let content_root = project.join("content");
     let (set, report) =
-        ContentLoader::new(project::project_component_registry()?).load_project(&content_root);
+        ContentLoader::new(starter_component_registry()?).load_project(&content_root);
     if report.has_errors() {
         bail!("content validation changed while building manifest");
     }
