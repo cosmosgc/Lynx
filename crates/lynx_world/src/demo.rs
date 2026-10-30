@@ -43,6 +43,15 @@ use crate::auth::Grant;
 /// The stable row name the runnable service uses for its world snapshot.
 pub const DEMO_WORLD_ID: &str = "demo";
 
+/// The durable zone instance every demo world serves.
+///
+/// The ID is fixed so the zone lease, the snapshot rows, and the event log name
+/// the same zone before any snapshot is loaded.
+#[must_use]
+pub fn zone_instance() -> StableId {
+    StableId::from_parts(IdKind::Zone, 1, 1)
+}
+
 const CHARACTER_SPACING_M: f32 = 120.0;
 const COLUMNS: usize = 6;
 const BASE_HEIGHT_M: u16 = 240;
@@ -89,7 +98,7 @@ pub fn build_zone(grants: &[Grant]) -> Result<Zone, EngineError> {
 
     let config = ZoneConfig::new(
         definition("zone.demo")?,
-        StableId::from_parts(IdKind::Zone, 1, 1),
+        zone_instance(),
         Vec3::ZERO,
         Vec3::new(f32::from(WIDTH_M), 4.0, f32::from(height_m)),
     )?;

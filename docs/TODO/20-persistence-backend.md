@@ -160,9 +160,10 @@ than the schema intends.
 ## PST-004 — Zone leases, fencing, and event log
 
 - **Priority:** P1
-- **Status:** Ready
+- **Status:** In progress — lease, fencing, and runtime wiring implemented; snapshot replay remains under `PST-005`
 - **Depends on:** —
-- **References:** migration `0003_zone_state.sql`, ADR 0005
+- **References:** migration `0003_zone_state.sql`, `0007_zone_fencing.sql`,
+  ADR 0005
 
 **Why:** `zone_leases`, `zone_snapshots`, and `zone_events` exist, but the
 runtime still behaves as a single process-local authority. There is no fencing
@@ -182,11 +183,27 @@ token or event sequence that proves which process owns a zone after a crash.
 
 **Acceptance criteria**
 
-- [ ] Two processes cannot both hold an unexpired lease for one zone.
-- [ ] A stale owner's writes are rejected after takeover.
-- [ ] Event sequences are gap-free and ordered per zone.
+- [x] Two processes cannot both hold an unexpired lease for one zone.
+- [x] A stale owner's writes are rejected after takeover.
+- [x] Event sequences are gap-free and ordered per zone.
 - [ ] Snapshot + replay reconstructs the same state as the live process.
-- [ ] Lease expiry/takeover is covered by an integration test.
+      (Replay is implemented under `PST-005`; it is the remaining criterion.)
+- [x] Lease expiry/takeover is covered by an integration test.
+
+**Implementation:** `0007_zone_fencing.sql` adds the durable fencing token and
+`PostgresZoneLeaseStore` implements acquire, renew, release, and fenced,
+gap-free event append/read. With `--state-postgres`, `lynx-world` acquires the
+demo zone lease before loading the snapshot and refuses to start when another
+live process owns it; `--lease-ttl-ms` (default 30 s) sets the lifetime. A
+renewal task renews every third of the TTL and turns readiness false and stops
+the process when the lease is taken over or can no longer be renewed before
+expiry. Snapshot upserts and event appends both check the lease row in their
+own transaction, so a stale process is rejected even if it has not noticed the
+loss. The service appends `world.started`, `world.snapshot`, and `world.stopped`
+events. The file-backed and memory-only stores are unchanged: without a shared
+database there is nothing to fence against, and they run without a lease.
+Replay from the last snapshot plus later events, retention, and quarantine
+remain open in `PST-005`.
 
 ---
 

@@ -19,7 +19,7 @@ use engine_core::error::{EngineError, ErrorCode};
 use postgres::{Client, Config, NoTls};
 use serde_json::Value;
 
-use super::{SnapshotStore, WorldSnapshot, ZoneEvent, ZoneLease};
+use super::{SnapshotStore, WorldSnapshot, ZoneEvent, ZoneEventInput, ZoneLease, ZoneLeaseStore};
 
 /// PostgreSQL lease and event-log operations for one zone at a time.
 pub struct PostgresZoneLeaseStore {
@@ -112,12 +112,15 @@ impl PostgresZoneLeaseStore {
         zone_id: &str,
         owner: &str,
         token: i64,
-        tick: i64,
-        kind: &str,
-        actor_id: Option<&str>,
-        payload: &Value,
-        schema_version: i32,
+        event: ZoneEventInput<'_>,
     ) -> Result<i64, EngineError> {
+        let ZoneEventInput {
+            tick,
+            kind,
+            actor_id,
+            payload,
+            schema_version,
+        } = event;
         if !valid_zone_id(zone_id)
             || owner.is_empty()
             || tick < 0
@@ -188,6 +191,46 @@ fn valid_zone_id(value: &str) -> bool {
             })
     })
 }
+
+impl ZoneLeaseStore for PostgresZoneLeaseStore {
+    fn acquire(
+        &self,
+        zone_id: &str,
+        owner: &str,
+        ttl: std::time::Duration,
+    ) -> Result<Option<ZoneLease>, EngineError> {
+        PostgresZoneLeaseStore::acquire(self, zone_id, owner, ttl)
+    }
+
+    fn renew(
+        &self,
+        zone_id: &str,
+        owner: &str,
+        token: i64,
+        ttl: std::time::Duration,
+    ) -> Result<Option<ZoneLease>, EngineError> {
+        PostgresZoneLeaseStore::renew(self, zone_id, owner, token, ttl)
+    }
+
+    fn release(&self, zone_id: &str, owner: &str, token: i64) -> Result<bool, EngineError> {
+        PostgresZoneLeaseStore::release(self, zone_id, owner, token)
+    }
+
+    fn append_event(
+        &self,
+        zone_id: &str,
+        owner: &str,
+        token: i64,
+        event: ZoneEventInput<'_>,
+    ) -> Result<i64, EngineError> {
+        PostgresZoneLeaseStore::append_event(self, zone_id, owner, token, event)
+    }
+
+    fn events_after(&self, zone_id: &str, sequence: i64) -> Result<Vec<ZoneEvent>, EngineError> {
+        PostgresZoneLeaseStore::events_after(self, zone_id, sequence)
+    }
+}
+
 fn validate_zone_owner(
     zone: &str,
     owner: &str,
@@ -241,6 +284,20 @@ ON CONFLICT (world_id) DO UPDATE SET \
     payload = EXCLUDED.payload, \
     payload_hash = EXCLUDED.payload_hash";
 
+const SELECT_HELD_LEASE: &str = "\
+SELECT 1 FROM lynx.zone_leases \
+WHERE zone_id = $1 AND owner = $2 AND fencing_token = $3 \
+    AND expires_at > clock_timestamp() \
+FOR UPDATE";
+
+/// A snapshot store connection bound to one held zone lease.
+#[derive(Debug, Clone)]
+struct SnapshotFence {
+    zone_id: String,
+    owner: String,
+    token: i64,
+}
+
 /// A [`SnapshotStore`] that keeps the whole world in PostgreSQL.
 ///
 /// Clones are not provided: the store owns one connection behind a mutex, and
@@ -249,6 +306,7 @@ ON CONFLICT (world_id) DO UPDATE SET \
 pub struct PostgresSnapshotStore {
     client: Mutex<Client>,
     world_id: String,
+    fence: Mutex<Option<SnapshotFence>>,
 }
 
 impl fmt::Debug for PostgresSnapshotStore {
@@ -303,6 +361,7 @@ impl PostgresSnapshotStore {
         Ok(Self {
             client: Mutex::new(client),
             world_id,
+            fence: Mutex::new(None),
         })
     }
 
@@ -310,6 +369,35 @@ impl PostgresSnapshotStore {
     #[must_use]
     pub fn world_id(&self) -> &str {
         &self.world_id
+    }
+
+    /// Reject later saves unless `zone_id` is still held by `owner` under
+    /// `token`.
+    ///
+    /// The lease row is checked in the same transaction as the snapshot upsert,
+    /// so a takeover fences the write even when this process has not noticed
+    /// the loss yet. Bind the fence before the store is shared with the
+    /// authority loop; it applies to every subsequent save.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorCode::InvalidRequest`] for an invalid zone, owner, or
+    /// token, and [`ErrorCode::Internal`] if the fence lock is poisoned.
+    pub fn bind_zone_lease(
+        &self,
+        zone_id: &str,
+        owner: &str,
+        token: i64,
+    ) -> Result<(), EngineError> {
+        if !valid_zone_id(zone_id) || owner.is_empty() || owner.len() > 256 || token <= 0 {
+            return Err(invalid_lease());
+        }
+        *self.fence.lock().map_err(|_| store_unavailable())? = Some(SnapshotFence {
+            zone_id: zone_id.to_owned(),
+            owner: owner.to_owned(),
+            token,
+        });
+        Ok(())
     }
 
     /// Remove the stored snapshot for this world.
@@ -444,21 +532,36 @@ impl SnapshotStore for PostgresSnapshotStore {
         let payload_hash = crate::auth::hash_hex(&canonical);
         let schema_major = i32::from(snapshot.schema_version.major);
         let schema_minor = i32::from(snapshot.schema_version.minor);
+        let params: [&(dyn postgres::types::ToSql + Sync); 6] = [
+            &self.world_id,
+            &schema_major,
+            &schema_minor,
+            &snapshot.saved_at_ms,
+            &payload,
+            &payload_hash,
+        ];
+        let fence = self.fence.lock().map_err(|_| store_unavailable())?.clone();
 
         let mut client = self.client()?;
-        client
-            .execute(
-                UPSERT_SNAPSHOT,
-                &[
-                    &self.world_id,
-                    &schema_major,
-                    &schema_minor,
-                    &snapshot.saved_at_ms,
-                    &payload,
-                    &payload_hash,
-                ],
+        let Some(fence) = fence else {
+            client
+                .execute(UPSERT_SNAPSHOT, &params)
+                .map_err(|error| write_error(&error))?;
+            return Ok(());
+        };
+        let mut tx = client.transaction().map_err(|error| write_error(&error))?;
+        let held = tx
+            .query_opt(
+                SELECT_HELD_LEASE,
+                &[&fence.zone_id, &fence.owner, &fence.token],
             )
             .map_err(|error| write_error(&error))?;
+        if held.is_none() {
+            return Err(stale_lease());
+        }
+        tx.execute(UPSERT_SNAPSHOT, &params)
+            .map_err(|error| write_error(&error))?;
+        tx.commit().map_err(|error| write_error(&error))?;
         Ok(())
     }
 }

@@ -212,6 +212,11 @@ format, validation rules, and formatting policy are specified in
   calendar, and factions with either the file store or `PostgresSnapshotStore`
   (`--state-postgres`). The file store remains available as an alternative; neither
   store persists sessions or resume tokens.
+- With `--state-postgres`, one process owns the zone lease at a time. A lease
+  carries a fencing token that every snapshot upsert and event append presents
+  in its own transaction, so a released or superseded owner cannot write stale
+  state after a takeover. Lifecycle markers (`world.started`, `world.snapshot`,
+  `world.stopped`) go to the append-only zone event log.
 - `backend_nakama` provides PostgreSQL-backed account mapping and character
   services, including character-bound world-entry records. `lynx-world` uses
   them for production session and ownership admission, but admits only actors
@@ -233,6 +238,10 @@ format, validation rules, and formatting policy are specified in
   successful write can be lost. Event replay and quarantine are not implemented.
   The target is to replay events, validate references, and accept sessions within
   60 seconds; this target is unverified.
+- With `--state-postgres`, an expired lease may be taken over by a replacement.
+  The token increment fences the old owner out of both snapshot writes and the
+  event log, and the displaced process stops rather than continuing to serve.
+  Reading those events back to reconstruct state is `PST-005`.
 - Target: admin actions and reputation changes are appended to a durable audit
   log in the same transaction as the mutation.
 

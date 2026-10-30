@@ -13,7 +13,7 @@ use lynx_world::auth::{Authenticator, Grant, digest};
 use lynx_world::demo;
 use lynx_world::persistence::{
     PostgresSnapshotStore, PostgresZoneLeaseStore, SnapshotStore, WorldSnapshot,
-    WorldSnapshotInputs,
+    WorldSnapshotInputs, ZoneEventInput,
 };
 use lynx_world::startup;
 use world_gateway::{GatewayConfig, SystemResumeTokens, WorldGateway};
@@ -65,8 +65,28 @@ fn test_world_id() -> String {
     format!("test-{nanos}")
 }
 
+fn test_zone_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!("zone_{nanos:026}")
+}
+
+fn authored_snapshot() -> anyhow::Result<WorldSnapshot> {
+    let grants = characters(1);
+    let world = startup::load(None, true, &grants, 1_000)?;
+    Ok(WorldSnapshot::capture(
+        &WorldSnapshotInputs {
+            zone: world.zone.snapshot(),
+            calendar_factions: Some((world.calendar.snapshot(), world.factions.snapshot())),
+        },
+        1_000,
+    ))
+}
+
 #[test]
-fn postgres_zone_lease_takeover_fences_old_owner_and_sequences_events() -> anyhow::Result<()> {
+fn postgres_zone_lease_takeover_fences_old_owner_writes() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     if std::env::var("LYNX_PG_PASSWORD").is_err() {
         anyhow::ensure!(
@@ -77,47 +97,66 @@ fn postgres_zone_lease_takeover_fences_old_owner_and_sequences_events() -> anyho
         return Ok(());
     }
     let store = PostgresZoneLeaseStore::from_env()?;
-    let zone = format!(
-        "zone_{:026}",
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-    );
+    let zone = test_zone_id();
     let first = store
-        .acquire(&zone, "owner-a", std::time::Duration::from_millis(30))?
+        .acquire(&zone, "owner-a", std::time::Duration::from_secs(10))?
         .unwrap();
     assert!(
         store
             .acquire(&zone, "owner-b", std::time::Duration::from_secs(10))?
-            .is_none()
+            .is_none(),
+        "an unexpired lease has one owner"
     );
-    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    // A snapshot written under the live lease is accepted.
+    let world_id = test_world_id();
+    let snapshots = PostgresSnapshotStore::from_env(&world_id)?;
+    snapshots.bind_zone_lease(&zone, "owner-a", first.fencing_token)?;
+    let snapshot = authored_snapshot()?;
+    snapshots.save(&snapshot)?;
+
+    // A clean handoff still increments the generation.
+    assert!(store.release(&zone, "owner-a", first.fencing_token)?);
     let second = store
         .acquire(&zone, "owner-b", std::time::Duration::from_secs(10))?
         .unwrap();
     assert!(second.fencing_token > first.fencing_token);
+
+    // Both durable write paths reject the superseded owner.
+    let stale_snapshot = snapshots.save(&snapshot).unwrap_err();
+    assert_eq!(
+        stale_snapshot.code(),
+        engine_core::error::ErrorCode::Conflict
+    );
     let payload = serde_json::json!({"value": 1});
-    let stale = store
+    let stale_event = store
         .append_event(
             &zone,
             "owner-a",
             first.fencing_token,
-            1,
-            "test",
-            None,
-            &payload,
-            1,
+            ZoneEventInput {
+                tick: 1,
+                kind: "test",
+                actor_id: None,
+                payload: &payload,
+                schema_version: 1,
+            },
         )
         .unwrap_err();
-    assert_eq!(stale.code(), engine_core::error::ErrorCode::Conflict);
+    assert_eq!(stale_event.code(), engine_core::error::ErrorCode::Conflict);
+
     assert_eq!(
         store.append_event(
             &zone,
             "owner-b",
             second.fencing_token,
-            2,
-            "test",
-            None,
-            &payload,
-            1
+            ZoneEventInput {
+                tick: 2,
+                kind: "test",
+                actor_id: None,
+                payload: &payload,
+                schema_version: 1,
+            },
         )?,
         0
     );
@@ -126,11 +165,13 @@ fn postgres_zone_lease_takeover_fences_old_owner_and_sequences_events() -> anyho
             &zone,
             "owner-b",
             second.fencing_token,
-            3,
-            "test",
-            None,
-            &payload,
-            1
+            ZoneEventInput {
+                tick: 3,
+                kind: "test",
+                actor_id: None,
+                payload: &payload,
+                schema_version: 1,
+            },
         )?,
         1
     );
@@ -142,6 +183,38 @@ fn postgres_zone_lease_takeover_fences_old_owner_and_sequences_events() -> anyho
             .collect::<Vec<_>>(),
         vec![0, 1]
     );
+    assert!(store.release(&zone, "owner-b", second.fencing_token)?);
+    snapshots.delete()?;
+    Ok(())
+}
+
+#[test]
+fn postgres_zone_lease_expiry_allows_takeover() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+    if std::env::var("LYNX_PG_PASSWORD").is_err() {
+        anyhow::ensure!(
+            std::env::var_os("LYNX_REQUIRE_POSTGRES_TEST").is_none(),
+            "PostgreSQL test required but not configured"
+        );
+        eprintln!("skipping PostgreSQL zone lease test: LYNX_PG_PASSWORD is not configured");
+        return Ok(());
+    }
+    let store = PostgresZoneLeaseStore::from_env()?;
+    let zone = test_zone_id();
+    let first = store
+        .acquire(&zone, "owner-a", std::time::Duration::from_millis(25))?
+        .unwrap();
+    assert!(
+        store
+            .acquire(&zone, "owner-b", std::time::Duration::from_secs(10))?
+            .is_none(),
+        "an unexpired lease cannot be taken over"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let second = store
+        .acquire(&zone, "owner-b", std::time::Duration::from_secs(10))?
+        .unwrap();
+    assert!(second.fencing_token > first.fencing_token);
     assert!(store.release(&zone, "owner-b", second.fencing_token)?);
     Ok(())
 }

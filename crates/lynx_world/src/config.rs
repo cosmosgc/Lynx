@@ -25,6 +25,9 @@ pub const TOKEN_HASH_ENV: &str = "LYNX_WORLD_TOKEN_HASHES";
 /// Default interval between world snapshot writes, in milliseconds.
 pub const DEFAULT_SNAPSHOT_MS: u64 = 10_000;
 
+/// Default zone lease lifetime for `--state-postgres`, in milliseconds.
+pub const DEFAULT_LEASE_MS: u64 = 30_000;
+
 /// Authentication path selected for one world process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum AuthMode {
@@ -137,6 +140,12 @@ pub struct ServeArgs {
     #[arg(long, default_value_t = DEFAULT_SNAPSHOT_MS)]
     pub snapshot_ms: u64,
 
+    /// Zone lease lifetime for `--state-postgres`, in milliseconds. The
+    /// authority renews it every third of this value and stops serving when it
+    /// cannot; a crashed holder's zone becomes available after it expires.
+    #[arg(long, default_value_t = DEFAULT_LEASE_MS)]
+    pub lease_ttl_ms: u64,
+
     /// SHA-256 hash of a bearer token. Repeat once per demo character.
     #[arg(long = "token-hash", value_name = "SHA256")]
     pub token_hashes: Vec<String>,
@@ -234,6 +243,23 @@ impl ServeArgs {
         Ok(Duration::from_millis(self.snapshot_ms))
     }
 
+    /// The zone lease lifetime used with `--state-postgres`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the lifetime is outside one second to ten minutes
+    /// or shorter than three tick intervals, which would leave no room to renew
+    /// before expiry.
+    pub fn lease_ttl(&self) -> Result<Duration> {
+        if !(1_000..=600_000).contains(&self.lease_ttl_ms) {
+            bail!("--lease-ttl-ms must be between 1000 and 600000");
+        }
+        if self.lease_ttl_ms < self.tick_ms.saturating_mul(3) {
+            bail!("--lease-ttl-ms must be at least three tick intervals");
+        }
+        Ok(Duration::from_millis(self.lease_ttl_ms))
+    }
+
     /// Combine consistency checks for the snapshot configuration.
     ///
     /// # Errors
@@ -310,6 +336,7 @@ mod tests {
             state_postgres: false,
             fresh: false,
             snapshot_ms: DEFAULT_SNAPSHOT_MS,
+            lease_ttl_ms: DEFAULT_LEASE_MS,
             token_hashes: vec![crate::auth::hash_hex("token")],
         }
     }
@@ -383,6 +410,33 @@ mod tests {
         let mut zero = sample();
         zero.snapshot_ms = 0;
         assert!(zero.snapshot_interval().is_err());
+    }
+
+    #[test]
+    fn lease_ttl_is_bounded_and_leaves_renewal_room() {
+        assert_eq!(
+            sample().lease_ttl().unwrap(),
+            Duration::from_millis(DEFAULT_LEASE_MS)
+        );
+
+        let mut too_short = sample();
+        too_short.lease_ttl_ms = 500;
+        assert!(too_short.lease_ttl().is_err());
+
+        let mut too_long = sample();
+        too_long.lease_ttl_ms = 600_001;
+        assert!(too_long.lease_ttl().is_err());
+
+        let mut crowded = sample();
+        crowded.tick_ms = 1_000;
+        crowded.lease_ttl_ms = 2_000;
+        assert!(
+            crowded.lease_ttl().is_err(),
+            "two ticks of lifetime cannot hold a renewal cycle"
+        );
+
+        crowded.lease_ttl_ms = 3_000;
+        assert!(crowded.lease_ttl().is_ok());
     }
 
     #[test]

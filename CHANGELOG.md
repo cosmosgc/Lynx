@@ -45,6 +45,19 @@ semantic versioning for engine releases and content bundles.
   during the first save interval instead of existing only in memory. Under
   `--fresh` a failed overwrite aborts startup rather than silently serving from
   a world the played file would replace on the next restart.
+- `lynx_world`: single-writer zone leases with fencing and an event log
+  (`PST-004`). With `--state-postgres`, the service acquires the demo zone lease
+  before loading the snapshot and refuses to start while another live process
+  holds it; `--lease-ttl-ms` (default 30 s) bounds the lifetime. Snapshot upserts
+  and event appends validate the owner, fencing token, and expiry in the same
+  transaction, so a superseded process is rejected with `conflict` instead of
+  overwriting newer state. A background task renews every third of the TTL,
+  turns readiness false, and stops the process when the lease is taken over or
+  expires unrenewed. `world.started`, `world.snapshot`, and `world.stopped`
+  markers are appended to `lynx.zone_events`, and
+  `lynx_world_zone_lease_held` / `lynx_world_zone_lease_renewals_total` expose
+  lease state. File-backed and memory-only modes remain lease-free. Replay from
+  the last snapshot plus later events remains `PST-005`.
 
 - `engine_core`: durable world calendar and bounded faction conflicts. Events
   have an audited `Draft -> Scheduled -> Open -> Active` lifecycle with

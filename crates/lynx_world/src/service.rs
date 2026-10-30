@@ -26,6 +26,7 @@ use world_gateway::{ERROR_KIND, ResumeToken, SessionClaims};
 use world_server::{CloseReason, ConnectionId, Opened, Outbound, WorldServer};
 
 use crate::auth::Grant;
+use crate::authority::{EVENT_WORLD_SNAPSHOT, EVENT_WORLD_STOPPED, ZoneAuthority};
 use crate::persistence::{SnapshotStore, WorldSnapshot, WorldSnapshotInputs};
 
 /// Client handshake message kind. Its body is [`Hello`].
@@ -120,6 +121,7 @@ pub struct Service {
     reply_sequence: u64,
     token_sequence: u64,
     persistence: Option<Persistence>,
+    authority: Option<ZoneAuthority>,
     metrics: Arc<Metrics>,
 }
 
@@ -161,6 +163,9 @@ pub struct Metrics {
     snapshot_success: AtomicU64,
     snapshot_failure: AtomicU64,
     snapshot_write_duration: Mutex<SnapshotWriteDuration>,
+    lease_held: AtomicU64,
+    lease_renew_success: AtomicU64,
+    lease_renew_failure: AtomicU64,
 }
 
 // Cumulative histogram bounds in nanoseconds: 1 ms, 10 ms, 100 ms, 1 s, 10 s.
@@ -315,6 +320,13 @@ impl Metrics {
             duration.nanos as f64 / 1_000_000_000.0,
             duration.count
         );
+        let _ = write!(
+            text,
+            "# HELP lynx_world_zone_lease_held Whether this process currently holds the zone lease (1) or not (0).\n# TYPE lynx_world_zone_lease_held gauge\nlynx_world_zone_lease_held {}\n# HELP lynx_world_zone_lease_renewals_total Zone lease renewal attempts by outcome.\n# TYPE lynx_world_zone_lease_renewals_total counter\nlynx_world_zone_lease_renewals_total{{outcome=\"success\"}} {}\nlynx_world_zone_lease_renewals_total{{outcome=\"failure\"}} {}\n",
+            get(&self.lease_held),
+            get(&self.lease_renew_success),
+            get(&self.lease_renew_failure)
+        );
         text
     }
 
@@ -325,6 +337,21 @@ impl Metrics {
             .unwrap()
             .entry(code.as_str())
             .or_default() += 1;
+    }
+
+    /// Record whether this process currently holds the zone lease.
+    pub fn set_lease_held(&self, held: bool) {
+        self.lease_held.store(u64::from(held), Ordering::Relaxed);
+    }
+
+    /// Count one lease renewal attempt by outcome.
+    pub fn record_lease_renewal(&self, success: bool) {
+        let counter = if success {
+            &self.lease_renew_success
+        } else {
+            &self.lease_renew_failure
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -359,6 +386,7 @@ impl Service {
             reply_sequence: 0,
             token_sequence: 0,
             persistence: None,
+            authority: None,
             metrics: Arc::new(Metrics::default()),
         };
         service.update_gauges();
@@ -440,6 +468,21 @@ impl Service {
         self
     }
 
+    /// Take durable authority for the served zone.
+    ///
+    /// The caller must already hold the lease and must bind the same lease to
+    /// the snapshot store; this method does not acquire or renew it. The
+    /// service appends a `world.snapshot` event after each successful save and
+    /// a `world.stopped` event when the loop ends. If another process takes the
+    /// lease over, those writes fail with [`ErrorCode::Conflict`] instead of
+    /// silently extending a log this process no longer owns.
+    #[must_use]
+    pub fn with_zone_authority(mut self, authority: ZoneAuthority) -> Self {
+        self.metrics.set_lease_held(true);
+        self.authority = Some(authority);
+        self
+    }
+
     /// Drive admission, input, replication, and shutdown until the channel
     /// closes or the shutdown flag flips.
     pub async fn run(
@@ -487,6 +530,7 @@ impl Service {
 
         self.save_snapshot();
         self.close_all();
+        self.stop_authority();
         tracing::debug!("world service loop stopped");
     }
 
@@ -535,7 +579,60 @@ impl Service {
             &self.metrics.snapshot_failure
         };
         counter.fetch_add(1, Ordering::Relaxed);
+        if result.is_ok() {
+            self.record_snapshot_event(&world);
+        }
         result
+    }
+
+    /// Append a boundary marker after a durable snapshot is written.
+    fn record_snapshot_event(&self, world: &WorldSnapshot) {
+        let Some(authority) = &self.authority else {
+            return;
+        };
+        let tick = self.server.gateway().zone().tick();
+        let payload = serde_json::json!({
+            "saved_at_ms": world.saved_at_ms,
+            "tick": tick.0,
+            "entities": u64::try_from(world.zone.entities.len()).unwrap_or(u64::MAX),
+            "schema_version": world.schema_version.to_string(),
+        });
+        if let Err(error) = authority.append_event(tick, EVENT_WORLD_SNAPSHOT, None, &payload) {
+            tracing::warn!(
+                code = ?error.code(),
+                details = %error,
+                "the snapshot could not be recorded in the zone event log"
+            );
+        }
+    }
+
+    /// Record shutdown and give the zone lease back.
+    fn stop_authority(&self) {
+        let Some(authority) = &self.authority else {
+            return;
+        };
+        let tick = self.server.gateway().zone().tick();
+        let payload = serde_json::json!({"tick": tick.0});
+        if let Err(error) = authority.append_event(tick, EVENT_WORLD_STOPPED, None, &payload) {
+            tracing::warn!(
+                code = ?error.code(),
+                details = %error,
+                "the world stop event could not be appended"
+            );
+        }
+        match authority.release() {
+            Ok(true) => tracing::info!(zone = authority.zone_id(), "zone lease released"),
+            Ok(false) => tracing::warn!(
+                zone = authority.zone_id(),
+                "zone lease was already expired or superseded"
+            ),
+            Err(error) => tracing::warn!(
+                code = ?error.code(),
+                details = %error,
+                "the zone lease could not be released"
+            ),
+        }
+        self.metrics.set_lease_held(false);
     }
 
     /// The authoritative state a snapshot is built from.
@@ -1729,6 +1826,56 @@ mod tests {
             state.last = Some(snapshot.clone());
             Ok(())
         }
+    }
+
+    #[test]
+    fn durable_authority_records_snapshot_events_and_stops_on_takeover() {
+        use crate::authority::tests::MemoryLeases;
+        use crate::persistence::ZoneLeaseStore;
+
+        let (service, _, _) = service();
+        let zone = service
+            .server
+            .gateway()
+            .zone()
+            .config()
+            .instance
+            .to_string();
+        let leases = Arc::new(MemoryLeases::default());
+        let store: Arc<dyn ZoneLeaseStore> = leases.clone();
+        let authority = ZoneAuthority::acquire(store, &zone, "owner-a", Duration::from_secs(30))
+            .unwrap()
+            .unwrap();
+        let mut service = service
+            .with_persistence(Arc::new(MemoryStore::default()), Duration::from_secs(1))
+            .with_zone_authority(authority.clone());
+
+        service.try_save_snapshot().unwrap();
+        let events = authority.events_after(-1).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, EVENT_WORLD_SNAPSHOT);
+        assert_eq!(events[0].sequence, 0);
+        assert_eq!(events[0].tick, 0);
+
+        // A takeover increments the token; the old owner must not extend the log.
+        assert!(authority.release().unwrap());
+        let store: Arc<dyn ZoneLeaseStore> = leases.clone();
+        let replacement = ZoneAuthority::acquire(store, &zone, "owner-b", Duration::from_secs(30))
+            .unwrap()
+            .unwrap();
+        service.try_save_snapshot().unwrap();
+        assert_eq!(
+            authority.events_after(-1).unwrap().len(),
+            1,
+            "a superseded owner appends nothing"
+        );
+        service.stop_authority();
+        assert_eq!(
+            replacement.events_after(-1).unwrap().len(),
+            1,
+            "the stale owner's stop marker is fenced too"
+        );
+        assert_eq!(replacement.fencing_token(), authority.fencing_token() + 1);
     }
 
     #[derive(Debug, Default)]

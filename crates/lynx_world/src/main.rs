@@ -27,18 +27,23 @@ use backend_nakama::{
     PostgresIdentityStore,
 };
 use clap::{Parser, Subcommand};
+use engine_core::time::Tick;
 use lynx_world::auth::{self, Authenticator, Grant, NakamaIdentityBackend};
+use lynx_world::authority::{self, ZoneAuthority};
 use lynx_world::backend;
 use lynx_world::config::{AuthMode, ServeArgs};
 use lynx_world::demo;
 use lynx_world::persistence::{
-    FileSnapshotStore, PostgresSnapshotStore, SnapshotStore, postgres_config_from_env,
+    FileSnapshotStore, PostgresSnapshotStore, PostgresZoneLeaseStore, SnapshotStore,
+    ZoneLeaseStore, postgres_config_from_env,
 };
 use lynx_world::service::Service;
 use lynx_world::startup;
 use lynx_world::transport::{self, AppState, OriginPolicy};
 use postgres::NoTls;
+use serde_json::json;
 use tokio::sync::watch;
+use tokio::time::MissedTickBehavior;
 use world_gateway::{SystemResumeTokens, WorldGateway};
 use world_server::WorldServer;
 
@@ -52,6 +57,10 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the CLI is parsed once and the serve arguments stay inline for readability"
+)]
 enum Command {
     /// Run the world service.
     Serve(ServeArgs),
@@ -139,7 +148,8 @@ async fn serve(args: ServeArgs) -> Result<()> {
 
     args.validate_snapshot_args()
         .context("invalid snapshot configuration")?;
-    let store = snapshot_store(&args)?;
+    let stores = durable_stores(&args)?;
+    let store = stores.snapshot.clone();
     if args.auth_mode == AuthMode::Nakama && store.is_none() {
         bail!(
             "Nakama character admission requires --state-file or --state-postgres for durable actor provisioning"
@@ -155,6 +165,19 @@ async fn serve(args: ServeArgs) -> Result<()> {
     }
 
     let now_ms = demo::now_ms();
+    // Take the lease before reading the snapshot, so the state this process
+    // restores cannot be written by a superseded owner while it starts. The
+    // demo zone ID is fixed, so it is known without loading anything.
+    let authority = match (&stores.postgres, &stores.leases) {
+        (Some(postgres), Some(leases)) => Some(Arc::new(start_authority(
+            postgres,
+            leases,
+            &demo::zone_instance().to_string(),
+            args.lease_ttl()
+                .context("invalid zone lease configuration")?,
+        )?)),
+        _ => None,
+    };
     let startup::StartupWorld {
         zone,
         calendar,
@@ -187,6 +210,9 @@ async fn serve(args: ServeArgs) -> Result<()> {
             .with_persistence(Arc::clone(store), snapshot_interval),
         None => Service::new(server, args.tick_interval()),
     };
+    if let Some(authority) = &authority {
+        service = service.with_zone_authority(authority.as_ref().clone());
+    }
     // Establish the baseline snapshot before the loop starts, so the authored
     // world (or the freshly reset one under --fresh) is durable from the very
     // first second instead of waiting for the first interval save. Under
@@ -201,6 +227,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
 
     let (events, receivers) = transport::event_channel();
     let (shutdown, shutdown_rx) = watch::channel(false);
+    let metrics = service.metrics();
     let state = match (authenticator, identity_backend) {
         (Some(authenticator), None) => AppState::new(events, authenticator),
         (None, Some(backend)) => {
@@ -213,10 +240,77 @@ async fn serve(args: ServeArgs) -> Result<()> {
     };
     let state = Arc::new(
         state
-            .with_metrics(service.metrics())
+            .with_metrics(Arc::clone(&metrics))
             .with_origin_policy(origins)
             .with_rate_limits(rate_limits),
     );
+
+    // Renewal runs outside the authority loop so a slow database round trip
+    // never delays a tick. Losing the lease is fatal: durable writes are
+    // already fenced by the token, and continuing to serve would present stale
+    // authority. Losing it also turns readiness false and stops the process.
+    let renewal = authority.as_ref().map(|authority| {
+        let authority = Arc::clone(authority);
+        let metrics = Arc::clone(&metrics);
+        let state = Arc::clone(&state);
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            let mut expires_at = authority.lease().expires_at;
+            let mut ticker = tokio::time::interval(authority.renewal_interval());
+            ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let attempt = Arc::clone(&authority);
+                match tokio::task::spawn_blocking(move || attempt.renew()).await {
+                    Ok(Ok(Some(lease))) => {
+                        expires_at = lease.expires_at;
+                        metrics.record_lease_renewal(true);
+                        tracing::debug!(
+                            zone = authority.zone_id(),
+                            fencing_token = authority.fencing_token(),
+                            "zone lease renewed"
+                        );
+                    }
+                    Ok(Ok(None)) => {
+                        metrics.record_lease_renewal(false);
+                        tracing::error!(
+                            zone = authority.zone_id(),
+                            "the zone lease was taken over; stopping this process"
+                        );
+                        break;
+                    }
+                    Ok(Err(error)) => {
+                        metrics.record_lease_renewal(false);
+                        tracing::warn!(
+                            zone = authority.zone_id(),
+                            code = ?error.code(),
+                            details = %error,
+                            "the zone lease could not be renewed"
+                        );
+                        if std::time::SystemTime::now() >= expires_at {
+                            tracing::error!(
+                                zone = authority.zone_id(),
+                                "the zone lease expired before it could be renewed; stopping this process"
+                            );
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            zone = authority.zone_id(),
+                            %error,
+                            "the zone lease renewal task failed; stopping this process"
+                        );
+                        break;
+                    }
+                }
+            }
+            metrics.set_lease_held(false);
+            state.set_ready(false);
+            let _ = shutdown.send(true);
+        })
+    });
 
     let listener = tokio::net::TcpListener::bind(args.bind)
         .await
@@ -257,9 +351,19 @@ async fn serve(args: ServeArgs) -> Result<()> {
 
     let signal_state = Arc::clone(&state);
     let signal_shutdown = shutdown.clone();
+    let mut signal_watch = shutdown.subscribe();
     let shutdown_signal = async move {
-        let _ = tokio::signal::ctrl_c().await;
-        tracing::info!("shutdown requested");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => tracing::info!("shutdown requested"),
+            // The renewal task also drives shutdown when authority is lost.
+            () = async {
+                while !*signal_watch.borrow() {
+                    if signal_watch.changed().await.is_err() {
+                        break;
+                    }
+                }
+            } => tracing::warn!("shutdown requested by the authority"),
+        }
         signal_state.set_ready(false);
         let _ = signal_shutdown.send(true);
     };
@@ -273,6 +377,25 @@ async fn serve(args: ServeArgs) -> Result<()> {
     match loop_task.await {
         Ok(()) => {}
         Err(error) => tracing::error!(%error, "authority loop panicked"),
+    }
+    if let Some(renewal) = renewal {
+        // The loop already appended its stop marker; do not let a renewal race
+        // the release below.
+        renewal.abort();
+    }
+    if let Some(authority) = &authority {
+        match authority.release() {
+            Ok(true) => tracing::info!(zone = authority.zone_id(), "zone lease released"),
+            Ok(false) => tracing::warn!(
+                zone = authority.zone_id(),
+                "zone lease was already expired or superseded"
+            ),
+            Err(error) => tracing::warn!(
+                code = ?error.code(),
+                details = %error,
+                "zone lease could not be released"
+            ),
+        }
     }
     result.context("the HTTP server stopped with an error")
 }
@@ -304,17 +427,96 @@ fn production_identity_backend() -> Result<Arc<NakamaIdentityBackend>> {
     )))
 }
 
-fn snapshot_store(args: &ServeArgs) -> Result<Option<Arc<dyn SnapshotStore + Send + Sync>>> {
+/// Durable stores selected by the command line.
+struct DurableStores {
+    /// Snapshot store handed to the service.
+    snapshot: Option<Arc<dyn SnapshotStore + Send + Sync>>,
+    /// Concrete PostgreSQL store, kept so the zone lease can fence it.
+    postgres: Option<Arc<PostgresSnapshotStore>>,
+    /// Zone lease and event-log operations; only PostgreSQL provides them.
+    leases: Option<Arc<PostgresZoneLeaseStore>>,
+}
+
+fn durable_stores(args: &ServeArgs) -> Result<DurableStores> {
     if args.state_postgres {
-        Ok(Some(Arc::new(
+        let postgres = Arc::new(
             PostgresSnapshotStore::from_env(demo::DEMO_WORLD_ID)
                 .context("failed to open the PostgreSQL snapshot store")?,
-        )))
+        );
+        let leases = Arc::new(
+            PostgresZoneLeaseStore::from_env()
+                .context("failed to open the PostgreSQL zone lease store")?,
+        );
+        let snapshot: Arc<dyn SnapshotStore + Send + Sync> = postgres.clone();
+        Ok(DurableStores {
+            snapshot: Some(snapshot),
+            postgres: Some(postgres),
+            leases: Some(leases),
+        })
     } else {
-        Ok(args
-            .state_file
-            .as_ref()
-            .map(|path| Arc::new(FileSnapshotStore::new(path.clone())) as _))
+        Ok(DurableStores {
+            snapshot: args
+                .state_file
+                .as_ref()
+                .map(|path| Arc::new(FileSnapshotStore::new(path.clone())) as _),
+            postgres: None,
+            leases: None,
+        })
+    }
+}
+
+/// Take the zone lease and bind it to the durable snapshot store.
+///
+/// A failure after acquisition releases the lease, so a process that cannot
+/// finish starting does not block its replacement until the TTL expires.
+fn start_authority(
+    postgres: &PostgresSnapshotStore,
+    leases: &Arc<PostgresZoneLeaseStore>,
+    zone_id: &str,
+    ttl: Duration,
+) -> Result<ZoneAuthority> {
+    let owner = format!("lynx-world/{}", std::process::id());
+    let authority = ZoneAuthority::acquire(
+        Arc::clone(leases) as Arc<dyn ZoneLeaseStore>,
+        zone_id,
+        &owner,
+        ttl,
+    )
+    .context("failed to acquire the zone lease")?
+    .with_context(|| format!("zone {zone_id} is already owned by another live process"))?;
+    let started = (|| -> Result<()> {
+        postgres
+            .bind_zone_lease(zone_id, &owner, authority.fencing_token())
+            .context("failed to fence snapshots on the zone lease")?;
+        authority
+            .append_event(
+                Tick::ZERO,
+                authority::EVENT_WORLD_STARTED,
+                None,
+                &json!({
+                    "owner": owner,
+                    "world_id": demo::DEMO_WORLD_ID,
+                    "fencing_token": authority.fencing_token(),
+                }),
+            )
+            .context("failed to record the world start event")?;
+        Ok(())
+    })();
+    match started {
+        Ok(()) => {
+            tracing::info!(
+                zone = zone_id,
+                owner = %owner,
+                fencing_token = authority.fencing_token(),
+                ttl_ms = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX),
+                "zone lease acquired"
+            );
+            Ok(authority)
+        }
+        Err(error) => {
+            let _ = authority.release();
+            Err(error)
+        }
     }
 }
 

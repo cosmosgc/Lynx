@@ -128,6 +128,7 @@ flags:
 | `--state-postgres` | off | store durable world snapshots in PostgreSQL instead; reads `LYNX_PG_HOST`, `LYNX_PG_PORT`, `LYNX_PG_DATABASE`, `LYNX_PG_USER`, `LYNX_PG_PASSWORD` (mutually exclusive with `--state-file`) |
 | `--fresh` | off | ignore any saved snapshot, rebuild the authored demo, and overwrite it at startup; requires `--state-file` or `--state-postgres` (development reset) |
 | `--snapshot-ms <ms>` | 10000 | how often the configured snapshot store is rewritten (must be at least the tick interval) |
+| `--lease-ttl-ms <ms>` | 30000 | zone lease lifetime with `--state-postgres`, 1000–600000 ms and at least three tick intervals; the holder renews every third of it |
 
 For Nakama authentication, use `--auth-mode nakama`, set `LYNX_NAKAMA_URL` (and
 optional `LYNX_NAKAMA_HTTP_KEY`) plus the normal `LYNX_PG_*` variables, and
@@ -176,6 +177,21 @@ This adapter currently uses plain TCP and does not provide TLS; use a local
 TLS-terminating tunnel/proxy for remote database access. This opt-in does not
 encrypt traffic.
 
+With `--state-postgres`, the service also takes a single-writer lease on the
+demo zone in `lynx.zone_leases` before it loads the snapshot. A second process
+refuses to start while an unexpired lease is held. The lease carries a
+monotonically increasing fencing token; every snapshot upsert and event append
+checks the owner, token, and expiry in the same transaction as the write, so a
+process that lost the lease is rejected with `conflict` even if it has not yet
+noticed. A replacement may take over an expired lease after the previous holder
+crashes; recovery from its events is not implemented yet (`PST-005`). The
+holder renews every third of `--lease-ttl-ms`; if renewal reports a takeover, or
+keeps failing past the recorded expiry, the process turns not-ready and shuts
+down instead of serving stale authority. The event log records `world.started`,
+`world.snapshot`, and `world.stopped`. The file-backed store and the memory-only
+mode are unchanged and take no lease: without a shared database there is nothing
+to fence.
+
 A snapshot is a whole-world overwrite, so falling back to the authored demo
 would otherwise mean deleting the snapshot by hand. `--fresh` does that
 explicitly: it requires `--state-file` or `--state-postgres`, ignores the
@@ -215,8 +231,10 @@ Health checks:
 Readiness is stricter than liveness: the current binary becomes ready after the
 zone is built or restored and before it accepts connections, and turns not-ready
 as soon as shutdown begins. A configured snapshot must load; a failed baseline
-write aborts startup only with `--fresh`, otherwise it logs a warning. Migration execution, ongoing database health,
-authored content loading, and event replay are not readiness checks.
+write aborts startup only with `--fresh`, otherwise it logs a warning. With
+`--state-postgres`, losing the zone lease also turns readiness false and stops
+the process. Migration execution, ongoing database health, authored content
+loading, and event replay are not readiness checks.
 
 ## Metrics and logs
 
@@ -317,6 +335,8 @@ scrape_configs:
 | `lynx_world_admission_rejections_total{reason}` | rejected WebSocket upgrades by bounded capacity/draining reason |
 | `lynx_world_snapshot_writes_total{outcome}` | configured snapshot store write attempts, including startup and shutdown, by `success` or `failure`; no-store calls are excluded |
 | `lynx_world_snapshot_write_duration_seconds` | histogram of time in configured store `save` calls, including successful and failed writes at startup, periodically, and at shutdown; excludes snapshot capture and no-store calls. Cumulative buckets: 0.001, 0.01, 0.1, 1, 10, +Inf seconds |
+| `lynx_world_zone_lease_held` | `1` while this process holds the PostgreSQL zone lease, `0` otherwise; stays `0` without `--state-postgres` |
+| `lynx_world_zone_lease_renewals_total{outcome}` | lease renewal attempts by `success` or `failure`; a takeover or an expiry-driven shutdown counts as a failure |
 | `lynx_world_rate_limit_rejections_total{class,code}` | rate-limit rejections by bounded class and error code |
 | `lynx_world_actions_applied_total` | newly applied actions; cached idempotent replies are excluded |
 | `lynx_world_action_authority_duration_seconds` | histogram of time spent handling action requests inside the authority; not end-to-end client latency. Cumulative buckets: 0.001, 0.01, 0.1, 1, 10, +Inf seconds |

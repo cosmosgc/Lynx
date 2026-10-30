@@ -51,6 +51,80 @@ pub struct ZoneEvent {
 /// The schema version written by this service build.
 pub const WORLD_SNAPSHOT_VERSION: SchemaVersion = SchemaVersion::new(1, 0);
 
+/// One event to append under a zone lease.
+#[derive(Debug, Clone, Copy)]
+pub struct ZoneEventInput<'a> {
+    /// Authoritative tick the event describes.
+    pub tick: i64,
+    /// Stable event kind, at most 128 bytes.
+    pub kind: &'a str,
+    /// Actor the event concerns, when any.
+    pub actor_id: Option<&'a str>,
+    /// JSON object payload; never credentials or tokens.
+    pub payload: &'a serde_json::Value,
+    /// Event payload schema version.
+    pub schema_version: i32,
+}
+
+/// Single-writer locking and the append-only event log for one zone.
+///
+/// A holder proves authority with the lease's fencing token; every write that
+/// depends on ownership must present the current token. A takeover increments
+/// the token, so a process that lost the lease is rejected instead of writing
+/// stale state. Implementations are shared behind an `Arc` and must serialize
+/// connection access internally.
+pub trait ZoneLeaseStore: std::fmt::Debug + Send + Sync {
+    /// Acquire an absent or expired lease, or `None` when another owner holds a
+    /// live one.
+    ///
+    /// # Errors
+    /// Returns an engine error when the store cannot be reached.
+    fn acquire(
+        &self,
+        zone_id: &str,
+        owner: &str,
+        ttl: std::time::Duration,
+    ) -> Result<Option<ZoneLease>, EngineError>;
+
+    /// Extend a lease that is still owned by `owner` under `token`.
+    ///
+    /// # Errors
+    /// Returns an engine error when the store cannot be reached.
+    fn renew(
+        &self,
+        zone_id: &str,
+        owner: &str,
+        token: i64,
+        ttl: std::time::Duration,
+    ) -> Result<Option<ZoneLease>, EngineError>;
+
+    /// Expire a lease so another owner may take it over immediately.
+    ///
+    /// # Errors
+    /// Returns an engine error when the store cannot be reached.
+    fn release(&self, zone_id: &str, owner: &str, token: i64) -> Result<bool, EngineError>;
+
+    /// Append one event atomically with fence validation and gap-free
+    /// sequencing.
+    ///
+    /// # Errors
+    /// Returns [`ErrorCode::Conflict`] when the lease was lost or superseded,
+    /// and an engine error when the store cannot be reached.
+    fn append_event(
+        &self,
+        zone_id: &str,
+        owner: &str,
+        token: i64,
+        event: ZoneEventInput<'_>,
+    ) -> Result<i64, EngineError>;
+
+    /// Read events strictly after `sequence`, ordered by sequence.
+    ///
+    /// # Errors
+    /// Returns an engine error when the store cannot be reached.
+    fn events_after(&self, zone_id: &str, sequence: i64) -> Result<Vec<ZoneEvent>, EngineError>;
+}
+
 /// Everything needed to resume the world after a restart.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WorldSnapshot {

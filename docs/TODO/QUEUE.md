@@ -9,7 +9,6 @@ copied from the task entries; a dash means none are declared.
 
 | ID | Task | Priority | Status | Dependencies | Sequencing note |
 | --- | --- | --- | --- | --- | --- |
-| [PST-004](20-persistence-backend.md#pst-004--zone-leases-fencing-and-event-log) | Zone leases, fencing, and event log | P1 | Ready | — | Persistence/recovery foundation; enables PST-005 and downstream zone work. |
 | [OPS-006](60-operations-release.md#ops-006--ci-matrix-and-live-integration-coverage) | CI matrix and live-integration coverage | P1 | Ready | — | Close client-smoke and CI-duration gaps; useful parallel quality gate. |
 | [SIM-007](10-simulation-gameplay.md#sim-007--navigation-budgets-and-replan-policy) | Navigation budgets and replan policy | P1 | Ready | `SIM-001` | Formalize bounded navigation before authoring integration. |
 | [SIM-018](10-simulation-gameplay.md#sim-018--determinism-and-tick-budget) | Determinism and tick budget | P1 | Ready | — | Establish measured simulation limits alongside feature work. |
@@ -43,6 +42,7 @@ copied from the task entries; a dash means none are declared.
 | [SIM-002](10-simulation-gameplay.md#sim-002--client-prediction-and-reconciliation-contract) | Client prediction and reconciliation contract | P0 | In progress | `SIM-001`, `CLT-005` | Resume visual validation when client/network environment is available. |
 | [CLT-002](40-bevy-client.md#clt-002--login-and-session-bootstrap) | Login and session bootstrap | P0 | In progress | `NET-001`, `CLT-001` | Finish server profiles and world-session lifecycle. |
 | [CLT-003](40-bevy-client.md#clt-003--character-selection-and-creation) | Character selection and creation | P0 | In progress | `PST-001`, `CLT-002` | Verify full Bevy onboarding and restart flow against a live server. |
+| [PST-004](20-persistence-backend.md#pst-004--zone-leases-fencing-and-event-log) | Zone leases, fencing, and event log | P1 | In progress | — | Runtime holds and renews the lease and appends fenced events; snapshot replay remains in PST-005. |
 | [SIM-006](10-simulation-gameplay.md#sim-006--ai-behaviors-schedules-and-perception-budgets) | AI behaviors, schedules, and perception budgets | P1 | In progress | `SIM-001` | Continue bounded behavior/content hydration; prerequisite of SIM-015. |
 | [SIM-008](10-simulation-gameplay.md#sim-008--world-chat-and-presence) | World chat and presence | P1 | In progress | — | Complete authorized routing/moderation path; enables social/client tasks. |
 | [NET-003](30-networking-security.md#net-003--tls-and-reverse-proxy-boundary) | TLS and reverse-proxy boundary | P1 | In progress | — | Validate proxy configuration and deployed certificate boundary. |
