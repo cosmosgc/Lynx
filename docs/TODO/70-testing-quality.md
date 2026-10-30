@@ -188,7 +188,7 @@ non-flaky matrix.
 ## QUA-006 — Security abuse test suite
 
 - **Priority:** P1
-- **Status:** Ready
+- **Status:** In progress — duplicate-Origin rejection regression added; abuse matrix remains incomplete
 - **Depends on:** —
 - **References:** [security](../security.md), `NET-002`, `NET-007`, `NET-011`
 
@@ -206,6 +206,13 @@ non-flaky matrix.
 - [ ] Tests assert both rejection and the absence of side effects.
 - [ ] Secret-redaction assertions cover error/log paths.
 - [ ] The suite runs in CI and is extended with each security task.
+
+**Progress:** `crates/lynx_world/tests/websocket.rs` now checks that a request
+with multiple `Origin` headers is rejected with the stable `origin_forbidden`
+response and never reaches gateway admission. This covers the documented
+origin-violation case where one header is allowlisted and another is hostile.
+The broader abuse matrix, state-side-effect checks for other rejection paths,
+and comprehensive secret-redaction assertions remain open.
 
 ---
 

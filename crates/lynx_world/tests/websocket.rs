@@ -98,6 +98,25 @@ async fn origin_allowlist_rejects_before_websocket_upgrade() {
         other => panic!("unexpected error: {other}"),
     }
     assert!(receiver.try_recv().is_err());
+    // Multiple Origin headers are ambiguous and must not be treated as a
+    // valid allowlisted origin; rejection must happen before gateway admission.
+    let mut duplicate_origin = request(Some("https://game.example"));
+    duplicate_origin.headers_mut().append(
+        header::ORIGIN,
+        HeaderValue::from_static("https://evil.example"),
+    );
+    let error = connect_async(duplicate_origin).await.unwrap_err();
+    match error {
+        tokio_tungstenite::tungstenite::Error::Http(response) => {
+            assert_eq!(response.status(), 403);
+            assert_eq!(
+                response.body().as_deref(),
+                Some(&b"{\"error\":\"origin_forbidden\"}"[..])
+            );
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+    assert!(receiver.try_recv().is_err());
     let (allowed, _) = connect_async(request(Some("https://game.example")))
         .await
         .unwrap();
