@@ -36,6 +36,22 @@ jobs:
       - name: Check local Markdown links
         run: python3 scripts/check_markdown_links.py
 
+  dependency-audit:
+    name: Dependency and license audit (Ubuntu)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.99.0
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --version 0.18.3 --locked
+
+      - name: Audit locked dependencies
+        run: cargo deny --locked check
+
   rust:
     name: Rust checks (Ubuntu)
     runs-on: ubuntu-24.04

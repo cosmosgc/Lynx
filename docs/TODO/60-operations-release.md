@@ -268,6 +268,22 @@ manual baseline, not automated duration/flakiness tracking.
 - [ ] Release artifacts include an SBOM.
 - [ ] Security updates have a documented turnaround target.
 
+**Initial implementation:** `.github/workflows/ci.yml` runs pinned
+`cargo-deny` against the committed lockfile on pull requests and pushes.
+`deny.toml` denies known advisories, unapproved licenses, duplicate versions,
+wildcard requirements, and unknown dependency sources. New dependency sources
+and license families require explicit review; there are no blanket advisory or
+license exceptions. Any exception must identify the exact crate/advisory or
+license, rationale, accountable owner (GitHub handle), and ISO-8601 expiry in
+the relevant exception list with an explanatory comment. Expired exceptions
+must be removed or re-approved before expiry. Never put credentials or other
+secrets in audit configuration or logs. Triage security updates within 2
+business days and target remediation or documented mitigation within 7 calendar
+days for critical/high advisories and 30 calendar days for other severities.
+Review dependencies monthly and after RustSec alerts. This policy does not
+assert the current graph is vulnerability-free; hosted CI must run the audit.
+Release SBOM generation/attachment is still missing.
+
 ---
 
 ## OPS-009 — Incident runbooks
