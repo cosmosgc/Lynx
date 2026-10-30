@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Create account — Lynx{% endblock %}
+{% block content %}
+<section>
+  <p class="eyebrow">NEW PLAYER</p>
+  <h1>Create account</h1>
+  <p class="description">Your email and password are sent directly to Nakama over the configured secure connection.</p>
+  <form method="post" action="{{ url_for('register') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Email<input type="email" name="email" value="{{ email }}" autocomplete="email" maxlength="255" required></label>
+    <label>Username <span class="optional">(optional)</span><input type="text" name="username" value="{{ username }}" autocomplete="nickname" maxlength="128"></label>
+    <label>Password<input type="password" name="password" autocomplete="new-password" minlength="8" maxlength="128" required></label>
+    <button class="button primary" type="submit">Create account</button>
+  </form>
+  <p class="alternate">Already registered? <a href="{{ url_for('login') }}">Sign in</a></p>
+</section>
+{% endblock %}

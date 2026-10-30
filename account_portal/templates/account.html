@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Your account — Lynx{% endblock %}
+{% block content %}
+<section>
+  <p class="eyebrow">ACCOUNT READY</p>
+  <h1>Welcome.</h1>
+  <p class="description">Signed in as <strong>{{ account_email }}</strong>.</p>
+  <p class="note">Your Nakama session is held in this app's memory only. It will be cleared if the app restarts.</p>
+  <form method="post" action="{{ url_for('logout') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button class="button secondary" type="submit">Sign out</button>
+  </form>
+</section>
+{% endblock %}

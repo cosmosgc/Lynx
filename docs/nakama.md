@@ -14,7 +14,8 @@ does not own authoritative zones or durable world state.
 
 | Nakama capability | Lynx ownership and current status | Notes |
 |---|---|---|
-| Device, social, custom, and platform authentication; sessions and refresh tokens | **Partially integrated** | `backend_nakama` validates a fresh bearer session at the world edge. The client has a `--login <character-id>` path with OS credential-store persistence and a `--logout` command. A login form, character-list UI, and automatic character creation remain pending. Static world tokens are development-only. |
+| Device, email, social, custom, and platform authentication; sessions and refresh tokens | **Partially integrated** | `backend_nakama` validates a fresh bearer session at the world edge. The client has device and email CLI login with OS credential-store persistence and a `--logout` command. A login form and character-list UI remain pending. Static world tokens are development-only. |
+
 | Account metadata and user profiles | **Partially integrated** | The world edge reads the authenticated account identity. Profile management is not exposed by the Lynx client or `game_api` adapter. |
 | Friends, groups, chat, presence, status, notifications | **Planned, not integrated** | Nakama is the selected platform owner, but Lynx has no production adapter/client flow for these services yet. Do not use Nakama presence as authoritative zone presence. See [social and chat boundary](#social-and-chat-boundary). |
 | Matchmaking and relayed multiplayer | **Planned, not integrated** | The Rust world service owns sessions, interest, replication, and authority. Nakama matchmaking may later form groups before a world admission. |
@@ -23,11 +24,33 @@ does not own authoritative zones or durable world state.
 | Console and Console API | **Available for local administration** | The development console binds only to `127.0.0.1:7351`. It is an administrator interface, not the player login experience. |
 | Health endpoint and Prometheus metrics | **Health used; metrics opt-in** | `GET /healthcheck` is used by `lynx doctor --backend`. Set `LYNX_NAKAMA_METRICS_PORT` to expose Nakama Prometheus metrics; Lynx does not currently scrape, proxy, or alert on them. |
 
+## Email login
+
+For an account created through `account_portal/`, run `--email-login <email>` to
+authenticate before listing or creating characters, or use
+`--login-email <email> <character-id>` to authenticate and attempt world entry.
+Configure `LYNX_NAKAMA_URL`,
+`LYNX_NAKAMA_SERVER_KEY`, and, if needed, `LYNX_WORLD_API_URL` and
+`LYNX_WORLD_URL` as for `--login`. The password is requested without terminal
+echo only when needed; do not pass it as an argument. The OS credential store
+holds the email identity and rotating refresh token, never the password. A saved
+session is refreshed only for the matching email; an expired session prompts
+again. Explicitly logging into a different email replaces the saved per-server
+session after successful authentication. Existing device records continue to
+work, and `--characters` and `--login` resume the currently saved account; if an
+email session expires, use `--login-email` to authenticate again. `--logout`
+revokes and removes the current saved session. There is no plaintext credential
+fallback. Remote authentication requires HTTPS and does not use proxy settings.
+
+Character selection verifies account ownership, but neither portal account
+creation nor character selection provisions a live world actor. World admission
+still requires a corresponding actor to exist on the server.
+
 ## Current request path
 
 1. A client obtains a Nakama session through a supported Nakama authentication
-   flow. `lynx_client_net::NakamaAuthClient` supports device acquisition,
-   refresh, and per-session logout. The client stores device identity and the
+   flow. `lynx_client_net::NakamaAuthClient` supports device and email acquisition,
+   refresh, and per-session logout. The client stores account identity and the
    rotating refresh token in the OS credential store, refreshes before opening
    its window, and verifies the selected character through the authenticated
    Lynx HTTP API. It has no login/character-selection UI. It refuses remote

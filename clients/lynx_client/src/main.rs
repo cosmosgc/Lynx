@@ -1,4 +1,5 @@
 #[cfg(feature = "window")]
+#[allow(clippy::too_many_lines)] // The entry point keeps the existing mode dispatch together.
 fn main() {
     use bevy::prelude::*;
     use lynx_client::{
@@ -8,6 +9,20 @@ fn main() {
         windowed::{OfflineWindowPlugin, OnlineWindowPlugin},
     };
     use std::ffi::OsStr;
+
+    load_repository_env();
+
+    if std::env::args_os().nth(1).as_deref() == Some(OsStr::new("--account")) {
+        if std::env::args_os().nth(2).is_some() {
+            eprintln!("Usage: lynx_client --account");
+            std::process::exit(2);
+        }
+        App::new()
+            .add_plugins(DefaultPlugins)
+            .add_plugins(lynx_client::account_ui::AccountUiPlugin)
+            .run();
+        return;
+    }
 
     if character_command() {
         return;
@@ -22,20 +37,25 @@ fn main() {
         return;
     }
     let mut args = std::env::args_os().skip(1);
-    let mode = match (args.next(), args.next(), args.next()) {
-        (None, None, None) => (None, None),
-        (Some(mode), None, None) if mode == "--demo-online" => (Some(false), None),
-        (Some(mode), Some(character), None) if mode == "--login" => (Some(true), Some(character)),
-        (Some(mode), Some(path), None) if mode == "--replay" => (None, Some(path)),
+    let mode = match (args.next(), args.next(), args.next(), args.next()) {
+        (None, None, None, None) => (None, None, None),
+        (Some(mode), None, None, None) if mode == "--demo-online" => (Some(false), None, None),
+        (Some(mode), Some(character), None, None) if mode == "--login" => {
+            (Some(true), Some(character), None)
+        }
+        (Some(mode), Some(email), Some(character), None) if mode == "--login-email" => {
+            (Some(true), Some(character), Some(email))
+        }
+        (Some(mode), Some(path), None, None) if mode == "--replay" => (None, Some(path), None),
         _ => {
             eprintln!(
-                "Usage: lynx_client [--characters | --create-character <name> <intent-key> | --select-character <id> | --demo-online | --login <id> | --logout | --replay <fixture.json>]"
+                "Usage: lynx_client [--account | --characters | --create-character <name> <intent-key> | --select-character <id> | --email-login <email> | --demo-online | --login <id> | --login-email <email> <id> | --logout | --replay <fixture.json>]"
             );
             std::process::exit(2);
         }
     };
-    let (login, replay_path) = mode;
-    let replay = replay_path.filter(|_| login.is_none()).map(|path| {
+    let (login, path, email) = mode;
+    let replay = path.clone().filter(|_| login.is_none()).map(|path| {
         let json = std::fs::read_to_string(path).unwrap_or_else(|error| {
             eprintln!("Could not read replay fixture: {error}");
             std::process::exit(2);
@@ -51,7 +71,9 @@ fn main() {
     // Keep the runtime alive until the window and its network task have exited.
     let _runtime = if let Some(login) = login {
         let (bearer, character) = if login {
-            authenticate_device(std::env::args().nth(2).as_deref().unwrap_or_default())
+            let character = path.and_then(|s| s.into_string().ok()).unwrap_or_default();
+            let email = email.map(|s| s.into_string().unwrap_or_default());
+            authenticate_device(&character, email)
         } else {
             let Some(bearer) = std::env::var_os("LYNX_DEMO_TOKEN")
                 .and_then(|s| s.into_string().ok())
@@ -93,11 +115,20 @@ fn main() {
     app.run();
 }
 
+fn load_repository_env() {
+    let env_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.env");
+    // Explicit process environment wins over the repository's local defaults.
+    let _ = dotenvy::from_path(env_path);
+}
+
 #[cfg(feature = "window")]
 fn character_command() -> bool {
-    use game_api::{CharacterCreationKey, CreateCharacter, SessionToken};
-    use lynx_client::nakama_credentials::{OsNakamaCredentialStore, authenticate_or_resume};
-    use lynx_client_net::{CharacterApiClient, NakamaAuthClient, NakamaAuthConfig};
+    use game_api::{CharacterCreationKey, CreateCharacter};
+    use lynx_client::nakama_credentials::{
+        NakamaLoginError, OsNakamaCredentialStore, authenticate_email_or_resume,
+        authenticate_or_resume,
+    };
+    use lynx_client_net::{NakamaAuthClient, NakamaAuthConfig};
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(command) = args.first().map(String::as_str) else {
@@ -105,16 +136,18 @@ fn character_command() -> bool {
     };
     if !matches!(
         command,
-        "--characters" | "--create-character" | "--select-character"
+        "--characters" | "--create-character" | "--select-character" | "--email-login"
     ) {
         return false;
     }
     if !matches!(
         (command, args.len()),
-        ("--characters", 1) | ("--create-character", 3) | ("--select-character", 2)
+        ("--characters", 1)
+            | ("--create-character", 3)
+            | ("--select-character" | "--email-login", 2)
     ) {
         eprintln!(
-            "Usage: lynx_client --characters | --create-character <name> <intent-key> | --select-character <id>"
+            "Usage: lynx_client --characters | --create-character <name> <intent-key> | --select-character <id> | --email-login <email>"
         );
         std::process::exit(2);
     }
@@ -143,27 +176,31 @@ fn character_command() -> bool {
         std::env::var("LYNX_WORLD_API_URL").unwrap_or_else(|_| "http://127.0.0.1:8090".into());
     let result = std::thread::spawn(move || -> Result<(), String> {
         let auth = NakamaAuthClient::new(NakamaAuthConfig::new(&base_url, server_key)).map_err(|e| format!("{e:?}"))?;
-        let session = authenticate_or_resume(&auth, &base_url, &OsNakamaCredentialStore, engine_core::Locale::default()).map_err(|e| format!("{e:?}"))?;
-        let token = SessionToken::new(session.access_token()).map_err(|_| "invalid access session".to_owned())?;
-        let api = CharacterApiClient::new(api_url).map_err(|e| format!("{e:?}"))?;
-        match args[0].as_str() {
-            "--characters" => {
-                let characters = api.characters(&token).map_err(|e| format!("{e:?}"))?;
-                if characters.is_empty() { println!("No characters yet. Create one with --create-character <name> <intent-key>."); }
-                for character in characters { println!("{}\t{}\t{:?}", character.id, character.name, character.status); }
-            }
-            "--create-character" => {
-                let receipt = api.create_character(&token, &args[2], &CreateCharacter { name: args[1].clone() }).map_err(|e| format!("{e:?}"))?;
-                println!("Character created (or previously created): {}. Select with --select-character or enter with --login.", receipt.character_id);
-                println!("World admission requires a corresponding live actor; character creation does not provision one.");
-            }
-            _ => {
-                let character = api.select_character(&token, &args[1]).map_err(|e| format!("{e:?}"))?;
-                println!("Selected {} ({}). Selection verifies ownership but does not admit an actor.", character.name, character.id);
-                println!("Use --login {} to attempt world entry; admission is unavailable unless the server has a corresponding live actor.", character.id);
-            }
+        let session = if args[0] == "--email-login" {
+            authenticate_email_or_resume(
+                &auth,
+                &base_url,
+                &OsNakamaCredentialStore,
+                &args[1],
+                || {
+                    rpassword::prompt_password("Password: ")
+                        .map_err(|_| NakamaLoginError::PasswordInput)
+                },
+            )
+        } else {
+            authenticate_or_resume(
+                &auth,
+                &base_url,
+                &OsNakamaCredentialStore,
+                engine_core::Locale::default(),
+            )
         }
-        Ok(())
+        .map_err(|e| format!("{e:?}"))?;
+        if args[0] == "--email-login" {
+            println!("Signed in to the Nakama account. Use --characters to list or --create-character to make a character.");
+            return Ok(());
+        }
+        run_character_api(&args, api_url, session.access_token())
     }).join();
     match result {
         Ok(Ok(())) => {}
@@ -181,6 +218,65 @@ fn character_command() -> bool {
         }
     }
     true
+}
+
+#[cfg(feature = "window")]
+fn run_character_api(args: &[String], api_url: String, access_token: &str) -> Result<(), String> {
+    use game_api::{CreateCharacter, SessionToken};
+    use lynx_client_net::CharacterApiClient;
+
+    let token = SessionToken::new(access_token).map_err(|_| "invalid access session".to_owned())?;
+    let api = CharacterApiClient::new(api_url).map_err(|error| format!("{error:?}"))?;
+    match args[0].as_str() {
+        "--characters" => {
+            let characters = api
+                .characters(&token)
+                .map_err(|error| format!("{error:?}"))?;
+            if characters.is_empty() {
+                println!(
+                    "No characters yet. Create one with --create-character <name> <intent-key>."
+                );
+            }
+            for character in characters {
+                println!(
+                    "{}\t{}\t{:?}",
+                    character.id, character.name, character.status
+                );
+            }
+        }
+        "--create-character" => {
+            let receipt = api
+                .create_character(
+                    &token,
+                    &args[2],
+                    &CreateCharacter {
+                        name: args[1].clone(),
+                    },
+                )
+                .map_err(|error| format!("{error:?}"))?;
+            println!(
+                "Character created (or previously created): {}. Select with --select-character or enter with --login.",
+                receipt.character_id
+            );
+            println!(
+                "World admission requires a corresponding live actor; character creation does not provision one."
+            );
+        }
+        _ => {
+            let character = api
+                .select_character(&token, &args[1])
+                .map_err(|error| format!("{error:?}"))?;
+            println!(
+                "Selected {} ({}). Selection verifies ownership but does not admit an actor.",
+                character.name, character.id
+            );
+            println!(
+                "Use --login {} to attempt world entry; admission is unavailable unless the server has a corresponding live actor.",
+                character.id
+            );
+        }
+    }
+    Ok(())
 }
 
 #[cfg(feature = "window")]
@@ -229,8 +325,11 @@ fn logout_device() {
 }
 
 #[cfg(feature = "window")]
-fn authenticate_device(character: &str) -> (String, Option<String>) {
-    use lynx_client::nakama_credentials::{OsNakamaCredentialStore, authenticate_or_resume};
+fn authenticate_device(character: &str, email: Option<String>) -> (String, Option<String>) {
+    use lynx_client::nakama_credentials::{
+        NakamaLoginError, OsNakamaCredentialStore, authenticate_email_or_resume,
+        authenticate_or_resume,
+    };
     use lynx_client_net::{CharacterApiClient, NakamaAuthClient, NakamaAuthConfig};
     let required = |key: &str| {
         std::env::var(key).unwrap_or_else(|_| {
@@ -251,12 +350,16 @@ fn authenticate_device(character: &str) -> (String, Option<String>) {
     let result = std::thread::spawn(move || -> Result<_, String> {
         let auth = NakamaAuthClient::new(NakamaAuthConfig::new(base_url, server_key))
             .map_err(|error| format!("{error:?}"))?;
-        let session = authenticate_or_resume(
+        let session = if let Some(email) = email {
+            authenticate_email_or_resume(&auth, &credential_server_url, &OsNakamaCredentialStore, &email, || {
+                rpassword::prompt_password("Password: ").map_err(|_| NakamaLoginError::PasswordInput)
+            })
+        } else { authenticate_or_resume(
             &auth,
             &credential_server_url,
             &OsNakamaCredentialStore,
             engine_core::Locale::default(),
-        )
+        ) }
         .map_err(|error| format!("{error:?}"))?;
         let character_api =
             CharacterApiClient::new(character_api_url).map_err(|error| format!("{error:?}"))?;
@@ -265,6 +368,7 @@ fn authenticate_device(character: &str) -> (String, Option<String>) {
         character_api
             .select_character(&token, &character_id)
             .map_err(|error| format!("{error:?}"))?;
+        eprintln!("Character ownership verified. World admission requires a corresponding live actor; account creation does not provision one.");
         Ok(session)
     })
     .join();
@@ -275,7 +379,7 @@ fn authenticate_device(character: &str) -> (String, Option<String>) {
         ),
         Ok(Err(error)) => {
             eprintln!(
-                "Login or character selection failed ({error}); check server configuration, network, and account ownership."
+                "Login or character selection failed ({error}); check configuration and ownership. If an email session expired, use --login-email to re-enter your password."
             );
             std::process::exit(1);
         }
@@ -292,6 +396,8 @@ fn main() {
         offline::OfflineScene,
         replay::{ReplayFixture, ReplayInput},
     };
+
+    load_repository_env();
 
     let mut args = std::env::args_os().skip(1);
     let mut app = lynx_client::headless_app();

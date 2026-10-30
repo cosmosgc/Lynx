@@ -119,9 +119,15 @@ async fn serve(args: ServeArgs) -> Result<()> {
     let authenticator = (args.auth_mode == AuthMode::Demo)
         .then(|| Authenticator::new(&args.token_hashes()?).map(|auth| auth.with_staff(args.staff)))
         .transpose()?;
-    let identity_backend = (args.auth_mode == AuthMode::Nakama)
-        .then(production_identity_backend)
-        .transpose()?;
+    let identity_backend = if args.auth_mode == AuthMode::Nakama {
+        Some(
+            tokio::task::spawn_blocking(production_identity_backend)
+                .await
+                .context("Nakama identity backend initialization task failed")??,
+        )
+    } else {
+        None
+    };
     let grants: Vec<Grant> = authenticator
         .as_ref()
         .map_or_else(Vec::new, |authenticator| {

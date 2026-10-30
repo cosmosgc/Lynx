@@ -71,6 +71,12 @@ convenience; it is not the reference path.
 
 ## Running the world service
 
+On Windows, `BAT\run-server.bat` and `run-multiplayer-server.bat` launch with
+`--auth-mode nakama`; the multiplayer launcher uses a separate world snapshot.
+Both require the repository-root `.env` to contain `LYNX_NAKAMA_URL` and valid
+`LYNX_PG_*` settings. The batch launchers no longer prompt for static demo
+tokens. To run the loopback-only demo mode manually, use the commands below.
+
 `lynx-world` defaults to `--auth-mode demo`, which accepts only SHA-256 hashes
 of high-entropy bearer tokens. This is loopback development mode, not a
 production login. Create a hash without writing the token to a file or shell

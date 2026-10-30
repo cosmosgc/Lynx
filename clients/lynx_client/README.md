@@ -8,7 +8,7 @@ the `InputBindings` resource; there is no rebinding UI.
 
 This is not the demo zone or a billboard character implementation. Movement
 is a fixed distance per update, so its speed depends on frame rate. There is no
-content loading, collision, UI, or gameplay authority. The 2D camera follows the rig's target rather than its 3D offset.
+content loading, collision, or gameplay authority. The 2D camera follows the rig's target rather than its 3D offset.
 A developer has confirmed that the default scene opens in a window on Windows.
 
 For offline experiments, `OfflineFoundationPlugin` composes `OfflineCorePlugin`
@@ -54,17 +54,28 @@ can be connected at a time. A duplicate connection receives an error rather
 than disconnecting or replacing the existing session. This is a planned flow,
 not a feature of the current demo; the current gateway policy is per-character.
 
-Login credentials will be remembered per server for faster connections. Saving
-them must be opt-in and use the operating system's secure credential store;
-passwords must not be written in plaintext to client configuration or logs.
-Remote servers must use `wss://`; plain `ws://` is for trusted local networks
-only. This browser and credential storage are planned features and are not
-implemented yet. The initial scope is user-added servers, history, and pins;
-public server discovery is not specified.
+The development CLI remembers account identity and rotating refresh tokens per
+Nakama server in the operating system's secure credential store. Passwords are
+prompted without echo when required and are never saved. A server browser,
+connection history, and pins remain planned. Remote world servers
+must use `wss://`; plain `ws://` is for trusted local networks only. Public server
+discovery is not specified.
 
 ## Development-only login and online demo
 
-For Nakama device login, set `LYNX_NAKAMA_URL` (for example,
+Run `cargo run -p lynx_client -- --account` for the in-client account screen.
+Click a field or use Tab, enter an existing email and password, and sign in;
+matching saved sessions are resumed from the OS credential store. Create new
+email accounts through `account_portal/` first. The password is masked and is
+not saved. Refresh the list after creating a character, then click a character
+to verify ownership. Selection does not enter the world: durable actor
+provisioning is not implemented and admission can fail. Creation retries keep
+the same idempotency key while this screen remains open; do not close it while
+the result is uncertain. The default command still launches the offline demo.
+
+The client loads the repository-root `.env` when present; variables already set
+in the process environment take precedence. For Nakama device login, configure
+`LYNX_NAKAMA_URL` (for example,
 `http://127.0.0.1:7350`) and the public client server key in
 `LYNX_NAKAMA_SERVER_KEY`. The device ID and rotating
 refresh token are stored in the OS credential manager (Windows Credential
@@ -79,14 +90,21 @@ only to loopback; remote Nakama and world endpoints require HTTPS/WSS. The
 Nakama server key is public client configuration, but must not be confused with
 the private runtime HTTP key.
 
-Onboarding uses the default-feature executable and the same saved device account:
+Onboarding uses the default-feature executable. To sign into the email/password
+account created in `account_portal/`, use:
 
 ```text
+cargo run -p lynx_client -- --email-login player@example.com
 cargo run -p lynx_client -- --characters
 cargo run -p lynx_client -- --create-character "Hero" my-first-hero-2026
-cargo run -p lynx_client -- --select-character <character-id>
-cargo run -p lynx_client -- --login <character-id>
+cargo run -p lynx_client -- --login-email player@example.com <character-id>
 ```
+
+`--email-login` authenticates and saves the account before listing/creating
+characters; `--login-email` authenticates/resumes that account and attempts world
+entry for the selected character. The password is prompted interactively without
+terminal echo. The device-auth flow remains available separately. Character
+commands use whichever Nakama account is currently saved for the server.
 
 Choose a unique, non-secret intent key for each creation (1–128 ASCII letters,
 digits, underscores or hyphens). Keep it and the exact name until the outcome is

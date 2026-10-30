@@ -4,6 +4,11 @@
 *.pdb
 *.dSYM
 
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
 # Local environment and secrets
 .env
 .env.*

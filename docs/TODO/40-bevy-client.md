@@ -112,19 +112,21 @@ window displaying the default offline placeholder scene.
 - [ ] Tokens do not appear in logs, crash reports, or screenshots.
 - [ ] Logout/close releases the session promptly.
 
-**Progress:** The development CLI now acquires/resumes a Nakama device session,
-stores the device ID and rotating refresh token in the OS credential store,
-supports logout, and can reach the character HTTP API. Access tokens remain in
-memory. The graphical login, server browser/profiles/history, localized errors,
-and world resume-token lifecycle remain open. Plaintext transport is restricted
-to literal loopback IPs, not arbitrary trusted LANs.
+**Progress:** The development CLI supports device auth and email/password login
+for accounts created through `account_portal/`. It prompts for passwords without
+echo, stores account identity plus rotating refresh tokens in the OS credential
+store, supports logout, and reaches the character HTTP API. Access tokens remain
+in memory. The `--account` Bevy screen signs in to existing email accounts and
+reuses the secure refresh token; new accounts use `account_portal/`. The server browser/profiles/history, localized
+errors, and world resume-token lifecycle remain open. Plaintext transport is
+restricted to literal loopback IPs, not arbitrary trusted LANs.
 
 ---
 
 ## CLT-003 — Character selection and creation
 
 - **Priority:** P0
-- **Status:** In progress — CLI flow; blocked on authoritative actor provisioning
+- **Status:** In progress — CLI and account screen; blocked on authoritative actor provisioning
 - **Depends on:** `PST-001`, `CLT-002`
 - **References:** `game_api::CharacterService`, `PST-001`
 
@@ -149,6 +151,8 @@ to literal loopback IPs, not arbitrary trusted LANs.
       ownership; creation requires a retry-stable idempotency key.
 - [x] The development CLI can list, create, and select characters, and tells
       the player to reuse the same creation key after an uncertain result.
+- [x] The account screen lists, creates, and verifies characters; creation retries
+      reuse a key for the lifetime of the screen (not across restarts).
 - [x] Client-side name/key/ID validation matches server contracts.
 - [ ] A new account can create a character and enter the world after restart.
 - [ ] The client cannot select a character it does not own.

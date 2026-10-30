@@ -170,6 +170,34 @@ impl NakamaAuthClient {
         parse_session(response)
     }
 
+    /// Authenticate an existing email account; account creation is never enabled.
+    pub fn authenticate_email(
+        &self,
+        email: &str,
+        password: &str,
+    ) -> Result<NakamaSession, NakamaAuthFailure> {
+        if email.is_empty()
+            || email.len() > 320
+            || email.chars().any(char::is_control)
+            || password.is_empty()
+            || password.len() > 4096
+        {
+            return Err(NakamaAuthFailure::InvalidRequest);
+        }
+        let response = self
+            .agent
+            .post(self.endpoint("/v2/account/authenticate/email"))
+            .query("create", "false")
+            .header("Authorization", &self.authorization)
+            .header("Content-Type", "application/json")
+            .send(
+                serde_json::to_vec(&json!({ "email": email, "password": password }))
+                    .map_err(|_| NakamaAuthFailure::Protocol)?,
+            )
+            .map_err(|_| NakamaAuthFailure::Transport)?;
+        parse_session(response)
+    }
+
     /// Exchange a prior refresh token for a new session pair.
     pub fn refresh(&self, refresh_token: &str) -> Result<NakamaSession, NakamaAuthFailure> {
         validate_outbound_token(refresh_token)?;

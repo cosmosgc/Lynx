@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Lynx Account — Welcome{% endblock %}
+{% block content %}
+<section class="hero">
+  <p class="eyebrow">PLAYER ACCOUNT</p>
+  <h1>Your world<br>starts here.</h1>
+  <p class="description">Create a Lynx account or sign in to continue.</p>
+  <nav class="actions">
+    <a class="button primary" href="{{ url_for('register') }}">Create account</a>
+    <a class="button secondary" href="{{ url_for('login') }}">Sign in</a>
+  </nav>
+</section>
+{% endblock %}

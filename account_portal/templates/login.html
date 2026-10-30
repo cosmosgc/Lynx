@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Sign in — Lynx{% endblock %}
+{% block content %}
+<section>
+  <p class="eyebrow">WELCOME BACK</p>
+  <h1>Sign in</h1>
+  <p class="description">Use the email and password associated with your Lynx account.</p>
+  <form method="post" action="{{ url_for('login') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Email<input type="email" name="email" value="{{ email }}" autocomplete="email" maxlength="255" required></label>
+    <label>Password<input type="password" name="password" autocomplete="current-password" maxlength="128" required></label>
+    <button class="button primary" type="submit">Sign in</button>
+  </form>
+  <p class="alternate">New to Lynx? <a href="{{ url_for('register') }}">Create an account</a></p>
+</section>
+{% endblock %}

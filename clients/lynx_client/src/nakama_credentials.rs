@@ -14,9 +14,12 @@ use serde::{Deserialize, Serialize};
 const KEYRING_SERVICE: &str = "com.lynx.client.nakama";
 
 /// Per-server credentials retained between client launches.
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct NakamaCredential {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     device_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    email: Option<String>,
     refresh_token: String,
 }
 
@@ -26,8 +29,23 @@ impl NakamaCredential {
     pub fn new(device_id: impl Into<String>, refresh_token: impl Into<String>) -> Self {
         Self {
             device_id: device_id.into(),
+            email: None,
             refresh_token: refresh_token.into(),
         }
+    }
+
+    pub fn email(email: impl Into<String>, refresh_token: impl Into<String>) -> Self {
+        Self {
+            device_id: String::new(),
+            email: Some(email.into()),
+            refresh_token: refresh_token.into(),
+        }
+    }
+
+    fn rotated(&self, refresh_token: &str) -> Self {
+        let mut credential = self.clone();
+        refresh_token.clone_into(&mut credential.refresh_token);
+        credential
     }
 
     /// Borrow the persistent Nakama device identifier.
@@ -47,6 +65,7 @@ impl fmt::Debug for NakamaCredential {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NakamaCredential")
             .field("device_id", &"[redacted]")
+            .field("email", &"[redacted]")
             .field("refresh_token", &"[redacted]")
             .finish()
     }
@@ -65,6 +84,7 @@ pub enum NakamaLoginError {
     Authentication(NakamaAuthFailure),
     CredentialStore(CredentialStoreError),
     DeviceIdGeneration,
+    PasswordInput,
 }
 
 /// Outcome of clearing a saved Nakama device session.
@@ -104,14 +124,17 @@ impl NakamaCredentialStore for OsNakamaCredentialStore {
             Err(keyring::Error::NoEntry) => return Ok(None),
             Err(_) => return Err(CredentialStoreError::Unavailable),
         };
-        serde_json::from_str::<CredentialRecord>(&value)
-            .map(|record| {
-                Some(NakamaCredential::new(
-                    record.device_id,
-                    record.refresh_token,
-                ))
-            })
-            .map_err(|_| CredentialStoreError::InvalidRecord)
+        let record: NakamaCredential =
+            serde_json::from_str(&value).map_err(|_| CredentialStoreError::InvalidRecord)?;
+        let valid_identity = match (&record.email, record.device_id.is_empty()) {
+            (Some(email), true) => !email.is_empty(),
+            (None, false) => true,
+            _ => false,
+        };
+        if record.refresh_token.is_empty() || !valid_identity {
+            return Err(CredentialStoreError::InvalidRecord);
+        }
+        Ok(Some(record))
     }
 
     fn save(
@@ -119,11 +142,8 @@ impl NakamaCredentialStore for OsNakamaCredentialStore {
         server_url: &str,
         credential: &NakamaCredential,
     ) -> Result<(), CredentialStoreError> {
-        let value = serde_json::to_string(&CredentialRecord {
-            device_id: credential.device_id.clone(),
-            refresh_token: credential.refresh_token.clone(),
-        })
-        .map_err(|_| CredentialStoreError::InvalidRecord)?;
+        let value =
+            serde_json::to_string(credential).map_err(|_| CredentialStoreError::InvalidRecord)?;
         keyring_entry(server_url)?
             .set_password(&value)
             .map_err(|_| CredentialStoreError::Unavailable)
@@ -142,12 +162,6 @@ fn keyring_entry(server_url: &str) -> Result<keyring::Entry, CredentialStoreErro
     keyring::Entry::new(KEYRING_SERVICE, server_url).map_err(|_| CredentialStoreError::Unavailable)
 }
 
-#[derive(Serialize, Deserialize)]
-struct CredentialRecord {
-    device_id: String,
-    refresh_token: String,
-}
-
 /// Resume a saved account or create a new device account, persisting each
 /// rotated refresh token before returning the access session to the caller.
 ///
@@ -163,6 +177,18 @@ pub fn authenticate_or_resume(
     let previous = store
         .load(server_url)
         .map_err(NakamaLoginError::CredentialStore)?;
+    if let Some(previous) = previous
+        .as_ref()
+        .filter(|credential| credential.email.is_some())
+    {
+        let session = client
+            .refresh(previous.refresh_token())
+            .map_err(NakamaLoginError::Authentication)?;
+        store
+            .save(server_url, &previous.rotated(session.refresh_token()))
+            .map_err(NakamaLoginError::CredentialStore)?;
+        return Ok(session);
+    }
     let (device_id, session) = if let Some(previous) = previous {
         let session = match client.refresh(previous.refresh_token()) {
             Ok(session) => session,
@@ -199,6 +225,46 @@ pub fn authenticate_or_resume(
     Ok(session)
 }
 
+/// Resume only the explicitly requested email account, or prompt to authenticate it.
+pub fn authenticate_email_or_resume(
+    client: &NakamaAuthClient,
+    server_url: &str,
+    store: &dyn NakamaCredentialStore,
+    email: &str,
+    prompt: impl FnOnce() -> Result<String, NakamaLoginError>,
+) -> Result<NakamaSession, NakamaLoginError> {
+    let previous = store
+        .load(server_url)
+        .map_err(NakamaLoginError::CredentialStore)?;
+    let session = if let Some(previous) = previous
+        .as_ref()
+        .filter(|c| c.email.as_deref() == Some(email))
+    {
+        match client.refresh(previous.refresh_token()) {
+            Ok(session) => Some(session),
+            Err(NakamaAuthFailure::Authentication) => None,
+            Err(error) => return Err(NakamaLoginError::Authentication(error)),
+        }
+    } else {
+        None
+    };
+    let session = if let Some(session) = session {
+        session
+    } else {
+        let password = prompt()?;
+        client
+            .authenticate_email(email, &password)
+            .map_err(NakamaLoginError::Authentication)?
+    };
+    store
+        .save(
+            server_url,
+            &NakamaCredential::email(email, session.refresh_token()),
+        )
+        .map_err(NakamaLoginError::CredentialStore)?;
+    Ok(session)
+}
+
 /// Revoke and remove a saved session. The rotated refresh token is saved before
 /// logout so an interrupted request never leaves only an already-consumed token
 /// in the credential store.
@@ -224,13 +290,7 @@ pub fn logout_saved_account(
         Err(error) => return Err(NakamaLoginError::Authentication(error)),
     };
     store
-        .save(
-            server_url,
-            &NakamaCredential::new(
-                credential.device_id().to_owned(),
-                session.refresh_token().to_owned(),
-            ),
-        )
+        .save(server_url, &credential.rotated(session.refresh_token()))
         .map_err(NakamaLoginError::CredentialStore)?;
     client
         .logout(&session)
@@ -272,30 +332,24 @@ mod tests {
     #[test]
     fn credential_json_round_trip_is_internal_to_the_secure_store() {
         let credential = NakamaCredential::new("device-id", "refresh-token");
-        let encoded = serde_json::to_string(&CredentialRecord {
-            device_id: credential.device_id.clone(),
-            refresh_token: credential.refresh_token.clone(),
-        })
-        .unwrap();
-        let decoded: CredentialRecord = serde_json::from_str(&encoded).unwrap();
-        let decoded = NakamaCredential::new(decoded.device_id, decoded.refresh_token);
+        let encoded = serde_json::to_string(&credential).unwrap();
+        let decoded: NakamaCredential = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, credential);
+        let legacy: NakamaCredential =
+            serde_json::from_str(r#"{"device_id":"device-id","refresh_token":"refresh-token"}"#)
+                .unwrap();
+        assert_eq!(legacy, credential);
     }
 
     #[derive(Default)]
-    struct MemoryStore(Mutex<Option<(String, String)>>);
+    struct MemoryStore(Mutex<Option<NakamaCredential>>);
 
     impl NakamaCredentialStore for MemoryStore {
         fn load(
             &self,
             _server_url: &str,
         ) -> Result<Option<NakamaCredential>, CredentialStoreError> {
-            Ok(self
-                .0
-                .lock()
-                .unwrap()
-                .as_ref()
-                .map(|(device, token)| NakamaCredential::new(device.clone(), token.clone())))
+            Ok(self.0.lock().unwrap().as_ref().cloned())
         }
 
         fn save(
@@ -303,10 +357,7 @@ mod tests {
             _server_url: &str,
             credential: &NakamaCredential,
         ) -> Result<(), CredentialStoreError> {
-            *self.0.lock().unwrap() = Some((
-                credential.device_id().to_owned(),
-                credential.refresh_token().to_owned(),
-            ));
+            *self.0.lock().unwrap() = Some(credential.clone());
             Ok(())
         }
 
@@ -354,6 +405,73 @@ mod tests {
             )
             .unwrap();
         stream.write_all(body).unwrap();
+    }
+
+    #[test]
+    fn email_login_switches_explicitly_and_resumes_only_matching_account() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let server_url = format!("http://{}", listener.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            let (mut first, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut first);
+            assert!(request.starts_with("POST /v2/account/authenticate/email?create=false"));
+            let body: serde_json::Value =
+                serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(body["email"], "new@example.test");
+            assert_eq!(body["password"], "password-secret");
+            respond_json(
+                &mut first,
+                b"{\"token\":\"access-one\",\"refresh_token\":\"refresh-one\"}",
+            );
+            let (mut second, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut second);
+            assert!(request.starts_with("POST /v2/account/session/refresh "));
+            assert!(request.contains("refresh-one"));
+            respond_json(
+                &mut second,
+                b"{\"token\":\"access-two\",\"refresh_token\":\"refresh-two\"}",
+            );
+            let (mut third, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut third);
+            assert!(request.contains("refresh-two"));
+            third
+                .write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            let (mut fourth, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut fourth);
+            assert!(request.starts_with("POST /v2/account/authenticate/email?create=false"));
+            respond_json(
+                &mut fourth,
+                b"{\"token\":\"access-three\",\"refresh_token\":\"refresh-three\"}",
+            );
+        });
+        let store = MemoryStore::default();
+        store
+            .save(
+                &server_url,
+                &NakamaCredential::new("old-device-id", "old-refresh"),
+            )
+            .unwrap();
+        let client =
+            NakamaAuthClient::new(NakamaAuthConfig::new(&server_url, "public-key")).unwrap();
+        let prompt = || Ok("password-secret".to_owned());
+        authenticate_email_or_resume(&client, &server_url, &store, "new@example.test", prompt)
+            .unwrap();
+        authenticate_email_or_resume(&client, &server_url, &store, "new@example.test", || {
+            panic!("unexpected prompt")
+        })
+        .unwrap();
+        authenticate_email_or_resume(&client, &server_url, &store, "new@example.test", prompt)
+            .unwrap();
+        worker.join().unwrap();
+        let saved = store.load(&server_url).unwrap().unwrap();
+        assert_eq!(saved.email.as_deref(), Some("new@example.test"));
+        assert_eq!(saved.refresh_token(), "refresh-three");
+        let encoded = serde_json::to_string(&saved).unwrap();
+        assert!(!encoded.contains("password-secret"));
+        assert!(!encoded.contains("device_id"));
     }
 
     #[test]

@@ -30,6 +30,7 @@ anyhow = "1.0.104"
 bevy = { version = "=0.20.0", default-features = false }
 base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive"] }
+dotenvy = "0.15.7"
 getrandom = "0.4.3"
 ron = "0.12.2"
 semver = { version = "1.0.28", features = ["serde"] }
