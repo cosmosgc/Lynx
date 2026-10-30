@@ -19,7 +19,10 @@ use engine_core::error::{EngineError, ErrorCode};
 use postgres::{Client, Config, NoTls};
 use serde_json::Value;
 
-use super::{SnapshotStore, WorldSnapshot, ZoneEvent, ZoneEventInput, ZoneLease, ZoneLeaseStore};
+use super::{
+    SnapshotStore, WorldSnapshot, ZoneEvent, ZoneEventInput, ZoneLease, ZoneLeaseStore,
+    replay_world_snapshot_events,
+};
 
 /// PostgreSQL lease and event-log operations for one zone at a time.
 pub struct PostgresZoneLeaseStore {
@@ -68,7 +71,7 @@ impl PostgresZoneLeaseStore {
         let ttl_ms = i64::try_from(ttl.as_millis()).map_err(|_| invalid_lease())?;
         let mut client = self.client.lock().map_err(|_| store_unavailable())?;
         let row = client.query_opt(
-            "INSERT INTO lynx.zone_leases (zone_id, owner, expires_at) VALUES ($1, $2, clock_timestamp() + ($3 * interval '1 millisecond')) ON CONFLICT (zone_id) DO UPDATE SET owner = EXCLUDED.owner, acquired_at = clock_timestamp(), expires_at = EXCLUDED.expires_at, fencing_token = lynx.zone_leases.fencing_token + 1 WHERE lynx.zone_leases.expires_at <= clock_timestamp() RETURNING zone_id, owner, fencing_token, expires_at",
+            "INSERT INTO lynx.zone_leases (zone_id, owner, expires_at) VALUES ($1, $2, clock_timestamp() + ($3::bigint::double precision * interval '1 millisecond')) ON CONFLICT (zone_id) DO UPDATE SET owner = EXCLUDED.owner, acquired_at = clock_timestamp(), expires_at = EXCLUDED.expires_at, fencing_token = lynx.zone_leases.fencing_token + 1 WHERE lynx.zone_leases.expires_at <= clock_timestamp() RETURNING zone_id, owner, fencing_token, expires_at",
             &[&zone_id, &owner, &ttl_ms],
         ).map_err(|error| store_error("the zone lease could not be acquired", &error))?;
         Ok(row.map(|row| ZoneLease {
@@ -90,7 +93,7 @@ impl PostgresZoneLeaseStore {
         validate_zone_owner(zone_id, owner, ttl)?;
         let ttl_ms = i64::try_from(ttl.as_millis()).map_err(|_| invalid_lease())?;
         let mut client = self.client.lock().map_err(|_| store_unavailable())?;
-        let row = client.query_opt("UPDATE lynx.zone_leases SET expires_at = clock_timestamp() + ($4 * interval '1 millisecond') WHERE zone_id = $1 AND owner = $2 AND fencing_token = $3 AND expires_at > clock_timestamp() RETURNING zone_id, owner, fencing_token, expires_at", &[&zone_id, &owner, &token, &ttl_ms]).map_err(|error| store_error("the zone lease could not be renewed", &error))?;
+        let row = client.query_opt("UPDATE lynx.zone_leases SET expires_at = clock_timestamp() + ($4::bigint::double precision * interval '1 millisecond') WHERE zone_id = $1 AND owner = $2 AND fencing_token = $3 AND expires_at > clock_timestamp() RETURNING zone_id, owner, fencing_token, expires_at", &[&zone_id, &owner, &token, &ttl_ms]).map_err(|error| store_error("the zone lease could not be renewed", &error))?;
         Ok(row.map(|row| ZoneLease {
             zone_id: row.get(0),
             owner: row.get(1),
@@ -289,6 +292,10 @@ SELECT 1 FROM lynx.zone_leases \
 WHERE zone_id = $1 AND owner = $2 AND fencing_token = $3 \
     AND expires_at > clock_timestamp() \
 FOR UPDATE";
+
+const SELECT_ZONE_EVENTS: &str = "\
+SELECT sequence, tick, occurred_at, kind, actor_id, payload, schema_version \
+FROM lynx.zone_events WHERE zone_id = $1 ORDER BY sequence";
 
 /// A snapshot store connection bound to one held zone lease.
 #[derive(Debug, Clone)]
@@ -522,7 +529,24 @@ impl SnapshotStore for PostgresSnapshotStore {
             ));
         }
         snapshot.validate()?;
-        Ok(Some(snapshot))
+
+        // Stores created before transactional snapshot events remain readable.
+        // Once a lease is bound, however, startup verifies that the latest
+        // replayable event rebuilds exactly the row it is about to serve.
+        let fence = self.fence.lock().map_err(|_| store_unavailable())?.clone();
+        let Some(fence) = fence else {
+            return Ok(Some(snapshot));
+        };
+        let events = read_zone_events(&mut client, &fence.zone_id)?;
+        let Some(replayed) = replay_world_snapshot_events(&events, &self.world_id)? else {
+            return Ok(Some(snapshot));
+        };
+        if replayed != snapshot {
+            return Err(snapshot_error(
+                "the replayed world snapshot does not match the stored snapshot",
+            ));
+        }
+        Ok(Some(replayed))
     }
 
     fn save(&self, snapshot: &WorldSnapshot) -> Result<(), EngineError> {
@@ -564,6 +588,85 @@ impl SnapshotStore for PostgresSnapshotStore {
         tx.commit().map_err(|error| write_error(&error))?;
         Ok(())
     }
+
+    fn save_at_tick(&self, snapshot: &WorldSnapshot, tick: i64) -> Result<(), EngineError> {
+        if tick < 0 {
+            return Err(snapshot_error("the world snapshot tick is invalid"));
+        }
+        snapshot.validate()?;
+        let payload = serde_json::to_value(snapshot).map_err(|error| encode_error(&error))?;
+        let canonical = canonical_json(&payload)?;
+        let payload_hash = crate::auth::hash_hex(&canonical);
+        let schema_major = i32::from(snapshot.schema_version.major);
+        let schema_minor = i32::from(snapshot.schema_version.minor);
+        let params: [&(dyn postgres::types::ToSql + Sync); 6] = [
+            &self.world_id,
+            &schema_major,
+            &schema_minor,
+            &snapshot.saved_at_ms,
+            &payload,
+            &payload_hash,
+        ];
+        let fence = self.fence.lock().map_err(|_| store_unavailable())?.clone();
+        let Some(fence) = fence else {
+            return self.save(snapshot);
+        };
+
+        let mut client = self.client()?;
+        let mut tx = client.transaction().map_err(|error| write_error(&error))?;
+        let held = tx
+            .query_opt(
+                SELECT_HELD_LEASE,
+                &[&fence.zone_id, &fence.owner, &fence.token],
+            )
+            .map_err(|error| write_error(&error))?;
+        if held.is_none() {
+            return Err(stale_lease());
+        }
+        tx.execute(UPSERT_SNAPSHOT, &params)
+            .map_err(|error| write_error(&error))?;
+        let sequence: i64 = tx
+            .query_one(
+                "SELECT COALESCE(MAX(sequence) + 1, 0) FROM lynx.zone_events WHERE zone_id = $1",
+                &[&fence.zone_id],
+            )
+            .map_err(|error| write_error(&error))?
+            .get(0);
+        let event_payload = serde_json::json!({
+            "world_id": self.world_id,
+            "snapshot": payload,
+            "snapshot_hash": payload_hash,
+        });
+        tx.execute(
+            "INSERT INTO lynx.zone_events (zone_id, sequence, tick, occurred_at, kind, actor_id, payload, schema_version) VALUES ($1, $2, $3, clock_timestamp(), 'world.snapshot', NULL, $4, 1)",
+            &[&fence.zone_id, &sequence, &tick, &event_payload],
+        )
+        .map_err(|error| write_error(&error))?;
+        tx.commit().map_err(|error| write_error(&error))?;
+        Ok(())
+    }
+
+    fn records_snapshot_events_transactionally(&self) -> bool {
+        self.fence.lock().is_ok_and(|fence| fence.is_some())
+    }
+}
+
+fn read_zone_events(client: &mut Client, zone_id: &str) -> Result<Vec<ZoneEvent>, EngineError> {
+    let rows = client
+        .query(SELECT_ZONE_EVENTS, &[&zone_id])
+        .map_err(|error| query_error(&error))?;
+    Ok(rows
+        .into_iter()
+        .map(|row| ZoneEvent {
+            sequence: row.get(0),
+            tick: row.get(1),
+            occurred_at: row.get(2),
+            kind: row.get(3),
+            actor_id: row.get(4),
+            payload: row.get(5),
+            schema_version: row.get(6),
+        })
+        .collect())
 }
 
 fn environment_or(name: &str, default: &str) -> String {

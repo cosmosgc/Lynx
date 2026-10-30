@@ -160,7 +160,7 @@ than the schema intends.
 ## PST-004 — Zone leases, fencing, and event log
 
 - **Priority:** P1
-- **Status:** In progress — lease, fencing, and runtime wiring implemented; snapshot replay remains under `PST-005`
+- **Status:** Done
 - **Depends on:** —
 - **References:** migration `0003_zone_state.sql`, `0007_zone_fencing.sql`,
   ADR 0005
@@ -186,8 +186,7 @@ token or event sequence that proves which process owns a zone after a crash.
 - [x] Two processes cannot both hold an unexpired lease for one zone.
 - [x] A stale owner's writes are rejected after takeover.
 - [x] Event sequences are gap-free and ordered per zone.
-- [ ] Snapshot + replay reconstructs the same state as the live process.
-      (Replay is implemented under `PST-005`; it is the remaining criterion.)
+- [x] Snapshot + replay reconstructs the same state as the live process.
 - [x] Lease expiry/takeover is covered by an integration test.
 
 **Implementation:** `0007_zone_fencing.sql` adds the durable fencing token and
@@ -197,28 +196,30 @@ demo zone lease before loading the snapshot and refuses to start when another
 live process owns it; `--lease-ttl-ms` (default 30 s) sets the lifetime. A
 renewal task renews every third of the TTL and turns readiness false and stops
 the process when the lease is taken over or can no longer be renewed before
-expiry. Snapshot upserts and event appends both check the lease row in their
-own transaction, so a stale process is rejected even if it has not noticed the
-loss. The service appends `world.started`, `world.snapshot`, and `world.stopped`
-events. The file-backed and memory-only stores are unchanged: without a shared
-database there is nothing to fence against, and they run without a lease.
-Replay from the last snapshot plus later events, retention, and quarantine
-remain open in `PST-005`.
+expiry. A PostgreSQL snapshot write now persists the `world.snapshot` event,
+including an integrity-checked complete snapshot payload, in the same fenced
+transaction as the snapshot row. Fenced startup replays the ordered event log
+and rejects a gap, corrupt payload, or replay/store mismatch before serving.
+The file-backed and memory-only stores are unchanged: without a shared database
+there is nothing to fence against, and they run without a lease. Broader event
+schema migration, quarantine, retention, and recovery-performance work remain
+in `PST-005`.
 
 ---
 
 ## PST-005 — Snapshot and event replay
 
 - **Priority:** P1
-- **Status:** Blocked — `PST-004`
+- **Status:** Ready
 - **Depends on:** `PST-004`
 - **References:** [architecture §Failure and recovery](../architecture.md#failure-and-recovery),
   migration `0003_zone_state.sql`
 
 **Why:** The architecture promises "load last snapshot, replay events after the
 snapshot, validate references, then accept sessions" with a 60-second recovery
-target. Replay is not implemented; `PostgresSnapshotStore` loads a single
-whole-world snapshot and nothing after it.
+target. `PST-004` establishes the transactional snapshot-event recovery
+boundary. This task extends it with schema migration, validation/quarantine,
+operational verification, retention, and a measured recovery target.
 
 **Scope**
 

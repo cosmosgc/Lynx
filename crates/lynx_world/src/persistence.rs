@@ -66,6 +66,102 @@ pub struct ZoneEventInput<'a> {
     pub schema_version: i32,
 }
 
+/// Rebuild the latest durable world state described by ordered zone events.
+///
+/// Snapshot events deliberately carry a complete [`WorldSnapshot`]. Applying
+/// one therefore replaces the prior recovered state, making repeated replay
+/// deterministic and idempotent. Other lifecycle events do not mutate the
+/// snapshot and are retained for auditability.
+///
+/// # Errors
+///
+/// Returns an error when event sequences contain a gap, a snapshot event is
+/// malformed, or its payload fails validation or integrity verification.
+pub fn replay_world_snapshot_events(
+    events: &[ZoneEvent],
+    world_id: &str,
+) -> Result<Option<WorldSnapshot>, EngineError> {
+    let mut expected_sequence = 0_i64;
+    let mut recovered = None;
+    for event in events {
+        if event.sequence != expected_sequence {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "the zone event log has a sequence gap",
+            )
+            .with_detail("expected", expected_sequence.to_string())
+            .with_detail("actual", event.sequence.to_string()));
+        }
+        expected_sequence = event.sequence.checked_add(1).ok_or_else(|| {
+            EngineError::new(
+                ErrorCode::InvalidRequest,
+                "the zone event sequence cannot be advanced",
+            )
+        })?;
+
+        if event.kind != "world.snapshot" {
+            continue;
+        }
+        if event.schema_version != 1 {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "the zone snapshot event has an unsupported schema version",
+            )
+            .with_detail("schema_version", event.schema_version.to_string()));
+        }
+        let event_world = event
+            .payload
+            .get("world_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                EngineError::new(
+                    ErrorCode::InvalidRequest,
+                    "the zone snapshot event is missing its world ID",
+                )
+            })?;
+        if event_world != world_id {
+            continue;
+        }
+        let snapshot_value = event.payload.get("snapshot").cloned().ok_or_else(|| {
+            EngineError::new(
+                ErrorCode::InvalidRequest,
+                "the zone snapshot event is missing its snapshot payload",
+            )
+        })?;
+        let stored_hash = event
+            .payload
+            .get("snapshot_hash")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                EngineError::new(
+                    ErrorCode::InvalidRequest,
+                    "the zone snapshot event is missing its integrity hash",
+                )
+            })?;
+        let canonical = serde_json::to_string(&snapshot_value).map_err(|_| {
+            EngineError::new(
+                ErrorCode::InvalidRequest,
+                "the zone snapshot event cannot be decoded",
+            )
+        })?;
+        if crate::auth::hash_hex(&canonical) != stored_hash {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "the zone snapshot event failed its integrity check",
+            ));
+        }
+        let snapshot: WorldSnapshot = serde_json::from_value(snapshot_value).map_err(|_| {
+            EngineError::new(
+                ErrorCode::InvalidRequest,
+                "the zone snapshot event is not a valid world snapshot",
+            )
+        })?;
+        snapshot.validate()?;
+        recovered = Some(snapshot);
+    }
+    Ok(recovered)
+}
+
 /// Single-writer locking and the append-only event log for one zone.
 ///
 /// A holder proves authority with the lease's fencing token; every write that
@@ -215,6 +311,24 @@ pub trait SnapshotStore: std::fmt::Debug {
     /// Returns an engine error when the snapshot could not be written. The
     /// in-memory world remains authoritative either way.
     fn save(&self, snapshot: &WorldSnapshot) -> Result<(), EngineError>;
+
+    /// Persist a snapshot at `tick`, recording its recovery event when the
+    /// backing store supports a transactional event log.
+    ///
+    /// File and memory stores have no shared event log, so their default is a
+    /// normal snapshot write. PostgreSQL writes the snapshot and its replayable
+    /// event in one transaction under the current zone lease.
+    fn save_at_tick(&self, snapshot: &WorldSnapshot, _tick: i64) -> Result<(), EngineError> {
+        self.save(snapshot)
+    }
+
+    /// Whether [`Self::save_at_tick`] atomically records a snapshot event.
+    ///
+    /// Service implementations use this to retain the non-transactional
+    /// lifecycle marker for file and test stores.
+    fn records_snapshot_events_transactionally(&self) -> bool {
+        false
+    }
 }
 
 /// A single-file snapshot store.
@@ -394,5 +508,54 @@ mod tests {
             .save(&world_snapshot())
             .unwrap_err();
         assert_eq!(error.code(), ErrorCode::Internal);
+    }
+
+    fn snapshot_event(sequence: i64, snapshot: &WorldSnapshot) -> ZoneEvent {
+        let value = serde_json::to_value(snapshot).unwrap();
+        let hash = crate::auth::hash_hex(&serde_json::to_string(&value).unwrap());
+        ZoneEvent {
+            sequence,
+            tick: sequence,
+            occurred_at: std::time::SystemTime::UNIX_EPOCH,
+            kind: "world.snapshot".to_owned(),
+            actor_id: None,
+            payload: serde_json::json!({
+                "world_id": "demo-world",
+                "snapshot": value,
+                "snapshot_hash": hash,
+            }),
+            schema_version: 1,
+        }
+    }
+
+    #[test]
+    fn replaying_snapshot_events_recovers_the_latest_live_state() {
+        let first = world_snapshot();
+        let mut live = first.clone();
+        let mut advanced_zone = zone();
+        for _ in 0..3 {
+            advanced_zone.advance_tick();
+        }
+        live.zone = advanced_zone.snapshot();
+        live.saved_at_ms = 2_000;
+        let events = vec![snapshot_event(0, &first), snapshot_event(1, &live)];
+
+        assert_eq!(
+            replay_world_snapshot_events(&events, "demo-world").unwrap(),
+            Some(live)
+        );
+    }
+
+    #[test]
+    fn replay_rejects_a_missing_or_corrupt_snapshot_event() {
+        let snapshot = world_snapshot();
+        let mut missing = snapshot_event(1, &snapshot);
+        let gap = replay_world_snapshot_events(&[missing.clone()], "demo-world").unwrap_err();
+        assert_eq!(gap.code(), ErrorCode::InvalidRequest);
+
+        missing.sequence = 0;
+        missing.payload["snapshot_hash"] = serde_json::json!("not-a-real-hash");
+        let corrupt = replay_world_snapshot_events(&[missing], "demo-world").unwrap_err();
+        assert_eq!(corrupt.code(), ErrorCode::InvalidRequest);
     }
 }

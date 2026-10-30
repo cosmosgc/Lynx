@@ -13,7 +13,7 @@ use lynx_world::auth::{Authenticator, Grant, digest};
 use lynx_world::demo;
 use lynx_world::persistence::{
     PostgresSnapshotStore, PostgresZoneLeaseStore, SnapshotStore, WorldSnapshot,
-    WorldSnapshotInputs, ZoneEventInput,
+    WorldSnapshotInputs, ZoneEventInput, replay_world_snapshot_events,
 };
 use lynx_world::startup;
 use world_gateway::{GatewayConfig, SystemResumeTokens, WorldGateway};
@@ -85,6 +85,45 @@ fn authored_snapshot() -> anyhow::Result<WorldSnapshot> {
     ))
 }
 
+fn assert_current_lease_renews(
+    store: &PostgresZoneLeaseStore,
+    zone: &str,
+    token: i64,
+) -> anyhow::Result<()> {
+    let renewed = store
+        .renew(zone, "owner-a", token, std::time::Duration::from_secs(20))?
+        .expect("the current owner can renew its live lease");
+    assert_eq!(renewed.fencing_token, token);
+    assert!(
+        store
+            .renew(
+                zone,
+                "owner-a",
+                token + 1,
+                std::time::Duration::from_secs(20),
+            )?
+            .is_none(),
+        "a stale fencing token cannot renew a lease"
+    );
+    Ok(())
+}
+
+fn assert_snapshot_event_replays(
+    store: &PostgresZoneLeaseStore,
+    zone: &str,
+    world_id: &str,
+    snapshot: &WorldSnapshot,
+) -> anyhow::Result<()> {
+    let recorded = store.events_after(zone, -1)?;
+    assert_eq!(recorded[0].kind, "world.snapshot");
+    assert_eq!(
+        replay_world_snapshot_events(&recorded, world_id)?,
+        Some(snapshot.clone()),
+        "the event committed with the snapshot reconstructs its live state"
+    );
+    Ok(())
+}
+
 #[test]
 fn postgres_zone_lease_takeover_fences_old_owner_writes() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
@@ -101,6 +140,7 @@ fn postgres_zone_lease_takeover_fences_old_owner_writes() -> anyhow::Result<()> 
     let first = store
         .acquire(&zone, "owner-a", std::time::Duration::from_secs(10))?
         .unwrap();
+    assert_current_lease_renews(&store, &zone, first.fencing_token)?;
     assert!(
         store
             .acquire(&zone, "owner-b", std::time::Duration::from_secs(10))?
@@ -113,7 +153,8 @@ fn postgres_zone_lease_takeover_fences_old_owner_writes() -> anyhow::Result<()> 
     let snapshots = PostgresSnapshotStore::from_env(&world_id)?;
     snapshots.bind_zone_lease(&zone, "owner-a", first.fencing_token)?;
     let snapshot = authored_snapshot()?;
-    snapshots.save(&snapshot)?;
+    snapshots.save_at_tick(&snapshot, 1)?;
+    assert_snapshot_event_replays(&store, &zone, &world_id, &snapshot)?;
 
     // A clean handoff still increments the generation.
     assert!(store.release(&zone, "owner-a", first.fencing_token)?);
@@ -158,7 +199,7 @@ fn postgres_zone_lease_takeover_fences_old_owner_writes() -> anyhow::Result<()> 
                 schema_version: 1,
             },
         )?,
-        0
+        1
     );
     assert_eq!(
         store.append_event(
@@ -173,7 +214,7 @@ fn postgres_zone_lease_takeover_fences_old_owner_writes() -> anyhow::Result<()> 
                 schema_version: 1,
             },
         )?,
-        1
+        2
     );
     let events = store.events_after(&zone, -1)?;
     assert_eq!(
@@ -181,7 +222,7 @@ fn postgres_zone_lease_takeover_fences_old_owner_writes() -> anyhow::Result<()> 
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![0, 1]
+        vec![0, 1, 2]
     );
     assert!(store.release(&zone, "owner-b", second.fencing_token)?);
     snapshots.delete()?;

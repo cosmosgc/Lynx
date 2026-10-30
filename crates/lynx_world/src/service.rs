@@ -566,7 +566,8 @@ impl Service {
         let store = Arc::clone(&persistence.store);
         let world = WorldSnapshot::capture(&self.snapshot_inputs(), clock().value());
         let started = Instant::now();
-        let result = store.save(&world);
+        let tick = self.server.gateway().zone().tick();
+        let result = store.save_at_tick(&world, i64::try_from(tick.0).unwrap_or(i64::MAX));
         let elapsed = started.elapsed();
         self.metrics
             .snapshot_write_duration
@@ -579,13 +580,13 @@ impl Service {
             &self.metrics.snapshot_failure
         };
         counter.fetch_add(1, Ordering::Relaxed);
-        if result.is_ok() {
+        if result.is_ok() && !store.records_snapshot_events_transactionally() {
             self.record_snapshot_event(&world);
         }
         result
     }
 
-    /// Append a boundary marker after a durable snapshot is written.
+    /// Append a boundary marker for stores that do not write it transactionally.
     fn record_snapshot_event(&self, world: &WorldSnapshot) {
         let Some(authority) = &self.authority else {
             return;
