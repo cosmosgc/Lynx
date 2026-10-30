@@ -140,6 +140,11 @@ async fn serve(args: ServeArgs) -> Result<()> {
     args.validate_snapshot_args()
         .context("invalid snapshot configuration")?;
     let store = snapshot_store(&args)?;
+    if args.auth_mode == AuthMode::Nakama && store.is_none() {
+        bail!(
+            "Nakama character admission requires --state-file or --state-postgres for durable actor provisioning"
+        );
+    }
     if args.fresh
         && let Some(path) = &args.state_file
     {

@@ -68,10 +68,13 @@ Click a field or use Tab, enter an existing email and password, and sign in;
 matching saved sessions are resumed from the OS credential store. Create new
 email accounts through `account_portal/` first. The password is masked and is
 not saved. Refresh the list after creating a character, then click a character
-to verify ownership. Selection does not enter the world: durable actor
-provisioning is not implemented and admission can fail. Creation retries keep
-the same idempotency key while this screen remains open; do not close it while
-the result is uncertain. The default command still launches the offline demo.
+to verify ownership, then click **Enter world**. The Nakama world server creates
+the character's deterministic player actor and persists it to the configured
+world snapshot before admitting the session. The online presentation remains
+read-only; movement and interactions are not implemented yet. Creation retries
+keep the same idempotency key while this screen remains open; do not close it
+while the result is uncertain. The default command still launches the offline
+demo.
 
 The client loads the repository-root `.env` when present; variables already set
 in the process environment take precedence. For Nakama device login, configure
@@ -115,12 +118,12 @@ to the request and account; changing the name with the same key conflicts. The
 key is supplied explicitly, not generated or saved by the client. Names must have
 1–32 characters with no control characters or surrounding whitespace.
 
-Selection verifies ownership and playability but does not provision an actor.
-World admission is unavailable unless the server already has the corresponding
-live actor in its active snapshot; creation alone does not make one. There is no
-graphical character UI yet. `cargo run -p lynx_client -- --logout` revokes the
-saved Nakama session and removes its OS credential entry. Startup errors are
-coarse and printed without response bodies or credentials.
+The Nakama server provisions an actor on first admission and requires durable
+world snapshot storage (`--state-file` or `--state-postgres`). It writes the
+deterministically identified actor before creating the session, so a failed or
+retried admission cannot create duplicates. `cargo run -p lynx_client -- --logout`
+revokes the saved Nakama session and removes its OS credential entry. Startup
+errors are coarse and printed without response bodies or credentials.
 
 ### Static-token demo
 

@@ -110,11 +110,13 @@ flags:
 | `--fresh` | off | ignore any saved snapshot, rebuild the authored demo, and overwrite it at startup; requires `--state-file` or `--state-postgres` (development reset) |
 | `--snapshot-ms <ms>` | 10000 | how often the configured snapshot store is rewritten (must be at least the tick interval) |
 
-For production authentication, use `--auth-mode nakama`, set
-`LYNX_NAKAMA_URL` (and optional `LYNX_NAKAMA_HTTP_KEY`) plus the normal
-`LYNX_PG_*` variables, and provision a zone snapshot whose live actors already
-correspond to the characters allowed to enter it. The service opens separate
-PostgreSQL connections for the trusted identity mapping and character lookup.
+For Nakama authentication, use `--auth-mode nakama`, set `LYNX_NAKAMA_URL` (and
+optional `LYNX_NAKAMA_HTTP_KEY`) plus the normal `LYNX_PG_*` variables, and
+configure a durable world snapshot with `--state-file` or `--state-postgres`.
+Nakama mode refuses to start without snapshot storage because newly admitted
+characters are provisioned into the live zone and the snapshot is committed
+before a session is opened. The service opens separate PostgreSQL connections
+for the trusted identity mapping and character lookup.
 Clients send the Nakama bearer session in `Authorization` and exactly one
 `X-Lynx-Character: chr_…` request header. The header does not establish
 ownership; the service validates it against the account returned by Nakama.

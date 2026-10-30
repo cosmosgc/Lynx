@@ -143,12 +143,15 @@ contact Nakama, so revocation or expiry is observed no later than the configured
 resume TTL (30 seconds by default) or the next fresh admission. No client clock
 or token claim supplies account, character, staff, or expiry authority.
 
-Production admission only connects a selected character that is already
-represented by exactly one live actor in the authoritative zone. A PostgreSQL
-row never creates an actor, and the demo loader is not used for production
-characters. A missing actor fails with the gateway's `not_found` result after
-the protocol hello and creates no gateway session. Character loading/spawning
-and multi-zone routing remain separate work.
+Production admission verifies the selected character against Nakama/PostgreSQL,
+then provisions a missing player actor in the authoritative zone. Its entity ID
+is deterministically derived from the character ID. Before the gateway creates
+a session, the service persists a world snapshot containing that actor; admission
+fails closed if durable snapshot storage is unavailable or the write fails. A
+retry therefore reuses the same actor, and a restart restores it from the
+snapshot. Actor placement uses an unblocked, unoccupied navigation cell. The
+demo loader is not used for production characters; multi-zone routing remains
+separate work.
 
 `lynx-world` applies bounded token buckets before work reaches the authority
 loop:

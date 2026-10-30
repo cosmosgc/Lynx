@@ -17,10 +17,22 @@ fn main() {
             eprintln!("Usage: lynx_client --account");
             std::process::exit(2);
         }
-        App::new()
+        let mut account_app = App::new();
+        account_app
             .add_plugins(DefaultPlugins)
-            .add_plugins(lynx_client::account_ui::AccountUiPlugin)
-            .run();
+            .insert_resource(lynx_client::account_ui::AccountWorldLaunch::default())
+            .add_plugins(lynx_client::account_ui::AccountUiPlugin);
+        let exit = account_app.run();
+        if !exit.is_success() {
+            std::process::exit(1);
+        }
+        if let Some((bearer, character)) = account_app
+            .world_mut()
+            .resource_mut::<lynx_client::account_ui::AccountWorldLaunch>()
+            .take()
+        {
+            run_account_world(bearer, character);
+        }
         return;
     }
 
@@ -115,6 +127,52 @@ fn main() {
     app.run();
 }
 
+#[cfg(feature = "window")]
+fn run_account_world(bearer: String, character: String) {
+    use bevy::prelude::*;
+    use lynx_client::{LynxClientPlugin, online::OnlineClient, windowed::OnlineWindowPlugin};
+
+    let url = std::env::var("LYNX_WORLD_URL")
+        .unwrap_or_else(|_| "ws://127.0.0.1:8090/world".into());
+    let version = semver::Version::parse(env!("CARGO_PKG_VERSION")).expect("valid package version");
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(_) => {
+            eprintln!("Could not initialize the world network runtime.");
+            return;
+        }
+    };
+    let mut client = match OnlineClient::new(1.0) {
+        Ok(client) => client,
+        Err(_) => {
+            eprintln!("Could not initialize the world client.");
+            return;
+        }
+    };
+    {
+        let _guard = runtime.enter();
+        if client
+            .connect(lynx_client_net::Config {
+                url,
+                bearer,
+                character: Some(character),
+                handshake: engine_net::protocol::Handshake::new(version.clone(), version),
+                last_ack_tick: engine_core::time::Tick::ZERO,
+            })
+            .is_err()
+        {
+            eprintln!("Could not start world admission.");
+            return;
+        }
+    }
+    let mut app = App::new();
+    app.add_plugins(DefaultPlugins)
+        .add_plugins(LynxClientPlugin)
+        .insert_resource(client)
+        .add_plugins(OnlineWindowPlugin);
+    let _runtime = runtime;
+    app.run();
+}
 fn load_repository_env() {
     let env_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.env");
     // Explicit process environment wins over the repository's local defaults.

@@ -126,7 +126,7 @@ restricted to literal loopback IPs, not arbitrary trusted LANs.
 ## CLT-003 — Character selection and creation
 
 - **Priority:** P0
-- **Status:** In progress — CLI and account screen; blocked on authoritative actor provisioning
+- **Status:** In progress — account screen and durable first-admission actor provisioning
 - **Depends on:** `PST-001`, `CLT-002`
 - **References:** `game_api::CharacterService`, `PST-001`
 
@@ -154,7 +154,10 @@ restricted to literal loopback IPs, not arbitrary trusted LANs.
 - [x] The account screen lists, creates, and verifies characters; creation retries
       reuse a key for the lifetime of the screen (not across restarts).
 - [x] Client-side name/key/ID validation matches server contracts.
-- [ ] A new account can create a character and enter the world after restart.
+- [x] First Nakama admission provisions a deterministic player actor and saves a
+      snapshot before opening the session; snapshot retries and restart reuse it.
+- [ ] A new account can create a character, enter through the Bevy screen, and
+      restore the same actor after a real server restart.
 - [ ] The client cannot select a character it does not own.
 - [ ] Name/appearance validation matches server rules.
 - [ ] The selected character is clearly identified in the UI.
@@ -162,12 +165,12 @@ restricted to literal loopback IPs, not arbitrary trusted LANs.
       server uses per-character limits; per-account limits reject a second
       session without affecting the first.
 
-**Blocker:** Character selection verifies ownership and playability but does not
-create or restore a live actor. Safe provisioning needs a durable
-character-to-actor binding and a crash-recovery protocol coordinated with world
-snapshots. Do not spawn on every admission or client retry until that persistence
-boundary is implemented and tested; otherwise a crash can duplicate actors or
-lose actor state.
+The server derives actor IDs deterministically from character IDs and commits the
+actor to the world snapshot before admission. If persistence fails, admission is
+denied; retries reuse the actor already present in memory, or recreate the same
+ID after a crash. The Bevy screen now hands the verified account session and
+selected character to the online window. The online view is still read-only, and
+live Nakama/PostgreSQL plus process-restart onboarding remains to be exercised.
 
 ---
 

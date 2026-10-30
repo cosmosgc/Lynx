@@ -592,6 +592,28 @@ impl Service {
                 self.server.open(grant.claims()?, &hello.handshake, now)?
             }
             Credential::Identity(claims) => {
+                // Character actors are deterministic and may be provisioned
+                // on first admission, but admission is not acknowledged until
+                // that actor is covered by the durable world snapshot. A
+                // retry after a crash therefore either restores the same
+                // actor or deterministically recreates it.
+                let has_actor = match self.server.gateway().player_actor(claims.principal) {
+                    Ok(_) => true,
+                    Err(error) if error.code() == ErrorCode::NotFound => false,
+                    Err(error) => return Err(error),
+                };
+                if !has_actor && self.persistence.is_none() {
+                    return Err(EngineError::new(
+                        ErrorCode::Internal,
+                        "Nakama character provisioning requires a durable world snapshot",
+                    ));
+                }
+                if self.persistence.is_some() {
+                    self.server
+                        .gateway_mut()
+                        .ensure_player_actor(claims.principal)?;
+                    self.try_save_snapshot()?;
+                }
                 self.server.open(claims.clone(), &hello.handshake, now)?
             }
             Credential::Resume(token) => {
@@ -1673,6 +1695,181 @@ mod tests {
             state.last = Some(snapshot.clone());
             Ok(())
         }
+    }
+
+    #[derive(Debug, Default)]
+    struct FailOnceStore {
+        failed: std::sync::atomic::AtomicBool,
+        last: std::sync::Mutex<Option<WorldSnapshot>>,
+    }
+
+    impl crate::persistence::SnapshotStore for FailOnceStore {
+        fn load(&self) -> Result<Option<WorldSnapshot>, EngineError> {
+            Ok(self.last.lock().unwrap().clone())
+        }
+
+        fn save(&self, snapshot: &WorldSnapshot) -> Result<(), EngineError> {
+            if !self.failed.swap(true, Ordering::SeqCst) {
+                return Err(EngineError::new(
+                    ErrorCode::Internal,
+                    "injected snapshot write failure",
+                ));
+            }
+            *self.last.lock().unwrap() = Some(snapshot.clone());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn failed_provision_snapshot_denies_admission_and_retry_reuses_actor() {
+        use game_api::AccountId;
+        use world_gateway::SessionClaims;
+
+        let principal = StableId::from_parts(IdKind::Character, 1_700_000_000_002, 987_656);
+        let claims =
+            SessionClaims::new(AccountId::new("nakama-test-account").unwrap(), principal).unwrap();
+        let (service, _, _) = service();
+        let store = Arc::new(FailOnceStore::default());
+        let mut service = service.with_persistence(store.clone(), Duration::from_secs(60));
+        let (outbound, _receiver) = mpsc::channel(16);
+        let hello = Hello {
+            handshake: demo::handshake().unwrap(),
+            last_ack_tick: Tick::ZERO,
+        };
+
+        assert!(
+            service
+                .admit(&Credential::Identity(claims.clone()), &hello, &outbound)
+                .is_err()
+        );
+        assert_eq!(service.server.gateway().connected_sessions(), 0);
+        let actor_count = service.server.gateway().zone().entity_count();
+        let expected_actor = service
+            .server
+            .gateway()
+            .player_actor(principal)
+            .expect("retryable provision remains in memory");
+
+        let admitted = service
+            .admit(&Credential::Identity(claims), &hello, &outbound)
+            .unwrap();
+        assert_eq!(admitted.actor, expected_actor);
+        assert_eq!(service.server.gateway().zone().entity_count(), actor_count);
+        let saved = store.last.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            saved
+                .zone
+                .entities
+                .iter()
+                .filter(|entity| entity.id == expected_actor)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn identity_admission_persists_a_deterministic_player_actor_before_connecting() {
+        use game_api::AccountId;
+        use world_gateway::SessionClaims;
+
+        let principal = StableId::from_parts(IdKind::Character, 1_700_000_000_000, 987_654);
+        let claims =
+            SessionClaims::new(AccountId::new("nakama-test-account").unwrap(), principal).unwrap();
+        let (service, _, _) = service();
+        let store = Arc::new(MemoryStore::default());
+        let mut service = service.with_persistence(store.clone(), Duration::from_secs(60));
+        let (outbound, _receiver) = mpsc::channel(16);
+
+        let first = service
+            .admit(
+                &Credential::Identity(claims.clone()),
+                &Hello {
+                    handshake: demo::handshake().unwrap(),
+                    last_ack_tick: Tick::ZERO,
+                },
+                &outbound,
+            )
+            .unwrap();
+        assert_eq!(
+            first.actor,
+            StableId::from_parts(
+                IdKind::Entity,
+                principal.timestamp_ms(),
+                principal.random_bits()
+            )
+        );
+        let saved = store.state.lock().unwrap().last.clone().unwrap();
+        assert!(
+            saved
+                .zone
+                .entities
+                .iter()
+                .any(|entity| entity.id == first.actor)
+        );
+        assert_eq!(store.state.lock().unwrap().saves, 1);
+
+        let restored_zone = demo::restore_zone(&saved.zone).unwrap();
+        let restored_count = restored_zone.entity_count();
+        assert!(restored_zone.entity(first.actor).is_some());
+        let restored_gateway = WorldGateway::new(
+            restored_zone,
+            demo::handshake().unwrap(),
+            GatewayConfig::new(DurationMs::new(30_000)),
+            SystemResumeTokens::new(),
+        )
+        .unwrap();
+        let mut restarted = Service::new(
+            WorldServer::new(restored_gateway),
+            Duration::from_millis(20),
+        )
+        .with_persistence(store, Duration::from_secs(60));
+        let (restarted_outbound, _restarted_receiver) = mpsc::channel(16);
+        let after_restart = restarted
+            .admit(
+                &Credential::Identity(claims),
+                &Hello {
+                    handshake: demo::handshake().unwrap(),
+                    last_ack_tick: Tick::ZERO,
+                },
+                &restarted_outbound,
+            )
+            .unwrap();
+        assert_eq!(after_restart.actor, first.actor);
+        assert_eq!(
+            restarted.server.gateway().zone().entity_count(),
+            restored_count
+        );
+    }
+
+    #[test]
+    fn nakama_actor_provisioning_fails_closed_without_snapshot_storage() {
+        use game_api::AccountId;
+        use world_gateway::SessionClaims;
+
+        let principal = StableId::from_parts(IdKind::Character, 1_700_000_000_001, 987_655);
+        let claims =
+            SessionClaims::new(AccountId::new("nakama-test-account").unwrap(), principal).unwrap();
+        let (mut service, _, _) = service();
+        let (outbound, _receiver) = mpsc::channel(16);
+
+        let error = service
+            .admit(
+                &Credential::Identity(claims),
+                &Hello {
+                    handshake: demo::handshake().unwrap(),
+                    last_ack_tick: Tick::ZERO,
+                },
+                &outbound,
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), ErrorCode::Internal);
+        assert!(service.server.gateway().zone().entities().all(|entity| {
+            entity
+                .mind
+                .as_ref()
+                .and_then(|mind| mind.controller.player_character())
+                != Some(principal)
+        }));
     }
 
     /// Observes whether the last queued admission has completed at each save.

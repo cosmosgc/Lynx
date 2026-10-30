@@ -28,6 +28,7 @@ use engine_core::error::{EngineError, ErrorCode};
 use engine_core::faction::FactionWorld;
 use engine_core::id::{DefinitionId, StableId};
 use engine_core::math::Vec3;
+use engine_core::schema::PersistencePolicy;
 use engine_core::time::{DurationMs, Millis, Tick};
 use engine_core::world_event::WorldCalendar;
 use engine_net::envelope::{Envelope, MessageId, MessageKind};
@@ -41,7 +42,9 @@ use engine_net::replication::{
 };
 use engine_sim::action::{ActionEffect, ActionRequest, ActionResult, Verb};
 use engine_sim::calendar::CalendarActionRequest;
-use engine_sim::mind::Controller;
+use engine_sim::combat::CombatStats;
+use engine_sim::entity::{EntityRecord, MovementProfile};
+use engine_sim::mind::{Controller, Mind};
 use engine_sim::movement::MovementIntent;
 use engine_sim::zone::Zone;
 use serde::Deserialize;
@@ -345,6 +348,75 @@ impl WorldGateway {
     /// tests. Client code never receives this handle.
     pub const fn zone_mut(&mut self) -> &mut Zone {
         &mut self.zone
+    }
+
+    /// Resolve the unique actor already bound to a character principal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorCode::NotFound`] when no actor is present or
+    /// [`ErrorCode::Conflict`] when the character is bound more than once.
+    pub fn player_actor(&self, principal: StableId) -> Result<StableId, EngineError> {
+        principal.expect_kind(engine_core::id::IdKind::Character)?;
+        self.resolve_actor(principal)
+    }
+
+    /// Ensure an authenticated character has one durable player actor.
+    ///
+    /// The entity ID is derived from the character ID, so an admission retry
+    /// after a crash cannot create a second actor. The caller must persist the
+    /// zone snapshot before admitting the connection.
+    ///
+    /// Returns `true` when a new actor was spawned and `false` when the
+    /// character already had exactly one persistent actor.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid character IDs, ambiguous/non-persistent
+    /// bindings, identifier collisions, or when there is no available spawn
+    /// cell or zone capacity.
+    pub fn ensure_player_actor(&mut self, principal: StableId) -> Result<bool, EngineError> {
+        match self.player_actor(principal) {
+            Ok(actor) => {
+                let entity = self.zone.entity(actor).ok_or_else(|| {
+                    EngineError::new(ErrorCode::Internal, "resolved player actor disappeared")
+                })?;
+                if entity.persistence != PersistencePolicy::PersistentEntity {
+                    return Err(EngineError::new(
+                        ErrorCode::InvalidState,
+                        "the player's existing actor is not persistent",
+                    )
+                    .with_detail("actor", actor.to_string()));
+                }
+                return Ok(false);
+            }
+            Err(error) if error.code() == ErrorCode::NotFound => {}
+            Err(error) => return Err(error),
+        }
+
+        let actor = StableId::from_parts(
+            engine_core::id::IdKind::Entity,
+            principal.timestamp_ms(),
+            principal.random_bits(),
+        );
+        if self.zone.entity(actor).is_some() {
+            return Err(EngineError::new(
+                ErrorCode::Conflict,
+                "the deterministic player actor ID is already occupied",
+            )
+            .with_detail("actor", actor.to_string()));
+        }
+        let position = player_spawn_position(&self.zone, principal)?;
+        let prototype = DefinitionId::new("character.player")?;
+        let entity = EntityRecord::new(actor, prototype, position)
+            .with_health(100)
+            .with_combat(CombatStats::default())
+            .with_mind(Mind::player(principal, "unbound"))
+            .with_movement(MovementProfile::default())
+            .owned_by(principal)
+            .with_persistence(PersistencePolicy::PersistentEntity);
+        self.zone.spawn(entity)?;
+        Ok(true)
     }
 
     /// Static gateway tuning.
@@ -1217,6 +1289,48 @@ impl WorldGateway {
         }
         Ok(())
     }
+}
+
+fn player_spawn_position(zone: &Zone, principal: StableId) -> Result<Vec3, EngineError> {
+    let nav = zone.nav();
+    let total = nav
+        .width()
+        .checked_mul(nav.height())
+        .filter(|total| *total > 0)
+        .ok_or_else(|| {
+            EngineError::new(ErrorCode::CapacityExceeded, "the zone has no spawn cells")
+        })?;
+    let total_u128 = u128::try_from(total).map_err(|_| {
+        EngineError::new(
+            ErrorCode::CapacityExceeded,
+            "the zone spawn grid is too large",
+        )
+    })?;
+    let start = usize::try_from(principal.random_bits() % total_u128)
+        .map_err(|_| EngineError::new(ErrorCode::Internal, "the player spawn index is invalid"))?;
+
+    for offset in 0..total {
+        let index = start.wrapping_add(offset) % total;
+        let x = index % nav.width();
+        let z = index / nav.width();
+        if nav.is_blocked(x, z) {
+            continue;
+        }
+        let position = nav.cell_center(x, z);
+        let occupied = zone.entities().any(|entity| {
+            entity.movement_profile().is_some_and(|body| {
+                body.occupies && position.distance_xz(entity.position()) < body.radius_m + 0.35
+            })
+        });
+        if !occupied && zone.config().contains(position) {
+            return Ok(position);
+        }
+    }
+
+    Err(EngineError::new(
+        ErrorCode::CapacityExceeded,
+        "the zone has no unoccupied player spawn cell",
+    ))
 }
 
 #[derive(Debug, Deserialize)]

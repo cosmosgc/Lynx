@@ -42,9 +42,11 @@ email session expires, use `--login-email` to authenticate again. `--logout`
 revokes and removes the current saved session. There is no plaintext credential
 fallback. Remote authentication requires HTTPS and does not use proxy settings.
 
-Character selection verifies account ownership, but neither portal account
-creation nor character selection provisions a live world actor. World admission
-still requires a corresponding actor to exist on the server.
+Character selection verifies account ownership. On first Nakama world admission,
+the server now creates a player actor with a deterministic entity ID and persists
+the world snapshot before opening the session. Nakama mode requires durable
+snapshot storage (`--state-file` or `--state-postgres`); a failed snapshot write
+fails admission and a retry reuses the same actor.
 
 ## Current request path
 
@@ -61,16 +63,16 @@ still requires a corresponding actor to exist on the server.
    `X-Lynx-Character`.
 3. `lynx-world --auth-mode nakama` validates the bearer through Nakama, maps
    the trusted account to Lynx PostgreSQL data, and verifies character ownership.
-4. The Rust gateway creates and controls the world session. Its local resume
-   token is single-use, short-lived, and distinct from a Nakama session token.
+4. The authority loop ensures the character's deterministic actor exists and
+   writes a durable snapshot before the gateway creates and controls the session.
+   Its local resume token is single-use, short-lived, and distinct from a Nakama
+   session token.
 
-The current login command is a transport integration seam, not a complete
-first-time player flow. World admission requires a persisted Lynx character
-owned by the authenticated Nakama account and an actor for that character in
-the active world. The command creates a new ephemeral device identity but does
-not create or list characters, so new accounts cannot normally finish admission
-yet. Character provisioning and a stable, securely stored device identity are
-still required for a usable player login flow.
+The `--account` Bevy screen supports email sign-in, listing/creating/selecting
+characters, then handing the selected character to the world client. The older
+CLI commands remain development seams. Character creation still goes through
+the authenticated Lynx API; world actor IDs are deterministic from character
+IDs and their records are stored in the world snapshot before fresh admission.
 
 See [networking](networking.md#world-edge-identity-admission) for admission and
 revocation semantics, and [operations](operations.md#running-the-world-service)

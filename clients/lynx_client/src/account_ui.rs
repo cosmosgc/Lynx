@@ -1,6 +1,7 @@
 //! Account management screen. All network and credential-store work runs on workers.
 use crate::nakama_credentials::{OsNakamaCredentialStore, authenticate_email_or_resume};
 use bevy::{
+    app::AppExit,
     input::{ButtonState, keyboard::KeyboardInput},
     prelude::*,
 };
@@ -11,6 +12,28 @@ use std::sync::{Mutex, mpsc};
 /// In-client account and character management, independent of the offline demo.
 #[derive(Debug)]
 pub struct AccountUiPlugin;
+
+/// Secret-bearing handoff from the account screen to the online world window.
+#[derive(Resource, Default)]
+pub struct AccountWorldLaunch(Option<(String, String)>);
+
+impl std::fmt::Debug for AccountWorldLaunch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AccountWorldLaunch")
+            .field("pending", &self.0.is_some())
+            .field("credentials", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl AccountWorldLaunch {
+    /// Take the authenticated access token and verified character selected by
+    /// the account screen. The token should be kept only in memory.
+    pub fn take(&mut self) -> Option<(String, String)> {
+        self.0.take()
+    }
+}
 
 impl Plugin for AccountUiPlugin {
     fn build(&self, app: &mut App) {
@@ -35,6 +58,7 @@ struct Screen {
     focus: Field,
     token: Option<String>,
     characters: Vec<Character>,
+    selected: Option<(String, String)>,
     intent: Option<(String, String)>,
     status: String,
     worker: Option<Mutex<mpsc::Receiver<Result<Outcome, String>>>>,
@@ -50,6 +74,7 @@ impl Default for Screen {
             focus: Field::Email,
             token: None,
             characters: Vec::new(),
+            selected: None,
             intent: None,
             status: "Sign in to an existing account. New accounts: use account_portal first."
                 .into(),
@@ -63,7 +88,7 @@ enum Outcome {
     SignedIn(String),
     Listed(Vec<Character>),
     Created,
-    Selected(String),
+    Selected { id: String, name: String },
 }
 #[derive(Component)]
 struct Root;
@@ -74,6 +99,7 @@ enum Action {
     List,
     Create,
     Select(String),
+    EnterWorld,
 }
 
 fn setup(mut commands: Commands) {
@@ -100,8 +126,11 @@ fn api(token: &str) -> Result<(CharacterApiClient, SessionToken), String> {
 }
 
 #[allow(deprecated)] // Bevy 0.20 still supports the legacy interaction component.
+#[allow(clippy::too_many_lines)] // Keep the small screen's action routing together.
 fn buttons(
     mut screen: ResMut<Screen>,
+    mut launch: ResMut<AccountWorldLaunch>,
+    mut exit: MessageWriter<AppExit>,
     query: Query<(&Interaction, &Action), Changed<Interaction>>,
 ) {
     for (interaction, action) in &query {
@@ -194,9 +223,20 @@ fn buttons(
                     start(&mut screen, move || {
                         let (api, token) = api(&token)?;
                         api.select_character(&token, &id)
-                            .map(|c| Outcome::Selected(c.name))
+                            .map(|c| Outcome::Selected {
+                                id: c.id.to_string(),
+                                name: c.name,
+                            })
                             .map_err(|e| format!("Selection failed: {e:?}"))
                     });
+                }
+            }
+            Action::EnterWorld => {
+                if let Some((id, _)) = screen.selected.clone()
+                    && let Some(token) = screen.token.take()
+                {
+                    launch.0 = Some((token, id));
+                    exit.write(AppExit::Success);
                 }
             }
         }
@@ -270,6 +310,7 @@ fn poll(mut screen: ResMut<Screen>) {
         }
         Ok(Outcome::Listed(characters)) => {
             screen.characters = characters;
+            screen.selected = None;
             screen.status = "Select a character or create one.".into();
         }
         Ok(Outcome::Created) => {
@@ -277,10 +318,9 @@ fn poll(mut screen: ResMut<Screen>) {
             screen.name.clear();
             screen.status = "Created. Refresh the list to see your character.".into();
         }
-        Ok(Outcome::Selected(name)) => {
-            screen.status = format!(
-                "{name} verified. Selection does not guarantee world entry: durable actor provisioning is not yet available, so admission can fail."
-            );
+        Ok(Outcome::Selected { id, name }) => {
+            screen.selected = Some((id, name.clone()));
+            screen.status = format!("{name} verified. Enter the world when ready.");
         }
     }
 }
@@ -304,6 +344,9 @@ fn render(mut commands: Commands, mut screen: ResMut<Screen>, roots: Query<Entit
         } else {
             button(parent, "Refresh character list".into(), Action::List);
             for c in &screen.characters { button(parent, format!("Select {} ({:?})", c.name, c.status), Action::Select(c.id.to_string())); }
+            if let Some((_, name)) = &screen.selected {
+                button(parent, format!("Enter world with {name}"), Action::EnterWorld);
+            }
             button(parent, format!("{}New character name: {}", marker(screen.focus == Field::Name), screen.name), Action::Focus(Field::Name));
             button(parent, "Create / retry creation".into(), Action::Create);
             parent.spawn(Text::new("Creation retries reuse the same key during this session. Do not close the client while an outcome is uncertain."));
@@ -334,6 +377,19 @@ fn button(parent: &mut ChildSpawnerCommands, label: String, action: Action) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn world_launch_is_single_use_and_redacts_the_access_token() {
+        let mut launch =
+            AccountWorldLaunch(Some(("secret-access-token".into(), "chr-test".into())));
+        assert!(!format!("{launch:?}").contains("secret-access-token"));
+        assert_eq!(
+            launch.take(),
+            Some(("secret-access-token".into(), "chr-test".into()))
+        );
+        assert!(launch.take().is_none());
+    }
+
     #[test]
     fn password_is_not_part_of_display_or_default_status() {
         let screen = Screen {
