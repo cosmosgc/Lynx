@@ -11,7 +11,7 @@ use engine_net::envelope::{Envelope, MessageId, MessageKind};
 use engine_net::protocol::{ErrorPayload, Handshake};
 use engine_net::replication::{ReplicationBatch, SessionId};
 use engine_sim::action::{ActionEffect, ActionResult, Verb};
-use engine_sim::combat::CombatStats;
+use engine_sim::combat::{CombatRules, CombatStats, FactionAttackRule};
 use engine_sim::entity::{
     Door, EntityRecord, FactionMembership, Interactable, InteractionPermission, MovementProfile,
     MovementStatus, UiProvider,
@@ -171,13 +171,18 @@ fn spawn_props(zone: &mut Zone) -> (StableId, StableId, StableId, StableId) {
 }
 
 fn fixture() -> Fixture {
+    fixture_with_combat(CombatRules::default())
+}
+
+fn fixture_with_combat(combat: CombatRules) -> Fixture {
     let config = ZoneConfig::new(
         text("zone.gateway_test"),
         id(IdKind::Zone, 1),
         Vec3::ZERO,
         Vec3::new(200.0, 4.0, 200.0),
     )
-    .unwrap();
+    .unwrap()
+    .with_combat(combat);
     let nav = NavGrid::new(200, 200, 1.0, Vec3::ZERO).unwrap();
     let mut zone = Zone::new(config, nav, Arc::new(UniformItemRules::new(99))).unwrap();
 
@@ -830,6 +835,90 @@ fn gateway_enforces_server_owned_faction_policy() {
         f.gateway
             .zone()
             .entity(f.alice_barrel)
+            .unwrap()
+            .health
+            .unwrap()
+            .current,
+        99
+    );
+}
+
+#[test]
+fn gateway_enforces_authored_directional_faction_override() {
+    let guard = text("faction.guard");
+    let bandit = text("faction.bandit");
+    let mut f = fixture_with_combat(CombatRules {
+        faction_rules: vec![FactionAttackRule {
+            attacker: guard.clone(),
+            target: bandit.clone(),
+            allowed: false,
+        }],
+        ..CombatRules::default()
+    });
+    f.gateway
+        .zone_mut()
+        .entity_mut(f.alice_actor)
+        .unwrap()
+        .faction = Some(FactionMembership::new(guard));
+    f.gateway
+        .zone_mut()
+        .entity_mut(f.alice_barrel)
+        .unwrap()
+        .faction = Some(FactionMembership::new(bandit.clone()));
+    f.gateway
+        .zone_mut()
+        .entity_mut(f.bob_actor)
+        .unwrap()
+        .faction = Some(FactionMembership::new(bandit));
+    f.gateway
+        .zone_mut()
+        .entity_mut(f.bob_barrel)
+        .unwrap()
+        .faction = Some(FactionMembership::new(text("faction.guard")));
+    let alice = connect(&mut f.gateway, "alice", f.alice_principal);
+    let bob = connect(&mut f.gateway, "bob", f.bob_principal);
+    let attack = |name, target: StableId| {
+        action(name, json!({"verb":"attack", "target":target.to_string()}))
+    };
+
+    let denied = result_of(
+        &f.gateway
+            .handle(
+                &alice.session,
+                &attack("guard-to-bandit", f.alice_barrel),
+                Millis::new(1001),
+            )
+            .unwrap(),
+    );
+    assert!(!denied.is_applied());
+    assert_eq!(
+        f.gateway
+            .zone()
+            .entity(f.alice_barrel)
+            .unwrap()
+            .health
+            .unwrap()
+            .current,
+        100
+    );
+
+    let reverse = result_of(
+        &f.gateway
+            .handle(
+                &bob.session,
+                &attack("bandit-to-guard", f.bob_barrel),
+                Millis::new(1002),
+            )
+            .unwrap(),
+    );
+    assert!(
+        reverse.is_applied(),
+        "an exact override must not imply its reverse: {reverse:?}"
+    );
+    assert_eq!(
+        f.gateway
+            .zone()
+            .entity(f.bob_barrel)
             .unwrap()
             .health
             .unwrap()

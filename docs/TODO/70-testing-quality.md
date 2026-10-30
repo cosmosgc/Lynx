@@ -51,16 +51,19 @@ idempotent attack retries, and a repeated mixed-input replay. It also checks
 stunned and zero-speed actors at both queue and processing time, occupied cells
 and swept-body collision, same-faction denial and different-faction attacks, and
 stale/pending sequence rejection without consuming a rejected newer sequence. A
-new gateway-level regression also checks an over-budget movement endpoint and a
-dead actor's attack without state mutation.
+new gateway-level regression (`gateway_enforces_speed_budget_and_dead_actor_combat_authority`)
+also checks an over-budget movement endpoint and a dead actor's attack without
+state mutation. A further gateway-seam case applies an authored directional
+`guard -> bandit` deny rule and proves the reverse pairing remains attackable.
+Re-verified locally on 2026-10-30 with
+`cargo test -p world_gateway --test gateway` (36 passed).
 Contested destinations resolve in stable actor order regardless of request
 arrival order, and revoking Move after queuing causes processing-time rejection
 and consumes the sequence. The updated gateway test suite passed locally. The
 tests require no GPU or service; CI's workspace test command includes them. The
-full invariant matrix
-and historical failing-before evidence remain open. In particular, integrated
-coverage still needs authored directional faction overrides and broader
-queue/budget boundaries. Zone transfer is not yet available. Simulation unit
+full invariant matrix and historical failing-before evidence remain open. In
+particular, integrated coverage still needs broader queue/budget boundaries.
+Zone transfer is not yet available. Simulation unit
 tests cover some of these separately, but do not substitute for this suite.
 
 ---
