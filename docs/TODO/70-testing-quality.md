@@ -458,7 +458,7 @@ copy-pasted socket code in every integration test.
 ## QUA-016 — Flaky-test and CI-duration control
 
 - **Priority:** P2
-- **Status:** Ready
+- **Status:** In progress — tracking policy and hosted baseline documented; automated reporting and timing-test audit remain open
 - **Depends on:** —
 - **References:** `OPS-006`
 
@@ -475,6 +475,21 @@ copy-pasted socket code in every integration test.
 - [ ] CI duration is visible and bounded.
 - [ ] Timing-sensitive tests use injected time or documented tolerances.
 - [ ] Quarantined tests have an owner and expiry.
+
+**Tracking policy:** A flaky test is recorded here with its exact test name,
+platform/workflow, first and latest observed failing run, issue/owner, and an
+expiry date no more than 30 days out. Quarantine requires an explicit skip or
+filter and a link to the tracking entry; CI must not silently retry it. The
+owner removes the quarantine after fixing the cause, or renews it with a new
+reason and expiry. No tests are currently listed as quarantined. This is a
+manual policy until automated flaky-test reporting is introduced.
+
+**Hosted duration baseline (2026-10-29):** OPS-006 recorded just under ten
+minutes overall, approximately three minutes for Ubuntu workspace tests and
+90 seconds for Clippy; Windows workspace tests exceeded ten minutes. These
+observations are a historical baseline only, not a CI bound. The current
+workflow does not publish per-job durations or enforce a duration budget, so
+no threshold is inferred from this single run.
 
 ---
 
