@@ -113,15 +113,20 @@ fields are:
 | `content diff` | `base`, `next`, compatibility diagnostics and version-bump data |
 | `content publish-check` | `manifest`, `base`, author/state/revision and publish diagnostics |
 
+When command dispatch fails before it can construct its command-specific
+report, `--json` emits the common failure shape `command`, `ok: false`,
+`exit_code: 1`, and `error: { code: "command_failed", message }`. This covers
+runtime command failures (for example, an unreadable content-hash input); CLI
+argument parsing failures are still handled by Clap before dispatch.
+
 Process exit codes are 0 for success, 2 for content/project validation failure,
 3 for compatibility failure, and 1 for other command or internal failures. A
 validation failure nested in the project-execution report remains code 2;
 Cargo execution failure is code 1. Build/run/test capture output until Cargo
 exits and close stdin; they are not interactive or streaming runners. If a
-command fails before it can construct its report (for example, Cargo cannot be
-started), the CLI currently writes the error to stderr and exits 1 rather than
-emitting JSON. This report schema is versioned with the CLI source; consumers
-should ignore unknown fields.
+command fails before its report can be constructed, that failure uses exit code
+1 and the common JSON failure shape above when `--json` is enabled. This report
+schema is versioned with the CLI source; consumers should ignore unknown fields.
 
 `lynx content build --project <dir> --content-version <semver> --engine <version-req>`
 validates first, then writes a deterministic `content/manifest.json` by default.

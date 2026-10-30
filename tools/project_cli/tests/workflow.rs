@@ -19,6 +19,34 @@ fn invoke(project: &Path, command: &str) -> (std::process::ExitStatus, Value) {
 }
 
 #[test]
+fn json_failures_before_report_construction_keep_the_report_schema() {
+    let missing = std::env::temp_dir().join(format!(
+        "lynx-json-missing-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let output = Command::new(env!("CARGO_BIN_EXE_lynx"))
+        .args(["--json", "content", "hash"])
+        .arg(&missing)
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(report["command"], "content hash");
+    assert_eq!(report["ok"], false);
+    assert_eq!(report["exit_code"], 1);
+    assert_eq!(report["error"]["code"], "command_failed");
+    assert!(
+        report["error"]["message"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty())
+    );
+}
+
+#[test]
 fn run_and_test_validate_before_executing_cargo() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -50,6 +78,7 @@ fn run_and_test_validate_before_executing_cargo() {
         assert!(status.success(), "{result}");
         assert_eq!(result["ok"], true);
         assert_eq!(result["command"], command);
+        assert_eq!(result["exit_code"], 0);
         assert_eq!(result["validation"]["ok"], true);
         assert_eq!(result["cargo"]["exit_code"], 0);
         if command != "build" {
@@ -71,6 +100,7 @@ fn run_and_test_validate_before_executing_cargo() {
         let (status, result) = invoke(&project, command);
         assert!(!status.success());
         assert_eq!(result["ok"], false);
+        assert_eq!(result["exit_code"], 2);
         assert_eq!(result["validation"]["ok"], false);
         assert!(result["cargo"].is_null());
     }
@@ -144,6 +174,7 @@ fn cargo_failure_is_reported_and_returns_nonzero() {
         let (status, result) = invoke(&project, command);
         assert!(!status.success());
         assert_eq!(result["ok"], false);
+        assert_eq!(result["exit_code"], 1);
         assert_eq!(result["validation"]["ok"], true);
         assert_ne!(result["cargo"]["exit_code"], 0);
         assert_ne!(result["cargo"]["stderr"].as_str().unwrap(), "");

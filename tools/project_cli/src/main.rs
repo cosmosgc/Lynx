@@ -149,15 +149,31 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
-
-    let mut output = match cli.command {
-        Commands::New(args) => commands::scaffold::new_project(&args)?,
-        Commands::Doctor(args) => commands::doctor::doctor(&args)?,
-        Commands::Validate(args) => commands::project::validate_project(&args)?,
-        Commands::Content(args) => commands::content::content(&args)?,
-        Commands::Build(args) => commands::project::project_command(&args, "build")?,
-        Commands::Run(args) => commands::project::project_command(&args, "run")?,
-        Commands::Test(args) => commands::project::project_command(&args, "test")?,
+    let command_name = command_name(&cli.command);
+    let result = match cli.command {
+        Commands::New(args) => commands::scaffold::new_project(&args),
+        Commands::Doctor(args) => commands::doctor::doctor(&args),
+        Commands::Validate(args) => commands::project::validate_project(&args),
+        Commands::Content(args) => commands::content::content(&args),
+        Commands::Build(args) => commands::project::project_command(&args, "build"),
+        Commands::Run(args) => commands::project::project_command(&args, "run"),
+        Commands::Test(args) => commands::project::project_command(&args, "test"),
+    };
+    let mut output = match result {
+        Ok(output) => output,
+        Err(error) if cli.json => serde_json::json!({
+            "command": command_name,
+            "ok": false,
+            "exit_code": 1,
+            "error": {
+                "code": "command_failed",
+                "message": error.to_string(),
+            }
+        }),
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
     };
 
     let exit_code = commands::output::exit_code(&output);
@@ -173,4 +189,21 @@ fn run() -> Result<()> {
         std::process::exit(exit_code);
     }
     Ok(())
+}
+
+fn command_name(command: &Commands) -> &'static str {
+    match command {
+        Commands::New(_) => "new",
+        Commands::Doctor(_) => "doctor",
+        Commands::Validate(_) => "validate",
+        Commands::Build(_) => "build",
+        Commands::Run(_) => "run",
+        Commands::Test(_) => "test",
+        Commands::Content(args) => match &args.command {
+            ContentCommand::Build(_) => "content build",
+            ContentCommand::Hash(_) => "content hash",
+            ContentCommand::Diff(_) => "content diff",
+            ContentCommand::PublishCheck(_) => "content publish-check",
+        },
+    }
 }

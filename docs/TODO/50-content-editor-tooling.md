@@ -314,11 +314,13 @@ contracts are still needed.
 The Ubuntu CI workflow exercises these commands and completed green in the
 hosted CI run confirmed on 2026-10-29.
 
-The CLI now includes `exit_code` in successful command reports and applies
-consistent process statuses to structured outcomes. JSON report shapes and the
-exit-code contract are documented in [AI tooling](../ai-tooling.md). Failures
-that occur before a report can be built still use stderr rather than a JSON
-error object, so the all-path JSON contract remains open.
+The CLI includes `exit_code` in command reports and uses a common JSON failure
+shape when command dispatch fails before a command-specific report can be
+built. JSON report shapes and the exit-code contract are documented in [AI
+tooling](../ai-tooling.md). Clap argument parse failures still happen before
+dispatch and are not JSON reports. Re-verified locally on 2026-10-30 with
+`cargo test -p project_cli` (15 tests passed across unit and integration
+targets); generated command reference and shell completion remain unimplemented.
 
 ---
 

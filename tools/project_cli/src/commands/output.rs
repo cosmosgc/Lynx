@@ -7,10 +7,8 @@ pub(crate) fn exit_code(output: &Value) -> i32 {
         3
     } else if output["validation"]["ok"] == false || has_validation_failure(output) {
         2
-    } else if output["ok"] == false {
-        1
     } else {
-        0
+        i32::from(output["ok"] == false)
     }
 }
 
@@ -35,27 +33,6 @@ fn has_validation_failure(value: &Value) -> bool {
         }
         Value::Array(values) => values.iter().any(has_validation_failure),
         _ => false,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::exit_code;
-    use serde_json::json;
-
-    #[test]
-    fn automation_exit_codes_distinguish_validation_incompatibility_and_failure() {
-        assert_eq!(exit_code(&json!({"ok": true})), 0);
-        assert_eq!(
-            exit_code(&json!({"ok": false, "validation": {"ok": false}})),
-            2
-        );
-        assert_eq!(exit_code(&json!({"ok": false, "compatible": false})), 3);
-        assert_eq!(
-            exit_code(&json!({"ok": false, "schema": {"compatible": false}})),
-            3
-        );
-        assert_eq!(exit_code(&json!({"ok": false})), 1);
     }
 }
 
@@ -230,5 +207,26 @@ fn push_diagnostics(lines: &mut Vec<String>, diagnostics: &Value) {
             diagnostic["code"].as_str().unwrap_or("?"),
             diagnostic["message"].as_str().unwrap_or("")
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::exit_code;
+    use serde_json::json;
+
+    #[test]
+    fn automation_exit_codes_distinguish_validation_incompatibility_and_failure() {
+        assert_eq!(exit_code(&json!({"ok": true})), 0);
+        assert_eq!(
+            exit_code(&json!({"ok": false, "validation": {"ok": false}})),
+            2
+        );
+        assert_eq!(exit_code(&json!({"ok": false, "compatible": false})), 3);
+        assert_eq!(
+            exit_code(&json!({"ok": false, "schema": {"compatible": false}})),
+            3
+        );
+        assert_eq!(exit_code(&json!({"ok": false})), 1);
     }
 }
