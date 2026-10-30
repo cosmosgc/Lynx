@@ -372,7 +372,7 @@ remain open. `SIM-001` remains an unverified prerequisite.
 ## SIM-008 — World chat and presence
 
 - **Priority:** P1
-- **Status:** Ready
+- **Status:** In progress — fail-closed gateway discovery; moderation and routing pending
 - **Depends on:** —
 - **References:** `crates/game_api/src/chat.rs`, `social.rs`,
   [README Phase 3](../../README.md#phase-3--interaction-and-mind-system--in-progress),
@@ -400,6 +400,17 @@ it, and the client needs a real channel to render.
 - [ ] Mute/ignore and rate limits are enforced server-side.
 - [ ] Chat survives reconnect for the retained window where policy allows.
 - [ ] Integration tests cover two sessions in one zone.
+
+**Increment:** Authenticated sessions can request `chat.channels` with an empty
+body and receive an empty channel list. Unknown fields are rejected; `chat.send`
+and `chat.history` fail closed without storing, broadcasting, or echoing content.
+This is not player chat or presence. The memory adapter's shared room has no
+world membership, mute, moderation, or delivery policy and is not connected to
+the gateway. `NET-009` moderation/reporting and `CNT-008` user-content policy
+remain unavailable; zone/party/whisper/system routing, presence, social policy,
+history pagination, reconnect retention, and player chat rate enforcement remain
+open. The transport's existing chat-family limiter is not an authorization or
+moderation substitute.
 
 ---
 

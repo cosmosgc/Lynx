@@ -272,6 +272,53 @@ fn connect(gateway: &mut WorldGateway, account: &str, principal: StableId) -> Co
 }
 
 #[test]
+fn world_chat_discovery_is_empty_and_player_content_fails_closed() {
+    let mut f = fixture();
+    let alice = connect(&mut f.gateway, "alice", f.alice_principal);
+    let bob = connect(&mut f.gateway, "bob", f.bob_principal);
+    for session in [&alice.session, &bob.session] {
+        let query = envelope("channels", "chat.channels", json!({}));
+        let replies = f
+            .gateway
+            .handle(session, &query, Millis::new(1001))
+            .unwrap();
+        assert_eq!(replies[0].kind.as_str(), "chat.channels.result");
+        assert_eq!(replies[0].body, json!({"channels": []}));
+        for (kind, body) in [
+            ("chat.channels", json!({"zone": "other"})),
+            (
+                "chat.send",
+                json!({"channel_id": "zone", "sender": f.bob_principal, "content": "private"}),
+            ),
+            ("chat.history", json!({"channel_id": "zone"})),
+        ] {
+            let request = envelope("denied", kind, body);
+            let replies = f
+                .gateway
+                .handle(session, &request, Millis::new(1002))
+                .unwrap();
+            assert_eq!(replies[0].kind.as_str(), "protocol.error");
+            assert!(!replies[0].body.to_string().contains("private"));
+        }
+    }
+    f.gateway
+        .disconnect(&alice.session, Tick::ZERO, Millis::new(1100))
+        .unwrap();
+    let resumed = f
+        .gateway
+        .resume(&alice.token, &handshake(), Tick::ZERO, Millis::new(1200))
+        .unwrap();
+    let query = envelope("channels", "chat.channels", json!({}));
+    assert_eq!(
+        f.gateway
+            .handle(&resumed.session, &query, Millis::new(1201))
+            .unwrap()[0]
+            .body,
+        json!({"channels": []})
+    );
+}
+
+#[test]
 fn session_lifecycle_cancels_queued_movement() {
     for lifecycle in ["close", "disconnect", "resume"] {
         let mut f = fixture();

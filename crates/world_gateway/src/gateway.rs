@@ -61,6 +61,10 @@ use crate::session::{
     GatewaySession, OpenPanel, ResumeToken, ResumeTokenSource, SessionClaims, SessionRegistry,
 };
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptyChatQuery {}
+
 /// The message kind used for protocol-level failures.
 pub const ERROR_KIND: &str = "protocol.error";
 
@@ -605,6 +609,23 @@ impl WorldGateway {
             (active.principal, active.actor)
         };
         match envelope.kind.as_str() {
+            "chat.channels" => {
+                if serde_json::from_value::<EmptyChatQuery>(envelope.body.clone()).is_err() {
+                    let error = EngineError::new(ErrorCode::InvalidRequest, "chat query rejected");
+                    return Ok(vec![self.error_reply(envelope, &error)]);
+                }
+                Ok(vec![envelope.reply(
+                    self.reply_id(),
+                    message_kind("chat.channels.result"),
+                    json!({ "channels": [] }),
+                )])
+            }
+            "chat.send" | "chat.history" => {
+                // No player content is admitted until server-side membership,
+                // moderation and social policy can all be enforced.
+                let error = EngineError::new(ErrorCode::Unsupported, "world chat unavailable");
+                Ok(vec![self.error_reply(envelope, &error)])
+            }
             "action.request" => self.handle_action(session, principal, actor, envelope, now),
             "movement.request" => Ok(self.handle_movement(session, principal, actor, envelope)),
             CALENDAR_COMMAND_KIND => {
