@@ -31,6 +31,25 @@ pub struct AiTickPolicy {
     pub epoch: Millis,
     /// Milliseconds per simulation tick.
     pub tick_ms: u32,
+    /// Declarative behavior bindings. Content may assign stable behavior IDs
+    /// to these bounded built-in semantics without changing the engine.
+    pub behaviors: Vec<AiBehaviorDefinition>,
+}
+
+/// A server-approved behavior definition that can be populated from content.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AiBehaviorDefinition {
+    pub id: DefinitionId,
+    pub kind: AiBehaviorKind,
+    /// Perception range for this behavior, in meters.
+    pub range_m: f32,
+}
+
+/// Bounded behavior primitives supported by the runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiBehaviorKind {
+    Guard,
 }
 
 /// Last tick's bounded AI decisions, retained for server inspection.
@@ -169,13 +188,18 @@ impl Zone {
                 reason: "unknown_behavior",
             };
             // The built-in behavior is deliberately explicit: unknown content does not attack.
-            if decision.behavior.as_str() == "behavior.guard" {
+            if let Some(definition) = policy
+                .behaviors
+                .iter()
+                .find(|definition| definition.id == decision.behavior)
+                .filter(|definition| definition.kind == AiBehaviorKind::Guard)
+            {
                 let perception = self
                     .perceive_hostiles_bounded(
                         actor,
                         &policy.factions,
                         policy.thresholds,
-                        policy.range_m,
+                        definition.range_m,
                         now,
                         policy.perception,
                     )
@@ -722,6 +746,11 @@ mod tests {
             max_controller_candidates: 10,
             epoch: Millis::new(0),
             tick_ms: 50,
+            behaviors: vec![AiBehaviorDefinition {
+                id: DefinitionId::new("behavior.guard").unwrap(),
+                kind: AiBehaviorKind::Guard,
+                range_m: 8.0,
+            }],
         }));
         zone
     }
@@ -761,6 +790,36 @@ mod tests {
         assert_eq!(a.take_ai_diagnostics().decisions, 2);
         assert_eq!(a.ai_diagnostics(), AiDiagnostics::default());
         assert_eq!(a.entity(id(3)), b.entity(id(3)));
+    }
+
+    #[test]
+    fn policy_binds_content_behavior_ids_to_bounded_guard_semantics() {
+        let mut zone = tick_zone(2, 1);
+        let content_id = DefinitionId::new("behavior.zone_sentinel").unwrap();
+        let mut policy = zone.ai_policy.as_ref().unwrap().as_ref().clone();
+        policy.behaviors = vec![AiBehaviorDefinition {
+            id: content_id.clone(),
+            kind: AiBehaviorKind::Guard,
+            range_m: 0.5,
+        }];
+        zone.set_ai_tick_policy(Some(policy));
+        let mut sentinel = ai_at(1, "faction.guards", 1.5, 1.5);
+        sentinel.mind = Some(Mind::ai(content_id));
+        zone.spawn(sentinel).unwrap();
+        let mut enemy = ai_at(2, "faction.bandits", 2.5, 1.5);
+        enemy.mind = None;
+        enemy.interactable = Some(Interactable::new(2.0, [Verb::Attack]));
+        zone.spawn(enemy).unwrap();
+
+        zone.advance_tick();
+        let decision = &zone.ai_tick_report().decisions[0];
+        assert_eq!(decision.behavior.as_str(), "behavior.zone_sentinel");
+        assert_eq!(decision.reason, "no_target");
+        assert_eq!(decision.perception.as_ref().unwrap().targets.len(), 0);
+        assert_eq!(
+            zone.entity(id(2)).unwrap().health.as_ref().unwrap().current,
+            100
+        );
     }
 
     #[test]

@@ -333,7 +333,14 @@ attempts here, **not** all player plus AI actions: player actions are currently
 applied immediately without a shared tick counter. The policy epoch must match
 the authoritative reputation timebase. Existing unbounded perception/helper
 APIs are unchanged. Content-defined behavior graphs, scheduling, group aggro,
-fair scheduling, persistent inspection, and a shared action budget remain.
+fair scheduling, persistent inspection, and a shared action budget remain. AI
+policy now accepts server-approved `AiBehaviorDefinition` bindings, allowing a
+content behavior ID to select the bounded Guard primitive and its perception
+range; a test verifies a custom ID and constrained range. `cargo test -p
+engine_sim policy_binds_content_behavior_ids_to_bounded_guard_semantics` passes.
+The content loader does not yet hydrate these definitions from authored bundles,
+and only the Guard primitive exists, so content-only behavior graphs/schedules
+remain open. `SIM-001` remains an unverified prerequisite.
 
 ---
 
