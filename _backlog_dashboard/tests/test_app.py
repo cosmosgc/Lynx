@@ -244,7 +244,7 @@ Phase 1  Engine skeleton             [██████████████
         self.assertIn(b".task[hidden] { display:none; }", response.data)
         self.assertIn(b"row.hidden = !visible", response.data)
 
-    def test_suggestions_use_priority_continuity_and_unblocked_dependents(self):
+    def test_suggestions_skip_blocked_tasks_and_do_not_assume_prior_suggestions_done(self):
         source = self.todo / "10-sample.md"
         markdown = source.read_text(encoding="utf-8").replace(
             "- **Depends on:** `D5`, —",
@@ -253,11 +253,58 @@ Phase 1  Engine skeleton             [██████████████
         source.write_text(markdown, encoding="utf-8")
         suggestions = suggest_next_tasks(order_tasks(load_backlog(self.todo)), 2)
 
-        self.assertEqual([task["id"] for task in suggestions], ["SIM-001", "SIM-002"])
+        self.assertEqual([task["id"] for task in suggestions], ["SIM-001", "SIM-003"])
         self.assertEqual(suggestions[0]["suggestion_score"], 55)
         self.assertIn("continue in-progress work (+10)", suggestions[0]["suggestion_reason"])
         self.assertIn("unlocks 1 dependent task(s) (+5)", suggestions[0]["suggestion_reason"])
-        self.assertEqual(suggestions[1]["suggestion_score"], 30)
+        self.assertEqual(suggestions[1]["id"], "SIM-003")
+
+    def test_in_progress_work_with_unmet_dependency_is_penalized(self):
+        source = self.todo / "10-sample.md"
+        markdown = source.read_text(encoding="utf-8").replace(
+            "- **Depends on:** `D5`, —",
+            "- **Depends on:** —",
+        ).replace(
+            "- **Status:** Blocked — movement first",
+            "- **Status:** In progress — transport foundation",
+        )
+        source.write_text(markdown, encoding="utf-8")
+
+        suggestions = suggest_next_tasks(order_tasks(load_backlog(self.todo)), 3)
+
+        transport = next(task for task in suggestions if task["id"] == "SIM-002")
+        self.assertEqual(transport["suggestion_score"], 30)
+        self.assertIn("1 unresolved task dependency(s) (-10)", transport["suggestion_reason"])
+
+    def test_ready_task_with_unmet_dependency_is_not_suggested(self):
+        source = self.todo / "10-sample.md"
+        markdown = source.read_text(encoding="utf-8").replace(
+            "- **Depends on:** `D5`, —",
+            "- **Depends on:** —",
+        ).replace(
+            "- **Status:** Blocked — movement first",
+            "- **Status:** Ready",
+        )
+        source.write_text(markdown, encoding="utf-8")
+
+        suggestions = suggest_next_tasks(order_tasks(load_backlog(self.todo)), 3)
+
+        self.assertNotIn("SIM-002", [task["id"] for task in suggestions])
+
+    def test_blocked_task_is_not_suggested_even_when_dependencies_are_done(self):
+        source = self.todo / "10-sample.md"
+        markdown = source.read_text(encoding="utf-8").replace(
+            "- **Depends on:** `D5`, —",
+            "- **Depends on:** —",
+        ).replace(
+            "- **Status:** In progress — basic slice",
+            "- **Status:** Done",
+        )
+        source.write_text(markdown, encoding="utf-8")
+
+        suggestions = suggest_next_tasks(order_tasks(load_backlog(self.todo)), 3)
+
+        self.assertNotIn("SIM-002", [task["id"] for task in suggestions])
 
     def test_task_order_renders_suggestion_and_rejects_invalid_count(self):
         client = self.make_app().test_client()

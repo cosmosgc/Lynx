@@ -78,8 +78,8 @@
       </form>
       <section class="detail-block" aria-labelledby="suggestion-heading">
         <h3 id="suggestion-heading">Suggested next {{ suggestion_limit }} task(s)</h3>
-        <p class="section-note">Only Ready/In progress tasks and dependency-unblocked tasks are considered. Done, proposed, icebox, and tasks with external blockers are skipped.</p>
-        <p class="section-note">Score = priority (P0 40, P1 30, P2 20, P3 10) + 10 for continuing In progress work + 5 per newly unlocked dependent (cap 20). Ties prefer higher priority, then backlog order.</p>
+        <p class="section-note">Suggestions show work actionable now, not a hypothetical dependency route. Blocked, done, proposed, icebox, and tasks with external blockers are skipped. Ready tasks need all tracked dependencies done; In progress work may appear with unresolved dependencies, clearly penalized.</p>
+        <p class="section-note">Score = priority (P0 40, P1 30, P2 20, P3 10) + 10 for continuing In progress work + 5 per dependent this task would actually unblock (cap 20) − 10 per unresolved task dependency for In progress work. Ties prefer fewer blockers, then higher priority, then backlog order.</p>
         {% if suggestions %}
         <ol class="suggestions" id="suggestions">
           {% for task in suggestions %}

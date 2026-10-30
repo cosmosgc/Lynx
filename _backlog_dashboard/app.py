@@ -408,59 +408,68 @@ def order_tasks(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def suggest_next_tasks(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
-    """Choose an actionable next-task route by priority, continuity, and unlock value."""
+    """Rank work that can be acted on now, without assuming suggestions are done."""
     if limit <= 0:
         return []
 
     by_id = {item["id"]: item for item in items}
     source_order = {item["id"]: index for index, item in enumerate(items)}
     priority_points = {"P0": 40, "P1": 30, "P2": 20, "P3": 10}
-    eligible_statuses = {"ready", "in_progress", "blocked"}
+    eligible_statuses = {"ready", "in_progress"}
     completed = {item["id"] for item in items if item["status"] == "done"}
-    selected: set[str] = set()
     suggestions: list[dict[str, Any]] = []
 
-    def unlock_count(task: dict[str, Any], resolved: set[str]) -> int:
+    def unlock_count(task: dict[str, Any]) -> int:
         newly_unblocked = 0
         for dependent_id in task["dependent_ids"]:
             dependent = by_id[dependent_id]
-            if dependent["status"] not in eligible_statuses:
+            if dependent["status"] not in eligible_statuses | {"blocked"}:
                 continue
             if dependent["external_dependencies"]:
                 continue
-            if dependent["status"] == "blocked" and not dependent["dependency_ids"]:
-                continue
-            if set(dependent["dependency_ids"]).issubset(resolved | {task["id"]}):
+            dependencies = set(dependent["dependency_ids"])
+            if task["id"] in dependencies and dependencies - {task["id"]} <= completed:
                 newly_unblocked += 1
         return newly_unblocked
 
     while len(suggestions) < limit:
-        resolved = completed | selected
         candidates = []
         for task in items:
-            if task["id"] in resolved or task["status"] not in eligible_statuses:
+            if task["id"] in completed or any(
+                suggestion["id"] == task["id"] for suggestion in suggestions
+            ) or task["status"] not in eligible_statuses:
                 continue
             if task["external_dependencies"]:
                 continue
-            dependencies = task["dependency_ids"]
-            if task["status"] == "blocked" and not dependencies:
-                continue
-            if not set(dependencies).issubset(resolved):
+            unresolved = [
+                dependency
+                for dependency in task["dependency_ids"]
+                if dependency not in completed
+            ]
+            # A Ready task with unmet prerequisites is not ready in practice.
+            # In-progress work may still be actionable, but gets a blocker penalty.
+            if task["status"] == "ready" and unresolved:
                 continue
 
             priority = priority_points.get(task["priority"], 0)
             continuation = 10 if task["status"] == "in_progress" else 0
-            unlocks = unlock_count(task, resolved)
+            unlocks = unlock_count(task)
             unlock_points = min(20, unlocks * 5)
-            score = priority + continuation + unlock_points
+            blocker_penalty = len(unresolved) * 10
+            score = priority + continuation + unlock_points - blocker_penalty
             reasons = [f"{task['priority']} priority (+{priority})"]
             if continuation:
                 reasons.append("continue in-progress work (+10)")
             if unlocks:
                 reasons.append(f"unlocks {unlocks} dependent task(s) (+{unlock_points})")
+            if unresolved:
+                reasons.append(
+                    f"{len(unresolved)} unresolved task dependency(s) (-{blocker_penalty})"
+                )
             candidates.append(
                 (
                     -score,
+                    blocker_penalty,
                     -priority,
                     source_order[task["id"]],
                     task,
@@ -471,9 +480,8 @@ def suggest_next_tasks(items: list[dict[str, Any]], limit: int) -> list[dict[str
 
         if not candidates:
             break
-        candidates.sort(key=lambda candidate: candidate[:3])
-        _, _, _, task, score, reason = candidates[0]
-        selected.add(task["id"])
+        candidates.sort(key=lambda candidate: candidate[:4])
+        _, _, _, _, task, score, reason = candidates[0]
         suggestions.append(
             {**task, "suggestion_score": score, "suggestion_reason": reason}
         )

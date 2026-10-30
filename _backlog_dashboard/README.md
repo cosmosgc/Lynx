@@ -9,9 +9,10 @@ TODO/FIXME/XXX triage inbox and a manager report with active, blocked, and
 recommended next work.
 The `/task-order` view gives a prerequisite-first route, multi-task selection,
 and an editable prompt builder with acceptance criteria and relevant files. Its
-next-N suggestion ranks actionable tasks by priority, in-progress continuity,
-and the number of dependent tasks they unlock; unresolved external blockers are
-excluded.
+next-N suggestions rank work actionable now by priority, in-progress
+continuity, unresolved task dependencies, and the dependents a task would
+actually unblock. Blocked work is excluded, and suggesting a prerequisite does
+not make its dependent appear actionable in the same list.
 Prompt options control delegation/parallelism, status tracking, validation,
 blocker handling, and whether to create WIP, per-task, batch, or no commits.
 
