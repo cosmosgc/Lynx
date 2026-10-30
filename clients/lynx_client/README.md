@@ -1,41 +1,54 @@
 # Lynx client foundation
 
-`cargo run -p lynx_client` starts a windowed, offline 2D placeholder on Windows
-(and on Linux with X11). WASD moves the blue square across a marked ground; a
-top-down camera follows it. E, Enter, I, and C map to interact, chat, inventory,
-and camera actions but have no behavior yet. Bindings can be changed through
-the `InputBindings` resource; there is no rebinding UI.
+`cargo run -p lynx_client` starts the built-in local demo zone on Windows (and
+Linux with X11). It renders bounded terrain, props, characters, and
+interactables as 2D placeholder sprites. WASD moves the local blue avatar; it
+is a presentation preview only, not server-authoritative movement, collision,
+or interaction resolution.
 
-This is not the demo zone or a billboard character implementation. Movement
-is a fixed distance per update, so its speed depends on frame rate. There is no
-content loading, collision, or gameplay authority. The 2D camera follows the rig's target rather than its 3D offset.
-A developer has confirmed that the default scene opens in a window on Windows.
+## Offline scene, camera, and input
 
-For offline experiments, `OfflineFoundationPlugin` composes `OfflineCorePlugin`
-with `DefaultActionPlugin` and `FollowCameraPlugin`. An app can instead install
-the core and provide its own action and camera systems in `OfflineSet::Actions`
-and `OfflineSet::Camera`; the ordered sets run input, input filtering, actions, placeholder
-movement, camera, then presentation. Alternative action systems must update or
-clear `ActiveActions` and `ActionTransitions` each update. The default resolver
-reports per-update press/release edges after combining bindings, so releasing one
-of two controls bound to the same action does not release the action. Rebinding
-a held control releases its old action and presses its new one. These edges are
-local presentation state, not queued input or gameplay commands. This is a
-testable local seam, not the final camera/input architecture or an online
-gameplay interface. The asset import and camera/input decisions remain gated by
-QUA-017.
+Pass a generated project or its `content/` directory to preview authored scene
+data. The loader recognizes a project root automatically, selects `zone.demo`
+or `zone.starter` by default, and `--describe` prints the resolved scene before
+the window opens:
 
-The offline core also exposes `OfflineInputEnabled` (default true). Set it in
-or before `OfflineSet::Input` to discard supplied controls before action
-resolution, for example when an experimental UI captures input. The default
-resolver emits releases on the first disabled update. This gate does not
-automatically observe UI state; a held keyboard key is supplied again when
-re-enabled. Separately, the window keyboard adapter clears controls when the
-primary window is unfocused or missing, releasing actions on that update. It
-supplies any keys still reported held when focus returns. Replay ignores window
-focus and continues consuming frames while the gate is disabled rather
-than postponing them. Custom action adapters must honor the filtered controls
-themselves. This affects only offline presentation, not online server state.
+```text
+cargo run -p project_cli -- new my-world --template mmorpg --output ../my-world
+cargo run -p lynx_client -- --content ../my-world --zone zone.starter --describe
+```
+
+Use `--camera follow3d` (the default) or `--camera billboard2d`; `3d`, `2d`,
+`follow`, and `billboard` are accepted aliases. Press `C` in the offline window
+to cycle modes. The present renderer uses camera-relative 2D sprites for both
+modes; `billboard2d` is the selectable wider-scale fallback for clients that
+cannot present the follow view.
+
+Inputs resolve from platform-neutral `Control` values into `Action` values.
+Defaults are WASD for movement, E for interact, Enter for chat, I for inventory,
+and C for camera. A JSON file can replace bindings, for example
+`{"bindings":{"W":"MoveForward","E":"Interact"}}`:
+
+```text
+cargo run -p lynx_client -- --bindings path/to/bindings.json
+```
+
+`OfflineFoundationPlugin` composes `OfflineCorePlugin`,
+`DefaultActionPlugin`, and `FollowCameraPlugin`. Projects can replace action
+resolution or camera systems independently in `OfflineSet::Actions` and
+`OfflineSet::Camera`, while keeping movement and scene presentation unchanged.
+The ordered sets are input, input filtering, actions, local preview movement,
+camera, then presentation. `OfflineInputEnabled` can discard supplied input
+while a UI has focus; the window adapter also clears controls when the primary
+window loses focus. These facilities are local presentation seams, never
+gameplay commands.
+
+Content with `manifest.json` is rejected cleanly if the engine requirement,
+file path, or SHA-256 hash is invalid. A missing manifest is reported as an
+unversioned-source warning. Missing, unsafe, or unsupported presentation assets
+produce a visible placeholder and a scene warning instead of panicking. The
+current policy accepts PNG billboard portraits and GLB/GLTF models; verified
+assets are recorded but not decoded by the placeholder renderer yet.
 
 ## Planned server browser
 

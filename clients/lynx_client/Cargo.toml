@@ -10,10 +10,11 @@ repository.workspace = true
 
 [features]
 default = ["window"]
-window = ["bevy/bevy_window", "bevy/bevy_winit", "bevy/x11", "bevy/2d_bevy_render", "bevy/bevy_ui", "bevy/bevy_ui_render", "bevy/bevy_text", "bevy/default_font", "dep:tokio", "dep:semver", "dep:rpassword"]
+window = ["bevy/bevy_window", "bevy/bevy_winit", "bevy/x11", "bevy/2d_bevy_render", "bevy/bevy_ui", "bevy/bevy_ui_render", "bevy/bevy_text", "bevy/default_font", "dep:tokio", "dep:rpassword"]
 
 [dependencies]
 bevy = { workspace = true, features = ["std", "async_executor"] }
+engine_content.workspace = true
 engine_core.workspace = true
 engine_net.workspace = true
 game_api.workspace = true
@@ -23,8 +24,8 @@ getrandom.workspace = true
 keyring = { version = "4.2.0", default-features = false, features = ["v1"] }
 serde.workspace = true
 serde_json.workspace = true
+semver.workspace = true
 tokio = { workspace = true, optional = true }
-semver = { workspace = true, optional = true }
 rpassword = { version = "7", optional = true }
 
 [dev-dependencies]

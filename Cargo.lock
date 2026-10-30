@@ -3604,6 +3604,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "dotenvy",
+ "engine_content",
  "engine_core",
  "engine_net",
  "futures-util",

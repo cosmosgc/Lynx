@@ -7,7 +7,10 @@ use engine_core::i18n::{
     CatalogSet, DEFAULT_LOCALE, Locale, MessageCatalog, MessageKey, validate_placeholders,
 };
 use engine_core::id::DefinitionId;
-use engine_core::schema::{ComponentInstance, ComponentRegistry, ComponentSchema, FieldType};
+use engine_core::schema::{
+    ComponentInstance, ComponentKey, ComponentRegistry, ComponentSchema, FieldSchema, FieldType,
+    PersistencePolicy, SchemaVersion, Visibility,
+};
 use engine_core::{EngineError, ErrorCode};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -566,6 +569,86 @@ fn collect_definition_refs(
         }
         _ => {}
     }
+}
+
+/// Component schemas every starter project template uses.
+///
+/// This is the shared registry for validating generated projects, the client's
+/// content loader, and tooling. Projects with custom components must extend the
+/// registry rather than redefining these core keys.
+///
+/// # Errors
+///
+/// Returns [`EngineError`] when a built-in schema is malformed or duplicates an
+/// existing registration.
+pub fn starter_component_registry() -> Result<ComponentRegistry, EngineError> {
+    let mut registry = ComponentRegistry::new();
+    let component_schemas = [
+        ComponentSchema::new(
+            ComponentKey::new("core.zone")?,
+            SchemaVersion::new(1, 0),
+            vec![
+                FieldSchema::required("max_players", FieldType::Int { min: 1, max: 1000 }),
+                FieldSchema::required(
+                    "cell_size_m",
+                    FieldType::Float {
+                        min: 0.25,
+                        max: 64.0,
+                    },
+                ),
+            ],
+            Visibility::ServerOnly,
+            PersistencePolicy::StaticDefinition,
+        ),
+        ComponentSchema::new(
+            ComponentKey::new("core.interactable")?,
+            SchemaVersion::new(1, 0),
+            vec![
+                FieldSchema::required(
+                    "verbs",
+                    FieldType::List {
+                        item: Box::new(FieldType::Enum {
+                            values: ["inspect", "talk", "practice"]
+                                .into_iter()
+                                .map(str::to_owned)
+                                .collect(),
+                        }),
+                        max_len: 8,
+                    },
+                ),
+                FieldSchema::required(
+                    "range_m",
+                    FieldType::Float {
+                        min: 0.1,
+                        max: 20.0,
+                    },
+                ),
+                FieldSchema::required("requires_line_of_sight", FieldType::Bool),
+            ],
+            Visibility::Client,
+            PersistencePolicy::StaticDefinition,
+        ),
+        ComponentSchema::new(
+            ComponentKey::new("core.item")?,
+            SchemaVersion::new(1, 0),
+            vec![
+                FieldSchema::required("stack_max", FieldType::Int { min: 1, max: 999 }),
+                FieldSchema::required(
+                    "weight_kg",
+                    FieldType::Float {
+                        min: 0.0,
+                        max: 1000.0,
+                    },
+                ),
+            ],
+            Visibility::Client,
+            PersistencePolicy::StaticDefinition,
+        ),
+    ];
+    for schema in component_schemas {
+        registry.register(schema)?;
+    }
+    Ok(registry)
 }
 
 /// Loads definitions and catalogs from a content root and validates them.

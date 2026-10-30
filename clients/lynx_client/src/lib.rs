@@ -4,6 +4,7 @@ use bevy::prelude::*;
 
 #[cfg(feature = "window")]
 pub mod account_ui;
+pub mod cli;
 #[cfg(feature = "window")]
 pub mod nakama_credentials;
 pub mod offline;
@@ -13,6 +14,7 @@ pub mod replay;
 #[cfg(feature = "window")]
 pub mod windowed;
 pub mod world_state;
+pub mod zone_scene;
 
 /// Shared client state used to verify that the application schedule is running.
 #[derive(Debug, Default, Resource)]

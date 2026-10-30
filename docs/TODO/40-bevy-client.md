@@ -177,7 +177,7 @@ live Nakama/PostgreSQL plus process-restart onboarding remains to be exercised.
 ## CLT-004 — Scene, camera, and input abstraction
 
 - **Priority:** P0
-- **Status:** In progress — offline placeholder
+- **Status:** Done
 - **Depends on:** `CLT-001`
 - **References:** [project guide §24](../lightweight_mmorpg_engine_project_guide.md#24-initial-vertical-slice-keep-it-small),
   `QUA-017` (camera/input ADR)
@@ -195,36 +195,39 @@ live Nakama/PostgreSQL plus process-restart onboarding remains to be exercised.
 
 **Acceptance criteria**
 
-- [ ] A generated `mmorpg` project opens a playable scene with the demo zone.
-- [ ] Camera and input are replaceable without touching gameplay systems.
-- [ ] Missing/incompatible assets produce a clear error, not a panic.
-- [ ] The 2D billboard presentation path is selectable or documented as the
-      fallback.
+- [x] A generated `mmorpg` project opens a playable scene with the demo zone.
+- [x] Camera and input are replaceable without touching gameplay systems.
+- [x] Missing/incompatible assets produce a clear error, not a panic.
+- [x] The 2D billboard presentation path is selectable or documented as the
+       fallback.
 
-**Progress:** The shared client plugin has a headless, in-memory placeholder
-avatar, rebindable control-to-action map, and follow-camera pose. A window-only
-keyboard adapter and simple top-down 2D shapes visualize that state; WASD moves
-the avatar, while the other mapped actions have no behavior. Tests inject input
-without a display. Movement is a fixed distance per update, frame-rate dependent,
-and is neither gameplay nor prediction. The 2D camera follows the rig target,
-not its 3D offset. There is no asset loading, demo zone, billboard character,
-collision, rebinding UI, or online connection. This is not a completed camera
-and input integration. A developer confirmed that the default placeholder scene
-opens in a window; this does not verify the demo zone or billboard path.
-The offline core now permits the existing action resolver and follow rig to be
-replaced independently, with ordered headless-tested seams; this is not an
-accepted camera/input architecture. Asset import policy and the final camera/
-input design still require the QUA-017 decisions. No acceptance criterion has
-been verified by this increment. The default offline action resolver also exposes
-per-update press/release transitions after combining bindings, including changes
-to bindings while a control is held; these are not gameplay commands.
-An opt-in local input gate can discard offline controls before action resolution;
-it emits default-resolver releases, but does not automatically handle window focus
-or UI capture. The separate window keyboard adapter clears controls when the
-primary window is unfocused or missing; replay ignores window focus. Held keys
-still reported by Bevy resume on focus return. Replay frames still advance while
-gated, and held keyboard input resumes when re-enabled. This does not establish
-the final input architecture.
+**Progress:** The offline client loads a project/content directory into a
+presentation-only `ZoneScene`: bounded terrain plus deterministic placeholder
+placement for props, characters, and interactables. With no content path, it
+uses a built-in `zone.demo`; project roots automatically resolve their
+`content/` directory. Content manifests are checked for engine compatibility,
+safe paths, and SHA-256 hashes before parsing. Invalid or incompatible bundles
+exit with a clear scene error; missing/unsafe/unsupported presentation assets
+emit a diagnostic and use a placeholder. PNG portraits and GLB/GLTF models are
+the supported asset policy; decoding remains future rendering work.
+
+`InputBindings` maps platform-neutral controls to actions and accepts a JSON
+rebinding file. `CameraController` selects `follow3d` or the selectable
+`billboard2d` fallback (also cycled with C). The offline core’s ordered seams
+let action and camera adapters be replaced independently without changing the
+local movement or scene presentation systems. All of this remains local
+presentation: authoritative movement, interaction outcomes, collision, and
+persistence are server work.
+
+Focused verification passed locally: `cargo test -p lynx_client
+--no-default-features` (40 tests), `cargo test -p lynx_client` (54 tests), and
+`cargo test -p engine_content` (48 tests). A freshly generated `mmorpg`
+project loaded headlessly with `--content … --zone zone.starter --camera
+billboard2d --describe` (256 terrain tiles, two characters/interactables), and
+the default-feature client opened a Windows window titled `Lynx offline -
+Taverna da Encruzilhada [zone.starter] source - camera billboard2d - 1
+warning(s)`. The sole warning correctly identifies the generated source as
+unversioned until a manifest is built.
 
 ---
 

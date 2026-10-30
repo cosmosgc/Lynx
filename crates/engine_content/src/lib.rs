@@ -22,4 +22,4 @@ pub use publishing::{
     AuthorId, LicenseId, ModerationAction, ModerationState, PublishingPolicy, PublishingRecord,
     ReviewNote, check_publish,
 };
-pub use validate::{ContentLoader, ContentSet};
+pub use validate::{ContentLoader, ContentSet, starter_component_registry};

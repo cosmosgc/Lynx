@@ -48,43 +48,29 @@ fn main() {
         logout_device();
         return;
     }
-    let mut args = std::env::args_os().skip(1);
-    let mode = match (args.next(), args.next(), args.next(), args.next()) {
-        (None, None, None, None) => (None, None, None),
-        (Some(mode), None, None, None) if mode == "--demo-online" => (Some(false), None, None),
-        (Some(mode), Some(character), None, None) if mode == "--login" => {
-            (Some(true), Some(character), None)
-        }
-        (Some(mode), Some(email), Some(character), None) if mode == "--login-email" => {
-            (Some(true), Some(character), Some(email))
-        }
-        (Some(mode), Some(path), None, None) if mode == "--replay" => (None, Some(path), None),
-        _ => {
-            eprintln!(
-                "Usage: lynx_client [--account | --characters | --create-character <name> <intent-key> | --select-character <id> | --email-login <email> | --demo-online | --login <id> | --login-email <email> <id> | --logout | --replay <fixture.json>]"
-            );
-            std::process::exit(2);
-        }
-    };
-    let (login, path, email) = mode;
-    let replay = path.clone().filter(|_| login.is_none()).map(|path| {
-        let json = std::fs::read_to_string(path).unwrap_or_else(|error| {
-            eprintln!("Could not read replay fixture: {error}");
-            std::process::exit(2);
-        });
-        ReplayFixture::from_json(&json).unwrap_or_else(|error| {
-            eprintln!("Invalid replay fixture: {error}");
-            std::process::exit(2);
-        })
-    });
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let first = args.first().map(String::as_str);
     let mut app = App::new();
     app.add_plugins(DefaultPlugins)
         .add_plugins(LynxClientPlugin);
-    // Keep the runtime alive until the window and its network task have exited.
-    let _runtime = if let Some(login) = login {
+    let _runtime = if let Some(first) =
+        first.filter(|first| matches!(*first, "--demo-online" | "--login" | "--login-email"))
+    {
+        let (login, character, email) = match (first, args.get(1), args.get(2), args.get(3)) {
+            ("--demo-online", None, None, None) => (false, None, None),
+            ("--login", Some(character), None, None) => (true, Some(character.clone()), None),
+            ("--login-email", Some(email), Some(character), None) => {
+                (true, Some(character.clone()), Some(email.clone()))
+            }
+            _ => {
+                eprintln!(
+                    "Usage: lynx_client [--demo-online | --login <id> | --login-email <email> <id>]"
+                );
+                std::process::exit(2);
+            }
+        };
         let (bearer, character) = if login {
-            let character = path.and_then(|s| s.into_string().ok()).unwrap_or_default();
-            let email = email.map(|s| s.into_string().unwrap_or_default());
+            let character = character.unwrap_or_default();
             authenticate_device(&character, email)
         } else {
             let Some(bearer) = std::env::var_os("LYNX_DEMO_TOKEN")
@@ -118,7 +104,42 @@ fn main() {
         app.insert_resource(client).add_plugins(OnlineWindowPlugin);
         Some(runtime)
     } else {
-        app.add_plugins(OfflineWindowPlugin);
+        let options = lynx_client::cli::parse_offline_args(args).unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(2);
+        });
+        let scene_options = lynx_client::zone_scene::SceneLoadOptions {
+            content_root: options.content_root.clone().or_else(default_content_root),
+            zone: options.zone.clone(),
+        };
+        let scene = lynx_client::zone_scene::load_scene(&scene_options).unwrap_or_else(|error| {
+            eprintln!("Could not load zone: {error}");
+            std::process::exit(1);
+        });
+        report_scene(&scene, options.describe);
+        let bindings = options
+            .bindings
+            .as_deref()
+            .map_or_else(lynx_client::offline::InputBindings::default, load_bindings);
+        let replay = options.replay.as_deref().map(|path| {
+            let json = std::fs::read_to_string(path).unwrap_or_else(|error| {
+                eprintln!("Could not read replay fixture: {error}");
+                std::process::exit(2);
+            });
+            ReplayFixture::from_json(&json).unwrap_or_else(|error| {
+                eprintln!("Invalid replay fixture: {error}");
+                std::process::exit(2);
+            })
+        });
+        app.insert_resource(lynx_client::offline::OfflineScene {
+            avatar_position: scene.spawn,
+        })
+        .insert_resource(scene)
+        .insert_resource(bindings)
+        .insert_resource(lynx_client::offline::CameraController {
+            mode: options.camera,
+        })
+        .add_plugins(OfflineWindowPlugin);
         if let Some(replay) = replay {
             app.insert_resource(ReplayInput::new(replay));
         }
@@ -128,26 +149,60 @@ fn main() {
 }
 
 #[cfg(feature = "window")]
+fn default_content_root() -> Option<std::path::PathBuf> {
+    if let Some(path) = std::env::var_os("LYNX_CONTENT_DIR")
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_dir())
+    {
+        return Some(path);
+    }
+    let local = std::path::PathBuf::from("content");
+    local.is_dir().then_some(local)
+}
+
+#[cfg(feature = "window")]
+fn load_bindings(path: &std::path::Path) -> lynx_client::offline::InputBindings {
+    let json = std::fs::read_to_string(path).unwrap_or_else(|error| {
+        eprintln!("Could not read bindings file {}: {error}", path.display());
+        std::process::exit(2);
+    });
+    lynx_client::offline::InputBindings::from_json(&json).unwrap_or_else(|error| {
+        eprintln!("Invalid bindings file {}: {error}", path.display());
+        std::process::exit(2);
+    })
+}
+
+#[cfg(feature = "window")]
+fn report_scene(scene: &lynx_client::zone_scene::ZoneScene, describe: bool) {
+    for issue in scene.issues.iter().take(20) {
+        eprintln!("Scene warning [{}]: {}", issue.code, issue.message);
+    }
+    if scene.issues.len() > 20 {
+        eprintln!(
+            "Scene warning: {} additional presentation warning(s) omitted",
+            scene.issues.len() - 20
+        );
+    }
+    if describe {
+        println!("{}", scene.summary());
+    }
+}
+
+#[cfg(feature = "window")]
 fn run_account_world(bearer: String, character: String) {
     use bevy::prelude::*;
     use lynx_client::{LynxClientPlugin, online::OnlineClient, windowed::OnlineWindowPlugin};
 
-    let url = std::env::var("LYNX_WORLD_URL")
-        .unwrap_or_else(|_| "ws://127.0.0.1:8090/world".into());
+    let url =
+        std::env::var("LYNX_WORLD_URL").unwrap_or_else(|_| "ws://127.0.0.1:8090/world".into());
     let version = semver::Version::parse(env!("CARGO_PKG_VERSION")).expect("valid package version");
-    let runtime = match tokio::runtime::Runtime::new() {
-        Ok(runtime) => runtime,
-        Err(_) => {
-            eprintln!("Could not initialize the world network runtime.");
-            return;
-        }
+    let Ok(runtime) = tokio::runtime::Runtime::new() else {
+        eprintln!("Could not initialize the world network runtime.");
+        return;
     };
-    let mut client = match OnlineClient::new(1.0) {
-        Ok(client) => client,
-        Err(_) => {
-            eprintln!("Could not initialize the world client.");
-            return;
-        }
+    let Ok(mut client) = OnlineClient::new(1.0) else {
+        eprintln!("Could not initialize the world client.");
+        return;
     };
     {
         let _guard = runtime.enter();
@@ -173,6 +228,7 @@ fn run_account_world(bearer: String, character: String) {
     let _runtime = runtime;
     app.run();
 }
+
 fn load_repository_env() {
     let env_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.env");
     // Explicit process environment wins over the repository's local defaults.
@@ -451,28 +507,62 @@ fn authenticate_device(character: &str, email: Option<String>) -> (String, Optio
 #[cfg(not(feature = "window"))]
 fn main() {
     use lynx_client::{
-        offline::OfflineScene,
+        cli::parse_offline_args,
+        offline::{CameraController, InputBindings, OfflineScene},
         replay::{ReplayFixture, ReplayInput},
+        zone_scene::{SceneLoadOptions, load_scene},
     };
 
     load_repository_env();
 
-    let mut args = std::env::args_os().skip(1);
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let options = parse_offline_args(args).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2);
+    });
+    let scene = load_scene(&SceneLoadOptions {
+        content_root: options.content_root.clone().or_else(default_content_root),
+        zone: options.zone.clone(),
+    })
+    .unwrap_or_else(|error| {
+        eprintln!("Could not load zone: {error}");
+        std::process::exit(1);
+    });
+    for issue in scene.issues.iter().take(20) {
+        eprintln!("Scene warning [{}]: {}", issue.code, issue.message);
+    }
+    if scene.issues.len() > 20 {
+        eprintln!(
+            "Scene warning: {} additional presentation warning(s) omitted",
+            scene.issues.len() - 20
+        );
+    }
+    let bindings = options
+        .bindings
+        .as_deref()
+        .map_or_else(InputBindings::default, |path| {
+            let json = std::fs::read_to_string(path).unwrap_or_else(|error| {
+                eprintln!("Could not read bindings file {}: {error}", path.display());
+                std::process::exit(2);
+            });
+            InputBindings::from_json(&json).unwrap_or_else(|error| {
+                eprintln!("Invalid bindings file {}: {error}", path.display());
+                std::process::exit(2);
+            })
+        });
+
     let mut app = lynx_client::headless_app();
-    if let Some(flag) = args.next() {
-        if flag != "--replay" {
-            eprintln!("Usage: lynx_client [--replay <fixture.json>]");
-            std::process::exit(2);
-        }
-        let Some(path) = args.next() else {
-            eprintln!("Usage: lynx_client [--replay <fixture.json>]");
-            std::process::exit(2);
-        };
-        if args.next().is_some() {
-            eprintln!("Usage: lynx_client [--replay <fixture.json>]");
-            std::process::exit(2);
-        }
-        let json = std::fs::read_to_string(path).unwrap_or_else(|error| {
+    app.insert_resource(OfflineScene {
+        avatar_position: scene.spawn,
+    })
+    .insert_resource(scene)
+    .insert_resource(bindings)
+    .insert_resource(CameraController {
+        mode: options.camera,
+    });
+
+    if let Some(path) = options.replay {
+        let json = std::fs::read_to_string(&path).unwrap_or_else(|error| {
             eprintln!("Could not read replay fixture: {error}");
             std::process::exit(2);
         });
@@ -490,4 +580,24 @@ fn main() {
     } else {
         app.update();
     }
+    if options.describe {
+        println!(
+            "{}",
+            app.world()
+                .resource::<lynx_client::zone_scene::ZoneScene>()
+                .summary()
+        );
+    }
+}
+
+#[cfg(not(feature = "window"))]
+fn default_content_root() -> Option<std::path::PathBuf> {
+    if let Some(path) = std::env::var_os("LYNX_CONTENT_DIR")
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_dir())
+    {
+        return Some(path);
+    }
+    let local = std::path::PathBuf::from("content");
+    local.is_dir().then_some(local)
 }

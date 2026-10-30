@@ -6,6 +6,7 @@ use bevy::window::PrimaryWindow;
 use crate::offline::{CameraPose, Control, OfflineScene, OfflineSet, PressedControls};
 use crate::online::{OnlineClient, OnlineStatus};
 use crate::replay::ReplayInput;
+use crate::zone_scene::{SceneObjectKind, ZoneScene};
 use engine_core::id::StableId;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -104,20 +105,45 @@ struct Avatar;
 #[derive(Component)]
 struct SceneCamera;
 
-fn setup_scene(mut commands: Commands) {
+/// Marks a sprite whose transform is derived from an authored scene position.
+#[derive(Component)]
+struct WorldPosition(Vec3);
+
+/// Sprite colour and size for a scene object category.
+fn object_style(kind: SceneObjectKind) -> (Color, f32, f32) {
+    match kind {
+        SceneObjectKind::Prop => (Color::srgb(0.58, 0.40, 0.22), 0.9, 0.6),
+        SceneObjectKind::Character => (Color::srgb(0.95, 0.78, 0.30), 0.8, 0.8),
+        SceneObjectKind::Interactable => (Color::srgb(0.90, 0.62, 0.18), 0.7, 0.6),
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters must be passed by value.
+fn setup_scene(mut commands: Commands, zone: Res<ZoneScene>, mut scene: ResMut<OfflineScene>) {
     commands.spawn((Camera2d, SceneCamera));
-    // A finite ground and landmarks make movement visible without external assets.
-    commands.spawn((
-        Sprite::from_color(Color::srgb(0.15, 0.25, 0.18), Vec2::splat(2048.0)),
-        Transform::from_xyz(0.0, 0.0, -1.0),
-    ));
-    for x in -4_i8..=4_i8 {
-        for y in -4_i8..=4_i8 {
-            commands.spawn((
-                Sprite::from_color(Color::srgb(0.3, 0.45, 0.3), Vec2::splat(8.0)),
-                Transform::from_xyz(f32::from(x) * 128.0, f32::from(y) * 128.0, 0.0),
-            ));
-        }
+    scene.avatar_position = zone.bounds.clamp(zone.spawn);
+
+    // Terrain and authored objects are placeholder sprites for the current 2D
+    // renderer. Assets verified by the content policy are not decoded yet.
+    for (index, tile) in zone.terrain.iter().enumerate() {
+        let colour = if index % 2 == 0 {
+            Color::srgb(0.13, 0.22, 0.16)
+        } else {
+            Color::srgb(0.15, 0.25, 0.18)
+        };
+        commands.spawn((
+            Sprite::from_color(colour, Vec2::splat(tile.size * SCALE)),
+            Transform::from_translation(Vec3::new(0.0, 0.0, -1.0)),
+            WorldPosition(tile.position),
+        ));
+    }
+    for object in &zone.objects {
+        let (colour, size, z) = object_style(object.kind);
+        commands.spawn((
+            Sprite::from_color(colour, Vec2::splat(size * SCALE)),
+            Transform::from_translation(Vec3::new(0.0, 0.0, z)),
+            WorldPosition(object.position),
+        ));
     }
     commands.spawn((
         Sprite::from_color(Color::srgb(0.3, 0.7, 1.0), Vec2::splat(24.0)),
@@ -159,22 +185,67 @@ fn keyboard_input(
         .collect();
 }
 
+/// Project a world position into camera-relative 2D pixels. The primary follow
+/// mode uses the slice's closer scale; the billboard fallback is slightly wider.
+fn project(world: Vec3, pose: &CameraPose) -> Vec3 {
+    let scale = match pose.mode {
+        crate::offline::CameraMode::Follow3d => SCALE,
+        crate::offline::CameraMode::Billboard2d => SCALE * 0.75,
+    };
+    Vec3::new(
+        (world.x - pose.target.x) * scale,
+        -(world.z - pose.target.z) * scale,
+        0.0,
+    )
+}
+
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)] // Bevy system parameters must be passed by value.
 fn present_scene(
+    zone: Res<ZoneScene>,
     scene: Res<OfflineScene>,
     pose: Res<CameraPose>,
     mut avatars: Query<&mut Transform, (With<Avatar>, Without<SceneCamera>)>,
-    mut cameras: Query<&mut Transform, (With<SceneCamera>, Without<Avatar>)>,
+    mut objects: Query<(&WorldPosition, &mut Transform), (Without<Avatar>, Without<SceneCamera>)>,
+    mut cameras: Query<
+        &mut Transform,
+        (With<SceneCamera>, Without<Avatar>, Without<WorldPosition>),
+    >,
+    mut windows: Query<&mut Window>,
 ) {
     let scene = scene.into_inner();
     let pose = pose.into_inner();
     for mut transform in &mut avatars {
-        transform.translation.x = scene.avatar_position.x * SCALE;
-        transform.translation.y = -scene.avatar_position.z * SCALE;
+        let projected = project(scene.avatar_position, pose);
+        transform.translation.x = projected.x;
+        transform.translation.y = projected.y;
     }
-    // The top-down view follows the rig's target; its 3D offset is not used in 2D.
+    for (world, mut transform) in &mut objects {
+        let projected = project(world.0, pose);
+        transform.translation.x = projected.x;
+        transform.translation.y = projected.y;
+    }
     for mut transform in &mut cameras {
-        transform.translation.x = pose.target.x * SCALE;
-        transform.translation.y = -pose.target.z * SCALE;
+        // Objects are already camera-relative, so the camera stays at the origin.
+        transform.translation.x = 0.0;
+        transform.translation.y = 0.0;
+    }
+    if let Some(mut window) = windows.iter_mut().next() {
+        let version = zone
+            .content_version
+            .as_deref()
+            .map_or("source".to_owned(), |version| format!("v{version}"));
+        let suffix = if zone.issue_count() == 0 {
+            String::new()
+        } else {
+            format!(" - {} warning(s)", zone.issue_count())
+        };
+        window.title = format!(
+            "Lynx offline - {} [{}] {} - camera {}{suffix}",
+            zone.name,
+            zone.zone_id,
+            version,
+            pose.mode.as_str()
+        );
     }
 }
 
@@ -211,12 +282,12 @@ mod tests {
             .query_filtered::<&Transform, With<Avatar>>()
             .single(world)
             .unwrap();
-        assert_eq!(avatar.translation.y, SCALE);
+        assert_eq!(avatar.translation.y, 0.0);
         let camera = world
             .query_filtered::<&Transform, With<SceneCamera>>()
             .single(world)
             .unwrap();
-        assert_eq!(camera.translation.y, SCALE);
+        assert_eq!(camera.translation.y, 0.0);
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()
             .release(KeyCode::KeyW);
@@ -317,6 +388,43 @@ mod tests {
         assert_eq!(
             app.world().resource::<OfflineScene>().avatar_position,
             Vec3::new(1.0, 0.0, -1.0)
+        );
+    }
+
+    #[test]
+    fn startup_spawns_terrain_props_characters_and_interactables() {
+        let mut app = headless_app();
+        app.init_resource::<ButtonInput<KeyCode>>()
+            .add_plugins(OfflineWindowPlugin);
+        app.update();
+        let world = app.world_mut();
+        let terrain = world
+            .query_filtered::<&WorldPosition, Without<Avatar>>()
+            .iter(world)
+            .count();
+        assert!(terrain > 6, "terrain and objects should be spawned");
+        let avatar = world
+            .query_filtered::<&Transform, With<Avatar>>()
+            .single(world)
+            .unwrap();
+        assert_eq!(avatar.translation, Vec3::new(0.0, 0.0, 1.0));
+    }
+
+    #[test]
+    fn billboard_mode_uses_the_documented_fallback_scale() {
+        let follow = CameraPose {
+            target: Vec3::ZERO,
+            ..default()
+        };
+        let billboard = CameraPose {
+            mode: crate::offline::CameraMode::Billboard2d,
+            target: Vec3::ZERO,
+            ..default()
+        };
+        assert_eq!(project(Vec3::X, &follow), Vec3::new(SCALE, 0.0, 0.0));
+        assert_eq!(
+            project(Vec3::X, &billboard),
+            Vec3::new(SCALE * 0.75, 0.0, 0.0)
         );
     }
 }
