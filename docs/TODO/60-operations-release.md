@@ -249,7 +249,7 @@ manual baseline, not automated duration/flakiness tracking.
 ## OPS-008 — Dependency and license auditing
 
 - **Priority:** P1
-- **Status:** Ready
+- **Status:** In progress
 - **Depends on:** —
 - **References:** [security §Abuse prevention](../security.md#abuse-prevention)
 
