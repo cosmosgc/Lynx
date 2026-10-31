@@ -52,6 +52,10 @@ const MIGRATIONS: &[(&str, &[u8])] = &[
         "0012_recovery_quarantine",
         include_bytes!("../../../server/migrations/0012_recovery_quarantine.sql"),
     ),
+    (
+        "0013_fix_event_result_trigger",
+        include_bytes!("../../../server/migrations/0013_fix_event_result_trigger.sql"),
+    ),
 ];
 
 /// Schema compatibility against the migrations embedded in this binary.
@@ -179,7 +183,10 @@ mod tests {
         assert!(compare(false, &rows).compatible());
         assert!(!compare(true, &[]).compatible());
         rows.pop();
-        assert_eq!(compare(false, &rows).pending, ["0012_recovery_quarantine"]);
+        assert_eq!(
+            compare(false, &rows).pending,
+            ["0013_fix_event_result_trigger"]
+        );
         rows[0].1 = "bad".into();
         rows.push(("0007_future".into(), "secret".into()));
         let status = compare(false, &rows);

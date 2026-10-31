@@ -85,6 +85,7 @@ edit applied migration files to resolve a mismatch.
 | `0010_snapshot_event_checkpoints.sql` | Pins durable snapshots to their exact replay-log checkpoint. |
 | `0011_snapshot_checkpoint_zone.sql` | Binds zone-local checkpoint sequences to their owning zone. |
 | `0012_recovery_quarantine.sql` | Durable report of saved entries isolated during snapshot recovery. |
+| `0013_fix_event_result_trigger.sql` | Removes PL/pgSQL column/variable ambiguity in the deferred calendar-result consistency trigger. |
 
 ## Audit retention
 

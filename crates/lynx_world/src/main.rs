@@ -24,7 +24,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use backend_nakama::{
     NakamaClient, NakamaConfig, NakamaPostgresBackend, PostgresCharacterStore,
-    PostgresIdentityStore,
+    PostgresFactionCalendarStore, PostgresIdentityStore,
 };
 use clap::{Parser, Subcommand};
 use engine_core::time::Tick;
@@ -261,16 +261,42 @@ async fn serve(args: ServeArgs) -> Result<()> {
         )?)),
         _ => None,
     };
+    if let (Some(faction_calendar), Some(authority)) = (&stores.faction_calendar, &authority) {
+        let lease = authority.lease();
+        if let Err(error) =
+            faction_calendar.bind_zone_lease(&lease.zone_id, &lease.owner, lease.fencing_token)
+        {
+            let _ = authority.release();
+            return Err(error).context("failed to fence normalized faction/calendar writes");
+        }
+    }
     let recovery_started = std::time::Instant::now();
-    let startup_world = startup::load(
+    let startup_result = startup::load(
         store
             .as_ref()
             .map(|store| store.as_ref() as &dyn SnapshotStore),
         args.fresh,
         &grants,
         now_ms,
-    )
-    .context("failed to start the demo world")?;
+    );
+    let mut startup_world = match startup_result {
+        Ok(world) => world,
+        Err(error) => {
+            if let Some(authority) = &authority {
+                let _ = authority.release();
+            }
+            return Err(error).context("failed to start the demo world");
+        }
+    };
+    if let Some(faction_calendar) = &stores.faction_calendar
+        && let Err(error) =
+            initialize_normalized_world(faction_calendar, &mut startup_world, args.fresh)
+    {
+        if let Some(authority) = &authority {
+            let _ = authority.release();
+        }
+        return Err(error).context("failed to initialize normalized faction/calendar state");
+    }
     let recovery_elapsed = recovery_started.elapsed();
     let startup::StartupWorld {
         zone,
@@ -315,9 +341,15 @@ async fn serve(args: ServeArgs) -> Result<()> {
     gateway = gateway
         .with_calendar(calendar, factions)
         .context("failed to attach the demo calendar")?;
-    gateway = gateway.with_calendar_store(Box::new(backend::DemoCalendarCommit::new(
-        backend_memory::MemoryBackend::new(),
-    )));
+    gateway = if let Some(faction_calendar) = &stores.faction_calendar {
+        gateway.with_calendar_store(Box::new(backend::PostgresCalendarCommit::new(Arc::clone(
+            faction_calendar,
+        ))))
+    } else {
+        gateway.with_calendar_store(Box::new(backend::DemoCalendarCommit::new(
+            backend_memory::MemoryBackend::new(),
+        )))
+    };
     let server = WorldServer::new(gateway);
     let mut service = match &store {
         Some(store) => Service::new(server, args.tick_interval())
@@ -549,6 +581,8 @@ struct DurableStores {
     postgres: Option<Arc<PostgresSnapshotStore>>,
     /// Zone lease and event-log operations; only PostgreSQL provides them.
     leases: Option<Arc<PostgresZoneLeaseStore>>,
+    /// Fenced normalized persistence for the paired calendar/faction state.
+    faction_calendar: Option<Arc<PostgresFactionCalendarStore>>,
 }
 
 fn durable_stores(args: &ServeArgs) -> Result<DurableStores> {
@@ -561,11 +595,18 @@ fn durable_stores(args: &ServeArgs) -> Result<DurableStores> {
             PostgresZoneLeaseStore::from_env()
                 .context("failed to open the PostgreSQL zone lease store")?,
         );
+        let faction_calendar = Arc::new(PostgresFactionCalendarStore::new(
+            postgres_config_from_env()
+                .context("invalid PostgreSQL faction/calendar configuration")?
+                .connect(NoTls)
+                .context("failed to connect the PostgreSQL faction/calendar store")?,
+        ));
         let snapshot: Arc<dyn SnapshotStore + Send + Sync> = postgres.clone();
         Ok(DurableStores {
             snapshot: Some(snapshot),
             postgres: Some(postgres),
             leases: Some(leases),
+            faction_calendar: Some(faction_calendar),
         })
     } else {
         Ok(DurableStores {
@@ -575,8 +616,53 @@ fn durable_stores(args: &ServeArgs) -> Result<DurableStores> {
                 .map(|path| Arc::new(FileSnapshotStore::new(path.clone())) as _),
             postgres: None,
             leases: None,
+            faction_calendar: None,
         })
     }
+}
+
+/// Establish a verified normalized copy before it becomes a runtime authority.
+/// Snapshot replay remains the recovery source for this increment: a populated
+/// normalized pair must exactly agree with it, otherwise startup fails closed.
+fn initialize_normalized_world(
+    store: &PostgresFactionCalendarStore,
+    world: &mut startup::StartupWorld,
+    fresh: bool,
+) -> Result<()> {
+    let calendar = world.calendar.snapshot();
+    let factions = world.factions.snapshot();
+    if fresh {
+        store
+            .reset_world_state(&calendar, &factions)
+            .context("failed to atomically reset normalized faction/calendar state")?;
+    } else if let Some((stored_calendar, stored_factions)) = store
+        .load_world_state()
+        .context("failed to load normalized faction/calendar state")?
+    {
+        anyhow::ensure!(
+            stored_calendar == calendar && stored_factions == factions,
+            "normalized faction/calendar state differs from the replayed world snapshot; reconcile before serving"
+        );
+        // Rebuild from the normalized copy after equality proves both sources
+        // represent the same aggregate pair.
+        world.calendar = engine_core::world_event::WorldCalendar::from_snapshot(stored_calendar)
+            .context("normalized calendar failed validation")?;
+        world.factions = engine_core::faction::FactionWorld::from_snapshot(stored_factions)
+            .context("normalized factions failed validation")?;
+        return Ok(());
+    } else {
+        store
+            .replace_world_state(&calendar, &factions)
+            .context("failed to backfill normalized faction/calendar state")?;
+    }
+
+    anyhow::ensure!(
+        store
+            .verify_world_state(&calendar, &factions)
+            .context("failed to verify normalized faction/calendar state")?,
+        "normalized faction/calendar state does not match the source snapshot"
+    );
+    Ok(())
 }
 
 /// Take the zone lease and bind it to the durable snapshot store.

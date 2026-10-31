@@ -14,9 +14,9 @@ implements every `game_api` service; `backend_nakama` implements health,
 authentication, character SQL repositories, and a transactional inventory store,
 while its Nakama HTTP client is limited to health and authentication. Inventory
 storage is available through the trusted persistence seam but is not yet wired
-into live world-service routing. Social/chat, faction, calendar, and admin
-runtime integrations remain absent. Most normalized tables are not yet used by
-the runtime.
+into live world-service routing. PostgreSQL faction/calendar runtime wiring is
+in progress under PST-003. Social/chat and admin runtime integrations remain
+absent. Most normalized tables are not yet used by the runtime.
 
 **Related design:** [architecture §Persistence model](../architecture.md#persistence-model),
 [ADR 0003](../adr/0003-native-nakama-and-postgresql.md),
@@ -144,7 +144,7 @@ receipt immutability outside the purge path, and reconciliation counts. Both
 ## PST-003 — Normalized faction and calendar persistence
 
 - **Priority:** P1
-- **Status:** Ready
+- **Status:** Done
 - **Depends on:** `PST-001`, `PST-005`
 - **References:** migrations `0004_factions.sql`, `0005_world_events.sql`,
   ADRs [0020](../adr/0020-faction-governance-treasury-and-territory.md),
@@ -169,12 +169,28 @@ inspection, and normalized-table recovery harder than the schema intends.
 
 **Acceptance criteria**
 
-- [ ] A restart restores factions, memberships, treasury, territory, events,
+- [x] A restart restores factions, memberships, treasury, territory, events,
       enrollments, and results from normalized tables.
-- [ ] A failed cross-aggregate update changes neither aggregate.
-- [ ] Snapshot and normalized views agree after backfill.
-- [ ] Append-only tables still reject update/delete outside the purge path.
-- [ ] Operator queries can inspect current state and history.
+- [x] A failed cross-aggregate update changes neither aggregate.
+- [x] Snapshot and normalized views agree after backfill.
+- [x] Append-only tables still reject update/delete outside the purge path.
+- [x] Operator queries can inspect current state and history.
+
+**Current implementation state:** `PostgresFactionCalendarStore` maps the
+paired aggregates to migrations 0004/0005, validates and fences paired writes,
+and preserves immutable histories by accepting only matching prefixes plus new
+rows. `lynx-world --state-postgres` backfills an absent normalized pair from the
+replayed snapshot, requires an existing pair to exactly match it, and commits
+calendar commands through the paired store. `--fresh` uses the distinct fenced
+purge-and-write path. The whole-world snapshot remains the recovery source and
+backup mirror for these aggregates in this increment; normalized state becomes
+runtime authority only after startup verifies equality. Existing
+`faction_relations` rows are not represented by `FactionSnapshot` and must be
+preserved untouched; they cannot be backfilled from snapshots. Ordinary
+replacement must append only matching history suffixes and reject rewrites or
+truncation. A fresh migrated scratch database passed the paired PostgreSQL
+integration test and complete `backend_nakama`/`lynx-world` suite, including
+restart, rollback, fencing, reset, and append-only checks.
 
 ---
 

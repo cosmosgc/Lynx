@@ -40,6 +40,38 @@ impl CalendarPersistence for DemoCalendarCommit {
     }
 }
 
+/// Commits calendar and faction snapshots as one fenced PostgreSQL transaction.
+#[derive(Debug, Clone)]
+pub struct PostgresCalendarCommit {
+    store: std::sync::Arc<backend_nakama::PostgresFactionCalendarStore>,
+}
+
+impl PostgresCalendarCommit {
+    /// Wrap the normalized paired-state repository.
+    #[must_use]
+    pub fn new(store: std::sync::Arc<backend_nakama::PostgresFactionCalendarStore>) -> Self {
+        Self { store }
+    }
+}
+
+impl CalendarPersistence for PostgresCalendarCommit {
+    fn commit(
+        &self,
+        calendar: &CalendarSnapshot,
+        factions: &FactionSnapshot,
+    ) -> Result<(), EngineError> {
+        self.store
+            .replace_world_state(calendar, factions)
+            .map_err(|error| {
+                EngineError::new(
+                    ErrorCode::Internal,
+                    "the normalized calendar and faction state could not be committed",
+                )
+                .with_detail("error", error.to_string())
+            })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
