@@ -19,13 +19,30 @@ use std::path::{Path, PathBuf};
 
 use engine_core::error::{EngineError, ErrorCode};
 use engine_core::faction::FactionSnapshot;
-use engine_core::schema::SchemaVersion;
+use engine_core::schema::{PersistencePolicy, SchemaVersion};
 use engine_core::world_event::CalendarSnapshot;
+use engine_sim::entity::EntityRecord;
 use engine_sim::snapshot::ZoneSnapshot;
 
 mod postgres;
 
 pub use postgres::{PostgresSnapshotStore, PostgresZoneLeaseStore, postgres_config_from_env};
+
+/// Point-in-time result of an operator's read-only checkpoint verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SnapshotVerification {
+    /// No snapshot or checkpoint event exists for this world.
+    Absent,
+    /// A legacy snapshot exists but is not paired with a checkpoint event.
+    LegacyUncheckpointed { saved_at_ms: i64, tick: u64 },
+    /// The snapshot row matches its latest durable checkpoint event and replay.
+    Verified {
+        event_sequence: i64,
+        event_count: usize,
+        saved_at_ms: i64,
+        tick: u64,
+    },
+}
 
 /// A currently-held zone lease. The fencing token changes on every takeover.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +68,11 @@ pub struct ZoneEvent {
 /// The schema version written by this service build.
 pub const WORLD_SNAPSHOT_VERSION: SchemaVersion = SchemaVersion::new(1, 0);
 
+/// Event that replaces or inserts one persistent entity after a checkpoint.
+pub const EVENT_ENTITY_UPSERT: &str = "zone.entity.upsert";
+/// Event that removes one persistent entity after a checkpoint.
+pub const EVENT_ENTITY_REMOVE: &str = "zone.entity.remove";
+
 /// One event to append under a zone lease.
 #[derive(Debug, Clone, Copy)]
 pub struct ZoneEventInput<'a> {
@@ -69,14 +91,14 @@ pub struct ZoneEventInput<'a> {
 /// Rebuild the latest durable world state described by ordered zone events.
 ///
 /// Snapshot events deliberately carry a complete [`WorldSnapshot`]. Applying
-/// one therefore replaces the prior recovered state, making repeated replay
-/// deterministic and idempotent. Other lifecycle events do not mutate the
-/// snapshot and are retained for auditability.
+/// one replaces the prior recovered state; supported entity deltas after it
+/// update persistent entity records in sequence order. Lifecycle events remain
+/// audit-only. Unknown event kinds are ignored for compatibility.
 ///
 /// # Errors
 ///
 /// Returns an error when event sequences contain a gap, a snapshot event is
-/// malformed, or its payload fails validation or integrity verification.
+/// malformed, a delta is invalid, or a payload fails integrity verification.
 pub fn replay_world_snapshot_events(
     events: &[ZoneEvent],
     world_id: &str,
@@ -99,67 +121,177 @@ pub fn replay_world_snapshot_events(
             )
         })?;
 
-        if event.kind != "world.snapshot" {
-            continue;
+        if event.kind == "world.snapshot" {
+            if let Some(snapshot) = decode_snapshot_event(event, world_id)? {
+                recovered = Some(snapshot);
+            }
+        } else {
+            apply_entity_delta(&mut recovered, event)?;
         }
-        if event.schema_version != 1 {
-            return Err(EngineError::new(
-                ErrorCode::InvalidRequest,
-                "the zone snapshot event has an unsupported schema version",
-            )
-            .with_detail("schema_version", event.schema_version.to_string()));
-        }
-        let event_world = event
-            .payload
-            .get("world_id")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                EngineError::new(
-                    ErrorCode::InvalidRequest,
-                    "the zone snapshot event is missing its world ID",
-                )
-            })?;
-        if event_world != world_id {
-            continue;
-        }
-        let snapshot_value = event.payload.get("snapshot").cloned().ok_or_else(|| {
-            EngineError::new(
-                ErrorCode::InvalidRequest,
-                "the zone snapshot event is missing its snapshot payload",
-            )
-        })?;
-        let stored_hash = event
-            .payload
-            .get("snapshot_hash")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                EngineError::new(
-                    ErrorCode::InvalidRequest,
-                    "the zone snapshot event is missing its integrity hash",
-                )
-            })?;
-        let canonical = serde_json::to_string(&snapshot_value).map_err(|_| {
-            EngineError::new(
-                ErrorCode::InvalidRequest,
-                "the zone snapshot event cannot be decoded",
-            )
-        })?;
-        if crate::auth::hash_hex(&canonical) != stored_hash {
-            return Err(EngineError::new(
-                ErrorCode::InvalidRequest,
-                "the zone snapshot event failed its integrity check",
-            ));
-        }
-        let snapshot: WorldSnapshot = serde_json::from_value(snapshot_value).map_err(|_| {
-            EngineError::new(
-                ErrorCode::InvalidRequest,
-                "the zone snapshot event is not a valid world snapshot",
-            )
-        })?;
+    }
+    if let Some(snapshot) = &recovered {
         snapshot.validate()?;
-        recovered = Some(snapshot);
     }
     Ok(recovered)
+}
+
+fn decode_snapshot_event(
+    event: &ZoneEvent,
+    world_id: &str,
+) -> Result<Option<WorldSnapshot>, EngineError> {
+    if event.schema_version != 1 {
+        return Err(
+            replay_error("the zone snapshot event has an unsupported schema version")
+                .with_detail("schema_version", event.schema_version.to_string()),
+        );
+    }
+    let event_world = event
+        .payload
+        .get("world_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| replay_error("the zone snapshot event is missing its world ID"))?;
+    if event_world != world_id {
+        return Ok(None);
+    }
+    let snapshot_value =
+        event.payload.get("snapshot").cloned().ok_or_else(|| {
+            replay_error("the zone snapshot event is missing its snapshot payload")
+        })?;
+    let stored_hash = event
+        .payload
+        .get("snapshot_hash")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| replay_error("the zone snapshot event is missing its integrity hash"))?;
+    let canonical = serde_json::to_string(&snapshot_value)
+        .map_err(|_| replay_error("the zone snapshot event cannot be decoded"))?;
+    if crate::auth::hash_hex(&canonical) != stored_hash {
+        return Err(replay_error(
+            "the zone snapshot event failed its integrity check",
+        ));
+    }
+    let snapshot: WorldSnapshot = serde_json::from_value(snapshot_value)
+        .map_err(|_| replay_error("the zone snapshot event is not a valid world snapshot"))?;
+    snapshot.validate()?;
+    Ok(Some(snapshot))
+}
+
+fn apply_entity_delta(
+    recovered: &mut Option<WorldSnapshot>,
+    event: &ZoneEvent,
+) -> Result<(), EngineError> {
+    let delta = matches!(
+        event.kind.as_str(),
+        EVENT_ENTITY_UPSERT | EVENT_ENTITY_REMOVE
+    );
+    if delta && event.schema_version != 1 {
+        return Err(
+            replay_error("the entity event has an unsupported schema version")
+                .with_detail("schema_version", event.schema_version.to_string()),
+        );
+    }
+    if delta {
+        let Some(snapshot) = recovered else {
+            return Err(replay_error(
+                "the entity event appears before the first world checkpoint",
+            ));
+        };
+        match event.kind.as_str() {
+            EVENT_ENTITY_UPSERT => apply_entity_upsert(snapshot, event),
+            EVENT_ENTITY_REMOVE => apply_entity_remove(snapshot, event),
+            _ => unreachable!("delta kind was matched above"),
+        }
+    } else if event.kind.starts_with("zone.") {
+        Err(replay_error("the zone event kind is not replayable")
+            .with_detail("kind", event.kind.clone()))
+    } else {
+        Ok(())
+    }
+}
+
+fn apply_entity_upsert(snapshot: &mut WorldSnapshot, event: &ZoneEvent) -> Result<(), EngineError> {
+    let entity_value = event
+        .payload
+        .get("entity")
+        .cloned()
+        .ok_or_else(|| replay_error("the entity-upsert event is missing its entity payload"))?;
+    let entity: EntityRecord = serde_json::from_value(entity_value)
+        .map_err(|_| replay_error("the entity-upsert event contains an invalid entity"))?;
+    let entity_id = entity.id.to_string();
+    validate_entity_delta_tick(snapshot, event, &entity_id)?;
+    if event.actor_id.as_deref() != Some(entity_id.as_str()) {
+        return Err(replay_error(
+            "the entity-upsert actor does not match its entity",
+        ));
+    }
+    if entity.persistence != PersistencePolicy::PersistentEntity {
+        return Err(replay_error(
+            "the entity-upsert event does not describe a persistent entity",
+        ));
+    }
+    if let Some(existing) = snapshot
+        .zone
+        .entities
+        .iter_mut()
+        .find(|value| value.id == entity.id)
+    {
+        *existing = entity;
+    } else {
+        snapshot.zone.entities.push(entity);
+        snapshot.zone.entities.sort_by_key(|value| value.id);
+    }
+    snapshot.zone.tick.0 =
+        u64::try_from(event.tick).map_err(|_| replay_error("the entity event tick is negative"))?;
+    Ok(())
+}
+
+fn apply_entity_remove(snapshot: &mut WorldSnapshot, event: &ZoneEvent) -> Result<(), EngineError> {
+    let entity_id = event
+        .payload
+        .get("entity_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| replay_error("the entity-remove event is missing its entity ID"))?;
+    validate_entity_delta_tick(snapshot, event, entity_id)?;
+    if event.actor_id.as_deref() != Some(entity_id) {
+        return Err(replay_error(
+            "the entity-remove actor does not match its entity",
+        ));
+    }
+    let Some(index) = snapshot
+        .zone
+        .entities
+        .iter()
+        .position(|value| value.id.to_string() == entity_id)
+    else {
+        return Err(replay_error(
+            "the entity-remove event references an absent entity",
+        ));
+    };
+    snapshot.zone.entities.remove(index);
+    snapshot.zone.tick.0 =
+        u64::try_from(event.tick).map_err(|_| replay_error("the entity event tick is negative"))?;
+    Ok(())
+}
+
+fn validate_entity_delta_tick(
+    snapshot: &WorldSnapshot,
+    event: &ZoneEvent,
+    entity_id: &str,
+) -> Result<(), EngineError> {
+    let tick =
+        u64::try_from(event.tick).map_err(|_| replay_error("the entity event tick is negative"))?;
+    if tick < snapshot.zone.tick.0 {
+        return Err(
+            replay_error("the entity event predates the recovered checkpoint")
+                .with_detail("entity_id", entity_id)
+                .with_detail("checkpoint_tick", snapshot.zone.tick.0.to_string())
+                .with_detail("event_tick", tick.to_string()),
+        );
+    }
+    Ok(())
+}
+
+fn replay_error(message: &'static str) -> EngineError {
+    EngineError::new(ErrorCode::InvalidRequest, message)
 }
 
 /// Single-writer locking and the append-only event log for one zone.
@@ -421,6 +553,7 @@ mod tests {
     use engine_core::id::{DefinitionId, IdKind, StableId};
     use engine_core::inventory::UniformItemRules;
     use engine_core::math::Vec3;
+    use engine_sim::entity::EntityRecord;
     use engine_sim::nav::NavGrid;
     use engine_sim::zone::{Zone, ZoneConfig};
 
@@ -544,6 +677,81 @@ mod tests {
             replay_world_snapshot_events(&events, "demo-world").unwrap(),
             Some(live)
         );
+        assert_eq!(
+            replay_world_snapshot_events(&events, "demo-world").unwrap(),
+            replay_world_snapshot_events(&events, "demo-world").unwrap(),
+            "repeated recovery is deterministic"
+        );
+    }
+
+    #[test]
+    fn replay_applies_persistent_entity_upserts_and_removals_after_checkpoint() {
+        let baseline = world_snapshot();
+        let entity = EntityRecord::new(
+            StableId::from_parts(IdKind::Entity, 12, 1),
+            DefinitionId::new("entity.test").unwrap(),
+            Vec3::new(2.0, 0.0, 3.0),
+        )
+        .with_persistence(PersistencePolicy::PersistentEntity);
+        let entity_id = entity.id.to_string();
+        let upsert = ZoneEvent {
+            sequence: 1,
+            tick: 2,
+            occurred_at: std::time::SystemTime::UNIX_EPOCH,
+            kind: EVENT_ENTITY_UPSERT.to_owned(),
+            actor_id: Some(entity_id.clone()),
+            payload: serde_json::json!({ "entity": entity }),
+            schema_version: 1,
+        };
+        let mut recovered = baseline.clone();
+        recovered
+            .zone
+            .entities
+            .push(serde_json::from_value(upsert.payload["entity"].clone()).unwrap());
+        recovered.zone.tick.0 = 2;
+        let remove = ZoneEvent {
+            sequence: 2,
+            tick: 3,
+            occurred_at: std::time::SystemTime::UNIX_EPOCH,
+            kind: EVENT_ENTITY_REMOVE.to_owned(),
+            actor_id: Some(entity_id.clone()),
+            payload: serde_json::json!({ "entity_id": entity_id }),
+            schema_version: 1,
+        };
+        recovered.zone.entities.clear();
+        recovered.zone.tick.0 = 3;
+
+        assert_eq!(
+            replay_world_snapshot_events(
+                &[snapshot_event(0, &baseline), upsert, remove],
+                "demo-world"
+            )
+            .unwrap(),
+            Some(recovered)
+        );
+    }
+
+    #[test]
+    fn replay_rejects_nonpersistent_or_misidentified_entity_deltas() {
+        let baseline = world_snapshot();
+        let entity = EntityRecord::new(
+            StableId::from_parts(IdKind::Entity, 13, 1),
+            DefinitionId::new("entity.test").unwrap(),
+            Vec3::ZERO,
+        );
+        let event = ZoneEvent {
+            sequence: 1,
+            tick: 1,
+            occurred_at: std::time::SystemTime::UNIX_EPOCH,
+            kind: EVENT_ENTITY_UPSERT.to_owned(),
+            actor_id: Some("wrong-actor".to_owned()),
+            payload: serde_json::json!({ "entity": entity }),
+            schema_version: 1,
+        };
+        let error =
+            replay_world_snapshot_events(&[snapshot_event(0, &baseline), event], "demo-world")
+                .unwrap_err();
+        assert!(error.to_string().contains("does not match its entity"));
     }
 
     #[test]

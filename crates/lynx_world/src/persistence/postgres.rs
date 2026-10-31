@@ -16,12 +16,12 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use engine_core::error::{EngineError, ErrorCode};
-use postgres::{Client, Config, NoTls};
+use postgres::{Client, Config, GenericClient, NoTls, Row};
 use serde_json::Value;
 
 use super::{
-    SnapshotStore, WorldSnapshot, ZoneEvent, ZoneEventInput, ZoneLease, ZoneLeaseStore,
-    replay_world_snapshot_events,
+    SnapshotStore, SnapshotVerification, WorldSnapshot, ZoneEvent, ZoneEventInput, ZoneLease,
+    ZoneLeaseStore, replay_world_snapshot_events,
 };
 
 /// PostgreSQL lease and event-log operations for one zone at a time.
@@ -273,19 +273,21 @@ fn store_error(message: &'static str, _error: &postgres::Error) -> EngineError {
 }
 
 const SELECT_SNAPSHOT: &str = "\
-SELECT schema_major, schema_minor, saved_at_ms, payload, payload_hash \
+SELECT schema_major, schema_minor, saved_at_ms, payload, payload_hash, event_sequence, checkpoint_zone_id \
 FROM lynx.world_snapshots WHERE world_id = $1";
 
 const UPSERT_SNAPSHOT: &str = "\
 INSERT INTO lynx.world_snapshots \
-    (world_id, schema_major, schema_minor, saved_at_ms, payload, payload_hash) \
-VALUES ($1, $2, $3, $4, $5, $6) \
+    (world_id, schema_major, schema_minor, saved_at_ms, payload, payload_hash, event_sequence, checkpoint_zone_id) \
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
 ON CONFLICT (world_id) DO UPDATE SET \
     schema_major = EXCLUDED.schema_major, \
     schema_minor = EXCLUDED.schema_minor, \
     saved_at_ms = EXCLUDED.saved_at_ms, \
     payload = EXCLUDED.payload, \
-    payload_hash = EXCLUDED.payload_hash";
+    payload_hash = EXCLUDED.payload_hash, \
+    event_sequence = EXCLUDED.event_sequence, \
+    checkpoint_zone_id = EXCLUDED.checkpoint_zone_id";
 
 const SELECT_HELD_LEASE: &str = "\
 SELECT 1 FROM lynx.zone_leases \
@@ -422,6 +424,63 @@ impl PostgresSnapshotStore {
         Ok(deleted > 0)
     }
 
+    /// Verify snapshot/event recovery state without acquiring a lease or writing.
+    ///
+    /// All reads use one repeatable-read, read-only transaction. The result is
+    /// a point-in-time observation, not a reservation against later writes.
+    pub fn verify_recovery(&self, zone_id: &str) -> Result<SnapshotVerification, EngineError> {
+        if !valid_zone_id(zone_id) {
+            return Err(invalid_lease());
+        }
+        let mut client = self.client()?;
+        let mut tx = client.transaction().map_err(|error| query_error(&error))?;
+        tx.batch_execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .map_err(|error| query_error(&error))?;
+        let row = tx
+            .query_opt(SELECT_SNAPSHOT, &[&self.world_id])
+            .map_err(|error| query_error(&error))?;
+        let events = read_zone_events(&mut tx, zone_id)?;
+        let Some(row) = row else {
+            replay_world_snapshot_events(&events, &self.world_id)?;
+            if events
+                .iter()
+                .any(|event| is_snapshot_event_for(event, &self.world_id))
+            {
+                return Err(snapshot_error(
+                    "a world snapshot event exists but its checkpoint row is missing",
+                ));
+            }
+            tx.commit().map_err(|error| query_error(&error))?;
+            return Ok(SnapshotVerification::Absent);
+        };
+        let (snapshot, stored_hash, event_sequence, checkpoint_zone_id) =
+            decode_snapshot_row(&row)?;
+        let recovered = verify_snapshot_event_history(
+            &events,
+            &self.world_id,
+            zone_id,
+            &snapshot,
+            &stored_hash,
+            event_sequence,
+            checkpoint_zone_id.as_deref(),
+        )?;
+        let result = if let Some(recovered) = recovered {
+            SnapshotVerification::Verified {
+                event_sequence: event_sequence.expect("verified implies checkpoint sequence"),
+                event_count: events.len(),
+                saved_at_ms: recovered.saved_at_ms,
+                tick: recovered.zone.tick.0,
+            }
+        } else {
+            SnapshotVerification::LegacyUncheckpointed {
+                saved_at_ms: snapshot.saved_at_ms,
+                tick: snapshot.zone.tick.0,
+            }
+        };
+        tx.commit().map_err(|error| query_error(&error))?;
+        Ok(result)
+    }
+
     fn client(&self) -> Result<MutexGuard<'_, Client>, EngineError> {
         self.client.lock().map_err(|_| {
             EngineError::new(
@@ -494,98 +553,79 @@ fn connect_with_retry(config: &Config) -> Result<Client, postgres::Error> {
 impl SnapshotStore for PostgresSnapshotStore {
     fn load(&self) -> Result<Option<WorldSnapshot>, EngineError> {
         let mut client = self.client()?;
-        let row = client
+        let mut tx = client.transaction().map_err(|error| query_error(&error))?;
+        tx.batch_execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .map_err(|error| query_error(&error))?;
+        let fence = self.fence.lock().map_err(|_| store_unavailable())?.clone();
+        let row = tx
             .query_opt(SELECT_SNAPSHOT, &[&self.world_id])
             .map_err(|error| query_error(&error))?;
         let Some(row) = row else {
+            if let Some(fence) = fence {
+                let events = read_zone_events(&mut tx, &fence.zone_id)?;
+                replay_world_snapshot_events(&events, &self.world_id)?;
+                if events
+                    .iter()
+                    .any(|event| is_snapshot_event_for(event, &self.world_id))
+                {
+                    return Err(snapshot_error(
+                        "a world snapshot event exists but its checkpoint row is missing",
+                    ));
+                }
+            }
+            tx.commit().map_err(|error| query_error(&error))?;
             return Ok(None);
         };
+        let (snapshot, stored_hash, event_sequence, checkpoint_zone_id) =
+            decode_snapshot_row(&row)?;
 
-        let payload: Value = row.get("payload");
-        let stored_hash: String = row.get("payload_hash");
-        let stored_schema_major: i32 = row.get("schema_major");
-        let stored_schema_minor: i32 = row.get("schema_minor");
-        let stored_saved_at_ms: i64 = row.get("saved_at_ms");
-        let canonical = canonical_json(&payload)?;
-        if crate::auth::hash_hex(&canonical) != stored_hash {
-            return Err(snapshot_error(
-                "the stored world snapshot failed its integrity check",
-            ));
-        }
-
-        let snapshot: WorldSnapshot = serde_json::from_value(payload).map_err(|error| {
-            snapshot_error("the stored world snapshot is not valid")
-                .with_detail("error", error.to_string())
-        })?;
-        if !snapshot_metadata_matches(
-            snapshot.schema_version,
-            snapshot.saved_at_ms,
-            stored_schema_major,
-            stored_schema_minor,
-            stored_saved_at_ms,
-        ) {
-            return Err(snapshot_error(
-                "the stored world snapshot metadata does not match its payload",
-            ));
-        }
-        snapshot.validate()?;
-
-        // Stores created before transactional snapshot events remain readable.
-        // Once a lease is bound, however, startup verifies that the latest
-        // replayable event rebuilds exactly the row it is about to serve.
-        let fence = self.fence.lock().map_err(|_| store_unavailable())?.clone();
         let Some(fence) = fence else {
+            tx.commit().map_err(|error| query_error(&error))?;
             return Ok(Some(snapshot));
         };
-        let events = read_zone_events(&mut client, &fence.zone_id)?;
-        let Some(replayed) = replay_world_snapshot_events(&events, &self.world_id)? else {
-            return Ok(Some(snapshot));
-        };
-        if replayed != snapshot {
-            return Err(snapshot_error(
-                "the replayed world snapshot does not match the stored snapshot",
-            ));
-        }
-        Ok(Some(replayed))
+        let events = read_zone_events(&mut tx, &fence.zone_id)?;
+        let recovered = verify_snapshot_event_history(
+            &events,
+            &self.world_id,
+            &fence.zone_id,
+            &snapshot,
+            &stored_hash,
+            event_sequence,
+            checkpoint_zone_id.as_deref(),
+        )?;
+        tx.commit().map_err(|error| query_error(&error))?;
+        Ok(Some(recovered.unwrap_or(snapshot)))
     }
 
     fn save(&self, snapshot: &WorldSnapshot) -> Result<(), EngineError> {
         snapshot.validate()?;
+        let fence = self.fence.lock().map_err(|_| store_unavailable())?.clone();
+        if fence.is_some() {
+            let tick = i64::try_from(snapshot.zone.tick.0)
+                .map_err(|_| snapshot_error("the world snapshot tick is out of range"))?;
+            return self.save_at_tick(snapshot, tick);
+        }
         let payload = serde_json::to_value(snapshot).map_err(|error| encode_error(&error))?;
         let canonical = canonical_json(&payload)?;
         let payload_hash = crate::auth::hash_hex(&canonical);
         let schema_major = i32::from(snapshot.schema_version.major);
         let schema_minor = i32::from(snapshot.schema_version.minor);
-        let params: [&(dyn postgres::types::ToSql + Sync); 6] = [
+        let event_sequence: Option<i64> = None;
+        let checkpoint_zone_id: Option<String> = None;
+        let params: [&(dyn postgres::types::ToSql + Sync); 8] = [
             &self.world_id,
             &schema_major,
             &schema_minor,
             &snapshot.saved_at_ms,
             &payload,
             &payload_hash,
+            &event_sequence,
+            &checkpoint_zone_id,
         ];
-        let fence = self.fence.lock().map_err(|_| store_unavailable())?.clone();
-
         let mut client = self.client()?;
-        let Some(fence) = fence else {
-            client
-                .execute(UPSERT_SNAPSHOT, &params)
-                .map_err(|error| write_error(&error))?;
-            return Ok(());
-        };
-        let mut tx = client.transaction().map_err(|error| write_error(&error))?;
-        let held = tx
-            .query_opt(
-                SELECT_HELD_LEASE,
-                &[&fence.zone_id, &fence.owner, &fence.token],
-            )
+        client
+            .execute(UPSERT_SNAPSHOT, &params)
             .map_err(|error| write_error(&error))?;
-        if held.is_none() {
-            return Err(stale_lease());
-        }
-        tx.execute(UPSERT_SNAPSHOT, &params)
-            .map_err(|error| write_error(&error))?;
-        tx.commit().map_err(|error| write_error(&error))?;
         Ok(())
     }
 
@@ -599,14 +639,6 @@ impl SnapshotStore for PostgresSnapshotStore {
         let payload_hash = crate::auth::hash_hex(&canonical);
         let schema_major = i32::from(snapshot.schema_version.major);
         let schema_minor = i32::from(snapshot.schema_version.minor);
-        let params: [&(dyn postgres::types::ToSql + Sync); 6] = [
-            &self.world_id,
-            &schema_major,
-            &schema_minor,
-            &snapshot.saved_at_ms,
-            &payload,
-            &payload_hash,
-        ];
         let fence = self.fence.lock().map_err(|_| store_unavailable())?.clone();
         let Some(fence) = fence else {
             return self.save(snapshot);
@@ -623,8 +655,6 @@ impl SnapshotStore for PostgresSnapshotStore {
         if held.is_none() {
             return Err(stale_lease());
         }
-        tx.execute(UPSERT_SNAPSHOT, &params)
-            .map_err(|error| write_error(&error))?;
         let sequence: i64 = tx
             .query_one(
                 "SELECT COALESCE(MAX(sequence) + 1, 0) FROM lynx.zone_events WHERE zone_id = $1",
@@ -632,6 +662,20 @@ impl SnapshotStore for PostgresSnapshotStore {
             )
             .map_err(|error| write_error(&error))?
             .get(0);
+        let event_sequence = Some(sequence);
+        let checkpoint_zone_id = Some(fence.zone_id.clone());
+        let params: [&(dyn postgres::types::ToSql + Sync); 8] = [
+            &self.world_id,
+            &schema_major,
+            &schema_minor,
+            &snapshot.saved_at_ms,
+            &payload,
+            &payload_hash,
+            &event_sequence,
+            &checkpoint_zone_id,
+        ];
+        tx.execute(UPSERT_SNAPSHOT, &params)
+            .map_err(|error| write_error(&error))?;
         let event_payload = serde_json::json!({
             "world_id": self.world_id,
             "snapshot": payload,
@@ -651,7 +695,132 @@ impl SnapshotStore for PostgresSnapshotStore {
     }
 }
 
-fn read_zone_events(client: &mut Client, zone_id: &str) -> Result<Vec<ZoneEvent>, EngineError> {
+fn decode_snapshot_row(
+    row: &Row,
+) -> Result<(WorldSnapshot, String, Option<i64>, Option<String>), EngineError> {
+    let payload: Value = row.get("payload");
+    let stored_hash: String = row.get("payload_hash");
+    let stored_schema_major: i32 = row.get("schema_major");
+    let stored_schema_minor: i32 = row.get("schema_minor");
+    let stored_saved_at_ms: i64 = row.get("saved_at_ms");
+    let event_sequence: Option<i64> = row.get("event_sequence");
+    let checkpoint_zone_id: Option<String> = row.get("checkpoint_zone_id");
+    let canonical = canonical_json(&payload)?;
+    if crate::auth::hash_hex(&canonical) != stored_hash {
+        return Err(snapshot_error(
+            "the stored world snapshot failed its integrity check",
+        ));
+    }
+    let snapshot: WorldSnapshot = serde_json::from_value(payload).map_err(|error| {
+        snapshot_error("the stored world snapshot is not valid")
+            .with_detail("error", error.to_string())
+    })?;
+    if !snapshot_metadata_matches(
+        snapshot.schema_version,
+        snapshot.saved_at_ms,
+        stored_schema_major,
+        stored_schema_minor,
+        stored_saved_at_ms,
+    ) {
+        return Err(snapshot_error(
+            "the stored world snapshot metadata does not match its payload",
+        ));
+    }
+    snapshot.validate()?;
+    Ok((snapshot, stored_hash, event_sequence, checkpoint_zone_id))
+}
+
+fn verify_snapshot_event_history(
+    events: &[ZoneEvent],
+    world_id: &str,
+    zone_id: &str,
+    snapshot: &WorldSnapshot,
+    stored_hash: &str,
+    event_sequence: Option<i64>,
+    checkpoint_zone_id: Option<&str>,
+) -> Result<Option<WorldSnapshot>, EngineError> {
+    let matching_events: Vec<_> = events
+        .iter()
+        .filter(|event| is_snapshot_event_for(event, world_id))
+        .collect();
+    let Some(checkpoint_sequence) = event_sequence else {
+        replay_world_snapshot_events(events, world_id)?;
+        if checkpoint_zone_id.is_some() {
+            return Err(snapshot_error(
+                "the snapshot has a checkpoint zone without a checkpoint sequence",
+            ));
+        }
+        if matching_events.is_empty() {
+            // Explicit compatibility for pre-checkpoint/unfenced rows.
+            return Ok(None);
+        }
+        return Err(snapshot_error(
+            "a world snapshot event exists without a checkpoint sequence",
+        ));
+    };
+    if checkpoint_zone_id != Some(zone_id) {
+        return Err(snapshot_error(
+            "the stored world snapshot checkpoint belongs to another or unknown zone",
+        )
+        .with_detail(
+            "checkpoint_zone_id",
+            checkpoint_zone_id.unwrap_or("unknown"),
+        )
+        .with_detail("requested_zone_id", zone_id));
+    }
+    let latest_sequence = matching_events.last().map(|event| event.sequence);
+    if latest_sequence != Some(checkpoint_sequence) {
+        return Err(
+            snapshot_error("the stored world snapshot checkpoint is missing or stale")
+                .with_detail("expected_sequence", checkpoint_sequence.to_string())
+                .with_detail(
+                    "latest_sequence",
+                    latest_sequence.map_or_else(|| "none".to_owned(), |value| value.to_string()),
+                ),
+        );
+    }
+    let checkpoint = matching_events
+        .last()
+        .expect("latest_sequence came from a non-empty event list");
+    let checkpoint_hash = checkpoint
+        .payload
+        .get("snapshot_hash")
+        .and_then(Value::as_str);
+    if checkpoint_hash != Some(stored_hash) {
+        return Err(snapshot_error(
+            "the stored world snapshot does not match its checkpoint event",
+        ));
+    }
+    let checkpoint_index = events
+        .iter()
+        .position(|event| event.sequence == checkpoint_sequence)
+        .expect("matching checkpoint event has the pinned sequence");
+    let Some(checkpoint_snapshot) =
+        replay_world_snapshot_events(&events[..=checkpoint_index], world_id)?
+    else {
+        return Err(snapshot_error(
+            "the checkpoint event log does not contain a replayable world snapshot",
+        ));
+    };
+    if &checkpoint_snapshot != snapshot {
+        return Err(snapshot_error(
+            "the checkpoint event snapshot does not match the stored snapshot",
+        ));
+    }
+    replay_world_snapshot_events(events, world_id)?.map_or_else(
+        || {
+            Err(snapshot_error(
+                "the checkpoint event log does not contain a replayable world snapshot",
+            ))
+        },
+        |recovered| Ok(Some(recovered)),
+    )
+}
+
+fn read_zone_events(
+    client: &mut impl GenericClient,
+    zone_id: &str,
+) -> Result<Vec<ZoneEvent>, EngineError> {
     let rows = client
         .query(SELECT_ZONE_EVENTS, &[&zone_id])
         .map_err(|error| query_error(&error))?;
@@ -667,6 +836,11 @@ fn read_zone_events(client: &mut Client, zone_id: &str) -> Result<Vec<ZoneEvent>
             schema_version: row.get(6),
         })
         .collect())
+}
+
+fn is_snapshot_event_for(event: &ZoneEvent, world_id: &str) -> bool {
+    event.kind == "world.snapshot"
+        && event.payload.get("world_id").and_then(Value::as_str) == Some(world_id)
 }
 
 fn environment_or(name: &str, default: &str) -> String {

@@ -10,7 +10,6 @@ copied from the task entries; a dash means none are declared.
 | ID | Task | Priority | Status | Dependencies | Sequencing note |
 | --- | --- | --- | --- | --- | --- |
 | [OPS-006](60-operations-release.md#ops-006--ci-matrix-and-live-integration-coverage) | CI matrix and live-integration coverage | P1 | Ready | — | Close client-smoke and CI-duration gaps; useful parallel quality gate. |
-| [PST-005](20-persistence-backend.md#pst-005--snapshot-and-event-replay) | Snapshot and event replay | P1 | Ready | `PST-004` | Extend the transactional recovery boundary with migration, validation, retention, and verification. |
 | [SIM-007](10-simulation-gameplay.md#sim-007--navigation-budgets-and-replan-policy) | Navigation budgets and replan policy | P1 | Ready | `SIM-001` | Formalize bounded navigation before authoring integration. |
 | [SIM-018](10-simulation-gameplay.md#sim-018--determinism-and-tick-budget) | Determinism and tick budget | P1 | Ready | — | Establish measured simulation limits alongside feature work. |
 | [PST-007](20-persistence-backend.md#pst-007--postgresql-connection-hardening) | PostgreSQL connection hardening | P1 | Ready | — | Harden remote database access independently. |
@@ -55,6 +54,7 @@ copied from the task entries; a dash means none are declared.
 | [QUA-006](70-testing-quality.md#qua-006--security-abuse-test-suite) | Security abuse test suite | P1 | In progress | — | Expand abuse matrix and secret-redaction/side-effect assertions. |
 | [OPS-005](60-operations-release.md#ops-005--release-artifacts-and-packaging) | Release artifacts and packaging | P2 | In progress | — | Verify tagged release; client packages/macOS remain later work. |
 | [OPS-008](60-operations-release.md#ops-008--dependency-and-license-auditing) | Dependency and license auditing | P1 | In progress | — | Add release SBOM generation/attachment. |
+| [PST-005](20-persistence-backend.md#pst-005--snapshot-and-event-replay) | Snapshot and event replay | P1 | In progress | `PST-004` | Pin and verify checkpoint/event recovery; next add delta replay, quarantine, and measured recovery. |
 | [QUA-016](70-testing-quality.md#qua-016--flaky-test-and-ci-duration-control) | Flaky-test and CI-duration control | P2 | In progress | — | Automate duration/flakiness reporting and audit timing-sensitive tests. |
 
 ## Blocked

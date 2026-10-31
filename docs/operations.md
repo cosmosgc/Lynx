@@ -184,13 +184,29 @@ monotonically increasing fencing token; every snapshot upsert and event append
 checks the owner, token, and expiry in the same transaction as the write, so a
 process that lost the lease is rejected with `conflict` even if it has not yet
 noticed. A replacement may take over an expired lease after the previous holder
-crashes; recovery from its events is not implemented yet (`PST-005`). The
+crashes; fenced startup verifies the pinned checkpoint/event history, while
+gameplay-delta replay remains in `PST-005`. The
 holder renews every third of `--lease-ttl-ms`; if renewal reports a takeover, or
 keeps failing past the recorded expiry, the process turns not-ready and shuts
 down instead of serving stale authority. The event log records `world.started`,
 `world.snapshot`, and `world.stopped`. The file-backed store and the memory-only
 mode are unchanged and take no lease: without a shared database there is nothing
 to fence.
+
+Run a read-only, point-in-time check of the PostgreSQL checkpoint/event pair
+before a planned restart or during incident triage:
+
+```text
+lynx-world verify-snapshot --world-id demo --zone-id <zone-id>
+```
+
+The command does not acquire a lease or modify rows. `VERIFIED` means the
+snapshot row matches its pinned checkpoint event and ordered replay;
+`UNVERIFIED` means a legacy snapshot has no matching checkpoint event; `ABSENT`
+means neither snapshot nor checkpoint exists. Errors (including sequence gaps
+and row/event mismatches) return a nonzero exit. This checks checkpoint
+integrity, not gameplay-delta recovery, entity quarantine, or the 60-second
+recovery target.
 
 A snapshot is a whole-world overwrite, so falling back to the authored demo
 would otherwise mean deleting the snapshot by hand. `--fresh` does that

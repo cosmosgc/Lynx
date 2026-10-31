@@ -40,6 +40,14 @@ const MIGRATIONS: &[(&str, &[u8])] = &[
         "0009_inventory_transfer_ledger",
         include_bytes!("../../../server/migrations/0009_inventory_transfer_ledger.sql"),
     ),
+    (
+        "0010_snapshot_event_checkpoints",
+        include_bytes!("../../../server/migrations/0010_snapshot_event_checkpoints.sql"),
+    ),
+    (
+        "0011_snapshot_checkpoint_zone",
+        include_bytes!("../../../server/migrations/0011_snapshot_checkpoint_zone.sql"),
+    ),
 ];
 
 /// Schema compatibility against the migrations embedded in this binary.
@@ -167,7 +175,10 @@ mod tests {
         assert!(compare(false, &rows).compatible());
         assert!(!compare(true, &[]).compatible());
         rows.pop();
-        assert_eq!(compare(false, &rows).pending, ["0007_zone_fencing"]);
+        assert_eq!(
+            compare(false, &rows).pending,
+            ["0011_snapshot_checkpoint_zone"]
+        );
         rows[0].1 = "bad".into();
         rows.push(("0007_future".into(), "secret".into()));
         let status = compare(false, &rows);

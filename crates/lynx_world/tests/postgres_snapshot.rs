@@ -8,12 +8,16 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use engine_core::id::{DefinitionId, IdKind, StableId};
+use engine_core::math::Vec3;
+use engine_core::schema::PersistencePolicy;
 use engine_core::time::{DurationMs, Millis};
+use engine_sim::entity::EntityRecord;
 use lynx_world::auth::{Authenticator, Grant, digest};
 use lynx_world::demo;
 use lynx_world::persistence::{
-    PostgresSnapshotStore, PostgresZoneLeaseStore, SnapshotStore, WorldSnapshot,
-    WorldSnapshotInputs, ZoneEventInput, replay_world_snapshot_events,
+    PostgresSnapshotStore, PostgresZoneLeaseStore, SnapshotStore, SnapshotVerification,
+    WorldSnapshot, WorldSnapshotInputs, ZoneEventInput, replay_world_snapshot_events,
 };
 use lynx_world::startup;
 use world_gateway::{GatewayConfig, SystemResumeTokens, WorldGateway};
@@ -226,6 +230,199 @@ fn postgres_zone_lease_takeover_fences_old_owner_writes() -> anyhow::Result<()> 
     );
     assert!(store.release(&zone, "owner-b", second.fencing_token)?);
     snapshots.delete()?;
+    Ok(())
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // One isolated fixture covers checkpoint verification end to end.
+fn fenced_recovery_rejects_missing_checkpoint_rows_and_events() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+    if std::env::var("LYNX_PG_PASSWORD").is_err() {
+        anyhow::ensure!(
+            std::env::var_os("LYNX_REQUIRE_POSTGRES_TEST").is_none(),
+            "PostgreSQL test required but not configured"
+        );
+        eprintln!("skipping PostgreSQL checkpoint test: database is not configured");
+        return Ok(());
+    }
+
+    let zone = test_zone_id();
+    let world_id = test_world_id();
+    let leases = PostgresZoneLeaseStore::from_env()?;
+    let lease = leases
+        .acquire(&zone, "checkpoint-test", std::time::Duration::from_secs(30))?
+        .expect("isolated test zone lease is available");
+    let store = PostgresSnapshotStore::from_env(&world_id)?;
+    store.bind_zone_lease(&zone, "checkpoint-test", lease.fencing_token)?;
+    let mut snapshot = authored_snapshot()?;
+    snapshot.zone.tick.0 = 3;
+    let config = lynx_world::persistence::postgres_config_from_env()?;
+    let mut client = config.connect(postgres::NoTls)?;
+    let verifier = PostgresSnapshotStore::from_env(&world_id)?;
+    assert_eq!(
+        verifier.verify_recovery(&zone)?,
+        SnapshotVerification::Absent
+    );
+    store.save_at_tick(&snapshot, 3)?;
+    assert_eq!(store.load()?, Some(snapshot.clone()));
+    assert_eq!(
+        verifier.verify_recovery(&zone)?,
+        SnapshotVerification::Verified {
+            event_sequence: 0,
+            event_count: 1,
+            saved_at_ms: snapshot.saved_at_ms,
+            tick: 3,
+        }
+    );
+
+    let checkpoint_sequence: i64 = client
+        .query_one(
+            "SELECT event_sequence FROM lynx.world_snapshots WHERE world_id = $1",
+            &[&world_id],
+        )?
+        .get(0);
+    client.execute(
+        "UPDATE lynx.world_snapshots SET event_sequence = $2 WHERE world_id = $1",
+        &[&world_id, &(checkpoint_sequence + 1)],
+    )?;
+    let stale_checkpoint = store.load().unwrap_err();
+    assert!(
+        stale_checkpoint
+            .to_string()
+            .contains("checkpoint is missing or stale")
+    );
+    assert!(verifier.verify_recovery(&zone).is_err());
+    client.execute(
+        "UPDATE lynx.world_snapshots SET event_sequence = $2 WHERE world_id = $1",
+        &[&world_id, &checkpoint_sequence],
+    )?;
+
+    assert!(store.delete()?);
+    let missing_row = store.load().unwrap_err();
+    assert!(
+        missing_row
+            .to_string()
+            .contains("checkpoint row is missing")
+    );
+    assert!(verifier.verify_recovery(&zone).is_err());
+
+    store.save_at_tick(&snapshot, 3)?;
+    let mut purge = client.transaction()?;
+    purge.batch_execute("SET LOCAL lynx.allow_append_only_purge = 'on'")?;
+    purge.execute(
+        "DELETE FROM lynx.zone_events WHERE zone_id = $1 AND kind = 'world.snapshot' AND payload->>'world_id' = $2",
+        &[&zone, &world_id],
+    )?;
+    purge.commit()?;
+    let missing_event = store.load().unwrap_err();
+    assert!(
+        missing_event
+            .to_string()
+            .contains("checkpoint is missing or stale")
+    );
+    assert!(verifier.verify_recovery(&zone).is_err());
+
+    store.delete()?;
+    assert!(leases.release(&zone, "checkpoint-test", lease.fencing_token)?);
+    client.execute("DELETE FROM lynx.zone_leases WHERE zone_id = $1", &[&zone])?;
+
+    let legacy_zone = test_zone_id();
+    let legacy_world = test_world_id();
+    let legacy_lease = leases
+        .acquire(
+            &legacy_zone,
+            "legacy-checkpoint-test",
+            std::time::Duration::from_secs(30),
+        )?
+        .expect("isolated legacy test zone lease is available");
+    let legacy_store = PostgresSnapshotStore::from_env(&legacy_world)?;
+    legacy_store.save(&snapshot)?;
+    legacy_store.bind_zone_lease(
+        &legacy_zone,
+        "legacy-checkpoint-test",
+        legacy_lease.fencing_token,
+    )?;
+    assert_eq!(
+        legacy_store.verify_recovery(&legacy_zone)?,
+        SnapshotVerification::LegacyUncheckpointed {
+            saved_at_ms: snapshot.saved_at_ms,
+            tick: 3,
+        }
+    );
+    assert_eq!(legacy_store.load()?, Some(snapshot));
+    legacy_store.delete()?;
+    assert!(leases.release(
+        &legacy_zone,
+        "legacy-checkpoint-test",
+        legacy_lease.fencing_token,
+    )?);
+    client.execute(
+        "DELETE FROM lynx.zone_leases WHERE zone_id = $1",
+        &[&legacy_zone],
+    )?;
+    Ok(())
+}
+
+#[test]
+fn postgres_load_replays_entity_deltas_after_the_pinned_checkpoint() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+    if std::env::var("LYNX_PG_PASSWORD").is_err() {
+        anyhow::ensure!(
+            std::env::var_os("LYNX_REQUIRE_POSTGRES_TEST").is_none(),
+            "PostgreSQL test required but not configured"
+        );
+        eprintln!("skipping PostgreSQL entity-delta test: database is not configured");
+        return Ok(());
+    }
+
+    let zone = test_zone_id();
+    let world_id = test_world_id();
+    let leases = PostgresZoneLeaseStore::from_env()?;
+    let lease = leases
+        .acquire(
+            &zone,
+            "entity-delta-test",
+            std::time::Duration::from_secs(30),
+        )?
+        .expect("isolated test zone lease is available");
+    let store = PostgresSnapshotStore::from_env(&world_id)?;
+    store.bind_zone_lease(&zone, "entity-delta-test", lease.fencing_token)?;
+    let mut snapshot = authored_snapshot()?;
+    snapshot.zone.tick.0 = 3;
+    store.save_at_tick(&snapshot, 3)?;
+
+    let entity = EntityRecord::new(
+        StableId::from_parts(IdKind::Entity, 77, 1),
+        DefinitionId::new("entity.replay-test")?,
+        Vec3::new(2.0, 0.0, 3.0),
+    )
+    .with_persistence(PersistencePolicy::PersistentEntity);
+    let actor_id = entity.id.to_string();
+    let payload = serde_json::json!({ "entity": entity });
+    let config = lynx_world::persistence::postgres_config_from_env()?;
+    let mut client = config.connect(postgres::NoTls)?;
+    client.execute(
+        "INSERT INTO lynx.zone_events (zone_id, sequence, tick, occurred_at, kind, actor_id, payload, schema_version) VALUES ($1, 1, 4, clock_timestamp(), 'zone.entity.upsert', $2, $3, 1)",
+        &[&zone, &actor_id, &payload],
+    )?;
+
+    let mut expected = snapshot.clone();
+    expected
+        .zone
+        .entities
+        .push(serde_json::from_value(payload["entity"].clone())?);
+    expected.zone.entities.sort_by_key(|value| value.id);
+    expected.zone.tick.0 = 4;
+    assert_eq!(store.load()?, Some(expected));
+    assert_eq!(
+        store.verify_recovery(&zone)?,
+        SnapshotVerification::Verified {
+            event_sequence: 0,
+            event_count: 2,
+            saved_at_ms: snapshot.saved_at_ms,
+            tick: 4,
+        }
+    );
     Ok(())
 }
 

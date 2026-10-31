@@ -16,7 +16,8 @@ fn prepared_schema_is_rejected() -> anyhow::Result<()> {
     match scenario.as_str() {
         "missing" => {
             assert!(status.history_missing);
-            assert_eq!(status.pending.len(), 7);
+            assert_eq!(status.applied, [] as [&str; 0]);
+            assert_eq!(status.pending.last(), Some(&status.expected_head));
             assert!(message.contains("scripts/db-migrate"), "{message}");
         }
         "newer" => {

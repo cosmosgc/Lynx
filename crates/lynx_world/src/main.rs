@@ -35,7 +35,7 @@ use lynx_world::config::{AuthMode, ServeArgs};
 use lynx_world::demo;
 use lynx_world::persistence::{
     FileSnapshotStore, PostgresSnapshotStore, PostgresZoneLeaseStore, SnapshotStore,
-    ZoneLeaseStore, postgres_config_from_env,
+    SnapshotVerification, ZoneLeaseStore, postgres_config_from_env,
 };
 use lynx_world::service::Service;
 use lynx_world::startup;
@@ -69,6 +69,15 @@ enum Command {
     /// Use this to produce configuration values without writing plaintext
     /// tokens to a file: `lynx-world token-hash < token.txt`.
     TokenHash,
+    /// Read-only verification of one PostgreSQL snapshot/event checkpoint.
+    VerifySnapshot {
+        /// World ID used in `lynx.world_snapshots` and checkpoint payloads.
+        #[arg(long)]
+        world_id: String,
+        /// Zone whose ordered event log contains the checkpoint history.
+        #[arg(long)]
+        zone_id: String,
+    },
 }
 
 #[tokio::main]
@@ -80,6 +89,11 @@ async fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Serve(args) => serve(args).await,
         Command::TokenHash => token_hash(),
+        Command::VerifySnapshot { world_id, zone_id } => {
+            tokio::task::spawn_blocking(move || verify_snapshot(&world_id, &zone_id))
+                .await
+                .context("snapshot verifier task failed")?
+        }
     }
 }
 
@@ -104,6 +118,35 @@ fn token_hash() -> Result<()> {
         bail!("standard input did not contain a token");
     }
     println!("{}", auth::hash_hex(token));
+    Ok(())
+}
+
+fn verify_snapshot(world_id: &str, zone_id: &str) -> Result<()> {
+    let store = PostgresSnapshotStore::from_env(world_id)
+        .context("failed to open the PostgreSQL snapshot store")?;
+    match store
+        .verify_recovery(zone_id)
+        .context("snapshot recovery verification failed")?
+    {
+        SnapshotVerification::Absent => {
+            println!("ABSENT world_id={world_id} zone_id={zone_id} status=no-snapshot");
+        }
+        SnapshotVerification::LegacyUncheckpointed { saved_at_ms, tick } => {
+            println!(
+                "UNVERIFIED world_id={world_id} zone_id={zone_id} status=legacy-uncheckpointed saved_at_ms={saved_at_ms} tick={tick}"
+            );
+        }
+        SnapshotVerification::Verified {
+            event_sequence,
+            event_count,
+            saved_at_ms,
+            tick,
+        } => {
+            println!(
+                "VERIFIED world_id={world_id} zone_id={zone_id} checkpoint_sequence={event_sequence} event_count={event_count} saved_at_ms={saved_at_ms} tick={tick}"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -545,5 +588,24 @@ mod tests {
             panic!("expected serve")
         };
         assert!(args.validate_demo_auth_bind().is_ok());
+    }
+
+    #[test]
+    fn verify_snapshot_cli_requires_explicit_world_and_zone_ids() {
+        let cli = Cli::try_parse_from([
+            "lynx-world",
+            "verify-snapshot",
+            "--world-id",
+            "demo",
+            "--zone-id",
+            "zone_00000000000000000000000000",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::VerifySnapshot { world_id, zone_id }
+                if world_id == "demo" && zone_id == "zone_00000000000000000000000000"
+        ));
+        assert!(Cli::try_parse_from(["lynx-world", "verify-snapshot"]).is_err());
     }
 }

@@ -231,7 +231,7 @@ in `PST-005`.
 ## PST-005 — Snapshot and event replay
 
 - **Priority:** P1
-- **Status:** Ready
+- **Status:** In progress
 - **Depends on:** `PST-004`
 - **References:** [architecture §Failure and recovery](../architecture.md#failure-and-recovery),
   migration `0003_zone_state.sql`
@@ -261,6 +261,30 @@ operational verification, retention, and a measured recovery target.
 - [ ] Impossible entities are quarantined, not silently dropped.
 - [ ] Recovery completes within the documented target on the reference dataset.
 - [ ] Replay is deterministic across repeated runs.
+
+**Decision (D4):** Use a hybrid whole-world checkpoint plus append-only event
+log. The snapshot row remains authoritative; each fenced save atomically records
+the exact sequence of its `world.snapshot` checkpoint event. The current event
+log contains lifecycle markers and full checkpoint payloads, not gameplay delta
+events, so recovery reaches the last committed checkpoint but does not recover
+changes made after it.
+
+**Implementation in progress:** Migration `0010_snapshot_event_checkpoints.sql`
+pins each snapshot row to its checkpoint event; `0011_snapshot_checkpoint_zone.sql`
+adds the zone identity because event sequences are zone-local. Both migrations
+backfill only unambiguous matching historical data. Fenced loads reject a
+missing checkpoint row/event, a stale checkpoint sequence, an unknown or
+mismatched zone, an event hash mismatch, sequence gaps, corrupt payloads, or a
+replay that disagrees with the stored snapshot. Legacy rows without a sequence
+are accepted only when no matching checkpoint event exists. Fenced `save()`
+routes through the atomic snapshot-and-event write path. `lynx-world
+verify-snapshot` provides read-only point-in-time verification in a
+repeatable-read transaction without acquiring a lease; it distinguishes
+verified, legacy-uncheckpointed, and absent state. The replay reducer now
+understands version-1 `zone.entity.upsert` and `zone.entity.remove` events after
+the latest checkpoint, validates their tick/actor/entity identity and
+persistence policy, and returns the recovered entity state. Gameplay mutation
+paths do not yet emit these deltas, so the reducer is not end-to-end durability.
 
 ---
 

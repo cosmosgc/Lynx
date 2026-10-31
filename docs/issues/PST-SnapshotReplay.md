@@ -9,7 +9,26 @@
 
 ## Resolution
 
-The architecture targets snapshot loading, event replay, reference validation, and a 60-second recovery time. The current implementation restores a whole-world snapshot but has no event-sourced recovery path; changes since the last successful snapshot can be lost.
+The persistence model is now explicitly hybrid: the whole-world snapshot is the
+authoritative checkpoint, and the ordered zone event log records lifecycle
+markers plus full snapshot checkpoints. Migrations `0010_snapshot_event_checkpoints.sql`
+and `0011_snapshot_checkpoint_zone.sql` store the checkpoint sequence and zone
+with the snapshot row and backfill only unambiguous matching checkpoints. Fenced startup verifies the exact row/event
+pair, replays the ordered checkpoint history, and fails closed on gaps, missing
+or stale checkpoints, corruption, or mismatches. Untracked legacy snapshots are
+accepted only when the event log contains no checkpoint event for that world.
+Operators can run `lynx-world verify-snapshot` for a read-only point-in-time
+check without taking the zone lease.
+
+This does not yet replay gameplay delta events: state after the latest committed
+checkpoint can still be lost unless the event log contains the supported
+`zone.entity.upsert` / `zone.entity.remove` records. The reducer applies those
+version-1 events after the latest checkpoint and fails closed on invalid,
+non-persistent, misidentified, or pre-checkpoint entity changes. The live world
+does not yet emit these events for gameplay mutations, so this is a replay
+contract and reducer, not end-to-end delta durability. Reference quarantine,
+end-to-end event emission, dry-run verification, and the measured 60-second
+recovery target remain open PST-005 work.
 
 Partial hardening: `engine_sim::Zone::restore` now rejects duplicate action,
 link, and transfer idempotency keys, mismatched action cache keys, oversized
@@ -18,18 +37,20 @@ non-entity endpoints. Tests cover corruption and a valid transfer round trip.
 This is fail-closed snapshot validation, not event replay or quarantine. Transfer
 endpoints may refer to historical entities, so their existence is not checked;
 receipt slot history and other inventory/ownership invariants remain unverified.
-The replay model and durable zone event log remain dependent on PST-004 and D4.
+The replay model and durable zone event log were established by PST-004 and D4;
+PST-005 continues with delta replay, quarantine, operator verification, and
+recovery-time measurement.
 
 The persistence layer must implement:
-- Deterministic replay of zone events against a snapshot baseline
+- [x] Deterministic replay of typed persistent-entity upsert/removal events after a snapshot baseline
 - Reference validation after replay (entity tombstones, links, inventories)
 - Quarantine mechanism for impossible entities instead of silent reset
 - Measurable recovery time with a 60-second target on the reference dataset
 
 ## Defect
 
-The `PostgresSnapshotStore` loads only one whole-world snapshot and provides no event sourcing or delta replay. This means:
-- A process restart can restore a configured snapshot, but not changes made after it
+The `PostgresSnapshotStore` replays and validates full snapshot checkpoints but does not yet apply gameplay delta events. This means:
+- A process restart restores the last committed snapshot, but not changes made after it
 - There is no incremental recovery for specific zones or characters
 - The documented 60-second recovery target has not been demonstrated
 - Reconnect after a crash loses all session state even though the world survives
