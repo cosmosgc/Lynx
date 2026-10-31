@@ -249,14 +249,22 @@ format, validation rules, and formatting policy are specified in
   silently reset.
 - Fenced PostgreSQL startup replays and verifies the checkpoint history before
   serving. It fails closed on sequence gaps, missing or stale checkpoint rows,
-  corrupt checkpoint payloads, and row/event mismatches. It does not yet replay
-  gameplay delta events, quarantine impossible entities, or have a measured
-  60-second recovery guarantee.
+  corrupt checkpoint payloads, row/event mismatches, and non-monotonic event
+  ticks. Persistent entity upserts/removals after the checkpoint are applied
+  deterministically. Links, cooldowns, transfer receipts, calendar, and faction
+  state are still recovered only from the whole-world checkpoint.
+- Recovery validates entity identity, persistence policy, inventories, health
+  ranges, links, cooldowns, and transfer receipts. Individually impossible
+  entries are quarantined and recorded in `lynx.recovery_quarantine` (or a
+  `*.quarantine.json` sidecar for file snapshots) instead of silently vanishing;
+  structural corruption still fails startup. `lynx-world verify-snapshot`
+  performs the same replay and dry-run restore read-only.
 - With `--state-postgres`, an expired lease may be taken over by a replacement.
   The token increment fences the old owner out of both snapshot writes and the
   event log, and the displaced process stops rather than continuing to serve.
-  Checkpoint verification is implemented; gameplay delta replay, quarantine,
-  dry-run verification, and recovery performance remain in `PST-005`.
+  Startup logs measured recovery time, and a reference-dataset test enforces the
+  60-second target. Per-tick delta coverage for non-entity aggregates, event-log
+  retention, and the measured production P95 remain in `PST-005`.
 - Target: admin actions and reputation changes are appended to a durable audit
   log in the same transaction as the mutation.
 

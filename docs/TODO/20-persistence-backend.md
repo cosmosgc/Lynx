@@ -256,11 +256,13 @@ operational verification, retention, and a measured recovery target.
 **Acceptance criteria**
 
 - [ ] Recovery from snapshot + events restores the same state as before the
-      crash for a multi-tick scenario.
-- [ ] Corrupt or missing events fail loudly with a recoverable diagnostic.
-- [ ] Impossible entities are quarantined, not silently dropped.
-- [ ] Recovery completes within the documented target on the reference dataset.
-- [ ] Replay is deterministic across repeated runs.
+      crash for a multi-tick scenario (entity state is covered; links,
+      cooldowns, transfer receipts, calendar, and factions are still
+      checkpoint-only).
+- [x] Corrupt or missing events fail loudly with a recoverable diagnostic.
+- [x] Impossible entities are quarantined, not silently dropped.
+- [x] Recovery completes within the documented target on the reference dataset.
+- [x] Replay is deterministic across repeated runs.
 
 **Decision (D4):** Use a hybrid whole-world checkpoint plus append-only event
 log. The snapshot row remains authoritative; each fenced save atomically records
@@ -282,11 +284,27 @@ are accepted only when no matching checkpoint event exists. Fenced `save()`
 routes through the atomic snapshot-and-event write path. `lynx-world
 verify-snapshot` provides read-only point-in-time verification in a
 repeatable-read transaction without acquiring a lease; it distinguishes
-verified, legacy-uncheckpointed, and absent state. The replay reducer now
-understands version-1 `zone.entity.upsert` and `zone.entity.remove` events after
-the latest checkpoint, validates their tick/actor/entity identity and
-persistence policy, and returns the recovered entity state. The service emits
-these events atomically per tick; append failure stops the authority loop.
+verified, legacy-uncheckpointed, and absent state, and performs a dry-run zone
+restore that reports quarantined entries. The replay reducer understands
+version-1 `zone.entity.upsert` and `zone.entity.remove` events after the latest
+checkpoint, validates their tick/actor/entity identity, persistence policy, and
+non-decreasing tick order, and applies them through a stable-ID map so repeated
+runs produce the same canonical state. The service emits these events atomically
+per tick; append failure stops the authority loop.
+
+`Zone::restore_quarantining` validates entity identity and persistence policy,
+inventories, health ranges, links, cooldowns, and transfer receipts after replay.
+Structurally invalid snapshots still fail closed, but individually impossible
+entries are skipped and returned in a report. Migration
+`0012_recovery_quarantine.sql` stores that report in
+`lynx.recovery_quarantine` (deduplicated and refreshed on repeat), and the file
+store writes a `*.quarantine.json` sidecar. Startup logs each record, persists
+the report before serving, and aborts if the report cannot be stored. The
+reference recovery dataset is 1,000 persistent entities with 5,000 upserts and
+400 removals; `recovery_reference_dataset_completes_within_the_documented_target`
+measures replay and enforces the 60-second target, and startup logs the measured
+recovery time. Remaining PST-005 work is per-tick delta coverage for links,
+cooldowns, transfers, calendar, and factions, plus log retention.
 
 ---
 

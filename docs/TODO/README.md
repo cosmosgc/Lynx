@@ -89,8 +89,8 @@ the quick audit; update it when a gap is found or closed.
 | World chat exists in `game_api` but is not routed by the gateway | [README](../../README.md#phase-3--interaction-and-mind-system--in-progress) | `SIM-008` |
 | Durable per-aggregate inventory and transfer ledger are not implemented | [persistence backlog](20-persistence-backend.md#pst-002--inventory-and-transfer-ledger-persistence) | `PST-002` |
 | Production admission requires an already-live actor; authoritative character population and other Nakama services remain incomplete | [persistence backlog](20-persistence-backend.md#pst-001--account-and-character-persistence), [networking](../networking.md#world-edge-identity-admission) | `PST-010`, `SIM-014` |
-| `zone_leases` and `zone_events` are used by the PostgreSQL runtime; retention policy and replay are outstanding | [persistence backlog](20-persistence-backend.md#pst-004--zone-leases-fencing-and-event-log) | `PST-004`, `PST-005` |
-| Snapshot replay is not implemented; recovery target unproven | [architecture](../architecture.md#failure-and-recovery) | `PST-005` |
+| `zone_leases` and `zone_events` are used by the PostgreSQL runtime; persistent-entity replay is implemented, but event retention and non-entity delta replay are outstanding | [persistence backlog](20-persistence-backend.md#pst-004--zone-leases-fencing-and-event-log) | `PST-004`, `PST-005` |
+| Persistent-entity replay, durable quarantine, dry-run verification, and a measured 60-second reference target exist; non-entity delta coverage and production-scale recovery timing remain open | [architecture](../architecture.md#failure-and-recovery) | `PST-005` |
 | PostgreSQL adapter is plain TCP, no TLS | [operations](../operations.md) | `PST-007`, `NET-003` |
 | Sessions and resume windows are process-local | [networking](../networking.md#reconnect-and-recovery) | `PST-006` |
 | Session and token abuse defenses, including revocation and attack alerting, remain incomplete | [networking backlog](30-networking-security.md#net-007--session-and-token-abuse-defenses) | `NET-007` |

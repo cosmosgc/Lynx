@@ -183,6 +183,20 @@ impl Inventory {
         Ok(Self { capacity, slots })
     }
 
+    /// Re-check a deserialized inventory against the same rules
+    /// [`Inventory::from_slots`] enforces.
+    ///
+    /// Snapshots deserialize their inventory directly, bypassing the
+    /// constructor, so restore paths call this before adopting the state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an empty inventory, too many slots, zero
+    /// quantities, over-limit stacks, or item-instance IDs of the wrong kind.
+    pub fn validate(&self, rules: &dyn ItemRules) -> Result<(), EngineError> {
+        Self::from_slots(self.slots.clone(), rules).map(|_| ())
+    }
+
     /// Number of slots.
     #[must_use]
     pub fn capacity(&self) -> usize {

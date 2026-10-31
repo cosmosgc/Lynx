@@ -9,6 +9,7 @@
 use anyhow::{Context, Result};
 use engine_core::faction::FactionWorld;
 use engine_core::world_event::WorldCalendar;
+use engine_sim::snapshot::QuarantinedRecord;
 use engine_sim::zone::Zone;
 
 use crate::auth::Grant;
@@ -24,6 +25,8 @@ pub struct StartupWorld {
     pub calendar: WorldCalendar,
     /// Faction aggregate paired with `calendar`.
     pub factions: FactionWorld,
+    /// Saved entries isolated during restore instead of being adopted.
+    pub quarantined: Vec<QuarantinedRecord>,
 }
 
 /// Build the world the service starts on.
@@ -54,16 +57,30 @@ pub fn load(
         }
     };
 
-    let zone = match saved.as_ref() {
+    let (zone, quarantined) = match saved.as_ref() {
         Some(world) => {
             tracing::info!(
                 saved_at_ms = world.saved_at_ms,
                 entities = world.zone.entities.len(),
                 "restoring the world from the snapshot file"
             );
-            demo::restore_zone(&world.zone).context("failed to restore the demo zone")?
+            let report = demo::restore_zone_quarantining(&world.zone)
+                .context("failed to restore the demo zone")?;
+            for record in &report.quarantined {
+                tracing::warn!(
+                    section = %record.section,
+                    entity = ?record.entity,
+                    code = %record.code,
+                    message = %record.message,
+                    "saved entry quarantined during recovery"
+                );
+            }
+            (report.zone, report.quarantined)
         }
-        None => demo::build_zone(grants).context("failed to build the demo zone")?,
+        None => (
+            demo::build_zone(grants).context("failed to build the demo zone")?,
+            Vec::new(),
+        ),
     };
 
     let (calendar, factions) = if let Some(WorldSnapshot {
@@ -93,5 +110,6 @@ pub fn load(
         zone,
         calendar,
         factions,
+        quarantined,
     })
 }

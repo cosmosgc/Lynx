@@ -13,16 +13,18 @@
 //! A token hash is never part of a snapshot, and session state (resume tokens,
 //! connection IDs) stays in memory as before.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use engine_core::error::{EngineError, ErrorCode};
 use engine_core::faction::FactionSnapshot;
+use engine_core::id::{IdKind, StableId};
 use engine_core::schema::{PersistencePolicy, SchemaVersion};
 use engine_core::world_event::CalendarSnapshot;
 use engine_sim::entity::EntityRecord;
-use engine_sim::snapshot::ZoneSnapshot;
+use engine_sim::snapshot::{QuarantinedRecord, ZoneSnapshot};
 
 mod postgres;
 
@@ -68,6 +70,9 @@ pub struct ZoneEvent {
 /// The schema version written by this service build.
 pub const WORLD_SNAPSHOT_VERSION: SchemaVersion = SchemaVersion::new(1, 0);
 
+/// Documented upper bound for restoring world state during startup.
+pub const RECOVERY_TARGET: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Event that replaces or inserts one persistent entity after a checkpoint.
 pub const EVENT_ENTITY_UPSERT: &str = "zone.entity.upsert";
 /// Event that removes one persistent entity after a checkpoint.
@@ -104,7 +109,11 @@ pub fn replay_world_snapshot_events(
     world_id: &str,
 ) -> Result<Option<WorldSnapshot>, EngineError> {
     let mut expected_sequence = 0_i64;
-    let mut recovered = None;
+    let mut recovered: Option<WorldSnapshot> = None;
+    // Entity deltas are applied through a keyed map so replay stays O(log n)
+    // per event and always emits the canonical stable-ID order of a snapshot.
+    let mut entities: BTreeMap<StableId, EntityRecord> = BTreeMap::new();
+    let mut last_tick = 0_u64;
     for event in events {
         if event.sequence != expected_sequence {
             return Err(EngineError::new(
@@ -123,16 +132,57 @@ pub fn replay_world_snapshot_events(
 
         if event.kind == "world.snapshot" {
             if let Some(snapshot) = decode_snapshot_event(event, world_id)? {
+                let tick = snapshot.zone.tick.0;
+                if tick < last_tick {
+                    return Err(replay_error(
+                        "a world checkpoint moves the recovered tick backwards",
+                    )
+                    .with_detail("previous_tick", last_tick.to_string())
+                    .with_detail("checkpoint_tick", tick.to_string()));
+                }
+                last_tick = tick;
+                entities = snapshot
+                    .zone
+                    .entities
+                    .iter()
+                    .cloned()
+                    .map(|entity| (entity.id, entity))
+                    .collect();
                 recovered = Some(snapshot);
             }
-        } else {
-            apply_entity_delta(&mut recovered, event)?;
+        } else if matches!(
+            event.kind.as_str(),
+            EVENT_ENTITY_UPSERT | EVENT_ENTITY_REMOVE
+        ) {
+            let snapshot = recovered.as_mut().ok_or_else(|| {
+                replay_error("the entity event appears before the first world checkpoint")
+            })?;
+            let tick = event_tick(event)?;
+            if tick < last_tick {
+                return Err(
+                    replay_error("an entity event moves the recovered tick backwards")
+                        .with_detail("previous_tick", last_tick.to_string())
+                        .with_detail("event_tick", tick.to_string()),
+                );
+            }
+            last_tick = tick;
+            match event.kind.as_str() {
+                EVENT_ENTITY_UPSERT => apply_entity_upsert(snapshot, &mut entities, event, tick)?,
+                EVENT_ENTITY_REMOVE => apply_entity_remove(snapshot, &mut entities, event, tick)?,
+                _ => unreachable!("entity delta kind was matched above"),
+            }
+        } else if event.kind.starts_with("zone.") {
+            return Err(replay_error("the zone event kind is not replayable")
+                .with_detail("kind", event.kind.clone()));
         }
     }
-    if let Some(snapshot) = &recovered {
+    if let Some(mut snapshot) = recovered {
+        snapshot.zone.entities = entities.into_values().collect();
         snapshot.validate()?;
+        Ok(Some(snapshot))
+    } else {
+        Ok(None)
     }
-    Ok(recovered)
 }
 
 fn decode_snapshot_event(
@@ -175,40 +225,22 @@ fn decode_snapshot_event(
     Ok(Some(snapshot))
 }
 
-fn apply_entity_delta(
-    recovered: &mut Option<WorldSnapshot>,
+fn event_tick(event: &ZoneEvent) -> Result<u64, EngineError> {
+    u64::try_from(event.tick).map_err(|_| replay_error("the entity event tick is negative"))
+}
+
+fn apply_entity_upsert(
+    snapshot: &mut WorldSnapshot,
+    entities: &mut BTreeMap<StableId, EntityRecord>,
     event: &ZoneEvent,
+    tick: u64,
 ) -> Result<(), EngineError> {
-    let delta = matches!(
-        event.kind.as_str(),
-        EVENT_ENTITY_UPSERT | EVENT_ENTITY_REMOVE
-    );
-    if delta && event.schema_version != 1 {
+    if event.schema_version != 1 {
         return Err(
             replay_error("the entity event has an unsupported schema version")
                 .with_detail("schema_version", event.schema_version.to_string()),
         );
     }
-    if delta {
-        let Some(snapshot) = recovered else {
-            return Err(replay_error(
-                "the entity event appears before the first world checkpoint",
-            ));
-        };
-        match event.kind.as_str() {
-            EVENT_ENTITY_UPSERT => apply_entity_upsert(snapshot, event),
-            EVENT_ENTITY_REMOVE => apply_entity_remove(snapshot, event),
-            _ => unreachable!("delta kind was matched above"),
-        }
-    } else if event.kind.starts_with("zone.") {
-        Err(replay_error("the zone event kind is not replayable")
-            .with_detail("kind", event.kind.clone()))
-    } else {
-        Ok(())
-    }
-}
-
-fn apply_entity_upsert(snapshot: &mut WorldSnapshot, event: &ZoneEvent) -> Result<(), EngineError> {
     let entity_value = event
         .payload
         .get("entity")
@@ -216,8 +248,8 @@ fn apply_entity_upsert(snapshot: &mut WorldSnapshot, event: &ZoneEvent) -> Resul
         .ok_or_else(|| replay_error("the entity-upsert event is missing its entity payload"))?;
     let entity: EntityRecord = serde_json::from_value(entity_value)
         .map_err(|_| replay_error("the entity-upsert event contains an invalid entity"))?;
+    entity.id.expect_kind(IdKind::Entity)?;
     let entity_id = entity.id.to_string();
-    validate_entity_delta_tick(snapshot, event, &entity_id)?;
     if event.actor_id.as_deref() != Some(entity_id.as_str()) {
         return Err(replay_error(
             "the entity-upsert actor does not match its entity",
@@ -228,65 +260,43 @@ fn apply_entity_upsert(snapshot: &mut WorldSnapshot, event: &ZoneEvent) -> Resul
             "the entity-upsert event does not describe a persistent entity",
         ));
     }
-    if let Some(existing) = snapshot
-        .zone
-        .entities
-        .iter_mut()
-        .find(|value| value.id == entity.id)
-    {
-        *existing = entity;
-    } else {
-        snapshot.zone.entities.push(entity);
-        snapshot.zone.entities.sort_by_key(|value| value.id);
-    }
-    snapshot.zone.tick.0 =
-        u64::try_from(event.tick).map_err(|_| replay_error("the entity event tick is negative"))?;
+    entities.insert(entity.id, entity);
+    snapshot.zone.tick.0 = tick;
     Ok(())
 }
 
-fn apply_entity_remove(snapshot: &mut WorldSnapshot, event: &ZoneEvent) -> Result<(), EngineError> {
+fn apply_entity_remove(
+    snapshot: &mut WorldSnapshot,
+    entities: &mut BTreeMap<StableId, EntityRecord>,
+    event: &ZoneEvent,
+    tick: u64,
+) -> Result<(), EngineError> {
+    if event.schema_version != 1 {
+        return Err(
+            replay_error("the entity event has an unsupported schema version")
+                .with_detail("schema_version", event.schema_version.to_string()),
+        );
+    }
     let entity_id = event
         .payload
         .get("entity_id")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| replay_error("the entity-remove event is missing its entity ID"))?;
-    validate_entity_delta_tick(snapshot, event, entity_id)?;
+    let parsed = StableId::parse(entity_id)
+        .map_err(|_| replay_error("the entity-remove event has an invalid entity ID"))?;
+    parsed.expect_kind(IdKind::Entity)?;
     if event.actor_id.as_deref() != Some(entity_id) {
         return Err(replay_error(
             "the entity-remove actor does not match its entity",
         ));
     }
-    let Some(index) = snapshot
-        .zone
-        .entities
-        .iter()
-        .position(|value| value.id.to_string() == entity_id)
-    else {
-        return Err(replay_error(
-            "the entity-remove event references an absent entity",
-        ));
-    };
-    snapshot.zone.entities.remove(index);
-    snapshot.zone.tick.0 =
-        u64::try_from(event.tick).map_err(|_| replay_error("the entity event tick is negative"))?;
-    Ok(())
-}
-
-fn validate_entity_delta_tick(
-    snapshot: &WorldSnapshot,
-    event: &ZoneEvent,
-    entity_id: &str,
-) -> Result<(), EngineError> {
-    let tick =
-        u64::try_from(event.tick).map_err(|_| replay_error("the entity event tick is negative"))?;
-    if tick < snapshot.zone.tick.0 {
+    if entities.remove(&parsed).is_none() {
         return Err(
-            replay_error("the entity event predates the recovered checkpoint")
-                .with_detail("entity_id", entity_id)
-                .with_detail("checkpoint_tick", snapshot.zone.tick.0.to_string())
-                .with_detail("event_tick", tick.to_string()),
+            replay_error("the entity-remove event references an absent entity")
+                .with_detail("entity_id", entity_id),
         );
     }
+    snapshot.zone.tick.0 = tick;
     Ok(())
 }
 
@@ -474,6 +484,24 @@ pub trait SnapshotStore: std::fmt::Debug {
     fn records_snapshot_events_transactionally(&self) -> bool {
         false
     }
+
+    /// Persist entries isolated during recovery so they stay operator-visible.
+    ///
+    /// Stores without a durable quarantine location accept the report and rely
+    /// on the caller's log. File and PostgreSQL stores keep it next to the
+    /// snapshot so a later `verify-snapshot` can report it.
+    fn record_quarantine(
+        &self,
+        _zone_id: &str,
+        _records: &[QuarantinedRecord],
+    ) -> Result<(), EngineError> {
+        Ok(())
+    }
+
+    /// Read the durable quarantine report for this world and zone.
+    fn quarantine_records(&self, _zone_id: &str) -> Result<Vec<QuarantinedRecord>, EngineError> {
+        Ok(Vec::new())
+    }
 }
 
 /// A single-file snapshot store.
@@ -547,6 +575,64 @@ impl SnapshotStore for FileSnapshotStore {
         // what this seam promises.
         fs::rename(&temp, &self.path).map_err(|error| io_error(&error, &self.path))?;
         Ok(())
+    }
+
+    fn record_quarantine(
+        &self,
+        _zone_id: &str,
+        records: &[QuarantinedRecord],
+    ) -> Result<(), EngineError> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let path = self.quarantine_path();
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent).map_err(|error| io_error(&error, &path))?;
+        }
+        let body = serde_json::to_vec_pretty(records).map_err(|error| {
+            EngineError::new(
+                ErrorCode::Internal,
+                "the recovery quarantine report could not be encoded",
+            )
+            .with_detail("error", error.to_string())
+        })?;
+        let temp = path.with_extension("tmp");
+        fs::write(&temp, body).map_err(|error| io_error(&error, &temp))?;
+        fs::rename(&temp, &path).map_err(|error| io_error(&error, &path))?;
+        Ok(())
+    }
+
+    fn quarantine_records(&self, _zone_id: &str) -> Result<Vec<QuarantinedRecord>, EngineError> {
+        let bytes = match fs::read(self.quarantine_path()) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(EngineError::new(
+                    ErrorCode::Internal,
+                    "the recovery quarantine report could not be read",
+                )
+                .with_detail("path", self.quarantine_path().display().to_string())
+                .with_detail("error", error.to_string()));
+            }
+        };
+        serde_json::from_slice(&bytes).map_err(|error| {
+            EngineError::new(
+                ErrorCode::InvalidRequest,
+                "the recovery quarantine report is not valid",
+            )
+            .with_detail("path", self.quarantine_path().display().to_string())
+            .with_detail("error", error.to_string())
+        })
+    }
+}
+
+impl FileSnapshotStore {
+    /// Sidecar path holding the last recovery quarantine report.
+    #[must_use]
+    pub fn quarantine_path(&self) -> PathBuf {
+        self.path.with_extension("quarantine.json")
     }
 }
 
@@ -765,6 +851,141 @@ mod tests {
             replay_world_snapshot_events(&[snapshot_event(0, &baseline), event], "demo-world")
                 .unwrap_err();
         assert!(error.to_string().contains("does not match its entity"));
+    }
+
+    #[test]
+    fn replay_rejects_a_checkpoint_that_moves_the_tick_backwards() {
+        let mut baseline = world_snapshot();
+        baseline.zone.tick.0 = 5;
+        let mut older = world_snapshot();
+        older.zone.tick.0 = 3;
+
+        let error = replay_world_snapshot_events(
+            &[snapshot_event(0, &baseline), snapshot_event(1, &older)],
+            "demo-world",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("backwards"));
+        assert_eq!(error.code(), ErrorCode::InvalidRequest);
+    }
+
+    #[test]
+    fn replay_rejects_entity_events_with_a_malformed_identity() {
+        let baseline = world_snapshot();
+        let event = ZoneEvent {
+            sequence: 1,
+            tick: 1,
+            occurred_at: std::time::SystemTime::UNIX_EPOCH,
+            kind: EVENT_ENTITY_REMOVE.to_owned(),
+            actor_id: Some("not-a-stable-id".to_owned()),
+            payload: serde_json::json!({ "entity_id": "not-a-stable-id" }),
+            schema_version: 1,
+        };
+        let error =
+            replay_world_snapshot_events(&[snapshot_event(0, &baseline), event], "demo-world")
+                .unwrap_err();
+        assert!(error.to_string().contains("invalid entity ID"));
+    }
+
+    #[test]
+    fn recovery_reference_dataset_completes_within_the_documented_target() {
+        // Reference dataset: 1,000 persistent entities, 5,000 upserts, and 400
+        // removals. This is the measured recovery workload for the 60-second
+        // target; see docs/operations.md.
+        const ENTITIES: u128 = 1_000;
+        const UPSERTS: u128 = 5_000;
+        const REMOVALS: u128 = 400;
+
+        let mut baseline = world_snapshot();
+        baseline.zone.entities = (0..ENTITIES)
+            .map(|index| {
+                EntityRecord::new(
+                    StableId::from_parts(
+                        IdKind::Entity,
+                        1_000 + u64::try_from(index).unwrap(),
+                        index,
+                    ),
+                    DefinitionId::new("entity.recovery-reference").unwrap(),
+                    Vec3::new(0.0, 0.0, 0.0),
+                )
+                .with_persistence(PersistencePolicy::PersistentEntity)
+            })
+            .collect();
+        baseline.zone.entities.sort_by_key(|entity| entity.id);
+
+        let mut events = Vec::with_capacity(1 + (UPSERTS + REMOVALS) as usize);
+        events.push(snapshot_event(0, &baseline));
+        let mut sequence = 1_i64;
+        for index in 0..UPSERTS {
+            let source = &baseline.zone.entities[usize::try_from(index % ENTITIES).unwrap()];
+            let mut entity = source.clone();
+            entity.transform.position.x += f32::from(u8::try_from(index % 7).unwrap()) * 0.01;
+            let actor_id = entity.id.to_string();
+            events.push(ZoneEvent {
+                sequence,
+                tick: sequence,
+                occurred_at: std::time::SystemTime::UNIX_EPOCH,
+                kind: EVENT_ENTITY_UPSERT.to_owned(),
+                actor_id: Some(actor_id),
+                payload: serde_json::json!({ "entity": entity }),
+                schema_version: 1,
+            });
+            sequence += 1;
+        }
+        for index in 0..REMOVALS {
+            let entity_id = baseline.zone.entities[usize::try_from(index).unwrap()]
+                .id
+                .to_string();
+            events.push(ZoneEvent {
+                sequence,
+                tick: sequence,
+                occurred_at: std::time::SystemTime::UNIX_EPOCH,
+                kind: EVENT_ENTITY_REMOVE.to_owned(),
+                actor_id: Some(entity_id.clone()),
+                payload: serde_json::json!({ "entity_id": entity_id }),
+                schema_version: 1,
+            });
+            sequence += 1;
+        }
+
+        let started = std::time::Instant::now();
+        let recovered = replay_world_snapshot_events(&events, "demo-world")
+            .expect("the reference dataset replays");
+        let elapsed = started.elapsed();
+        let repeated = replay_world_snapshot_events(&events, "demo-world")
+            .expect("the reference dataset replays again");
+        assert_eq!(recovered, repeated, "repeated recovery is deterministic");
+        assert_eq!(
+            recovered.unwrap().zone.entities.len(),
+            usize::try_from(ENTITIES - REMOVALS).unwrap()
+        );
+        assert!(
+            elapsed < RECOVERY_TARGET,
+            "recovery took {elapsed:?}, over the documented target"
+        );
+    }
+
+    #[test]
+    fn file_store_persists_a_recovery_quarantine_report() {
+        let dir = std::env::temp_dir().join("lynx-world-snapshot-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("quarantine.json");
+        let store = FileSnapshotStore::new(&path);
+        let _ = std::fs::remove_file(store.quarantine_path());
+        assert_eq!(store.quarantine_records("zone_demo").unwrap().len(), 0);
+
+        let records = vec![QuarantinedRecord {
+            section: "entity".to_owned(),
+            entity: Some(StableId::from_parts(IdKind::Entity, 1, 2)),
+            code: "out_of_range".to_owned(),
+            message: "entity position is outside the zone bounds".to_owned(),
+        }];
+        store.record_quarantine("zone_demo", &records).unwrap();
+        assert_eq!(
+            store.quarantine_records("zone_demo").unwrap(),
+            records,
+            "the operator report survives a restart"
+        );
     }
 
     #[test]

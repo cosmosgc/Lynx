@@ -1,4 +1,4 @@
-# PST-005 — Snapshot and event replay not implemented
+# PST-005 — Snapshot and event replay incomplete
 
 - **Status:** Open
 - **Reported:** 2026-10-28
@@ -24,51 +24,65 @@ The service now emits `zone.entity.upsert` / `zone.entity.remove` records for
 changed persistent entity records after each successful authoritative tick.
 Each tick's event batch is atomic and fenced; append failure stops the authority
 loop rather than continuing with unrecorded state. The reducer validates event
-tick/actor/entity identity and persistence policy and applies events after the
-latest checkpoint. This is deliberately bounded: links, action caches,
-cooldowns, transfer receipts, calendar, and faction changes are still only
-captured by whole-world checkpoints, so complete multi-tick recovery is not yet
-provided. Replayed state passes through strict zone restoration; invalid
-entities fail startup rather than being silently dropped. A durable quarantine
-record, operator-visible restore report, full aggregate event coverage, and the
-measured 60-second recovery target remain open PST-005 work.
+tick/actor/entity identity, persistence policy, and non-decreasing tick order,
+and applies events through a stable-ID map so repeated runs produce the same
+canonical state. This is deliberately bounded: links, action caches, cooldowns,
+transfer receipts, calendar, and faction changes are still only captured by
+whole-world checkpoints, so complete multi-tick recovery is not yet provided.
 
-Partial hardening: `engine_sim::Zone::restore` now rejects duplicate action,
-link, and transfer idempotency keys, mismatched action cache keys, oversized
-action/link caches, and transfer receipts with an empty key, zero quantity, or
-non-entity endpoints. Tests cover corruption and a valid transfer round trip.
-This is fail-closed snapshot validation, not event replay or quarantine. Transfer
-endpoints may refer to historical entities, so their existence is not checked;
-receipt slot history and other inventory/ownership invariants remain unverified.
-The replay model and durable zone event log were established by PST-004 and D4;
-PST-005 continues with delta replay, quarantine, operator verification, and
-recovery-time measurement.
+Recovery is now quarantine-aware. `Zone::restore_quarantining` re-validates
+entity identity and persistence policy, inventories, health ranges, links,
+cooldowns, and transfer receipts. Structurally corrupt snapshots still fail
+closed, but individually impossible entries are skipped and returned in a
+report. Migration `0012_recovery_quarantine.sql` stores that report in
+`lynx.recovery_quarantine`; the file store writes a `*.quarantine.json` sidecar.
+Startup logs each record, persists the report before serving, and aborts if it
+cannot be stored, so quarantined entries never disappear silently.
+`lynx-world verify-snapshot` performs the same replay and dry-run restore
+read-only and prints both newly detected and previously stored quarantine
+records.
+
+Recovery time is measured at startup and logged. The reference dataset (1,000
+persistent entities, 5,000 upserts, and 400 removals) is replayed by
+`recovery_reference_dataset_completes_within_the_documented_target`, which
+asserts the 60-second target and deterministic repeated output. Full aggregate
+event coverage (links, cooldowns, transfers, calendar, factions) and event-log
+retention remain open PST-005 work.
 
 The persistence layer must implement:
 - [x] Deterministic replay of typed persistent-entity upsert/removal events after a snapshot baseline
-- Reference validation after replay (entity tombstones, links, inventories)
-- Quarantine mechanism for impossible entities instead of silent reset
-- Measurable recovery time with a 60-second target on the reference dataset
+- [x] Reference validation after replay (entity identity, persistence, inventories, health, links, cooldowns, transfer receipts)
+- [x] Quarantine mechanism for impossible entities instead of silent reset
+- [x] Measurable recovery time with a 60-second target on the reference dataset
+- [ ] Per-tick delta events for non-entity aggregates
+- [ ] Event-log retention policy
 
 ## Defect
 
-The `PostgresSnapshotStore` replays and validates full snapshot checkpoints but does not yet apply gameplay delta events. This means:
-- A process restart restores the last committed snapshot, but not changes made after it
-- There is no incremental recovery for specific zones or characters
-- The documented 60-second recovery target has not been demonstrated
-- Reconnect after a crash loses all session state even though the world survives
+`PostgresSnapshotStore` now replays persistent-entity delta events, but recovery
+is still incomplete:
+- Links, cooldowns, transfer receipts, calendar state, and faction state are
+  captured only by whole-world checkpoints, not per-tick events
+- The event log has no retention or purge policy, so it grows with every tick
+  that changes a persistent entity
+- The 60-second target is enforced on the reference replay dataset, but no
+  production-scale P95 has been measured
+- Reconnect after a crash still loses session state even though the world
+  survives
 
 ## Impact
 
-- Server crashes lose zone-specific state that should have been recoverable
-- Recovery time for large worlds is unmeasured
-- The documented failure-and-recovery model is not implementable with current code
-- This is a P1 risk: unrecoverable data loss on restart violates the authoritative simulation contract
+- A crash between whole-world checkpoints can lose non-entity aggregate changes
+- Event storage grows without a documented retention boundary
+- Production recovery headroom is unknown beyond the reference dataset
+- This remains a P1 durability risk for the authoritative simulation contract
 
 ## Acceptance criteria
 
-- [ ] Zone recovery loads last snapshot and replays all events to current tick
-- [ ] Replay validates references, quarantine impossible entities, and reports diagnostics
-- [ ] Recovery completes within 60 seconds on the reference dataset (documented P95)
-- [ ] Repeated recovery produces identical state (deterministic replay)
-- [ ] Quarantined entities are clearly documented in recovery reports and do not silently disappear
+- [x] Zone recovery loads the last snapshot and replays persistent-entity events to the current tick
+- [x] Replay validates references, quarantines impossible entries, and reports diagnostics
+- [x] Recovery completes within 60 seconds on the reference dataset
+- [x] Repeated recovery produces identical state (deterministic replay)
+- [x] Quarantined entities are documented in recovery reports and do not silently disappear
+- [ ] Recovery replays non-entity aggregates to the current tick
+- [ ] Event-log retention is defined and enforced

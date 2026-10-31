@@ -10,8 +10,11 @@
 //! [`Zone::restore`] is strict: every entity, link, cooldown, and transfer
 //! receipt in the snapshot is re-validated against a fresh zone, so a stale or
 //! tampered file fails startup instead of silently yielding a partial world.
-//! Client input and wire payloads never reach this path; only an authoritative
-//! caller may adopt a snapshot.
+//! [`Zone::restore_quarantining`] applies the same checks but skips entries
+//! that are individually impossible and returns them in a report, which the
+//! durable recovery path uses to isolate corrupt entities instead of discarding
+//! them silently. Client input and wire payloads never reach this path; only an
+//! authoritative caller may adopt a snapshot.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -59,6 +62,49 @@ pub struct ZoneSnapshot {
     pub applied_actions: u64,
     /// Link activations since the zone started.
     pub link_activations: u64,
+}
+
+/// One snapshot entry that could not be adopted during quarantine-aware
+/// recovery.
+///
+/// A record is durable evidence: operators can inspect why an entity, link, or
+/// cooldown was isolated from the recovered world instead of guessing why it
+/// disappeared.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct QuarantinedRecord {
+    /// Snapshot section the entry came from: `entity`, `link`, `cooldown`,
+    /// `link_cooldown`, or `transfer`.
+    pub section: String,
+    /// Affected entity, when the entry had a usable identity.
+    pub entity: Option<StableId>,
+    /// Stable failure code from the validation error.
+    pub code: String,
+    /// Human-readable explanation.
+    pub message: String,
+}
+
+/// The outcome of quarantine-aware recovery.
+#[derive(Debug)]
+pub struct ZoneRestoreReport {
+    /// The recovered zone, containing only entries that passed validation.
+    pub zone: Zone,
+    /// Entries that were isolated instead of adopted.
+    pub quarantined: Vec<QuarantinedRecord>,
+}
+
+impl QuarantinedRecord {
+    fn from_error(
+        section: &str,
+        entity: Option<StableId>,
+        error: &EngineError,
+    ) -> QuarantinedRecord {
+        QuarantinedRecord {
+            section: section.to_owned(),
+            entity,
+            code: error.code().as_str().to_owned(),
+            message: error.message().to_owned(),
+        }
+    }
 }
 
 impl Zone {
@@ -159,11 +205,52 @@ impl Zone {
     /// or cooldown references a missing entity, [`ErrorCode::Conflict`] for
     /// duplicate idempotency keys, and every error
     /// [`Zone::new`], [`Zone::spawn`], and [`Zone::add_link`] can produce.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "callers hand ownership of the item rules to the restored zone"
+    )]
     pub fn restore(
         snapshot: &ZoneSnapshot,
         nav: NavGrid,
         rules: Arc<dyn ItemRules + Send + Sync>,
     ) -> Result<Self, EngineError> {
+        Self::restore_inner(snapshot, nav, &rules, false).map(|report| report.zone)
+    }
+
+    /// Rebuild a zone from a snapshot, isolating entries that are individually
+    /// impossible.
+    ///
+    /// Structural failures (unsupported version, invalid zone configuration, or
+    /// corrupt idempotency caches) still fail the whole restore. An entity that
+    /// cannot be spawned, a link or cooldown that references a missing entity,
+    /// or an invalid transfer receipt is skipped and reported instead, so a
+    /// single corrupt record cannot reset or hide the rest of the world.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same structural errors as [`Zone::restore`].
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "callers hand ownership of the item rules to the restored zone"
+    )]
+    pub fn restore_quarantining(
+        snapshot: &ZoneSnapshot,
+        nav: NavGrid,
+        rules: Arc<dyn ItemRules + Send + Sync>,
+    ) -> Result<ZoneRestoreReport, EngineError> {
+        Self::restore_inner(snapshot, nav, &rules, true)
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one linear restore pass keeps validation, adoption, and quarantine reporting in event order"
+    )]
+    fn restore_inner(
+        snapshot: &ZoneSnapshot,
+        nav: NavGrid,
+        rules: &Arc<dyn ItemRules + Send + Sync>,
+        quarantine: bool,
+    ) -> Result<ZoneRestoreReport, EngineError> {
         if snapshot.schema_version != ZONE_SNAPSHOT_VERSION {
             return Err(EngineError::new(
                 ErrorCode::InvalidRequest,
@@ -174,17 +261,38 @@ impl Zone {
         }
         snapshot.config.instance.expect_kind(IdKind::Zone)?;
 
-        let mut zone = Zone::new(snapshot.config.clone(), nav, rules)?;
+        let mut quarantined = Vec::new();
+        let mut zone = Zone::new(snapshot.config.clone(), nav, Arc::clone(rules))?;
         zone.tick = snapshot.tick;
         zone.stats.tick = snapshot.tick;
         zone.stats.applied_actions = snapshot.applied_actions;
         zone.stats.link_activations = snapshot.link_activations;
 
         for entity in &snapshot.entities {
-            zone.spawn(entity.clone())?;
+            let result = validate_restored_entity(entity, &**rules)
+                .and_then(|()| zone.spawn(entity.clone()).map(|_| ()));
+            if let Err(error) = result {
+                if !quarantine {
+                    return Err(error);
+                }
+                quarantined.push(QuarantinedRecord::from_error(
+                    "entity",
+                    Some(entity.id),
+                    &error,
+                ));
+            }
         }
         for link in &snapshot.links {
-            zone.add_link(link.clone())?;
+            if let Err(error) = zone.add_link(link.clone()) {
+                if !quarantine {
+                    return Err(error);
+                }
+                quarantined.push(QuarantinedRecord::from_error(
+                    "link",
+                    Some(link.source),
+                    &error,
+                ));
+            }
         }
 
         if snapshot.action_results.len() > ACTION_CACHE_LIMIT
@@ -223,45 +331,66 @@ impl Zone {
         }
 
         for (key, until) in &snapshot.cooldowns {
-            if !zone.entities.contains_key(&key.0) {
-                return Err(EngineError::not_found("cooldown actor", key.0));
-            }
-            if let Some(target) = key.2
-                && !zone.entities.contains_key(&target)
-            {
-                return Err(EngineError::not_found("cooldown target", target));
+            let missing = if zone.entities.contains_key(&key.0) {
+                key.2
+                    .filter(|target| !zone.entities.contains_key(target))
+                    .map(|target| EngineError::not_found("cooldown target", target))
+            } else {
+                Some(EngineError::not_found("cooldown actor", key.0))
+            };
+            if let Some(error) = missing {
+                if !quarantine {
+                    return Err(error);
+                }
+                quarantined.push(QuarantinedRecord::from_error(
+                    "cooldown",
+                    Some(key.0),
+                    &error,
+                ));
+                continue;
             }
             zone.cooldowns.insert(key.clone(), *until);
         }
         for (key, until) in &snapshot.link_cooldowns {
             let (source, target, _) = key;
-            if !zone.entities.contains_key(source) {
-                return Err(EngineError::not_found("link source", *source));
-            }
-            if !zone.entities.contains_key(target) {
-                return Err(EngineError::not_found("link target", *target));
+            let missing = if !zone.entities.contains_key(source) {
+                Some(EngineError::not_found("link source", *source))
+            } else if !zone.entities.contains_key(target) {
+                Some(EngineError::not_found("link target", *target))
+            } else {
+                None
+            };
+            if let Some(error) = missing {
+                if !quarantine {
+                    return Err(error);
+                }
+                quarantined.push(QuarantinedRecord::from_error(
+                    "link_cooldown",
+                    Some(*source),
+                    &error,
+                ));
+                continue;
             }
             zone.link_cooldowns.insert(*key, *until);
         }
 
         let mut transfer_keys = BTreeSet::new();
+        let mut adopted = Vec::with_capacity(snapshot.transfers.len());
         for receipt in &snapshot.transfers {
-            if receipt.key.is_empty() || receipt.quantity == 0 {
-                return Err(EngineError::new(
-                    ErrorCode::InvalidRequest,
-                    "invalid snapshot transfer receipt",
+            if let Err(error) = validate_transfer_receipt(receipt, &mut transfer_keys) {
+                if !quarantine {
+                    return Err(error);
+                }
+                quarantined.push(QuarantinedRecord::from_error(
+                    "transfer",
+                    Some(receipt.source),
+                    &error,
                 ));
+                continue;
             }
-            receipt.source.expect_kind(IdKind::Entity)?;
-            receipt.destination.expect_kind(IdKind::Entity)?;
-            if !transfer_keys.insert(&receipt.key) {
-                return Err(EngineError::new(
-                    ErrorCode::Conflict,
-                    "duplicate snapshot transfer key",
-                ));
-            }
+            adopted.push(receipt.clone());
         }
-        zone.transfers.adopt(snapshot.transfers.clone());
+        zone.transfers.adopt(adopted);
 
         zone.stats.entity_count = zone.entities.len();
         zone.stats.controlled_entities = zone
@@ -269,8 +398,60 @@ impl Zone {
             .values()
             .filter(|entity| entity.is_controlled())
             .count();
-        Ok(zone)
+        Ok(ZoneRestoreReport { zone, quarantined })
     }
+}
+
+fn validate_restored_entity(
+    entity: &EntityRecord,
+    rules: &dyn ItemRules,
+) -> Result<(), EngineError> {
+    entity.id.expect_kind(IdKind::Entity)?;
+    if entity.persistence != PersistencePolicy::PersistentEntity {
+        return Err(EngineError::new(
+            ErrorCode::InvalidRequest,
+            "snapshot contains an entity that is not persistent",
+        )
+        .with_detail("entity", entity.id.to_string()));
+    }
+    if let Some(inventory) = &entity.inventory {
+        inventory
+            .validate(rules)
+            .map_err(|error| error.with_detail("entity", entity.id.to_string()))?;
+    }
+    if let Some(health) = entity.health
+        && (health.max < 1 || health.current < 0 || health.current > health.max)
+    {
+        return Err(EngineError::new(
+            ErrorCode::InvalidRequest,
+            "snapshot entity health is out of range",
+        )
+        .with_detail("entity", entity.id.to_string())
+        .with_detail("current", health.current.to_string())
+        .with_detail("max", health.max.to_string()));
+    }
+    Ok(())
+}
+
+fn validate_transfer_receipt(
+    receipt: &TransferReceipt,
+    transfer_keys: &mut BTreeSet<String>,
+) -> Result<(), EngineError> {
+    if receipt.key.is_empty() || receipt.quantity == 0 {
+        return Err(EngineError::new(
+            ErrorCode::InvalidRequest,
+            "invalid snapshot transfer receipt",
+        ));
+    }
+    receipt.source.expect_kind(IdKind::Entity)?;
+    receipt.destination.expect_kind(IdKind::Entity)?;
+    if !transfer_keys.insert(receipt.key.clone()) {
+        return Err(EngineError::new(
+            ErrorCode::Conflict,
+            "duplicate snapshot transfer key",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -509,6 +690,61 @@ mod tests {
                 .entity_count(),
             1
         );
+    }
+
+    #[test]
+    fn quarantine_recovery_isolates_impossible_entities_and_their_links() {
+        let mut source = zone();
+        let lever = source
+            .spawn(entity(1, PersistencePolicy::PersistentEntity))
+            .unwrap();
+        let door = source
+            .spawn(entity(2, PersistencePolicy::PersistentEntity))
+            .unwrap();
+        source.add_link(link(lever, door)).unwrap();
+
+        let mut corrupt = source.snapshot();
+        corrupt.entities[1].transform.position = Vec3::new(100.0, 0.0, 0.0);
+
+        let report = Zone::restore_quarantining(&corrupt, nav(), rules()).unwrap();
+        assert_eq!(report.zone.entity_count(), 1);
+        assert_eq!(report.zone.links().links().len(), 0);
+        assert_eq!(
+            report
+                .quarantined
+                .iter()
+                .map(|record| record.section.as_str())
+                .collect::<Vec<_>>(),
+            ["entity", "link"]
+        );
+        assert_eq!(report.quarantined[0].entity, Some(door));
+        assert_eq!(report.quarantined[0].code, "out_of_range");
+
+        let strict = Zone::restore(&corrupt, nav(), rules()).unwrap_err();
+        assert_eq!(strict.code(), ErrorCode::OutOfRange);
+    }
+
+    #[test]
+    fn quarantine_recovery_isolates_an_invalid_inventory() {
+        let mut source = zone();
+        let mut carrier = entity(3, PersistencePolicy::PersistentEntity);
+        carrier.inventory = Some(Inventory::with_capacity(2).unwrap());
+        let carrier_id = source.spawn(carrier).unwrap();
+
+        let mut value = serde_json::to_value(source.snapshot()).unwrap();
+        value["entities"][0]["inventory"]["slots"][0] = serde_json::json!({
+            "definition": "item.coin",
+            "quantity": 0,
+            "instance": null,
+        });
+        let corrupt: ZoneSnapshot = serde_json::from_value(value).unwrap();
+
+        let report = Zone::restore_quarantining(&corrupt, nav(), rules()).unwrap();
+        assert_eq!(report.zone.entity_count(), 0);
+        assert_eq!(report.quarantined.len(), 1);
+        assert_eq!(report.quarantined[0].entity, Some(carrier_id));
+        assert_eq!(report.quarantined[0].section, "entity");
+        assert_eq!(report.quarantined[0].code, "invalid_request");
     }
 
     #[test]

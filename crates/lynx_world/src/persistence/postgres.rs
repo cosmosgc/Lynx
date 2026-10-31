@@ -16,6 +16,8 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use engine_core::error::{EngineError, ErrorCode};
+use engine_core::id::StableId;
+use engine_sim::snapshot::QuarantinedRecord;
 use postgres::{Client, Config, GenericClient, NoTls, Row};
 use serde_json::Value;
 
@@ -463,6 +465,19 @@ impl PostgresSnapshotStore {
     /// All reads use one repeatable-read, read-only transaction. The result is
     /// a point-in-time observation, not a reservation against later writes.
     pub fn verify_recovery(&self, zone_id: &str) -> Result<SnapshotVerification, EngineError> {
+        self.verify_recovery_state(zone_id)
+            .map(|(verification, _)| verification)
+    }
+
+    /// Verify recovery state and return the replayed world for a dry run.
+    ///
+    /// The returned snapshot is what startup would restore: the checkpoint row
+    /// plus every entity delta after it. Verification is still read-only and
+    /// does not acquire the zone lease.
+    pub fn verify_recovery_state(
+        &self,
+        zone_id: &str,
+    ) -> Result<(SnapshotVerification, Option<WorldSnapshot>), EngineError> {
         if !valid_zone_id(zone_id) {
             return Err(invalid_lease());
         }
@@ -485,7 +500,7 @@ impl PostgresSnapshotStore {
                 ));
             }
             tx.commit().map_err(|error| query_error(&error))?;
-            return Ok(SnapshotVerification::Absent);
+            return Ok((SnapshotVerification::Absent, None));
         };
         let (snapshot, stored_hash, event_sequence, checkpoint_zone_id) =
             decode_snapshot_row(&row)?;
@@ -498,21 +513,112 @@ impl PostgresSnapshotStore {
             event_sequence,
             checkpoint_zone_id.as_deref(),
         )?;
-        let result = if let Some(recovered) = recovered {
-            SnapshotVerification::Verified {
-                event_sequence: event_sequence.expect("verified implies checkpoint sequence"),
-                event_count: events.len(),
-                saved_at_ms: recovered.saved_at_ms,
-                tick: recovered.zone.tick.0,
-            }
+        let (result, recovered) = if let Some(recovered) = recovered {
+            (
+                SnapshotVerification::Verified {
+                    event_sequence: event_sequence.expect("verified implies checkpoint sequence"),
+                    event_count: events.len(),
+                    saved_at_ms: recovered.saved_at_ms,
+                    tick: recovered.zone.tick.0,
+                },
+                Some(recovered),
+            )
         } else {
-            SnapshotVerification::LegacyUncheckpointed {
-                saved_at_ms: snapshot.saved_at_ms,
-                tick: snapshot.zone.tick.0,
-            }
+            (
+                SnapshotVerification::LegacyUncheckpointed {
+                    saved_at_ms: snapshot.saved_at_ms,
+                    tick: snapshot.zone.tick.0,
+                },
+                Some(snapshot),
+            )
         };
         tx.commit().map_err(|error| query_error(&error))?;
-        Ok(result)
+        Ok((result, recovered))
+    }
+
+    /// Persist entries isolated by recovery in this world's quarantine table.
+    ///
+    /// Records are deduplicated by `(entity, section, code)` and refreshed so a
+    /// repeated crash does not grow the table without bound. When a zone lease
+    /// is bound, the write is fenced exactly like an authoritative save.
+    pub fn record_quarantine(
+        &self,
+        zone_id: &str,
+        records: &[QuarantinedRecord],
+    ) -> Result<(), EngineError> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        if !valid_zone_id(zone_id) {
+            return Err(invalid_lease());
+        }
+        let fence = self.fence.lock().map_err(|_| store_unavailable())?.clone();
+        let mut client = self.client()?;
+        let mut tx = client.transaction().map_err(|error| write_error(&error))?;
+        if let Some(fence) = fence {
+            let held = tx
+                .query_opt(
+                    SELECT_HELD_LEASE,
+                    &[&fence.zone_id, &fence.owner, &fence.token],
+                )
+                .map_err(|error| write_error(&error))?;
+            if held.is_none() {
+                return Err(stale_lease());
+            }
+        }
+        for record in records {
+            let entity_id = record
+                .entity
+                .map_or_else(|| "unknown".to_owned(), |entity| entity.to_string());
+            tx.execute(
+                "INSERT INTO lynx.recovery_quarantine \
+                    (world_id, zone_id, entity_id, section, code, message) \
+                 VALUES ($1, $2, $3, $4, $5, $6) \
+                 ON CONFLICT (world_id, zone_id, entity_id, section, code) DO UPDATE SET \
+                    message = EXCLUDED.message, \
+                    detected_at = clock_timestamp()",
+                &[
+                    &self.world_id,
+                    &zone_id,
+                    &entity_id,
+                    &record.section,
+                    &record.code,
+                    &record.message,
+                ],
+            )
+            .map_err(|error| write_error(&error))?;
+        }
+        tx.commit().map_err(|error| write_error(&error))?;
+        Ok(())
+    }
+
+    /// Read the durable quarantine report for this world and zone.
+    pub fn quarantine_records(&self, zone_id: &str) -> Result<Vec<QuarantinedRecord>, EngineError> {
+        if !valid_zone_id(zone_id) {
+            return Err(invalid_lease());
+        }
+        let mut client = self.client()?;
+        let rows = client
+            .query(
+                "SELECT section, entity_id, code, message \
+                 FROM lynx.recovery_quarantine \
+                 WHERE world_id = $1 AND zone_id = $2 \
+                 ORDER BY detected_at, entity_id, section, code",
+                &[&self.world_id, &zone_id],
+            )
+            .map_err(|error| query_error(&error))?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let entity_id: String = row.get(1);
+                QuarantinedRecord {
+                    section: row.get(0),
+                    entity: StableId::parse(&entity_id).ok(),
+                    code: row.get(2),
+                    message: row.get(3),
+                }
+            })
+            .collect())
     }
 
     fn client(&self) -> Result<MutexGuard<'_, Client>, EngineError> {
@@ -664,8 +770,12 @@ impl SnapshotStore for PostgresSnapshotStore {
     }
 
     fn save_at_tick(&self, snapshot: &WorldSnapshot, tick: i64) -> Result<(), EngineError> {
-        if tick < 0 {
-            return Err(snapshot_error("the world snapshot tick is invalid"));
+        if tick < 0 || u64::try_from(tick).ok() != Some(snapshot.zone.tick.0) {
+            return Err(snapshot_error(
+                "the world snapshot tick does not match its checkpoint tick",
+            )
+            .with_detail("checkpoint_tick", tick.to_string())
+            .with_detail("snapshot_tick", snapshot.zone.tick.0.to_string()));
         }
         snapshot.validate()?;
         let payload = serde_json::to_value(snapshot).map_err(|error| encode_error(&error))?;
@@ -726,6 +836,18 @@ impl SnapshotStore for PostgresSnapshotStore {
 
     fn records_snapshot_events_transactionally(&self) -> bool {
         self.fence.lock().is_ok_and(|fence| fence.is_some())
+    }
+
+    fn record_quarantine(
+        &self,
+        zone_id: &str,
+        records: &[QuarantinedRecord],
+    ) -> Result<(), EngineError> {
+        PostgresSnapshotStore::record_quarantine(self, zone_id, records)
+    }
+
+    fn quarantine_records(&self, zone_id: &str) -> Result<Vec<QuarantinedRecord>, EngineError> {
+        PostgresSnapshotStore::quarantine_records(self, zone_id)
     }
 }
 

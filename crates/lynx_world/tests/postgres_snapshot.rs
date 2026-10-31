@@ -473,12 +473,20 @@ fn postgres_load_replays_entity_deltas_after_the_pinned_checkpoint() -> anyhow::
         &[&zone, &impossible_actor, &impossible_payload],
     )?;
     assert!(store.load()?.is_some(), "reducer returns the event state");
-    let error = startup::load(Some(&store), false, &characters(1), 1_000).unwrap_err();
+    let impossible_id = impossible_entity.id;
+    let world = startup::load(Some(&store), false, &characters(1), 1_000)
+        .expect("an impossible entity is quarantined instead of failing startup");
+    assert_eq!(world.quarantined.len(), 1);
+    assert_eq!(world.quarantined[0].entity, Some(impossible_id));
+    assert_eq!(world.quarantined[0].section, "entity");
     assert!(
-        error
-            .to_string()
-            .contains("failed to restore the demo zone")
+        world.zone.entity(impossible_id).is_none(),
+        "the impossible entity is not adopted"
     );
+
+    store.record_quarantine(&zone, &world.quarantined)?;
+    let stored = store.quarantine_records(&zone)?;
+    assert_eq!(stored, world.quarantined, "the report is durable");
     Ok(())
 }
 

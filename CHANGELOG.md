@@ -56,8 +56,27 @@ semantic versioning for engine releases and content bundles.
   expires unrenewed. `world.started`, `world.snapshot`, and `world.stopped`
   markers are appended to `lynx.zone_events`, and
   `lynx_world_zone_lease_held` / `lynx_world_zone_lease_renewals_total` expose
-  lease state. File-backed and memory-only modes remain lease-free. Replay from
-  the last snapshot plus later events remains `PST-005`.
+  lease state. File-backed and memory-only modes remain lease-free.
+- `lynx_world`: snapshot/event replay, durable quarantine, and measured recovery
+  (`PST-005`). The service appends version-1 `zone.entity.upsert` /
+  `zone.entity.remove` events for changed persistent entities after each
+  authoritative tick, in one atomic fenced batch; a failed append stops the
+  authority loop. The reducer rejects sequence gaps, malformed entity IDs,
+  mismatched actors, non-persistent records, and non-monotonic ticks, and applies
+  deltas through a stable-ID map so repeated recovery yields identical canonical
+  state. `Zone::restore_quarantining` re-validates entity identity, persistence
+  policy, inventories, health ranges, links, cooldowns, and transfer receipts;
+  individually impossible entries are skipped and reported while structural
+  corruption still fails closed. The report is stored in
+  `lynx.recovery_quarantine` (migration
+  `0012_recovery_quarantine.sql`) or a `*.quarantine.json` sidecar for file
+  snapshots, and startup persists it before serving or aborts. `lynx-world
+  verify-snapshot` performs the same replay and dry-run restore read-only and
+  prints detected and previously stored quarantine records. Startup logs measured
+  recovery time, and a reference-dataset test (1,000 entities, 5,000 upserts,
+  400 removals) enforces the 60-second target. Links, cooldowns, transfer
+  receipts, calendar, and faction state remain checkpoint-only, and event-log
+  retention remains open `PST-005` work.
 
 - `engine_core`: durable world calendar and bounded faction conflicts. Events
   have an audited `Draft -> Scheduled -> Open -> Active` lifecycle with

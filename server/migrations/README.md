@@ -84,6 +84,7 @@ edit applied migration files to resolve a mismatch.
 | `0009_inventory_transfer_ledger.sql` | Append-only transfer receipts and idempotency keys. |
 | `0010_snapshot_event_checkpoints.sql` | Pins durable snapshots to their exact replay-log checkpoint. |
 | `0011_snapshot_checkpoint_zone.sql` | Binds zone-local checkpoint sequences to their owning zone. |
+| `0012_recovery_quarantine.sql` | Durable report of saved entries isolated during snapshot recovery. |
 
 ## Audit retention
 

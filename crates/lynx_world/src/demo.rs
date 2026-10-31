@@ -34,7 +34,7 @@ use engine_sim::entity::{Door, EntityRecord, Interactable, UiProvider};
 use engine_sim::mind::Mind;
 use engine_sim::minigame::Minigame;
 use engine_sim::nav::NavGrid;
-use engine_sim::snapshot::ZoneSnapshot;
+use engine_sim::snapshot::{ZoneRestoreReport, ZoneSnapshot};
 use engine_sim::zone::{Zone, ZoneConfig};
 use world_gateway::VISIBILITY_OWNER_ONLY_TAG;
 
@@ -164,6 +164,22 @@ fn demo_nav(config: &ZoneConfig) -> Result<NavGrid, EngineError> {
 pub fn restore_zone(snapshot: &ZoneSnapshot) -> Result<Zone, EngineError> {
     let nav = demo_nav(&snapshot.config)?;
     Zone::restore(snapshot, nav, demo_rules())
+}
+
+/// Rebuild the demo zone, isolating individually impossible saved entries.
+///
+/// Startup uses this so one corrupt entity, link, cooldown, or transfer receipt
+/// is quarantined and reported instead of failing the whole world. Structural
+/// snapshot errors still abort startup.
+///
+/// # Errors
+///
+/// Returns the same structural errors as [`restore_zone`].
+pub fn restore_zone_quarantining(
+    snapshot: &ZoneSnapshot,
+) -> Result<ZoneRestoreReport, EngineError> {
+    let nav = demo_nav(&snapshot.config)?;
+    Zone::restore_quarantining(snapshot, nav, demo_rules())
 }
 
 fn demo_rules() -> Arc<dyn ItemRules + Send + Sync> {

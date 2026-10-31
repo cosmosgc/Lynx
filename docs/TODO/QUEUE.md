@@ -54,7 +54,7 @@ copied from the task entries; a dash means none are declared.
 | [QUA-006](70-testing-quality.md#qua-006--security-abuse-test-suite) | Security abuse test suite | P1 | In progress | — | Expand abuse matrix and secret-redaction/side-effect assertions. |
 | [OPS-005](60-operations-release.md#ops-005--release-artifacts-and-packaging) | Release artifacts and packaging | P2 | In progress | — | Verify tagged release; client packages/macOS remain later work. |
 | [OPS-008](60-operations-release.md#ops-008--dependency-and-license-auditing) | Dependency and license auditing | P1 | In progress | — | Add release SBOM generation/attachment. |
-| [PST-005](20-persistence-backend.md#pst-005--snapshot-and-event-replay) | Snapshot and event replay | P1 | In progress | `PST-004` | Pin and verify checkpoint/event recovery; next add delta replay, quarantine, and measured recovery. |
+| [PST-005](20-persistence-backend.md#pst-005--snapshot-and-event-replay) | Snapshot and event replay | P1 | In progress | `PST-004` | Entity delta replay, durable quarantine, dry-run verification, and a measured 60-second reference-recovery test are in place; next add non-entity delta coverage and event retention. |
 | [QUA-016](70-testing-quality.md#qua-016--flaky-test-and-ci-duration-control) | Flaky-test and CI-duration control | P2 | In progress | — | Automate duration/flakiness reporting and audit timing-sensitive tests. |
 
 ## Blocked

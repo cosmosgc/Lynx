@@ -34,8 +34,8 @@ use lynx_world::backend;
 use lynx_world::config::{AuthMode, ServeArgs};
 use lynx_world::demo;
 use lynx_world::persistence::{
-    FileSnapshotStore, PostgresSnapshotStore, PostgresZoneLeaseStore, SnapshotStore,
-    SnapshotVerification, ZoneLeaseStore, postgres_config_from_env,
+    FileSnapshotStore, PostgresSnapshotStore, PostgresZoneLeaseStore, RECOVERY_TARGET,
+    SnapshotStore, SnapshotVerification, ZoneLeaseStore, postgres_config_from_env,
 };
 use lynx_world::service::Service;
 use lynx_world::startup;
@@ -124,10 +124,10 @@ fn token_hash() -> Result<()> {
 fn verify_snapshot(world_id: &str, zone_id: &str) -> Result<()> {
     let store = PostgresSnapshotStore::from_env(world_id)
         .context("failed to open the PostgreSQL snapshot store")?;
-    match store
-        .verify_recovery(zone_id)
-        .context("snapshot recovery verification failed")?
-    {
+    let (verification, recovered) = store
+        .verify_recovery_state(zone_id)
+        .context("snapshot recovery verification failed")?;
+    match verification {
         SnapshotVerification::Absent => {
             println!("ABSENT world_id={world_id} zone_id={zone_id} status=no-snapshot");
         }
@@ -144,6 +144,46 @@ fn verify_snapshot(world_id: &str, zone_id: &str) -> Result<()> {
         } => {
             println!(
                 "VERIFIED world_id={world_id} zone_id={zone_id} checkpoint_sequence={event_sequence} event_count={event_count} saved_at_ms={saved_at_ms} tick={tick}"
+            );
+        }
+    }
+
+    if let Some(world) = recovered {
+        let report =
+            demo::restore_zone_quarantining(&world.zone).context("dry-run zone restore failed")?;
+        println!(
+            "RECOVERY tick={} entities={} quarantined={}",
+            report.zone.tick().0,
+            report.zone.entity_count(),
+            report.quarantined.len()
+        );
+        for record in &report.quarantined {
+            println!(
+                "QUARANTINE section={} entity={} code={} message={:?}",
+                record.section,
+                record
+                    .entity
+                    .map_or_else(|| "unknown".to_owned(), |entity| entity.to_string()),
+                record.code,
+                record.message
+            );
+        }
+    }
+
+    let stored = store
+        .quarantine_records(zone_id)
+        .context("failed to read the durable quarantine report")?;
+    if !stored.is_empty() {
+        println!("DURABLE_QUARANTINE count={}", stored.len());
+        for record in &stored {
+            println!(
+                "STORED_QUARANTINE section={} entity={} code={} message={:?}",
+                record.section,
+                record
+                    .entity
+                    .map_or_else(|| "unknown".to_owned(), |entity| entity.to_string()),
+                record.code,
+                record.message
             );
         }
     }
@@ -221,11 +261,8 @@ async fn serve(args: ServeArgs) -> Result<()> {
         )?)),
         _ => None,
     };
-    let startup::StartupWorld {
-        zone,
-        calendar,
-        factions,
-    } = startup::load(
+    let recovery_started = std::time::Instant::now();
+    let startup_world = startup::load(
         store
             .as_ref()
             .map(|store| store.as_ref() as &dyn SnapshotStore),
@@ -234,6 +271,40 @@ async fn serve(args: ServeArgs) -> Result<()> {
         now_ms,
     )
     .context("failed to start the demo world")?;
+    let recovery_elapsed = recovery_started.elapsed();
+    let startup::StartupWorld {
+        zone,
+        calendar,
+        factions,
+        quarantined,
+    } = startup_world;
+    let recovery_ms = u64::try_from(recovery_elapsed.as_millis()).unwrap_or(u64::MAX);
+    if recovery_elapsed > RECOVERY_TARGET {
+        tracing::error!(
+            elapsed_ms = recovery_ms,
+            target_ms = u64::try_from(RECOVERY_TARGET.as_millis()).unwrap_or(u64::MAX),
+            "world recovery exceeded the documented target"
+        );
+    } else {
+        tracing::info!(
+            elapsed_ms = recovery_ms,
+            quarantined = quarantined.len(),
+            "world recovery completed"
+        );
+    }
+    if !quarantined.is_empty() {
+        let zone_id = demo::zone_instance().to_string();
+        if let Some(store) = &store {
+            store
+                .record_quarantine(&zone_id, &quarantined)
+                .context("failed to persist the recovery quarantine report")?;
+        }
+        tracing::warn!(
+            count = quarantined.len(),
+            zone = %zone_id,
+            "recovery quarantined saved entries instead of adopting them"
+        );
+    }
     let mut gateway = WorldGateway::new(
         zone,
         demo::handshake().context("failed to build the server handshake")?,

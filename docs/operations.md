@@ -184,8 +184,9 @@ monotonically increasing fencing token; every snapshot upsert and event append
 checks the owner, token, and expiry in the same transaction as the write, so a
 process that lost the lease is rejected with `conflict` even if it has not yet
 noticed. A replacement may take over an expired lease after the previous holder
-crashes; fenced startup verifies the pinned checkpoint/event history, while
-gameplay-delta replay remains in `PST-005`. The
+crashes; fenced startup verifies the pinned checkpoint/event history and replays
+persistent entity deltas. Non-entity delta coverage and event retention remain
+in `PST-005`. The
 holder renews every third of `--lease-ttl-ms`; if renewal reports a takeover, or
 keeps failing past the recorded expiry, the process turns not-ready and shuts
 down instead of serving stale authority. The event log records `world.started`,
@@ -204,9 +205,24 @@ The command does not acquire a lease or modify rows. `VERIFIED` means the
 snapshot row matches its pinned checkpoint event and ordered replay;
 `UNVERIFIED` means a legacy snapshot has no matching checkpoint event; `ABSENT`
 means neither snapshot nor checkpoint exists. Errors (including sequence gaps
-and row/event mismatches) return a nonzero exit. This checks checkpoint
-integrity, not gameplay-delta recovery, entity quarantine, or the 60-second
-recovery target.
+and row/event mismatches) return a nonzero exit.
+
+The same command also performs a dry-run zone restore against the replayed
+state and prints a `RECOVERY` line plus one `QUARANTINE` line per entry that
+would be isolated. It then reads the durable `lynx.recovery_quarantine` report
+and prints `DURABLE_QUARANTINE` / `STORED_QUARANTINE` lines. A quarantined entry
+is not part of the recovered world; inspect its entity, section, code, and
+message before deciding whether to repair or accept the loss. Startup also
+writes the report before serving and fails if it cannot be stored.
+
+Startup logs `world recovery completed` with `elapsed_ms`, or
+`world recovery exceeded the documented target` when the measured time passes
+60 seconds. The reference recovery dataset (1,000 persistent entities, 5,000
+upserts, and 400 removals) is replayed by
+`recovery_reference_dataset_completes_within_the_documented_target`, which
+enforces that target. Entity-log replay is implemented; links, cooldowns,
+transfer receipts, calendar, and faction state still come from the whole-world
+checkpoint.
 
 A snapshot is a whole-world overwrite, so falling back to the authored demo
 would otherwise mean deleting the snapshot by hand. `--fresh` does that
