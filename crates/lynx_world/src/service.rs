@@ -7,7 +7,7 @@
 //! ended. Keeping the simulation single-threaded preserves the gateway's
 //! ordering guarantees and makes backpressure explicit.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -29,8 +29,9 @@ use world_server::{CloseReason, ConnectionId, Opened, Outbound, WorldServer};
 use crate::auth::Grant;
 use crate::authority::{EVENT_WORLD_SNAPSHOT, EVENT_WORLD_STOPPED, ZoneAuthority};
 use crate::persistence::{
-    EVENT_ENTITY_REMOVE, EVENT_ENTITY_UPSERT, SnapshotStore, WorldSnapshot, WorldSnapshotInputs,
-    ZoneEventInput,
+    EVENT_CALENDAR_FACTIONS_REPLACE, EVENT_COOLDOWNS_REPLACE, EVENT_ENTITY_REMOVE,
+    EVENT_ENTITY_UPSERT, EVENT_LINKS_REPLACE, EVENT_LINK_COOLDOWNS_REPLACE, EVENT_TRANSFERS_APPEND,
+    SnapshotStore, WorldSnapshot, WorldSnapshotInputs, ZoneEventInput,
 };
 
 /// Client handshake message kind. Its body is [`Hello`].
@@ -126,8 +127,8 @@ pub struct Service {
     token_sequence: u64,
     persistence: Option<Persistence>,
     authority: Option<ZoneAuthority>,
-    /// Last persistent entity state covered by the checkpoint or event log.
-    evented_entities: Option<BTreeMap<StableId, EntityRecord>>,
+    /// Last world state covered by the checkpoint or event log.
+    evented_world: Option<WorldSnapshot>,
     /// Stop serving after an event batch cannot be durably appended.
     authority_write_failed: bool,
     metrics: Arc<Metrics>,
@@ -395,7 +396,7 @@ impl Service {
             token_sequence: 0,
             persistence: None,
             authority: None,
-            evented_entities: None,
+            evented_world: None,
             authority_write_failed: false,
             metrics: Arc::new(Metrics::default()),
         };
@@ -602,34 +603,26 @@ impl Service {
             && store.records_snapshot_events_transactionally()
             && self.authority.is_some()
         {
-            self.evented_entities = Some(entity_records(&world));
+            self.evented_world = Some(world);
         }
         result
     }
 
-    /// Persist changed persistent entity records as one all-or-nothing tick batch.
-    fn record_entity_changes(&mut self) -> Result<(), EngineError> {
+    /// Persist changed world state as one all-or-nothing tick batch.
+    fn record_world_changes(&mut self) -> Result<(), EngineError> {
         let (Some(authority), Some(persistence)) = (&self.authority, &self.persistence) else {
             return Ok(());
         };
         if !persistence.store.records_snapshot_events_transactionally() {
             return Ok(());
         }
-        let previous = self.evented_entities.as_ref().ok_or_else(|| {
+        let previous = self.evented_world.as_ref().ok_or_else(|| {
             EngineError::new(
                 ErrorCode::Conflict,
-                "persistent entity events cannot precede the initial checkpoint",
+                "world events cannot precede the initial checkpoint",
             )
         })?;
-        let current: BTreeMap<_, _> = self
-            .server
-            .gateway()
-            .zone()
-            .snapshot()
-            .entities
-            .into_iter()
-            .map(|entity| (entity.id, entity))
-            .collect();
+        let current = WorldSnapshot::capture(&self.snapshot_inputs(), clock().value());
         let tick = i64::try_from(self.server.gateway().zone().tick().0).map_err(|_| {
             EngineError::new(
                 ErrorCode::InvalidRequest,
@@ -637,34 +630,23 @@ impl Service {
             )
         })?;
 
-        let mut pending = Vec::new();
-        for (id, entity) in &current {
-            if previous.get(id) != Some(entity) {
-                let payload = serde_json::json!({ "entity": entity });
-                pending.push((id.to_string(), EVENT_ENTITY_UPSERT, payload));
-            }
-        }
-        for id in previous.keys().filter(|id| !current.contains_key(id)) {
-            let payload = serde_json::json!({ "entity_id": id.to_string() });
-            pending.push((id.to_string(), EVENT_ENTITY_REMOVE, payload));
-        }
-        pending.sort_by(|left, right| left.0.cmp(&right.0));
+        let pending = world_delta_events(previous, &current);
         if pending.is_empty() {
             return Ok(());
         }
 
         let inputs: Vec<_> = pending
             .iter()
-            .map(|(actor_id, kind, payload)| ZoneEventInput {
+            .map(|event| ZoneEventInput {
                 tick,
-                kind,
-                actor_id: Some(actor_id),
-                payload,
+                kind: event.kind,
+                actor_id: event.actor_id.as_deref(),
+                payload: &event.payload,
                 schema_version: 1,
             })
             .collect();
         authority.append_events(&inputs)?;
-        self.evented_entities = Some(current);
+        self.evented_world = Some(current);
         Ok(())
     }
 
@@ -971,12 +953,12 @@ impl Service {
                 false
             }
         };
-        if tick_succeeded && let Err(error) = self.record_entity_changes() {
+        if tick_succeeded && let Err(error) = self.record_world_changes() {
             self.authority_write_failed = true;
             tracing::error!(
                 code = ?error.code(),
                 details = %error,
-                "persistent entity event batch failed; stopping authority loop"
+                "world event batch failed; stopping authority loop"
             );
         }
         let elapsed = started.elapsed();
@@ -1147,6 +1129,96 @@ fn entity_records(world: &WorldSnapshot) -> BTreeMap<StableId, EntityRecord> {
         .cloned()
         .map(|entity| (entity.id, entity))
         .collect()
+}
+
+/// One durable event produced by comparing two authoritative world states.
+struct PendingWorldEvent {
+    actor_id: Option<String>,
+    kind: &'static str,
+    payload: serde_json::Value,
+}
+
+/// Diff two world states into one deterministic per-tick event batch.
+///
+/// Entities are emitted in stable-ID order, followed by fixed-order section
+/// replacements. Action and link idempotency caches stay checkpoint-only.
+fn world_delta_events(
+    previous: &WorldSnapshot,
+    current: &WorldSnapshot,
+) -> Vec<PendingWorldEvent> {
+    let previous_entities = entity_records(previous);
+    let current_entities = entity_records(current);
+    let mut pending = Vec::new();
+    for (id, entity) in &current_entities {
+        if previous_entities.get(id) != Some(entity) {
+            pending.push(PendingWorldEvent {
+                actor_id: Some(id.to_string()),
+                kind: EVENT_ENTITY_UPSERT,
+                payload: serde_json::json!({ "entity": entity }),
+            });
+        }
+    }
+    for id in previous_entities
+        .keys()
+        .filter(|id| !current_entities.contains_key(id))
+    {
+        pending.push(PendingWorldEvent {
+            actor_id: Some(id.to_string()),
+            kind: EVENT_ENTITY_REMOVE,
+            payload: serde_json::json!({ "entity_id": id.to_string() }),
+        });
+    }
+
+    if previous.zone.links != current.zone.links {
+        pending.push(PendingWorldEvent {
+            actor_id: None,
+            kind: EVENT_LINKS_REPLACE,
+            payload: serde_json::json!({ "links": current.zone.links }),
+        });
+    }
+    if previous.zone.cooldowns != current.zone.cooldowns {
+        pending.push(PendingWorldEvent {
+            actor_id: None,
+            kind: EVENT_COOLDOWNS_REPLACE,
+            payload: serde_json::json!({ "cooldowns": current.zone.cooldowns }),
+        });
+    }
+    if previous.zone.link_cooldowns != current.zone.link_cooldowns {
+        pending.push(PendingWorldEvent {
+            actor_id: None,
+            kind: EVENT_LINK_COOLDOWNS_REPLACE,
+            payload: serde_json::json!({ "link_cooldowns": current.zone.link_cooldowns }),
+        });
+    }
+
+    let previous_transfers: BTreeSet<&String> =
+        previous.zone.transfers.iter().map(|receipt| &receipt.key).collect();
+    let appended: Vec<_> = current
+        .zone
+        .transfers
+        .iter()
+        .filter(|receipt| !previous_transfers.contains(&receipt.key))
+        .collect();
+    if !appended.is_empty() {
+        pending.push(PendingWorldEvent {
+            actor_id: None,
+            kind: EVENT_TRANSFERS_APPEND,
+            payload: serde_json::json!({ "transfers": appended }),
+        });
+    }
+
+    if previous.calendar != current.calendar || previous.factions != current.factions {
+        pending.push(PendingWorldEvent {
+            actor_id: None,
+            kind: EVENT_CALENDAR_FACTIONS_REPLACE,
+            payload: serde_json::json!({
+                "calendar": current.calendar,
+                "factions": current.factions,
+            }),
+        });
+    }
+
+    pending
 }
 
 fn clock() -> Millis {
@@ -2023,6 +2095,60 @@ mod tests {
         for id in changed_ids {
             assert!(event_actors.contains(id.to_string().as_str()));
         }
+    }
+
+    #[test]
+    fn world_delta_events_cover_every_replayable_section() {
+        use engine_core::inventory::TransferReceipt;
+        use engine_sim::action::Verb;
+        use engine_sim::link::{EntityLink, LinkEvent};
+
+        let (service, _, _) = service();
+        let baseline =
+            crate::persistence::WorldSnapshot::capture(&service.snapshot_inputs(), 1_000);
+        let mut current = baseline.clone();
+        let source = current.zone.entities[0].id;
+        let target = current.zone.entities[1].id;
+        current.zone.links.push(EntityLink::new(
+            engine_core::id::DefinitionId::new("link.service_test").unwrap(),
+            source,
+            target,
+            [LinkEvent::Activated],
+        ));
+        current
+            .zone
+            .cooldowns
+            .push(((source, Verb::Inspect, None), Tick(5)));
+        current
+            .zone
+            .link_cooldowns
+            .push(((source, target, LinkEvent::Activated), Tick(6)));
+        current.zone.transfers.push(TransferReceipt {
+            key: "service-transfer".to_owned(),
+            source,
+            source_slot: 0,
+            destination: target,
+            definition: engine_core::id::DefinitionId::new("item.coin").unwrap(),
+            quantity: 1,
+            destination_slots: vec![0],
+        });
+        let mut factions = demo::build_faction_world(5).unwrap();
+        let calendar = demo::build_calendar(&mut factions, 5).unwrap();
+        current.calendar = Some(calendar.snapshot());
+        current.factions = Some(factions.snapshot());
+
+        let events = world_delta_events(&baseline, &current);
+        assert_eq!(
+            events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+            [
+                EVENT_LINKS_REPLACE,
+                EVENT_COOLDOWNS_REPLACE,
+                EVENT_LINK_COOLDOWNS_REPLACE,
+                EVENT_TRANSFERS_APPEND,
+                EVENT_CALENDAR_FACTIONS_REPLACE,
+            ]
+        );
+        assert!(world_delta_events(&baseline, &baseline).is_empty());
     }
 
     #[test]

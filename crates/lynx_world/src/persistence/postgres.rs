@@ -830,6 +830,18 @@ impl SnapshotStore for PostgresSnapshotStore {
             &[&fence.zone_id, &sequence, &tick, &event_payload],
         )
         .map_err(|error| write_error(&error))?;
+        // Retention boundary: the checkpoint just written is a complete world
+        // state, so every earlier event is no longer needed for recovery. Keep
+        // the log bounded to one snapshot interval without losing replay state.
+        let pruned = prune_checkpoints_before(&mut tx, &fence.zone_id, &sequence)?;
+        if pruned > 0 {
+            tracing::debug!(
+                zone = %fence.zone_id,
+                retained_from = sequence,
+                pruned,
+                "pruned zone events covered by the new checkpoint"
+            );
+        }
         tx.commit().map_err(|error| write_error(&error))?;
         Ok(())
     }
@@ -849,6 +861,20 @@ impl SnapshotStore for PostgresSnapshotStore {
     fn quarantine_records(&self, zone_id: &str) -> Result<Vec<QuarantinedRecord>, EngineError> {
         PostgresSnapshotStore::quarantine_records(self, zone_id)
     }
+}
+
+fn prune_checkpoints_before(
+    tx: &mut postgres::Transaction<'_>,
+    zone_id: &str,
+    retained_from: &i64,
+) -> Result<u64, EngineError> {
+    tx.batch_execute("SET LOCAL lynx.allow_append_only_purge = 'on'")
+        .map_err(|error| write_error(&error))?;
+    tx.execute(
+        "DELETE FROM lynx.zone_events WHERE zone_id = $1 AND sequence < $2",
+        &[&zone_id, &retained_from],
+    )
+    .map_err(|error| write_error(&error))
 }
 
 fn decode_snapshot_row(

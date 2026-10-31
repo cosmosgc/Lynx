@@ -19,11 +19,15 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use engine_core::error::{EngineError, ErrorCode};
-use engine_core::faction::FactionSnapshot;
+use engine_core::faction::{FactionSnapshot, FactionWorld};
 use engine_core::id::{IdKind, StableId};
+use engine_core::inventory::TransferReceipt;
 use engine_core::schema::{PersistencePolicy, SchemaVersion};
-use engine_core::world_event::CalendarSnapshot;
+use engine_core::time::Tick;
+use engine_core::world_event::{CalendarSnapshot, WorldCalendar};
+use engine_sim::action::ActionKey;
 use engine_sim::entity::EntityRecord;
+use engine_sim::link::{EntityLink, LinkEvent};
 use engine_sim::snapshot::{QuarantinedRecord, ZoneSnapshot};
 
 mod postgres;
@@ -77,6 +81,16 @@ pub const RECOVERY_TARGET: std::time::Duration = std::time::Duration::from_secs(
 pub const EVENT_ENTITY_UPSERT: &str = "zone.entity.upsert";
 /// Event that removes one persistent entity after a checkpoint.
 pub const EVENT_ENTITY_REMOVE: &str = "zone.entity.remove";
+/// Event that replaces the zone's persisted link list.
+pub const EVENT_LINKS_REPLACE: &str = "zone.links.replace";
+/// Event that replaces the zone's active action cooldowns.
+pub const EVENT_COOLDOWNS_REPLACE: &str = "zone.cooldowns.replace";
+/// Event that replaces the zone's active link cooldowns.
+pub const EVENT_LINK_COOLDOWNS_REPLACE: &str = "zone.link-cooldowns.replace";
+/// Event that appends newly applied inventory-transfer receipts.
+pub const EVENT_TRANSFERS_APPEND: &str = "zone.transfers.append";
+/// Event that replaces the paired calendar and faction aggregates.
+pub const EVENT_CALENDAR_FACTIONS_REPLACE: &str = "world.calendar-factions.replace";
 
 /// One event to append under a zone lease.
 #[derive(Debug, Clone, Copy)]
@@ -96,9 +110,14 @@ pub struct ZoneEventInput<'a> {
 /// Rebuild the latest durable world state described by ordered zone events.
 ///
 /// Snapshot events deliberately carry a complete [`WorldSnapshot`]. Applying
-/// one replaces the prior recovered state; supported entity deltas after it
-/// update persistent entity records in sequence order. Lifecycle events remain
-/// audit-only. Unknown event kinds are ignored for compatibility.
+/// one replaces the prior recovered state; supported deltas after it update
+/// entities, links, cooldowns, transfer receipts, and the paired calendar and
+/// faction aggregates in sequence order. Lifecycle events remain audit-only.
+/// Unknown non-zone event kinds are ignored for compatibility.
+///
+/// A retained log may begin after sequence zero, but only when it begins with a
+/// full world checkpoint; that checkpoint supplies the baseline the remaining
+/// deltas build on. Gaps after the first event are always rejected.
 ///
 /// # Errors
 ///
@@ -108,7 +127,17 @@ pub fn replay_world_snapshot_events(
     events: &[ZoneEvent],
     world_id: &str,
 ) -> Result<Option<WorldSnapshot>, EngineError> {
-    let mut expected_sequence = 0_i64;
+    let mut expected_sequence = match events.first() {
+        Some(first) if first.sequence != 0 && first.kind != "world.snapshot" => {
+            return Err(
+                replay_error("a retained event log must begin with a world checkpoint")
+                    .with_detail("sequence", first.sequence.to_string())
+                    .with_detail("kind", first.kind.clone()),
+            );
+        }
+        Some(first) => first.sequence,
+        None => 0,
+    };
     let mut recovered: Option<WorldSnapshot> = None;
     // Entity deltas are applied through a keyed map so replay stays O(log n)
     // per event and always emits the canonical stable-ID order of a snapshot.
@@ -129,52 +158,13 @@ pub fn replay_world_snapshot_events(
                 "the zone event sequence cannot be advanced",
             )
         })?;
-
-        if event.kind == "world.snapshot" {
-            if let Some(snapshot) = decode_snapshot_event(event, world_id)? {
-                let tick = snapshot.zone.tick.0;
-                if tick < last_tick {
-                    return Err(replay_error(
-                        "a world checkpoint moves the recovered tick backwards",
-                    )
-                    .with_detail("previous_tick", last_tick.to_string())
-                    .with_detail("checkpoint_tick", tick.to_string()));
-                }
-                last_tick = tick;
-                entities = snapshot
-                    .zone
-                    .entities
-                    .iter()
-                    .cloned()
-                    .map(|entity| (entity.id, entity))
-                    .collect();
-                recovered = Some(snapshot);
-            }
-        } else if matches!(
-            event.kind.as_str(),
-            EVENT_ENTITY_UPSERT | EVENT_ENTITY_REMOVE
-        ) {
-            let snapshot = recovered.as_mut().ok_or_else(|| {
-                replay_error("the entity event appears before the first world checkpoint")
-            })?;
-            let tick = event_tick(event)?;
-            if tick < last_tick {
-                return Err(
-                    replay_error("an entity event moves the recovered tick backwards")
-                        .with_detail("previous_tick", last_tick.to_string())
-                        .with_detail("event_tick", tick.to_string()),
-                );
-            }
-            last_tick = tick;
-            match event.kind.as_str() {
-                EVENT_ENTITY_UPSERT => apply_entity_upsert(snapshot, &mut entities, event, tick)?,
-                EVENT_ENTITY_REMOVE => apply_entity_remove(snapshot, &mut entities, event, tick)?,
-                _ => unreachable!("entity delta kind was matched above"),
-            }
-        } else if event.kind.starts_with("zone.") {
-            return Err(replay_error("the zone event kind is not replayable")
-                .with_detail("kind", event.kind.clone()));
-        }
+        apply_replayed_event(
+            event,
+            world_id,
+            &mut recovered,
+            &mut entities,
+            &mut last_tick,
+        )?;
     }
     if let Some(mut snapshot) = recovered {
         snapshot.zone.entities = entities.into_values().collect();
@@ -183,6 +173,117 @@ pub fn replay_world_snapshot_events(
     } else {
         Ok(None)
     }
+}
+
+fn apply_replayed_event(
+    event: &ZoneEvent,
+    world_id: &str,
+    recovered: &mut Option<WorldSnapshot>,
+    entities: &mut BTreeMap<StableId, EntityRecord>,
+    last_tick: &mut u64,
+) -> Result<(), EngineError> {
+    match event.kind.as_str() {
+        "world.snapshot" => {
+            if let Some(snapshot) = decode_snapshot_event(event, world_id)? {
+                let tick = snapshot.zone.tick.0;
+                if tick < *last_tick {
+                    return Err(
+                        replay_error("a world checkpoint moves the recovered tick backwards")
+                            .with_detail("previous_tick", last_tick.to_string())
+                            .with_detail("checkpoint_tick", tick.to_string()),
+                    );
+                }
+                *last_tick = tick;
+                *entities = snapshot
+                    .zone
+                    .entities
+                    .iter()
+                    .cloned()
+                    .map(|entity| (entity.id, entity))
+                    .collect();
+                *recovered = Some(snapshot);
+            }
+            Ok(())
+        }
+        EVENT_ENTITY_UPSERT => {
+            let snapshot = recovered_snapshot(recovered)?;
+            let tick = delta_tick(event, last_tick)?;
+            apply_entity_upsert(snapshot, entities, event, tick)
+        }
+        EVENT_ENTITY_REMOVE => {
+            let snapshot = recovered_snapshot(recovered)?;
+            let tick = delta_tick(event, last_tick)?;
+            apply_entity_remove(snapshot, entities, event, tick)
+        }
+        EVENT_LINKS_REPLACE => {
+            let snapshot = recovered_snapshot(recovered)?;
+            let tick = delta_tick(event, last_tick)?;
+            apply_links_replace(snapshot, entities, event, tick)
+        }
+        EVENT_COOLDOWNS_REPLACE => {
+            let snapshot = recovered_snapshot(recovered)?;
+            let tick = delta_tick(event, last_tick)?;
+            apply_cooldowns_replace(snapshot, entities, event, tick)
+        }
+        EVENT_LINK_COOLDOWNS_REPLACE => {
+            let snapshot = recovered_snapshot(recovered)?;
+            let tick = delta_tick(event, last_tick)?;
+            apply_link_cooldowns_replace(snapshot, entities, event, tick)
+        }
+        EVENT_TRANSFERS_APPEND => {
+            let snapshot = recovered_snapshot(recovered)?;
+            let tick = delta_tick(event, last_tick)?;
+            apply_transfers_append(snapshot, event, tick)
+        }
+        EVENT_CALENDAR_FACTIONS_REPLACE => {
+            let snapshot = recovered_snapshot(recovered)?;
+            let tick = delta_tick(event, last_tick)?;
+            apply_calendar_factions_replace(snapshot, event, tick)
+        }
+        kind if kind.starts_with("zone.") => Err(replay_error("the zone event kind is not replayable")
+            .with_detail("kind", event.kind.clone())),
+        _ => Ok(()),
+    }
+}
+
+fn recovered_snapshot(
+    recovered: &mut Option<WorldSnapshot>,
+) -> Result<&mut WorldSnapshot, EngineError> {
+    recovered.as_mut().ok_or_else(|| {
+        replay_error("a durable delta appears before the first world checkpoint")
+    })
+}
+
+fn delta_tick(event: &ZoneEvent, last_tick: &mut u64) -> Result<u64, EngineError> {
+    if event.schema_version != 1 {
+        return Err(
+            replay_error("the durable delta has an unsupported schema version")
+                .with_detail("schema_version", event.schema_version.to_string()),
+        );
+    }
+    let tick = event_tick(event)?;
+    if tick < *last_tick {
+        return Err(
+            replay_error("a durable delta moves the recovered tick backwards")
+                .with_detail("previous_tick", last_tick.to_string())
+                .with_detail("event_tick", tick.to_string()),
+        );
+    }
+    *last_tick = tick;
+    Ok(tick)
+}
+
+fn event_payload_field<T: serde::de::DeserializeOwned>(
+    event: &ZoneEvent,
+    field: &str,
+    message: &'static str,
+) -> Result<T, EngineError> {
+    let value = event
+        .payload
+        .get(field)
+        .cloned()
+        .ok_or_else(|| replay_error(message).with_detail("field", field))?;
+    serde_json::from_value(value).map_err(|_| replay_error(message).with_detail("field", field))
 }
 
 fn decode_snapshot_event(
@@ -235,12 +336,6 @@ fn apply_entity_upsert(
     event: &ZoneEvent,
     tick: u64,
 ) -> Result<(), EngineError> {
-    if event.schema_version != 1 {
-        return Err(
-            replay_error("the entity event has an unsupported schema version")
-                .with_detail("schema_version", event.schema_version.to_string()),
-        );
-    }
     let entity_value = event
         .payload
         .get("entity")
@@ -271,12 +366,6 @@ fn apply_entity_remove(
     event: &ZoneEvent,
     tick: u64,
 ) -> Result<(), EngineError> {
-    if event.schema_version != 1 {
-        return Err(
-            replay_error("the entity event has an unsupported schema version")
-                .with_detail("schema_version", event.schema_version.to_string()),
-        );
-    }
     let entity_id = event
         .payload
         .get("entity_id")
@@ -295,6 +384,170 @@ fn apply_entity_remove(
             replay_error("the entity-remove event references an absent entity")
                 .with_detail("entity_id", entity_id),
         );
+    }
+    // Mirror `Zone::despawn`: a removed entity cannot remain a link endpoint,
+    // cooldown actor, cooldown target, or link-cooldown endpoint.
+    snapshot
+        .zone
+        .links
+        .retain(|link| link.source != parsed && link.target != parsed);
+    snapshot
+        .zone
+        .cooldowns
+        .retain(|(key, _)| key.0 != parsed && key.2 != Some(parsed));
+    snapshot
+        .zone
+        .link_cooldowns
+        .retain(|((source, target, _), _)| *source != parsed && *target != parsed);
+    snapshot.zone.tick.0 = tick;
+    Ok(())
+}
+
+fn apply_links_replace(
+    snapshot: &mut WorldSnapshot,
+    entities: &BTreeMap<StableId, EntityRecord>,
+    event: &ZoneEvent,
+    tick: u64,
+) -> Result<(), EngineError> {
+    let links: Vec<EntityLink> = event_payload_field(
+        event,
+        "links",
+        "the links-replace event contains an invalid link list",
+    )?;
+    for link in &links {
+        if !entities.contains_key(&link.source) || !entities.contains_key(&link.target) {
+            return Err(
+                replay_error("the links-replace event references an absent entity")
+                    .with_detail("source", link.source.to_string())
+                    .with_detail("target", link.target.to_string()),
+            );
+        }
+    }
+    snapshot.zone.links = links;
+    snapshot.zone.tick.0 = tick;
+    Ok(())
+}
+
+fn apply_cooldowns_replace(
+    snapshot: &mut WorldSnapshot,
+    entities: &BTreeMap<StableId, EntityRecord>,
+    event: &ZoneEvent,
+    tick: u64,
+) -> Result<(), EngineError> {
+    let cooldowns: Vec<(ActionKey, Tick)> = event_payload_field(
+        event,
+        "cooldowns",
+        "the cooldowns-replace event contains an invalid cooldown list",
+    )?;
+    for (key, _) in &cooldowns {
+        if !entities.contains_key(&key.0)
+            || key.2.is_some_and(|target| !entities.contains_key(&target))
+        {
+            return Err(
+                replay_error("the cooldowns-replace event references an absent entity")
+                    .with_detail("actor", key.0.to_string())
+                    .with_detail(
+                        "target",
+                        key.2.map_or_else(|| "none".to_owned(), |target| target.to_string()),
+                    ),
+            );
+        }
+    }
+    snapshot.zone.cooldowns = cooldowns;
+    snapshot.zone.tick.0 = tick;
+    Ok(())
+}
+
+fn apply_link_cooldowns_replace(
+    snapshot: &mut WorldSnapshot,
+    entities: &BTreeMap<StableId, EntityRecord>,
+    event: &ZoneEvent,
+    tick: u64,
+) -> Result<(), EngineError> {
+    let link_cooldowns: Vec<((StableId, StableId, LinkEvent), Tick)> = event_payload_field(
+        event,
+        "link_cooldowns",
+        "the link-cooldowns-replace event contains an invalid cooldown list",
+    )?;
+    for ((source, target, _), _) in &link_cooldowns {
+        if !entities.contains_key(source) || !entities.contains_key(target) {
+            return Err(
+                replay_error("the link-cooldowns-replace event references an absent entity")
+                    .with_detail("source", source.to_string())
+                    .with_detail("target", target.to_string()),
+            );
+        }
+    }
+    snapshot.zone.link_cooldowns = link_cooldowns;
+    snapshot.zone.tick.0 = tick;
+    Ok(())
+}
+
+fn apply_transfers_append(
+    snapshot: &mut WorldSnapshot,
+    event: &ZoneEvent,
+    tick: u64,
+) -> Result<(), EngineError> {
+    let appended: Vec<TransferReceipt> = event_payload_field(
+        event,
+        "transfers",
+        "the transfers-append event contains an invalid receipt list",
+    )?;
+    let mut by_key: BTreeMap<String, TransferReceipt> = snapshot
+        .zone
+        .transfers
+        .drain(..)
+        .map(|receipt| (receipt.key.clone(), receipt))
+        .collect();
+    for receipt in appended {
+        if receipt.key.is_empty() || receipt.quantity == 0 {
+            return Err(replay_error(
+                "the transfers-append event contains an invalid receipt",
+            ));
+        }
+        receipt.source.expect_kind(IdKind::Entity)?;
+        receipt.destination.expect_kind(IdKind::Entity)?;
+        by_key.insert(receipt.key.clone(), receipt);
+    }
+    snapshot.zone.transfers = by_key.into_values().collect();
+    snapshot.zone.tick.0 = tick;
+    Ok(())
+}
+
+fn apply_calendar_factions_replace(
+    snapshot: &mut WorldSnapshot,
+    event: &ZoneEvent,
+    tick: u64,
+) -> Result<(), EngineError> {
+    let calendar: Option<CalendarSnapshot> = event_payload_field(
+        event,
+        "calendar",
+        "the calendar-factions-replace event contains an invalid calendar",
+    )?;
+    let factions: Option<FactionSnapshot> = event_payload_field(
+        event,
+        "factions",
+        "the calendar-factions-replace event contains invalid faction state",
+    )?;
+    match (calendar, factions) {
+        (Some(calendar), Some(factions)) => {
+            calendar.validate()?;
+            factions.validate()?;
+            let faction_world = FactionWorld::from_snapshot(factions.clone())?;
+            WorldCalendar::from_snapshot(calendar.clone())?
+                .validate_against(&faction_world)?;
+            snapshot.calendar = Some(calendar);
+            snapshot.factions = Some(factions);
+        }
+        (None, None) => {
+            snapshot.calendar = None;
+            snapshot.factions = None;
+        }
+        _ => {
+            return Err(replay_error(
+                "the calendar-factions-replace event must pair both aggregates",
+            ));
+        }
     }
     snapshot.zone.tick.0 = tick;
     Ok(())
@@ -831,6 +1084,164 @@ mod tests {
     }
 
     #[test]
+    fn replay_applies_non_entity_state_replacements() {
+        use engine_core::inventory::TransferReceipt;
+        use engine_sim::action::Verb;
+        use engine_sim::link::EntityLink;
+
+        let mut baseline = world_snapshot();
+        baseline.zone.entities = [1_u128, 2]
+            .into_iter()
+            .map(|seed| {
+                EntityRecord::new(
+                    StableId::from_parts(IdKind::Entity, 100, seed),
+                    DefinitionId::new("entity.replay-test").unwrap(),
+                    Vec3::new(1.0, 0.0, 1.0),
+                )
+                .with_persistence(PersistencePolicy::PersistentEntity)
+            })
+            .collect();
+        let source = baseline.zone.entities[0].id;
+        let target = baseline.zone.entities[1].id;
+
+        let links = vec![EntityLink::new(
+            DefinitionId::new("link.replay_test").unwrap(),
+            source,
+            target,
+            [LinkEvent::Activated],
+        )];
+        let cooldowns = vec![((source, Verb::Inspect, Some(target)), Tick(9))];
+        let link_cooldowns = vec![((source, target, LinkEvent::Activated), Tick(10))];
+        let transfers = vec![TransferReceipt {
+            key: "replay-transfer".to_owned(),
+            source,
+            source_slot: 0,
+            destination: target,
+            definition: DefinitionId::new("item.coin").unwrap(),
+            quantity: 1,
+            destination_slots: vec![0],
+        }];
+        let mut factions = demo::build_faction_world(1).unwrap();
+        let calendar = demo::build_calendar(&mut factions, 1).unwrap();
+        let calendar = calendar.snapshot();
+        let factions = factions.snapshot();
+
+        let event = |sequence: i64, tick: i64, kind: &str, payload: serde_json::Value| ZoneEvent {
+            sequence,
+            tick,
+            occurred_at: std::time::SystemTime::UNIX_EPOCH,
+            kind: kind.to_owned(),
+            actor_id: None,
+            payload,
+            schema_version: 1,
+        };
+        let events = vec![
+            snapshot_event(0, &baseline),
+            event(
+                1,
+                2,
+                EVENT_LINKS_REPLACE,
+                serde_json::json!({ "links": links }),
+            ),
+            event(
+                2,
+                3,
+                EVENT_COOLDOWNS_REPLACE,
+                serde_json::json!({ "cooldowns": cooldowns }),
+            ),
+            event(
+                3,
+                4,
+                EVENT_LINK_COOLDOWNS_REPLACE,
+                serde_json::json!({ "link_cooldowns": link_cooldowns }),
+            ),
+            event(
+                4,
+                5,
+                EVENT_TRANSFERS_APPEND,
+                serde_json::json!({ "transfers": transfers }),
+            ),
+            event(
+                5,
+                6,
+                EVENT_CALENDAR_FACTIONS_REPLACE,
+                serde_json::json!({
+                    "calendar": calendar,
+                    "factions": factions,
+                }),
+            ),
+        ];
+
+        let mut expected = baseline.clone();
+        expected.zone.links = events[1].payload["links"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| serde_json::from_value(value.clone()).unwrap())
+            .collect();
+        expected.zone.cooldowns = events[2].payload["cooldowns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| serde_json::from_value(value.clone()).unwrap())
+            .collect();
+        expected.zone.link_cooldowns = events[3].payload["link_cooldowns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| serde_json::from_value(value.clone()).unwrap())
+            .collect();
+        expected.zone.transfers = events[4].payload["transfers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| serde_json::from_value(value.clone()).unwrap())
+            .collect();
+        expected.calendar =
+            Some(serde_json::from_value(events[5].payload["calendar"].clone()).unwrap());
+        expected.factions =
+            Some(serde_json::from_value(events[5].payload["factions"].clone()).unwrap());
+        expected.zone.tick.0 = 6;
+
+        assert_eq!(
+            replay_world_snapshot_events(&events, "demo-world").unwrap(),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn replay_accepts_a_retained_log_that_starts_at_a_checkpoint() {
+        let mut baseline = world_snapshot();
+        baseline.zone.tick.0 = 7;
+        let checkpoint = snapshot_event(7, &baseline);
+        assert_eq!(
+            replay_world_snapshot_events(&[checkpoint], "demo-world").unwrap(),
+            Some(baseline)
+        );
+    }
+
+    #[test]
+    fn replay_rejects_a_retained_log_that_starts_after_a_checkpoint() {
+        let entity = EntityRecord::new(
+            StableId::from_parts(IdKind::Entity, 101, 1),
+            DefinitionId::new("entity.replay-test").unwrap(),
+            Vec3::new(1.0, 0.0, 1.0),
+        )
+        .with_persistence(PersistencePolicy::PersistentEntity);
+        let event = ZoneEvent {
+            sequence: 3,
+            tick: 3,
+            occurred_at: std::time::SystemTime::UNIX_EPOCH,
+            kind: EVENT_ENTITY_UPSERT.to_owned(),
+            actor_id: Some(entity.id.to_string()),
+            payload: serde_json::json!({ "entity": entity }),
+            schema_version: 1,
+        };
+        let error = replay_world_snapshot_events(&[event], "demo-world").unwrap_err();
+        assert!(error.to_string().contains("must begin with a world checkpoint"));
+    }
+
+    #[test]
     fn replay_rejects_nonpersistent_or_misidentified_entity_deltas() {
         let baseline = world_snapshot();
         let entity = EntityRecord::new(
@@ -887,17 +1298,13 @@ mod tests {
         assert!(error.to_string().contains("invalid entity ID"));
     }
 
-    #[test]
-    fn recovery_reference_dataset_completes_within_the_documented_target() {
-        // Reference dataset: 1,000 persistent entities, 5,000 upserts, and 400
-        // removals. This is the measured recovery workload for the 60-second
-        // target; see docs/operations.md.
-        const ENTITIES: u128 = 1_000;
-        const UPSERTS: u128 = 5_000;
-        const REMOVALS: u128 = 400;
-
+    fn recovery_dataset(
+        entities: u128,
+        upserts: u128,
+        removals: u128,
+    ) -> (WorldSnapshot, Vec<ZoneEvent>) {
         let mut baseline = world_snapshot();
-        baseline.zone.entities = (0..ENTITIES)
+        baseline.zone.entities = (0..entities)
             .map(|index| {
                 EntityRecord::new(
                     StableId::from_parts(
@@ -913,11 +1320,11 @@ mod tests {
             .collect();
         baseline.zone.entities.sort_by_key(|entity| entity.id);
 
-        let mut events = Vec::with_capacity(1 + (UPSERTS + REMOVALS) as usize);
+        let mut events = Vec::with_capacity(1 + (upserts + removals) as usize);
         events.push(snapshot_event(0, &baseline));
         let mut sequence = 1_i64;
-        for index in 0..UPSERTS {
-            let source = &baseline.zone.entities[usize::try_from(index % ENTITIES).unwrap()];
+        for index in 0..upserts {
+            let source = &baseline.zone.entities[usize::try_from(index % entities).unwrap()];
             let mut entity = source.clone();
             entity.transform.position.x += f32::from(u8::try_from(index % 7).unwrap()) * 0.01;
             let actor_id = entity.id.to_string();
@@ -932,7 +1339,7 @@ mod tests {
             });
             sequence += 1;
         }
-        for index in 0..REMOVALS {
+        for index in 0..removals {
             let entity_id = baseline.zone.entities[usize::try_from(index).unwrap()]
                 .id
                 .to_string();
@@ -947,7 +1354,19 @@ mod tests {
             });
             sequence += 1;
         }
+        (baseline, events)
+    }
 
+    #[test]
+    fn recovery_reference_dataset_completes_within_the_documented_target() {
+        // Reference dataset: 1,000 persistent entities, 5,000 upserts, and 400
+        // removals. This is the measured recovery workload for the 60-second
+        // target; see docs/operations.md.
+        const ENTITIES: u128 = 1_000;
+        const UPSERTS: u128 = 5_000;
+        const REMOVALS: u128 = 400;
+
+        let (_, events) = recovery_dataset(ENTITIES, UPSERTS, REMOVALS);
         let started = std::time::Instant::now();
         let recovered = replay_world_snapshot_events(&events, "demo-world")
             .expect("the reference dataset replays");
@@ -962,6 +1381,44 @@ mod tests {
         assert!(
             elapsed < RECOVERY_TARGET,
             "recovery took {elapsed:?}, over the documented target"
+        );
+    }
+
+    #[test]
+    #[ignore = "production-scale timing check; run explicitly with --ignored --nocapture"]
+    fn recovery_production_scale_meets_the_target() {
+        // Ten times the checked reference workload. This is a manual timing
+        // check for headroom beyond the default test, not a CI gate.
+        const ENTITIES: u128 = 10_000;
+        const UPSERTS: u128 = 50_000;
+        const REMOVALS: u128 = 5_000;
+        const RUNS: usize = 5;
+
+        let (_, events) = recovery_dataset(ENTITIES, UPSERTS, REMOVALS);
+        let mut timings = Vec::with_capacity(RUNS);
+        for run in 0..RUNS {
+            let started = std::time::Instant::now();
+            let recovered = replay_world_snapshot_events(&events, "demo-world")
+                .expect("the production-scale dataset replays");
+            let elapsed = started.elapsed();
+            assert_eq!(
+                recovered.unwrap().zone.entities.len(),
+                usize::try_from(ENTITIES - REMOVALS).unwrap()
+            );
+            println!("production-scale recovery run {run}: {elapsed:?}");
+            timings.push(elapsed);
+        }
+        timings.sort_unstable();
+        let p95_index = (timings.len() * 95).div_ceil(100).saturating_sub(1);
+        let p95 = timings[p95_index.min(timings.len() - 1)];
+        let max = timings.last().copied().unwrap_or_default();
+        println!(
+            "production-scale recovery: events={} p95={p95:?} max={max:?}",
+            events.len()
+        );
+        assert!(
+            max < RECOVERY_TARGET,
+            "production-scale recovery took {max:?}, over the documented target"
         );
     }
 
@@ -991,13 +1448,16 @@ mod tests {
     #[test]
     fn replay_rejects_a_missing_or_corrupt_snapshot_event() {
         let snapshot = world_snapshot();
-        let mut missing = snapshot_event(1, &snapshot);
-        let gap = replay_world_snapshot_events(&[missing.clone()], "demo-world").unwrap_err();
+        let gap = replay_world_snapshot_events(
+            &[snapshot_event(0, &snapshot), snapshot_event(2, &snapshot)],
+            "demo-world",
+        )
+        .unwrap_err();
         assert_eq!(gap.code(), ErrorCode::InvalidRequest);
 
-        missing.sequence = 0;
-        missing.payload["snapshot_hash"] = serde_json::json!("not-a-real-hash");
-        let corrupt = replay_world_snapshot_events(&[missing], "demo-world").unwrap_err();
-        assert_eq!(corrupt.code(), ErrorCode::InvalidRequest);
+        let mut corrupt = snapshot_event(0, &snapshot);
+        corrupt.payload["snapshot_hash"] = serde_json::json!("not-a-real-hash");
+        let error = replay_world_snapshot_events(&[corrupt], "demo-world").unwrap_err();
+        assert_eq!(error.code(), ErrorCode::InvalidRequest);
     }
 }
