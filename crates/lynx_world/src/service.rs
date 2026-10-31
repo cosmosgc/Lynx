@@ -29,9 +29,10 @@ use world_server::{CloseReason, ConnectionId, Opened, Outbound, WorldServer};
 use crate::auth::Grant;
 use crate::authority::{EVENT_WORLD_SNAPSHOT, EVENT_WORLD_STOPPED, ZoneAuthority};
 use crate::persistence::{
-    EVENT_CALENDAR_FACTIONS_REPLACE, EVENT_COOLDOWNS_REPLACE, EVENT_ENTITY_REMOVE,
-    EVENT_ENTITY_UPSERT, EVENT_LINKS_REPLACE, EVENT_LINK_COOLDOWNS_REPLACE, EVENT_TRANSFERS_APPEND,
-    SnapshotStore, WorldSnapshot, WorldSnapshotInputs, ZoneEventInput,
+    EVENT_ACTION_RESULTS_REPLACE, EVENT_CALENDAR_FACTIONS_REPLACE, EVENT_COOLDOWNS_REPLACE,
+    EVENT_COUNTERS_REPLACE, EVENT_ENTITY_REMOVE, EVENT_ENTITY_UPSERT, EVENT_LINK_COOLDOWNS_REPLACE,
+    EVENT_LINK_RESULTS_REPLACE, EVENT_LINKS_REPLACE, EVENT_TRANSFERS_APPEND, SnapshotStore,
+    WorldSnapshot, WorldSnapshotInputs, ZoneEventInput,
 };
 
 /// Client handshake message kind. Its body is [`Hello`].
@@ -1141,11 +1142,8 @@ struct PendingWorldEvent {
 /// Diff two world states into one deterministic per-tick event batch.
 ///
 /// Entities are emitted in stable-ID order, followed by fixed-order section
-/// replacements. Action and link idempotency caches stay checkpoint-only.
-fn world_delta_events(
-    previous: &WorldSnapshot,
-    current: &WorldSnapshot,
-) -> Vec<PendingWorldEvent> {
+/// replacements, including retry caches and durable counters.
+fn world_delta_events(previous: &WorldSnapshot, current: &WorldSnapshot) -> Vec<PendingWorldEvent> {
     let previous_entities = entity_records(previous);
     let current_entities = entity_records(current);
     let mut pending = Vec::new();
@@ -1191,8 +1189,12 @@ fn world_delta_events(
         });
     }
 
-    let previous_transfers: BTreeSet<&String> =
-        previous.zone.transfers.iter().map(|receipt| &receipt.key).collect();
+    let previous_transfers: BTreeSet<&String> = previous
+        .zone
+        .transfers
+        .iter()
+        .map(|receipt| &receipt.key)
+        .collect();
     let appended: Vec<_> = current
         .zone
         .transfers
@@ -1218,6 +1220,33 @@ fn world_delta_events(
         });
     }
 
+    if previous.zone.action_results != current.zone.action_results {
+        pending.push(PendingWorldEvent {
+            actor_id: None,
+            kind: EVENT_ACTION_RESULTS_REPLACE,
+            payload: serde_json::json!({ "action_results": current.zone.action_results }),
+        });
+    }
+    if previous.zone.link_results != current.zone.link_results {
+        pending.push(PendingWorldEvent {
+            actor_id: None,
+            kind: EVENT_LINK_RESULTS_REPLACE,
+            payload: serde_json::json!({ "link_results": current.zone.link_results }),
+        });
+    }
+    if previous.zone.applied_actions != current.zone.applied_actions
+        || previous.zone.link_activations != current.zone.link_activations
+    {
+        pending.push(PendingWorldEvent {
+            actor_id: None,
+            kind: EVENT_COUNTERS_REPLACE,
+            payload: serde_json::json!({
+                "applied_actions": current.zone.applied_actions,
+                "link_activations": current.zone.link_activations,
+            }),
+        });
+    }
+
     pending
 }
 
@@ -1239,6 +1268,7 @@ mod tests {
 
     use crate::auth::{Authenticator, digest};
     use crate::demo;
+    use crate::persistence::{ZoneEvent, replay_world_snapshot_events};
     use world_gateway::{GatewayConfig, SystemResumeTokens, WorldGateway};
     use world_server::{READY_KIND, SNAPSHOT_KIND};
 
@@ -2098,15 +2128,18 @@ mod tests {
     }
 
     #[test]
-    fn world_delta_events_cover_every_replayable_section() {
+    #[allow(clippy::too_many_lines)] // Builds and replays every durable tick section.
+    fn world_delta_events_cover_every_replayable_section_and_replay() {
         use engine_core::inventory::TransferReceipt;
-        use engine_sim::action::Verb;
+        use engine_sim::action::{ActionOutcome, ActionResult, Verb};
         use engine_sim::link::{EntityLink, LinkEvent};
 
         let (service, _, _) = service();
         let baseline =
             crate::persistence::WorldSnapshot::capture(&service.snapshot_inputs(), 1_000);
         let mut current = baseline.clone();
+        current.zone.tick.0 = 1;
+        current.zone.entities[0].transform.position.x += 1.0;
         let source = current.zone.entities[0].id;
         let target = current.zone.entities[1].id;
         current.zone.links.push(EntityLink::new(
@@ -2136,19 +2169,75 @@ mod tests {
         let calendar = demo::build_calendar(&mut factions, 5).unwrap();
         current.calendar = Some(calendar.snapshot());
         current.factions = Some(factions.snapshot());
+        current.zone.action_results.push((
+            "service-action-cache".to_owned(),
+            ActionResult {
+                request_id: "service-action-cache".to_owned(),
+                actor: source,
+                verb: Verb::Inspect,
+                server_tick: Tick(1),
+                outcome: ActionOutcome::Applied {
+                    effects: Vec::new(),
+                },
+            },
+        ));
+        current
+            .zone
+            .link_results
+            .push(("service-link-cache".to_owned(), Vec::new()));
+        current.zone.applied_actions = 1;
+        current.zone.link_activations = 1;
 
         let events = world_delta_events(&baseline, &current);
         assert_eq!(
             events.iter().map(|event| event.kind).collect::<Vec<_>>(),
             [
+                EVENT_ENTITY_UPSERT,
                 EVENT_LINKS_REPLACE,
                 EVENT_COOLDOWNS_REPLACE,
                 EVENT_LINK_COOLDOWNS_REPLACE,
                 EVENT_TRANSFERS_APPEND,
                 EVENT_CALENDAR_FACTIONS_REPLACE,
+                EVENT_ACTION_RESULTS_REPLACE,
+                EVENT_LINK_RESULTS_REPLACE,
+                EVENT_COUNTERS_REPLACE,
             ]
         );
         assert!(world_delta_events(&baseline, &baseline).is_empty());
+
+        // Every emitted payload is accepted by the recovery reducer and
+        // reconstructs exactly the state the service was about to serve.
+        let snapshot = serde_json::to_value(&baseline).unwrap();
+        let snapshot_hash = crate::auth::hash_hex(&serde_json::to_string(&snapshot).unwrap());
+        let mut recorded = vec![ZoneEvent {
+            sequence: 0,
+            tick: i64::try_from(baseline.zone.tick.0).unwrap(),
+            occurred_at: std::time::SystemTime::UNIX_EPOCH,
+            kind: EVENT_WORLD_SNAPSHOT.to_owned(),
+            actor_id: None,
+            payload: serde_json::json!({
+                "world_id": "demo-world",
+                "snapshot": snapshot,
+                "snapshot_hash": snapshot_hash,
+            }),
+            schema_version: 1,
+        }];
+        for (offset, event) in events.iter().enumerate() {
+            recorded.push(ZoneEvent {
+                sequence: i64::try_from(offset + 1).unwrap(),
+                tick: i64::try_from(current.zone.tick.0).unwrap(),
+                occurred_at: std::time::SystemTime::UNIX_EPOCH,
+                kind: event.kind.to_owned(),
+                actor_id: event.actor_id.clone(),
+                payload: event.payload.clone(),
+                schema_version: 1,
+            });
+        }
+        assert_eq!(
+            replay_world_snapshot_events(&recorded, "demo-world").unwrap(),
+            Some(current),
+            "the emitted tick batch replays to the emitting world state"
+        );
     }
 
     #[test]

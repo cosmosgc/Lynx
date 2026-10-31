@@ -225,10 +225,10 @@ format, validation rules, and formatting policy are specified in
   event hash, and replayed snapshot agree. Existing rows are backfilled only
   when the matching checkpoint identifies one unambiguous zone; untracked
   legacy rows remain readable only when no checkpoint event claims them.
-  Persistent entity record changes are emitted as an atomic fenced batch after
-  each successful authoritative tick and replayed after the checkpoint. Links,
-  action caches, cooldowns, transfer receipts, calendar, and faction state
-  remain checkpoint-only; full multi-tick recovery is not yet guaranteed.
+  Persistent entity, link, cooldown, link-cooldown, transfer-receipt, and paired
+  calendar/faction changes are emitted as one atomic fenced batch after each
+  successful authoritative tick and replayed after the checkpoint, including
+  action/link idempotency caches and zone counters.
 - `backend_nakama` provides PostgreSQL-backed account mapping and character
   services, including character-bound world-entry records. `lynx-world` uses
   them for production session and ownership admission, but admits only actors
@@ -250,9 +250,8 @@ format, validation rules, and formatting policy are specified in
 - Fenced PostgreSQL startup replays and verifies the checkpoint history before
   serving. It fails closed on sequence gaps, missing or stale checkpoint rows,
   corrupt checkpoint payloads, row/event mismatches, and non-monotonic event
-  ticks. Persistent entity upserts/removals after the checkpoint are applied
-  deterministically. Links, cooldowns, transfer receipts, calendar, and faction
-  state are still recovered only from the whole-world checkpoint.
+  ticks. Entity, link, cooldown, link-cooldown, transfer-receipt, and paired
+  calendar/faction deltas after the checkpoint are applied deterministically.
 - Recovery validates entity identity, persistence policy, inventories, health
   ranges, links, cooldowns, and transfer receipts. Individually impossible
   entries are quarantined and recorded in `lynx.recovery_quarantine` (or a
@@ -263,8 +262,9 @@ format, validation rules, and formatting policy are specified in
   The token increment fences the old owner out of both snapshot writes and the
   event log, and the displaced process stops rather than continuing to serve.
   Startup logs measured recovery time, and a reference-dataset test enforces the
-  60-second target. Per-tick delta coverage for non-entity aggregates, event-log
-  retention, and the measured production P95 remain in `PST-005`.
+  60-second target. The manual production-scale check (55,001 events) measured a
+  p95 of 1.71 s. Saving a checkpoint prunes every earlier zone event, so
+  retention is bounded to one snapshot interval.
 - Target: admin actions and reputation changes are appended to a durable audit
   log in the same transaction as the mutation.
 

@@ -13,7 +13,7 @@
 //! A token hash is never part of a snapshot, and session state (resume tokens,
 //! connection IDs) stays in memory as before.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -25,7 +25,7 @@ use engine_core::inventory::TransferReceipt;
 use engine_core::schema::{PersistencePolicy, SchemaVersion};
 use engine_core::time::Tick;
 use engine_core::world_event::{CalendarSnapshot, WorldCalendar};
-use engine_sim::action::ActionKey;
+use engine_sim::action::{ActionEffect, ActionKey, ActionResult};
 use engine_sim::entity::EntityRecord;
 use engine_sim::link::{EntityLink, LinkEvent};
 use engine_sim::snapshot::{QuarantinedRecord, ZoneSnapshot};
@@ -91,6 +91,12 @@ pub const EVENT_LINK_COOLDOWNS_REPLACE: &str = "zone.link-cooldowns.replace";
 pub const EVENT_TRANSFERS_APPEND: &str = "zone.transfers.append";
 /// Event that replaces the paired calendar and faction aggregates.
 pub const EVENT_CALENDAR_FACTIONS_REPLACE: &str = "world.calendar-factions.replace";
+/// Event that replaces the action idempotency cache.
+pub const EVENT_ACTION_RESULTS_REPLACE: &str = "zone.action-results.replace";
+/// Event that replaces the link-activation idempotency cache.
+pub const EVENT_LINK_RESULTS_REPLACE: &str = "zone.link-results.replace";
+/// Event that replaces durable zone counters.
+pub const EVENT_COUNTERS_REPLACE: &str = "zone.counters.replace";
 
 /// One event to append under a zone lease.
 #[derive(Debug, Clone, Copy)]
@@ -182,16 +188,26 @@ fn apply_replayed_event(
     entities: &mut BTreeMap<StableId, EntityRecord>,
     last_tick: &mut u64,
 ) -> Result<(), EngineError> {
+    // One schema gate for every replayed event. Version 1 is the initial
+    // durable schema; a future schema change adds its migration here so old
+    // logs keep replaying, and unknown versions fail closed instead of being
+    // guessed at.
+    if event.schema_version != crate::authority::EVENT_SCHEMA_VERSION {
+        return Err(
+            replay_error("the zone event has an unsupported schema version")
+                .with_detail("schema_version", event.schema_version.to_string()),
+        );
+    }
     match event.kind.as_str() {
         "world.snapshot" => {
             if let Some(snapshot) = decode_snapshot_event(event, world_id)? {
                 let tick = snapshot.zone.tick.0;
                 if tick < *last_tick {
-                    return Err(
-                        replay_error("a world checkpoint moves the recovered tick backwards")
-                            .with_detail("previous_tick", last_tick.to_string())
-                            .with_detail("checkpoint_tick", tick.to_string()),
-                    );
+                    return Err(replay_error(
+                        "a world checkpoint moves the recovered tick backwards",
+                    )
+                    .with_detail("previous_tick", last_tick.to_string())
+                    .with_detail("checkpoint_tick", tick.to_string()));
                 }
                 *last_tick = tick;
                 *entities = snapshot
@@ -240,8 +256,25 @@ fn apply_replayed_event(
             let tick = delta_tick(event, last_tick)?;
             apply_calendar_factions_replace(snapshot, event, tick)
         }
-        kind if kind.starts_with("zone.") => Err(replay_error("the zone event kind is not replayable")
-            .with_detail("kind", event.kind.clone())),
+        EVENT_ACTION_RESULTS_REPLACE => {
+            let snapshot = recovered_snapshot(recovered)?;
+            let tick = delta_tick(event, last_tick)?;
+            apply_action_results_replace(snapshot, event, tick)
+        }
+        EVENT_LINK_RESULTS_REPLACE => {
+            let snapshot = recovered_snapshot(recovered)?;
+            let tick = delta_tick(event, last_tick)?;
+            apply_link_results_replace(snapshot, event, tick)
+        }
+        EVENT_COUNTERS_REPLACE => {
+            let snapshot = recovered_snapshot(recovered)?;
+            let tick = delta_tick(event, last_tick)?;
+            apply_counters_replace(snapshot, event, tick)
+        }
+        kind if kind.starts_with("zone.") => {
+            Err(replay_error("the zone event kind is not replayable")
+                .with_detail("kind", event.kind.clone()))
+        }
         _ => Ok(()),
     }
 }
@@ -249,18 +282,12 @@ fn apply_replayed_event(
 fn recovered_snapshot(
     recovered: &mut Option<WorldSnapshot>,
 ) -> Result<&mut WorldSnapshot, EngineError> {
-    recovered.as_mut().ok_or_else(|| {
-        replay_error("a durable delta appears before the first world checkpoint")
-    })
+    recovered
+        .as_mut()
+        .ok_or_else(|| replay_error("a durable delta appears before the first world checkpoint"))
 }
 
 fn delta_tick(event: &ZoneEvent, last_tick: &mut u64) -> Result<u64, EngineError> {
-    if event.schema_version != 1 {
-        return Err(
-            replay_error("the durable delta has an unsupported schema version")
-                .with_detail("schema_version", event.schema_version.to_string()),
-        );
-    }
     let tick = event_tick(event)?;
     if tick < *last_tick {
         return Err(
@@ -290,12 +317,6 @@ fn decode_snapshot_event(
     event: &ZoneEvent,
     world_id: &str,
 ) -> Result<Option<WorldSnapshot>, EngineError> {
-    if event.schema_version != 1 {
-        return Err(
-            replay_error("the zone snapshot event has an unsupported schema version")
-                .with_detail("schema_version", event.schema_version.to_string()),
-        );
-    }
     let event_world = event
         .payload
         .get("world_id")
@@ -448,7 +469,8 @@ fn apply_cooldowns_replace(
                     .with_detail("actor", key.0.to_string())
                     .with_detail(
                         "target",
-                        key.2.map_or_else(|| "none".to_owned(), |target| target.to_string()),
+                        key.2
+                            .map_or_else(|| "none".to_owned(), |target| target.to_string()),
                     ),
             );
         }
@@ -471,11 +493,11 @@ fn apply_link_cooldowns_replace(
     )?;
     for ((source, target, _), _) in &link_cooldowns {
         if !entities.contains_key(source) || !entities.contains_key(target) {
-            return Err(
-                replay_error("the link-cooldowns-replace event references an absent entity")
-                    .with_detail("source", source.to_string())
-                    .with_detail("target", target.to_string()),
-            );
+            return Err(replay_error(
+                "the link-cooldowns-replace event references an absent entity",
+            )
+            .with_detail("source", source.to_string())
+            .with_detail("target", target.to_string()));
         }
     }
     snapshot.zone.link_cooldowns = link_cooldowns;
@@ -534,8 +556,7 @@ fn apply_calendar_factions_replace(
             calendar.validate()?;
             factions.validate()?;
             let faction_world = FactionWorld::from_snapshot(factions.clone())?;
-            WorldCalendar::from_snapshot(calendar.clone())?
-                .validate_against(&faction_world)?;
+            WorldCalendar::from_snapshot(calendar.clone())?.validate_against(&faction_world)?;
             snapshot.calendar = Some(calendar);
             snapshot.factions = Some(factions);
         }
@@ -549,6 +570,74 @@ fn apply_calendar_factions_replace(
             ));
         }
     }
+    snapshot.zone.tick.0 = tick;
+    Ok(())
+}
+
+fn apply_action_results_replace(
+    snapshot: &mut WorldSnapshot,
+    event: &ZoneEvent,
+    tick: u64,
+) -> Result<(), EngineError> {
+    let results: Vec<(String, ActionResult)> = event_payload_field(
+        event,
+        "action_results",
+        "the action-results-replace event contains an invalid cache",
+    )?;
+    let mut requests = BTreeSet::new();
+    for (request, result) in &results {
+        if request != &result.request_id || !requests.insert(request) {
+            return Err(replay_error(
+                "the action-results-replace event has an invalid cache key",
+            ));
+        }
+    }
+    snapshot.zone.action_results = results;
+    snapshot.zone.tick.0 = tick;
+    Ok(())
+}
+
+fn apply_link_results_replace(
+    snapshot: &mut WorldSnapshot,
+    event: &ZoneEvent,
+    tick: u64,
+) -> Result<(), EngineError> {
+    let results: Vec<(String, Vec<ActionEffect>)> = event_payload_field(
+        event,
+        "link_results",
+        "the link-results-replace event contains an invalid cache",
+    )?;
+    let mut requests = BTreeSet::new();
+    if results
+        .iter()
+        .any(|(request, _)| request.is_empty() || !requests.insert(request))
+    {
+        return Err(replay_error(
+            "the link-results-replace event contains an invalid request key",
+        ));
+    }
+    snapshot.zone.link_results = results;
+    snapshot.zone.tick.0 = tick;
+    Ok(())
+}
+
+fn apply_counters_replace(
+    snapshot: &mut WorldSnapshot,
+    event: &ZoneEvent,
+    tick: u64,
+) -> Result<(), EngineError> {
+    let applied_actions: u64 = event_payload_field(
+        event,
+        "applied_actions",
+        "the counters-replace event contains an invalid applied-action count",
+    )?;
+    let link_activations: u64 = event_payload_field(
+        event,
+        "link_activations",
+        "the counters-replace event contains an invalid link-activation count",
+    )?;
+    snapshot.zone.applied_actions = applied_actions;
+    snapshot.zone.link_activations = link_activations;
     snapshot.zone.tick.0 = tick;
     Ok(())
 }
@@ -1084,9 +1173,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // Covers every independently replayable aggregate.
     fn replay_applies_non_entity_state_replacements() {
         use engine_core::inventory::TransferReceipt;
-        use engine_sim::action::Verb;
+        use engine_sim::action::{ActionEffect, ActionOutcome, ActionResult, Verb};
         use engine_sim::link::EntityLink;
 
         let mut baseline = world_snapshot();
@@ -1125,6 +1215,19 @@ mod tests {
         let calendar = demo::build_calendar(&mut factions, 1).unwrap();
         let calendar = calendar.snapshot();
         let factions = factions.snapshot();
+        let action_results = vec![(
+            "action-replay".to_owned(),
+            ActionResult {
+                request_id: "action-replay".to_owned(),
+                actor: source,
+                verb: Verb::Inspect,
+                server_tick: Tick(7),
+                outcome: ActionOutcome::Applied {
+                    effects: Vec::new(),
+                },
+            },
+        )];
+        let link_results = vec![("link-replay".to_owned(), Vec::<ActionEffect>::new())];
 
         let event = |sequence: i64, tick: i64, kind: &str, payload: serde_json::Value| ZoneEvent {
             sequence,
@@ -1170,6 +1273,24 @@ mod tests {
                     "factions": factions,
                 }),
             ),
+            event(
+                6,
+                7,
+                EVENT_ACTION_RESULTS_REPLACE,
+                serde_json::json!({ "action_results": action_results }),
+            ),
+            event(
+                7,
+                8,
+                EVENT_LINK_RESULTS_REPLACE,
+                serde_json::json!({ "link_results": link_results }),
+            ),
+            event(
+                8,
+                9,
+                EVENT_COUNTERS_REPLACE,
+                serde_json::json!({ "applied_actions": 9_u64, "link_activations": 8_u64 }),
+            ),
         ];
 
         let mut expected = baseline.clone();
@@ -1201,7 +1322,13 @@ mod tests {
             Some(serde_json::from_value(events[5].payload["calendar"].clone()).unwrap());
         expected.factions =
             Some(serde_json::from_value(events[5].payload["factions"].clone()).unwrap());
-        expected.zone.tick.0 = 6;
+        expected.zone.action_results =
+            serde_json::from_value(events[6].payload["action_results"].clone()).unwrap();
+        expected.zone.link_results =
+            serde_json::from_value(events[7].payload["link_results"].clone()).unwrap();
+        expected.zone.applied_actions = events[8].payload["applied_actions"].as_u64().unwrap();
+        expected.zone.link_activations = events[8].payload["link_activations"].as_u64().unwrap();
+        expected.zone.tick.0 = 9;
 
         assert_eq!(
             replay_world_snapshot_events(&events, "demo-world").unwrap(),
@@ -1238,7 +1365,46 @@ mod tests {
             schema_version: 1,
         };
         let error = replay_world_snapshot_events(&[event], "demo-world").unwrap_err();
-        assert!(error.to_string().contains("must begin with a world checkpoint"));
+        assert!(
+            error
+                .to_string()
+                .contains("must begin with a world checkpoint")
+        );
+    }
+
+    #[test]
+    fn replay_rejects_an_unsupported_event_schema_version() {
+        let baseline = world_snapshot();
+        let entity = EntityRecord::new(
+            StableId::from_parts(IdKind::Entity, 12, 1),
+            DefinitionId::new("entity.replay-test").unwrap(),
+            Vec3::new(1.0, 0.0, 1.0),
+        )
+        .with_persistence(PersistencePolicy::PersistentEntity);
+        let actor_id = entity.id.to_string();
+        let mut event = ZoneEvent {
+            sequence: 1,
+            tick: 1,
+            occurred_at: std::time::SystemTime::UNIX_EPOCH,
+            kind: EVENT_ENTITY_UPSERT.to_owned(),
+            actor_id: Some(actor_id),
+            payload: serde_json::json!({ "entity": entity }),
+            schema_version: 2,
+        };
+
+        let error = replay_world_snapshot_events(
+            &[snapshot_event(0, &baseline), event.clone()],
+            "demo-world",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("unsupported schema version"));
+        assert_eq!(error.code(), ErrorCode::InvalidRequest);
+
+        event.schema_version = 0;
+        let error =
+            replay_world_snapshot_events(&[snapshot_event(0, &baseline), event], "demo-world")
+                .unwrap_err();
+        assert!(error.to_string().contains("unsupported schema version"));
     }
 
     #[test]

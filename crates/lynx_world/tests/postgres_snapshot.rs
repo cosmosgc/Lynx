@@ -9,13 +9,18 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use engine_core::id::{DefinitionId, IdKind, StableId};
+use engine_core::inventory::TransferReceipt;
 use engine_core::math::Vec3;
 use engine_core::schema::PersistencePolicy;
-use engine_core::time::{DurationMs, Millis};
+use engine_core::time::{DurationMs, Millis, Tick};
+use engine_sim::action::{ActionOutcome, ActionResult, Verb};
 use engine_sim::entity::EntityRecord;
+use engine_sim::link::{EntityLink, LinkEvent};
 use lynx_world::auth::{Authenticator, Grant, digest};
 use lynx_world::demo;
 use lynx_world::persistence::{
+    EVENT_CALENDAR_FACTIONS_REPLACE, EVENT_COOLDOWNS_REPLACE, EVENT_ENTITY_UPSERT,
+    EVENT_LINK_COOLDOWNS_REPLACE, EVENT_LINKS_REPLACE, EVENT_TRANSFERS_APPEND,
     PostgresSnapshotStore, PostgresZoneLeaseStore, SnapshotStore, SnapshotVerification,
     WorldSnapshot, WorldSnapshotInputs, ZoneEventInput, replay_world_snapshot_events,
 };
@@ -128,6 +133,17 @@ fn assert_snapshot_event_replays(
     Ok(())
 }
 
+fn open_bound_store(
+    world_id: &str,
+    zone: &str,
+    owner: &str,
+    token: i64,
+) -> anyhow::Result<PostgresSnapshotStore> {
+    let store = PostgresSnapshotStore::from_env(world_id)?;
+    store.bind_zone_lease(zone, owner, token)?;
+    Ok(store)
+}
+
 fn assert_event_batch_appends_contiguously(
     store: &PostgresZoneLeaseStore,
     zone: &str,
@@ -192,6 +208,8 @@ fn postgres_zone_lease_takeover_fences_old_owner_writes() -> anyhow::Result<()> 
     let snapshots = PostgresSnapshotStore::from_env(&world_id)?;
     snapshots.bind_zone_lease(&zone, "owner-a", first.fencing_token)?;
     let snapshot = authored_snapshot()?;
+    let mut snapshot = snapshot;
+    snapshot.zone.tick.0 = 1;
     snapshots.save_at_tick(&snapshot, 1)?;
     assert_snapshot_event_replays(&store, &zone, &world_id, &snapshot)?;
 
@@ -487,6 +505,264 @@ fn postgres_load_replays_entity_deltas_after_the_pinned_checkpoint() -> anyhow::
     store.record_quarantine(&zone, &world.quarantined)?;
     let stored = store.quarantine_records(&zone)?;
     assert_eq!(stored, world.quarantined, "the report is durable");
+    Ok(())
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // One isolated fixture proves multi-tick recovery and retention end to end.
+fn postgres_recovers_multi_tick_aggregates_and_prunes_replayed_history() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+    if std::env::var("LYNX_PG_PASSWORD").is_err() {
+        anyhow::ensure!(
+            std::env::var_os("LYNX_REQUIRE_POSTGRES_TEST").is_none(),
+            "PostgreSQL test required but not configured"
+        );
+        eprintln!("skipping PostgreSQL multi-tick recovery test: database is not configured");
+        return Ok(());
+    }
+
+    let zone = test_zone_id();
+    let world_id = test_world_id();
+    let owner = "multi-tick-recovery-test";
+    let leases = PostgresZoneLeaseStore::from_env()?;
+    let lease = leases
+        .acquire(&zone, owner, std::time::Duration::from_secs(60))?
+        .expect("isolated test zone lease is available");
+    let store = open_bound_store(&world_id, &zone, owner, lease.fencing_token)?;
+
+    let mut expected = authored_snapshot()?;
+    expected.zone.tick.0 = 10;
+    store.save_at_tick(&expected, 10)?;
+
+    // Tick 11: move an entity, add a link, and arm an action cooldown.
+    let source = expected.zone.entities[0].id;
+    let target = expected.zone.entities[1].id;
+    let mut moved = expected.zone.entities[0].clone();
+    moved.transform.position.x += 0.5;
+    expected.zone.entities[0] = moved.clone();
+    expected.zone.links.push(EntityLink::new(
+        DefinitionId::new("link.recovery-test")?,
+        source,
+        target,
+        [LinkEvent::Activated],
+    ));
+    expected
+        .zone
+        .cooldowns
+        .push(((source, Verb::Inspect, None), Tick(12)));
+
+    let moved_actor = moved.id.to_string();
+    let entity_payload = serde_json::json!({ "entity": moved });
+    let links_payload = serde_json::json!({ "links": expected.zone.links });
+    let cooldowns_payload = serde_json::json!({ "cooldowns": expected.zone.cooldowns });
+    let tick_eleven = [
+        ZoneEventInput {
+            tick: 11,
+            kind: EVENT_ENTITY_UPSERT,
+            actor_id: Some(moved_actor.as_str()),
+            payload: &entity_payload,
+            schema_version: 1,
+        },
+        ZoneEventInput {
+            tick: 11,
+            kind: EVENT_LINKS_REPLACE,
+            actor_id: None,
+            payload: &links_payload,
+            schema_version: 1,
+        },
+        ZoneEventInput {
+            tick: 11,
+            kind: EVENT_COOLDOWNS_REPLACE,
+            actor_id: None,
+            payload: &cooldowns_payload,
+            schema_version: 1,
+        },
+    ];
+    leases.append_events(&zone, owner, lease.fencing_token, &tick_eleven)?;
+
+    // Tick 12: add an entity, arm a link cooldown, append a transfer receipt,
+    // and replace the paired calendar/faction aggregates.
+    let added = EntityRecord::new(
+        StableId::from_parts(IdKind::Entity, 98, 1),
+        DefinitionId::new("entity.recovery-test")?,
+        Vec3::new(2.0, 0.0, 3.0),
+    )
+    .with_persistence(PersistencePolicy::PersistentEntity);
+    expected.zone.entities.push(added.clone());
+    expected.zone.entities.sort_by_key(|entity| entity.id);
+    expected
+        .zone
+        .link_cooldowns
+        .push(((source, target, LinkEvent::Activated), Tick(14)));
+    let receipt = TransferReceipt {
+        key: "multi-tick-transfer".to_owned(),
+        source,
+        source_slot: 0,
+        destination: target,
+        definition: DefinitionId::new("item.coin")?,
+        quantity: 1,
+        destination_slots: vec![0],
+    };
+    expected.zone.transfers.push(receipt.clone());
+    expected
+        .zone
+        .transfers
+        .sort_by(|left, right| left.key.cmp(&right.key));
+    expected.zone.action_results.push((
+        "multi-tick-action-cache".to_owned(),
+        ActionResult {
+            request_id: "multi-tick-action-cache".to_owned(),
+            actor: source,
+            verb: Verb::Inspect,
+            server_tick: Tick(12),
+            outcome: ActionOutcome::Applied {
+                effects: Vec::new(),
+            },
+        },
+    ));
+    expected
+        .zone
+        .link_results
+        .push(("multi-tick-link-cache".to_owned(), Vec::new()));
+    expected.zone.applied_actions = 1;
+    expected.zone.link_activations = 1;
+    let mut factions = demo::build_faction_world(50_000)?;
+    let calendar = demo::build_calendar(&mut factions, 50_000)?;
+    expected.calendar = Some(calendar.snapshot());
+    expected.factions = Some(factions.snapshot());
+    expected.zone.tick.0 = 12;
+
+    let added_actor = added.id.to_string();
+    let added_payload = serde_json::json!({ "entity": added });
+    let link_cooldowns_payload =
+        serde_json::json!({ "link_cooldowns": expected.zone.link_cooldowns });
+    let transfers_payload = serde_json::json!({ "transfers": [receipt] });
+    let calendar_payload = serde_json::json!({
+        "calendar": expected.calendar,
+        "factions": expected.factions,
+    });
+    let action_results_payload =
+        serde_json::json!({ "action_results": expected.zone.action_results });
+    let link_results_payload = serde_json::json!({ "link_results": expected.zone.link_results });
+    let counters_payload = serde_json::json!({
+        "applied_actions": expected.zone.applied_actions,
+        "link_activations": expected.zone.link_activations,
+    });
+    let tick_twelve = [
+        ZoneEventInput {
+            tick: 12,
+            kind: EVENT_ENTITY_UPSERT,
+            actor_id: Some(added_actor.as_str()),
+            payload: &added_payload,
+            schema_version: 1,
+        },
+        ZoneEventInput {
+            tick: 12,
+            kind: EVENT_LINK_COOLDOWNS_REPLACE,
+            actor_id: None,
+            payload: &link_cooldowns_payload,
+            schema_version: 1,
+        },
+        ZoneEventInput {
+            tick: 12,
+            kind: EVENT_TRANSFERS_APPEND,
+            actor_id: None,
+            payload: &transfers_payload,
+            schema_version: 1,
+        },
+        ZoneEventInput {
+            tick: 12,
+            kind: EVENT_CALENDAR_FACTIONS_REPLACE,
+            actor_id: None,
+            payload: &calendar_payload,
+            schema_version: 1,
+        },
+        ZoneEventInput {
+            tick: 12,
+            kind: lynx_world::persistence::EVENT_ACTION_RESULTS_REPLACE,
+            actor_id: None,
+            payload: &action_results_payload,
+            schema_version: 1,
+        },
+        ZoneEventInput {
+            tick: 12,
+            kind: lynx_world::persistence::EVENT_LINK_RESULTS_REPLACE,
+            actor_id: None,
+            payload: &link_results_payload,
+            schema_version: 1,
+        },
+        ZoneEventInput {
+            tick: 12,
+            kind: lynx_world::persistence::EVENT_COUNTERS_REPLACE,
+            actor_id: None,
+            payload: &counters_payload,
+            schema_version: 1,
+        },
+    ];
+    leases.append_events(&zone, owner, lease.fencing_token, &tick_twelve)?;
+
+    // Simulate a crash: drop the connection-bound store and recover through a
+    // fresh store with the still-held lease.
+    drop(store);
+    let recovered_store = open_bound_store(&world_id, &zone, owner, lease.fencing_token)?;
+    assert_eq!(
+        recovered_store.load()?,
+        Some(expected.clone()),
+        "multi-tick entity, link, cooldown, transfer, calendar, and faction state survives the restart"
+    );
+
+    // A new checkpoint covers every earlier event, so retention keeps only the
+    // checkpoint and recovery still returns the same world.
+    recovered_store.save_at_tick(&expected, 12)?;
+    let retained = leases.events_after(&zone, -1)?;
+    assert_eq!(retained.len(), 1, "events before the checkpoint are pruned");
+    assert_eq!(retained[0].kind, "world.snapshot");
+    let checkpoint_sequence = retained[0].sequence;
+    assert!(checkpoint_sequence > 0);
+    assert_eq!(
+        recovered_store.verify_recovery(&zone)?,
+        SnapshotVerification::Verified {
+            event_sequence: checkpoint_sequence,
+            event_count: 1,
+            saved_at_ms: expected.saved_at_ms,
+            tick: 12,
+        }
+    );
+    assert_eq!(recovered_store.load()?, Some(expected.clone()));
+
+    // Deltas after the retained checkpoint still replay.
+    let mut after = expected;
+    after.zone.entities[0].transform.position.x += 0.25;
+    after.zone.tick.0 = 13;
+    let after_payload = serde_json::json!({ "entity": after.zone.entities[0] });
+    let after_actor = after.zone.entities[0].id.to_string();
+    leases.append_events(
+        &zone,
+        owner,
+        lease.fencing_token,
+        &[ZoneEventInput {
+            tick: 13,
+            kind: EVENT_ENTITY_UPSERT,
+            actor_id: Some(after_actor.as_str()),
+            payload: &after_payload,
+            schema_version: 1,
+        }],
+    )?;
+    drop(recovered_store);
+
+    let final_store = open_bound_store(&world_id, &zone, owner, lease.fencing_token)?;
+    assert_eq!(
+        final_store.load()?,
+        Some(after),
+        "a delta after a pruned checkpoint still replays"
+    );
+    let events = leases.events_after(&zone, -1)?;
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].sequence, checkpoint_sequence);
+    assert_eq!(events[1].kind, EVENT_ENTITY_UPSERT);
+
+    final_store.delete()?;
+    assert!(leases.release(&zone, owner, lease.fencing_token)?);
     Ok(())
 }
 

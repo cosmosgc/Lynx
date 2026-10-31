@@ -14,6 +14,7 @@ copied from the task entries; a dash means none are declared.
 | [SIM-018](10-simulation-gameplay.md#sim-018--determinism-and-tick-budget) | Determinism and tick budget | P1 | Ready | — | Establish measured simulation limits alongside feature work. |
 | [PST-007](20-persistence-backend.md#pst-007--postgresql-connection-hardening) | PostgreSQL connection hardening | P1 | Ready | — | Harden remote database access independently. |
 | [PST-009](20-persistence-backend.md#pst-009--backup-and-restore-verification) | Backup and restore verification | P1 | Ready | — | Define recovery guarantees before OPS-003 automation. |
+| [PST-003](20-persistence-backend.md#pst-003--normalized-faction-and-calendar-persistence) | Normalized faction and calendar persistence | P1 | Ready | `PST-001`, `PST-005` | Foundations are complete; implement normalized stores and snapshot backfill. |
 | [NET-006](30-networking-security.md#net-006--replication-delivery-slo-and-backpressure) | Replication delivery SLO and backpressure | P1 | Ready | — | Measure delivery limits; informs performance/load work. |
 | [NET-007](30-networking-security.md#net-007--session-and-token-abuse-defenses) | Session and token abuse defenses | P1 | Ready | `NET-002` | Build on existing rate limits; security priority. |
 | [NET-010](30-networking-security.md#net-010--secret-management-and-rotation) | Secret management and rotation | P1 | Ready | — | Upstream for blocked OPS-012. |
@@ -54,7 +55,7 @@ copied from the task entries; a dash means none are declared.
 | [QUA-006](70-testing-quality.md#qua-006--security-abuse-test-suite) | Security abuse test suite | P1 | In progress | — | Expand abuse matrix and secret-redaction/side-effect assertions. |
 | [OPS-005](60-operations-release.md#ops-005--release-artifacts-and-packaging) | Release artifacts and packaging | P2 | In progress | — | Verify tagged release; client packages/macOS remain later work. |
 | [OPS-008](60-operations-release.md#ops-008--dependency-and-license-auditing) | Dependency and license auditing | P1 | In progress | — | Add release SBOM generation/attachment. |
-| [PST-005](20-persistence-backend.md#pst-005--snapshot-and-event-replay) | Snapshot and event replay | P1 | In progress | `PST-004` | Entity delta replay, durable quarantine, dry-run verification, and a measured 60-second reference-recovery test are in place; next add non-entity delta coverage and event retention. |
+| [PST-005](20-persistence-backend.md#pst-005--snapshot-and-event-replay) | Snapshot and event replay | P1 | Done | `PST-004` | Full aggregate delta replay, durable quarantine, checkpoint retention, multi-tick restart coverage, and a measured 60-second target are implemented. |
 | [QUA-016](70-testing-quality.md#qua-016--flaky-test-and-ci-duration-control) | Flaky-test and CI-duration control | P2 | In progress | — | Automate duration/flakiness reporting and audit timing-sensitive tests. |
 
 ## Blocked
@@ -64,7 +65,6 @@ permission to start or to alter task status.
 
 | ID | Task | Priority | Status | Dependencies | Sequencing note |
 | --- | --- | --- | --- | --- | --- |
-| [PST-003](20-persistence-backend.md#pst-003--normalized-faction-and-calendar-persistence) | Normalized faction and calendar persistence | P1 | Blocked | `PST-001`, `PST-005` | Requires replay/persistence foundations. |
 | [OPS-002](60-operations-release.md#ops-002--dashboards-and-alerts) | Dashboards and alerts | P2 | Blocked | `OPS-001` | Follows metrics completion. |
 | [OPS-003](60-operations-release.md#ops-003--backup-and-restore-automation) | Backup and restore automation | P1 | Blocked | `PST-009` | Follows verified backup/restore procedure. |
 | [OPS-004](60-operations-release.md#ops-004--staging-publish-rollout-and-rollback) | Staging publish, rollout, and rollback | P2 | Blocked | `CNT-014`, `OPS-005` | Requires content migration and release workflow. |

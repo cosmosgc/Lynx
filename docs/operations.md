@@ -185,8 +185,9 @@ checks the owner, token, and expiry in the same transaction as the write, so a
 process that lost the lease is rejected with `conflict` even if it has not yet
 noticed. A replacement may take over an expired lease after the previous holder
 crashes; fenced startup verifies the pinned checkpoint/event history and replays
-persistent entity deltas. Non-entity delta coverage and event retention remain
-in `PST-005`. The
+entity, link, cooldown, transfer-receipt, and calendar/faction deltas. Each
+successful checkpoint save prunes every earlier event in the zone, so the log is
+bounded by one snapshot interval. The
 holder renews every third of `--lease-ttl-ms`; if renewal reports a takeover, or
 keeps failing past the recorded expiry, the process turns not-ready and shuts
 down instead of serving stale authority. The event log records `world.started`,
@@ -220,9 +221,15 @@ Startup logs `world recovery completed` with `elapsed_ms`, or
 60 seconds. The reference recovery dataset (1,000 persistent entities, 5,000
 upserts, and 400 removals) is replayed by
 `recovery_reference_dataset_completes_within_the_documented_target`, which
-enforces that target. Entity-log replay is implemented; links, cooldowns,
-transfer receipts, calendar, and faction state still come from the whole-world
-checkpoint.
+enforces that target. The ignored
+`recovery_production_scale_meets_the_target` check replays 55,001 events five
+times; run it with `cargo test -p lynx-world --lib
+recovery_production_scale_meets_the_target -- --ignored --nocapture` to record
+headroom on the deployment host. Recovery now replays entity, link, cooldown,
+transfer-receipt, calendar/faction, action/link idempotency-cache, and counter
+deltas. Each checkpoint save deletes earlier events for the zone
+under the append-only purge guard, so the retained log is one snapshot interval
+and `--snapshot-interval-ms` controls that boundary.
 
 A snapshot is a whole-world overwrite, so falling back to the authored demo
 would otherwise mean deleting the snapshot by hand. `--fresh` does that

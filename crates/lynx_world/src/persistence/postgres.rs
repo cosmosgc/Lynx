@@ -833,7 +833,7 @@ impl SnapshotStore for PostgresSnapshotStore {
         // Retention boundary: the checkpoint just written is a complete world
         // state, so every earlier event is no longer needed for recovery. Keep
         // the log bounded to one snapshot interval without losing replay state.
-        let pruned = prune_checkpoints_before(&mut tx, &fence.zone_id, &sequence)?;
+        let pruned = prune_checkpoints_before(&mut tx, &fence.zone_id, sequence)?;
         if pruned > 0 {
             tracing::debug!(
                 zone = %fence.zone_id,
@@ -866,7 +866,7 @@ impl SnapshotStore for PostgresSnapshotStore {
 fn prune_checkpoints_before(
     tx: &mut postgres::Transaction<'_>,
     zone_id: &str,
-    retained_from: &i64,
+    retained_from: i64,
 ) -> Result<u64, EngineError> {
     tx.batch_execute("SET LOCAL lynx.allow_append_only_purge = 'on'")
         .map_err(|error| write_error(&error))?;

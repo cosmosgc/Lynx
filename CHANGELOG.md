@@ -57,26 +57,28 @@ semantic versioning for engine releases and content bundles.
   markers are appended to `lynx.zone_events`, and
   `lynx_world_zone_lease_held` / `lynx_world_zone_lease_renewals_total` expose
   lease state. File-backed and memory-only modes remain lease-free.
-- `lynx_world`: snapshot/event replay, durable quarantine, and measured recovery
-  (`PST-005`). The service appends version-1 `zone.entity.upsert` /
-  `zone.entity.remove` events for changed persistent entities after each
-  authoritative tick, in one atomic fenced batch; a failed append stops the
-  authority loop. The reducer rejects sequence gaps, malformed entity IDs,
-  mismatched actors, non-persistent records, and non-monotonic ticks, and applies
-  deltas through a stable-ID map so repeated recovery yields identical canonical
-  state. `Zone::restore_quarantining` re-validates entity identity, persistence
-  policy, inventories, health ranges, links, cooldowns, and transfer receipts;
-  individually impossible entries are skipped and reported while structural
-  corruption still fails closed. The report is stored in
-  `lynx.recovery_quarantine` (migration
+- `lynx_world`: snapshot/event replay, durable quarantine, retention, and measured
+  recovery (`PST-005`). The service appends one atomic fenced event batch after
+  each authoritative tick for changed persistent entities, links, action and link
+  cooldowns, newly applied transfer receipts, and paired calendar/faction state;
+  a failed append stops the authority loop. The reducer rejects sequence gaps,
+  malformed IDs, mismatched actors, non-persistent records, unsupported event
+  schemas, and non-monotonic ticks, and applies deltas through a stable-ID map so
+  repeated recovery yields identical canonical state. `Zone::restore_quarantining`
+  re-validates entity identity, persistence policy, inventories, health ranges,
+  links, cooldowns, and transfer receipts; individually impossible entries are
+  skipped and reported while structural corruption still fails closed. The report
+  is stored in `lynx.recovery_quarantine` (migration
   `0012_recovery_quarantine.sql`) or a `*.quarantine.json` sidecar for file
   snapshots, and startup persists it before serving or aborts. `lynx-world
   verify-snapshot` performs the same replay and dry-run restore read-only and
   prints detected and previously stored quarantine records. Startup logs measured
-  recovery time, and a reference-dataset test (1,000 entities, 5,000 upserts,
-  400 removals) enforces the 60-second target. Links, cooldowns, transfer
-  receipts, calendar, and faction state remain checkpoint-only, and event-log
-  retention remains open `PST-005` work.
+  recovery time; the reference-dataset test (1,000 entities, 5,000 upserts, 400
+  removals) enforces the 60-second target, and the manual 55,001-event check
+  measured a p95 of 1.71 s. A checkpoint save prunes every earlier zone event, so
+  retention is bounded to one snapshot interval. A multi-tick PostgreSQL restart
+  test covers every replayed aggregate and replay after pruning, including
+  action/link idempotency caches and zone counters.
 
 - `engine_core`: durable world calendar and bounded faction conflicts. Events
   have an audited `Draft -> Scheduled -> Open -> Active` lifecycle with
