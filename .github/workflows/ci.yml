@@ -226,7 +226,8 @@ jobs:
           doctor_status=$?
           set -e
           test "$doctor_status" -eq 1
-          jq -e '.backend.schema.history_missing == true and (.backend.schema.pending | length) == 6 and (.backend.schema.applied | length) == 0' "$RUNNER_TEMP/doctor-missing.json"
+          migration_count=$(find server/migrations -maxdepth 1 -name '*.sql' | wc -l)
+          jq -e --argjson count "$migration_count" '.backend.schema.history_missing == true and (.backend.schema.pending | length) == $count and (.backend.schema.applied | length) == 0' "$RUNNER_TEMP/doctor-missing.json"
           PGPASSWORD="$LYNX_PG_PASSWORD" psql -X -q -tA -v ON_ERROR_STOP=1 -h "$LYNX_PG_HOST" -p "$LYNX_PG_PORT" -U "$LYNX_PG_USER" -d "$LYNX_PG_DATABASE" -c "SELECT to_regclass('lynx.schema_migrations') IS NULL" | grep -Fx t
 
       - name: Apply migrations twice and check migration head
@@ -264,7 +265,8 @@ jobs:
           doctor_status=$?
           set -e
           test "$doctor_status" -eq 1
-          jq -e '.backend.schema.unknown_count == 1 and (.backend.schema.applied | length) == 6 and (.backend.schema.pending | length) == 0' "$RUNNER_TEMP/doctor-newer.json"
+          migration_count=$(find server/migrations -maxdepth 1 -name '*.sql' | wc -l)
+          jq -e --argjson count "$migration_count" '.backend.schema.unknown_count == 1 and (.backend.schema.applied | length) == $count and (.backend.schema.pending | length) == 0' "$RUNNER_TEMP/doctor-newer.json"
           test "$before" = "$(psql "${psql_args[@]}" -c "$history_query")"
           psql "${psql_args[@]}" -c "DELETE FROM lynx.schema_migrations WHERE version = '0007_future'"
           original="$(psql "${psql_args[@]}" -c "SELECT checksum FROM lynx.schema_migrations WHERE version = '0001_core'")"

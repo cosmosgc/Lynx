@@ -423,6 +423,26 @@ fn postgres_load_replays_entity_deltas_after_the_pinned_checkpoint() -> anyhow::
             tick: 4,
         }
     );
+
+    let impossible_entity = EntityRecord::new(
+        StableId::from_parts(IdKind::Entity, 77, 2),
+        DefinitionId::new("entity.replay-test")?,
+        Vec3::new(10_000.0, 0.0, 10_000.0),
+    )
+    .with_persistence(PersistencePolicy::PersistentEntity);
+    let impossible_actor = impossible_entity.id.to_string();
+    let impossible_payload = serde_json::json!({ "entity": impossible_entity });
+    client.execute(
+        "INSERT INTO lynx.zone_events (zone_id, sequence, tick, occurred_at, kind, actor_id, payload, schema_version) VALUES ($1, 2, 5, clock_timestamp(), 'zone.entity.upsert', $2, $3, 1)",
+        &[&zone, &impossible_actor, &impossible_payload],
+    )?;
+    assert!(store.load()?.is_some(), "reducer returns the event state");
+    let error = startup::load(Some(&store), false, &characters(1), 1_000).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("failed to restore the demo zone")
+    );
     Ok(())
 }
 
@@ -440,7 +460,7 @@ fn postgres_zone_lease_expiry_allows_takeover() -> anyhow::Result<()> {
     let store = PostgresZoneLeaseStore::from_env()?;
     let zone = test_zone_id();
     let first = store
-        .acquire(&zone, "owner-a", std::time::Duration::from_millis(25))?
+        .acquire(&zone, "owner-a", std::time::Duration::from_millis(500))?
         .unwrap();
     assert!(
         store
@@ -448,7 +468,7 @@ fn postgres_zone_lease_expiry_allows_takeover() -> anyhow::Result<()> {
             .is_none(),
         "an unexpired lease cannot be taken over"
     );
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    std::thread::sleep(std::time::Duration::from_millis(700));
     let second = store
         .acquire(&zone, "owner-b", std::time::Duration::from_secs(10))?
         .unwrap();

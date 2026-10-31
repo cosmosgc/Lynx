@@ -31,7 +31,7 @@ fn zone_with_entities(entity_count: usize) -> Zone {
     let nav = NavGrid::new(32, 32, 1.0, Vec3::ZERO).unwrap();
     let mut zone = Zone::new(config, nav, Arc::new(UniformItemRules::new(10))).unwrap();
     for index in 0..entity_count {
-        let coordinate = (index % 32) as f32 + 0.5;
+        let coordinate = f32::from(u8::try_from(index % 32).unwrap()) + 0.5;
         zone.spawn(
             EntityRecord::new(
                 stable_id(IdKind::Entity, index as u128 + 1),

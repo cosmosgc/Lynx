@@ -26,9 +26,12 @@ checkpoint can still be lost unless the event log contains the supported
 version-1 events after the latest checkpoint and fails closed on invalid,
 non-persistent, misidentified, or pre-checkpoint entity changes. The live world
 does not yet emit these events for gameplay mutations, so this is a replay
-contract and reducer, not end-to-end delta durability. Reference quarantine,
-end-to-end event emission, dry-run verification, and the measured 60-second
-recovery target remain open PST-005 work.
+contract and reducer, not end-to-end delta durability. Replayed state is still
+passed through strict zone restoration; invalid entities fail startup rather
+than being silently dropped. A durable quarantine record and operator-visible
+recovery report are not implemented. Reference quarantine, end-to-end event
+emission, dry-run verification, and the measured 60-second recovery target
+remain open PST-005 work.
 
 Partial hardening: `engine_sim::Zone::restore` now rejects duplicate action,
 link, and transfer idempotency keys, mismatched action cache keys, oversized

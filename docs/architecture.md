@@ -217,14 +217,28 @@ format, validation rules, and formatting policy are specified in
   in its own transaction, so a released or superseded owner cannot write stale
   state after a takeover. Lifecycle markers (`world.started`, `world.snapshot`,
   `world.stopped`) go to the append-only zone event log.
+- Persistence uses a hybrid checkpoint model: the whole-world row is the
+  authoritative state, and a matching `world.snapshot` event is the durable
+  checkpoint record. Migrations `0010_snapshot_event_checkpoints.sql` and
+  `0011_snapshot_checkpoint_zone.sql` store the exact event sequence and zone
+  beside each checkpoint; fenced startup verifies the row, zone, sequence,
+  event hash, and replayed snapshot agree. Existing rows are backfilled only
+  when the matching checkpoint identifies one unambiguous zone; untracked
+  legacy rows remain readable only when no checkpoint event claims them.
+  Lifecycle events are not gameplay deltas, so state changes after the latest
+  committed checkpoint can still be lost unless a typed entity delta is
+  recorded. The recovery reducer supports version-1 persistent entity upsert
+  and removal events after a checkpoint, but live gameplay mutation paths do
+  not yet emit them.
 - `backend_nakama` provides PostgreSQL-backed account mapping and character
   services, including character-bound world-entry records. `lynx-world` uses
   them for production session and ownership admission, but admits only actors
   already present in the authoritative zone; character population remains a
-  separate concern. Inventory, normalized faction/calendar persistence, and
-  event replay remain backlog work.
-- The zone snapshot persists transfer receipts so retries stay idempotent across
-  a restart. A general durable SQL idempotency ledger is not yet implemented.
+  separate concern. Transactional inventory snapshots and transfer receipts are
+  available through the trusted `InventoryStore` seam, but inventory transport
+  wiring and normalized faction/calendar persistence remain backlog work.
+- The PostgreSQL inventory store persists transfer receipts in an append-only
+  SQL ledger, so retries remain idempotent across restart.
 - Content definitions are versioned bundles; instances record the content
   version they were created from.
 
@@ -234,14 +248,16 @@ format, validation rules, and formatting policy are specified in
 - Target: missing or obsolete component data loads through the migration chain; if a
   migration is impossible, the entity is quarantined and reported instead of
   silently reset.
-- Today startup loads the configured whole-world snapshot; state since its last
-  successful write can be lost. Event replay and quarantine are not implemented.
-  The target is to replay events, validate references, and accept sessions within
-  60 seconds; this target is unverified.
+- Fenced PostgreSQL startup replays and verifies the checkpoint history before
+  serving. It fails closed on sequence gaps, missing or stale checkpoint rows,
+  corrupt checkpoint payloads, and row/event mismatches. It does not yet replay
+  gameplay delta events, quarantine impossible entities, or have a measured
+  60-second recovery guarantee.
 - With `--state-postgres`, an expired lease may be taken over by a replacement.
   The token increment fences the old owner out of both snapshot writes and the
   event log, and the displaced process stops rather than continuing to serve.
-  Reading those events back to reconstruct state is `PST-005`.
+  Checkpoint verification is implemented; gameplay delta replay, quarantine,
+  dry-run verification, and recovery performance remain in `PST-005`.
 - Target: admin actions and reputation changes are appended to a durable audit
   log in the same transaction as the mutation.
 

@@ -202,11 +202,11 @@ fn seeded_multi_entity_replay_has_byte_identical_snapshots() {
             state = state
                 .wrapping_mul(6_364_136_223_846_793_005)
                 .wrapping_add(1);
-            let x = ((state >> 32) % 4) as f32 + 0.5;
+            let x = f32::from(u8::try_from((state >> 32) % 4).unwrap()) + 0.5;
             state = state
                 .wrapping_mul(6_364_136_223_846_793_005)
                 .wrapping_add(1);
-            let z = ((state >> 32) % 4) as f32 + 0.5;
+            let z = f32::from(u8::try_from((state >> 32) % 4).unwrap()) + 0.5;
             sequences[index] += 1;
             let sequence = sequences[index];
             let session = if index == 0 {
