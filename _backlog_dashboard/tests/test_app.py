@@ -10,6 +10,7 @@ from _backlog_dashboard.app import (
     backlog_summary,
     create_app,
     load_backlog,
+    load_decisions,
     load_phase_progress,
     order_tasks,
     scan_user_todos,
@@ -164,6 +165,57 @@ Phase 1  Engine skeleton             [██████████████
         self.assertEqual(response.json["phases"][1]["percent"], 85)
         self.assertEqual(client.get("/source?file=docs/TODO/10-sample.md").status_code, 200)
         self.assertEqual(client.get("/source?file=../../outside.md").status_code, 404)
+
+    def test_decisions_view_connects_roadmap_gates_adrs_and_tasks(self):
+        adr_dir = self.root / "docs" / "adr"
+        adr_dir.mkdir(parents=True)
+        (adr_dir / "0022-combat.md").write_text(
+            "# ADR 0022: Combat model\n\n- **Status:** Proposed\n\n"
+            "## Goal\n\nA proposed combat decision summary.\n",
+            encoding="utf-8",
+        )
+        roadmap = self.todo / "00-roadmap.md"
+        roadmap.write_text(
+            "# Roadmap\n\n## Decision gates\n\n"
+            "| Gate | Question | Owner | Unblocks |\n"
+            "| --- | --- | --- | --- |\n"
+            "| **D5 — Editor scope** | Should ADR 0022 be accepted? | Content + client | `SIM-001` |\n",
+            encoding="utf-8",
+        )
+        sample = self.todo / "10-sample.md"
+        sample.write_text(
+            sample.read_text(encoding="utf-8").replace(
+                "- **References:** `SIM-002`, [guide](../guide.md)",
+                "- **References:** `SIM-002`, ADR 0022, [guide](../guide.md)",
+            ),
+            encoding="utf-8",
+        )
+
+        client = self.make_app().test_client()
+        response = client.get("/decisions")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Architecture decisions", response.data)
+        self.assertIn(b"D5 ", response.data)
+        self.assertIn(b"ADR 0022", response.data)
+        self.assertIn(b"SIM-001", response.data)
+        self.assertIn(b"/source?file=docs/adr/0022-combat.md#L1", response.data)
+
+        api = client.get("/api/decisions")
+        self.assertEqual(api.status_code, 200)
+        self.assertEqual(api.json["gates"][0]["related_task_ids"], ["SIM-001"])
+        self.assertEqual(api.json["gates"][0]["adr_ids"], ["ADR 0022"])
+        self.assertEqual(api.json["adrs"][0]["gate_ids"], ["D5"])
+        self.assertEqual(api.json["adrs"][0]["related_task_ids"], ["SIM-001"])
+        task = next(
+            item
+            for item in client.get("/api/items").json["items"]
+            if item["id"] == "SIM-001"
+        )
+        self.assertEqual(task["decision_gate_ids"], ["D5"])
+        self.assertEqual(task["adr_ids"], ["ADR 0022"])
+        self.assertIn(b"Connected decisions", client.get("/").data)
+        self.assertIn(b"/decisions#${id.toLowerCase()}", client.get("/").data)
+        self.assertIn(b"Connected decisions", client.get("/dependencies").data)
 
     def test_source_todo_inbox_and_manager_report(self):
         markers = scan_user_todos(self.root)

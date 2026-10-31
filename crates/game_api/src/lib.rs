@@ -28,7 +28,10 @@ pub use chat::{
 pub use faction::{
     FactionMemberView, FactionService, FactionStore, FactionView, TerritoryView, validate_snapshot,
 };
-pub use inventory::{InventoryService, InventorySlot, InventoryStore, validate_slots};
+pub use inventory::{
+    InventoryReconciliation, InventoryService, InventorySlot, InventoryStore,
+    TransferInventoryUpdate, VersionedInventory, validate_slots,
+};
 pub use service::{
     Account, AccountId, ApiError, AuthService, Backend, CreateCharacter, DeviceLogin,
     HealthService, HealthStatus, Session, SessionToken, WorldService, WorldSession, Zone,

@@ -59,7 +59,7 @@
   <header>
     <h1>Full dependency graph</h1>
     <p class="muted">Every tracked task is shown. Arrows point from prerequisite to dependent task.</p>
-    <nav class="nav" aria-label="Backlog navigation"><a href="/">Backlog</a><a href="/task-order">Plan</a><a href="/dependencies" aria-current="page">Dependencies</a><a href="/reports">Reports</a><a href="/todos">Source TODOs</a><a href="/history">History</a></nav>
+    <nav class="nav" aria-label="Backlog navigation"><a href="/">Backlog</a><a href="/task-order">Plan</a><a href="/dependencies" aria-current="page">Dependencies</a><a href="/decisions">Decisions</a><a href="/reports">Reports</a><a href="/todos">Source TODOs</a><a href="/history">History</a></nav>
   </header>
   <div class="toolbar">
     <input id="search" type="search" placeholder="Find task ID or title">
@@ -214,13 +214,18 @@
     const linkButtons = ids => ids.length
       ? `<div class="task-links">${ids.map(taskId => `<button type="button" data-open-task="${taskId}">${taskId}</button>`).join("")}</div>`
       : `<span class="muted">None</span>`;
+    const decisions = [
+      ...item.decision_gate_ids.map(gateId => `<a href="/decisions#${gateId.toLowerCase()}">${escapeHtml(gateId)}</a>`),
+      ...item.adr_ids.map(adrId => `<a href="/decisions#adr-${adrId.toLowerCase().replace("adr ", "")}">${escapeHtml(adrId)}</a>`)
+    ];
     details.innerHTML = `<h2>${escapeHtml(item.id)} — ${escapeHtml(item.title)}</h2>
       <p class="source"><a href="/source?file=${encodeURIComponent(item.file)}#L${item.line}">${escapeHtml(item.file)}:${item.line}</a></p>
       <span class="badge status ${item.status}">${escapeHtml(item.status_label)}</span><span class="badge">${escapeHtml(item.priority)}</span>
       ${item.status_detail ? `<p class="muted">${escapeHtml(item.status_detail)}</p>` : ""}
       <div class="detail-block"><h3>Depends on</h3>${linkButtons(item.dependency_ids)}${item.external_dependencies.map(value => `<span class="badge">${escapeHtml(value)}</span>`).join("")}</div>
       <div class="detail-block"><h3>Dependents</h3>${linkButtons(item.dependent_ids)}</div>
-      <div class="detail-block"><h3>References</h3><span>${escapeHtml(item.references || "None")}</span></div>`;
+      <div class="detail-block"><h3>References</h3><span>${escapeHtml(item.references || "None")}</span></div>
+      <div class="detail-block"><h3>Connected decisions</h3><div class="task-links">${decisions.length ? decisions.join("") : `<span class="muted">No linked roadmap gates or ADRs.</span>`}</div></div>`;
     details.querySelectorAll("[data-open-task]").forEach(button => button.addEventListener("click", () => selectTask(button.dataset.openTask)));
   }
 

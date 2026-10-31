@@ -84,6 +84,15 @@ struct State {
     characters: BTreeMap<CharacterId, Character>,
     character_receipts: BTreeMap<(AccountId, String), (CreateCharacter, CharacterCreationReceipt)>,
     inventory: BTreeMap<CharacterId, Vec<InventorySlot>>,
+    inventory_versions: BTreeMap<CharacterId, i64>,
+    inventory_transfer_receipts: BTreeMap<
+        String,
+        (
+            CharacterId,
+            CharacterId,
+            engine_core::inventory::TransferReceipt,
+        ),
+    >,
     friends: BTreeMap<AccountId, BTreeMap<AccountId, FriendState>>,
     blocked: BTreeMap<AccountId, BTreeSet<AccountId>>,
     channels: BTreeMap<String, ChatChannel>,

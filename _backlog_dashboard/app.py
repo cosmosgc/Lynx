@@ -18,6 +18,15 @@ TASK_HEADING = re.compile(
 )
 METADATA_LINE = re.compile(r"^- \*\*(Priority|Status|Depends on|References):\*\*\s*(.*)$")
 TASK_ID = re.compile(r"\b[A-Z]{2,5}-\d{3}\b")
+ADR_ID = re.compile(r"\bADR\s*0*(\d{1,4})\b", re.IGNORECASE)
+DECISION_GATE_ID = re.compile(r"\bD\d+\b", re.IGNORECASE)
+ADR_HEADING = re.compile(
+    r"^#\s+ADR\s+0*(\d{1,4})\s*[:—–-]\s*(.+?)\s*$", re.MULTILINE | re.IGNORECASE
+)
+DECISION_GATE_ROW = re.compile(
+    r"^\|\s*\*\*(D\d+)\s*[—–-]\s*([^*]+)\*\*\s*\|(.+)\|\s*$",
+    re.IGNORECASE,
+)
 PROJECT_PATH = re.compile(
     r"(?:^|[`/\\\s(])((?:crates|clients|tools|docs|server|scripts|BAT)/[A-Za-z0-9_./\\-]+|(?:Cargo\.toml|Cargo\.lock|README\.md|CHANGELOG\.md))"
 )
@@ -49,6 +58,143 @@ PHASE_LINE = re.compile(
     r"^Phase\s+(\d+)\s+(.+?)\s+\[([█░]+)\]\s+(\d+)%\s+(.+?)\s*$",
     re.MULTILINE,
 )
+
+
+def _decision_summary(text: str) -> str:
+    headings = list(re.finditer(r"^##\s+(.+?)\s*$", text, re.MULTILINE))
+    preferred = next(
+        (heading for heading in headings if heading.group(1).casefold() == "decision"),
+        None,
+    )
+    if preferred is None:
+        preferred = next(
+            (
+                heading
+                for heading in headings
+                if heading.group(1).casefold() in {"proposed solution", "goal"}
+            ),
+            None,
+        )
+    if preferred is None:
+        return "No decision summary section found."
+    end = next(
+        (heading.start() for heading in headings if heading.start() > preferred.start()),
+        len(text),
+    )
+    section = text[preferred.end() : end]
+    lines = []
+    for line in section.splitlines():
+        value = line.strip()
+        if not value:
+            continue
+        value = re.sub(r"^[-*+]\s+", "", value)
+        value = re.sub(r"^\d+[.)]\s+", "", value)
+        value = re.sub(r"\[([^]]+)\]\([^)]+\)", r"\1", value)
+        value = re.sub(r"[`*_]", "", value)
+        value = re.sub(r"\s+", " ", value).strip()
+        if value:
+            lines.append(value)
+        if len(" ".join(lines)) >= 420:
+            break
+    summary = " ".join(lines)
+    return summary[:420].rstrip() + ("…" if len(summary) > 420 else "")
+
+
+def _adr_status(text: str) -> str:
+    status = re.search(r"^- \*\*Status:\*\*\s*(.+?)\s*$", text, re.MULTILINE)
+    if status:
+        return status.group(1).strip()
+    section = re.search(r"^##\s+Status\s*$([\s\S]*?)(?=^##\s+|\Z)", text, re.MULTILINE)
+    if section:
+        return next((line.strip() for line in section.group(1).splitlines() if line.strip()), "Unspecified")
+    return "Unspecified"
+
+
+def load_decisions(
+    repository_root: Path,
+    items: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Load roadmap decision gates and ADRs, connecting both to parsed tasks."""
+    task_by_id = {item["id"]: item for item in items}
+    gates: list[dict[str, Any]] = []
+    roadmap = repository_root / "docs" / "TODO" / "00-roadmap.md"
+    if roadmap.is_file():
+        for line_number, line in enumerate(roadmap.read_text(encoding="utf-8").splitlines(), start=1):
+            match = DECISION_GATE_ROW.match(line)
+            if not match:
+                continue
+            cells = [cell.strip() for cell in match.group(3).split("|")]
+            if len(cells) != 3:
+                continue
+            gate_id = match.group(1).upper()
+            unblocks = [task_id for task_id in TASK_ID.findall(cells[2]) if task_id in task_by_id]
+            related = {
+                task_id
+                for task_id, item in task_by_id.items()
+                if gate_id in item.get("decision_gate_ids", [])
+            }
+            related.update(unblocks)
+            adr_ids = {
+                f"ADR {int(value):04d}"
+                for value in ADR_ID.findall(cells[0] + " " + cells[1])
+            }
+            for task_id in related:
+                adr_ids.update(task_by_id[task_id].get("adr_ids", []))
+            gates.append(
+                {
+                    "id": gate_id,
+                    "title": match.group(2).strip(),
+                    "question": cells[0],
+                    "owner": cells[1],
+                    "unblocks": unblocks,
+                    "related_task_ids": sorted(related),
+                    "adr_ids": sorted(adr_ids),
+                    "file": roadmap.relative_to(repository_root).as_posix(),
+                    "line": line_number,
+                }
+            )
+
+    adrs: list[dict[str, Any]] = []
+    adr_directory = repository_root / "docs" / "adr"
+    if adr_directory.is_dir():
+        for source in sorted(adr_directory.glob("*.md")):
+            text = source.read_text(encoding="utf-8")
+            heading = ADR_HEADING.search(text)
+            if not heading:
+                continue
+            adr_id = f"ADR {int(heading.group(1)):04d}"
+            related = [
+                item
+                for item in items
+                if adr_id in item.get("adr_ids", [])
+            ]
+            gate_ids = sorted(
+                gate["id"]
+                for gate in gates
+                if adr_id in gate["adr_ids"]
+            )
+            adrs.append(
+                {
+                    "id": adr_id,
+                    "title": heading.group(2).strip(),
+                    "status": _adr_status(text),
+                    "summary": _decision_summary(text),
+                    "related_tasks": related,
+                    "related_task_ids": [item["id"] for item in related],
+                    "gate_ids": gate_ids,
+                    "file": source.relative_to(repository_root).as_posix(),
+                    "line": text.count("\n", 0, heading.start()) + 1,
+                }
+            )
+
+    adrs_by_id = {adr["id"]: adr for adr in adrs}
+    for gate in gates:
+        gate["related_adrs"] = [adrs_by_id[adr_id] for adr_id in gate["adr_ids"] if adr_id in adrs_by_id]
+        for adr in gate["related_adrs"]:
+            if gate["id"] not in adr["gate_ids"]:
+                adr["gate_ids"].append(gate["id"])
+                adr["gate_ids"].sort()
+    return {"gates": gates, "adrs": adrs}
 
 
 @contextmanager
@@ -313,6 +459,15 @@ def load_backlog(todo_dir: Path) -> list[dict[str, Any]]:
                         label for label in dependency_labels if TASK_ID.fullmatch(label)
                     ],
                     "references": references,
+                    "adr_ids": sorted(
+                        {
+                            f"ADR {int(value):04d}"
+                            for value in ADR_ID.findall(section)
+                        }
+                    ),
+                    "decision_gate_ids": sorted(
+                        {value.upper() for value in DECISION_GATE_ID.findall(section)}
+                    ),
                     "relevant_files": _relevant_files(section, references, source, repo_root),
                     "reference_ids": TASK_ID.findall(fields.get("references", "")),
                     "acceptance": _acceptance_criteria(section),
@@ -750,6 +905,15 @@ def create_app(
             return render_template("error.html", error=str(error)), 500
         return render_template("dependencies.html", items=items)
 
+    @app.get("/decisions")
+    def decisions():
+        try:
+            items = get_items()
+            decisions_data = load_decisions(get_repository_root(), items)
+        except (OSError, sqlite3.Error, UnicodeError, ValueError) as error:
+            return render_template("error.html", error=str(error)), 500
+        return render_template("decisions.html", **decisions_data)
+
     @app.get("/task-order")
     def task_order():
         try:
@@ -825,6 +989,13 @@ def create_app(
     def api_report():
         try:
             return jsonify(manager_report(get_items(), sync_user_todos(get_repository_root(), database_path)))
+        except (OSError, sqlite3.Error, UnicodeError, ValueError) as error:
+            return jsonify({"error": str(error)}), 500
+
+    @app.get("/api/decisions")
+    def api_decisions():
+        try:
+            return jsonify(load_decisions(get_repository_root(), get_items()))
         except (OSError, sqlite3.Error, UnicodeError, ValueError) as error:
             return jsonify({"error": str(error)}), 500
 

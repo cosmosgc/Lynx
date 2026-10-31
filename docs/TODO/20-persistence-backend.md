@@ -4,16 +4,19 @@ Scope: durable state behind `game_api` and the world service — accounts,
 characters, inventories, factions, calendar, zone leases, event replay,
 snapshots, migrations, backups, and adapter coverage.
 
-**What exists today:** migrations `0001`–`0006` define accounts, characters,
+**What exists today:** migrations `0001`–`0009` define accounts, characters,
 versioned components, inventory, property, idempotency keys, audit, content
 bundles, zone leases/snapshots/events, factions, the world calendar, and
-whole-world snapshots. `lynx-world` can persist a whole world to a JSON file or
-to `lynx.world_snapshots` through `PostgresSnapshotStore`. `backend_memory`
+whole-world snapshots, inventory revisions, and append-only transfer receipts.
+`lynx-world` can persist a whole world to a JSON file or to
+`lynx.world_snapshots` through `PostgresSnapshotStore`. `backend_memory`
 implements every `game_api` service; `backend_nakama` implements health,
-authentication, and character SQL repositories, while its Nakama HTTP client is
-limited to health and authentication. Social/chat, inventory, faction, calendar,
-and admin integrations remain absent. Most normalized tables are defined but not
-yet used by the runtime.
+authentication, character SQL repositories, and a transactional inventory store,
+while its Nakama HTTP client is limited to health and authentication. Inventory
+storage is available through the trusted persistence seam but is not yet wired
+into live world-service routing. Social/chat, faction, calendar, and admin
+runtime integrations remain absent. Most normalized tables are not yet used by
+the runtime.
 
 **Related design:** [architecture §Persistence model](../architecture.md#persistence-model),
 [ADR 0003](../adr/0003-native-nakama-and-postgresql.md),
@@ -91,9 +94,10 @@ restart lost creation, selection, and ownership even when the world survived.
 ## PST-002 — Inventory and transfer-ledger persistence
 
 - **Priority:** P1
-- **Status:** Blocked — `PST-001`
+- **Status:** Done
 - **Depends on:** `PST-001`
-- **References:** migration `0001_core.sql`, `crates/engine_sim` inventory,
+- **References:** migrations `0001_core.sql`, `0008_inventory_revisions.sql`,
+  `0009_inventory_transfer_ledger.sql`, `crates/engine_sim` inventory,
   `crates/game_api/src/inventory.rs`
 
 **Why:** Inventory transfers are idempotent in the simulation and snapshot, but
@@ -112,11 +116,28 @@ there is no durable per-aggregate inventory store or ledger behind `game_api`.
 
 **Acceptance criteria**
 
-- [ ] A transfer applied twice returns the original result and moves value once.
-- [ ] A failed transaction leaves both inventories unchanged.
-- [ ] Restarting between request and retry preserves idempotency.
-- [ ] Slot versions prevent lost updates under concurrency.
-- [ ] Inventory state and audit/ledger entries agree after fault injection.
+- [x] A transfer applied twice returns the original result and moves value once.
+- [x] A failed transaction leaves both inventories unchanged.
+- [x] Restarting between request and retry preserves idempotency.
+- [x] Slot versions prevent lost updates under concurrency.
+- [x] Inventory state and audit/ledger entries agree after fault injection.
+
+**Implementation:** `PostgresInventoryStore` atomically persists validated
+inventory snapshots and optimistic versions. `commit_transfer` locks both
+character aggregates in a stable order, checks both versions, replaces both
+snapshots, advances both versions, and writes the append-only receipt in one
+transaction. Idempotency keys are serialized with a transaction advisory lock
+and are bound to the original owners and receipt; retries after reconnect return
+the original receipt. `reconcile_character` reports slot/quantity/version counts
+alongside transfer history counts. Migrations `0008` and `0009` add revision and
+append-only receipt tables.
+
+**Validation:** Live PostgreSQL integration coverage verifies stale-version
+conflicts, rollback after a destination-side unique-item failure, concurrent
+same-key retries, concurrent stale-version writes, replay after reconnect,
+receipt immutability outside the purge path, and reconciliation counts. Both
+`cargo test -p backend_memory -p backend_nakama` (with
+`LYNX_REQUIRE_POSTGRES_TEST=1`) and scoped Clippy/fmt checks pass.
 
 ---
 
@@ -246,7 +267,7 @@ operational verification, retention, and a measured recovery target.
 ## PST-006 — Durable sessions and resume windows
 
 - **Priority:** P2
-- **Status:** Blocked — `PST-001`, `NET-001`
+- **Status:** Ready
 - **Depends on:** `PST-001`, `NET-001`
 - **References:** [networking §Reconnect and recovery](../networking.md#reconnect-and-recovery),
   ADR 0013
@@ -330,7 +351,7 @@ later, in a less obvious place.
   pending, or newer than the binary supports.
 - Add `lynx doctor --backend` output for schema version, pending migrations, and
   checksum mismatches.
-- Run the runner against a fresh database in CI and assert `0001`–`0006` apply
+- Run the runner against a fresh database in CI and assert `0001`–`0007` apply
   idempotently.
 - Document the upgrade order: backup, migrate, start new binary, roll back.
 

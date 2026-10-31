@@ -100,7 +100,7 @@
     <h1>Lynx backlog progress</h1>
     <p class="subtle">Live backlog manager parsed from task sections under <code>docs/TODO/</code>. Status remains source-controlled in Markdown.</p>
     <nav class="nav" aria-label="Backlog navigation">
-      <a href="/" aria-current="page">Backlog</a><a href="/task-order">Plan</a><a href="/dependencies">Dependencies</a><a href="/reports">Reports</a><a href="/todos">Source TODOs</a><a href="/history">History</a>
+      <a href="/" aria-current="page">Backlog</a><a href="/task-order">Plan</a><a href="/dependencies">Dependencies</a><a href="/decisions">Decisions</a><a href="/reports">Reports</a><a href="/todos">Source TODOs</a><a href="/history">History</a>
     </nav>
   </header>
 
@@ -246,6 +246,10 @@
     const details = document.getElementById("details");
     const statusNote = item.status_detail ? `<p class="subtle">${escapeHtml(item.status_detail)}</p>` : "";
     const references = item.references ? `<p>${escapeHtml(item.references)}</p>` : `<span class="muted">No references listed.</span>`;
+    const decisions = [
+      ...item.decision_gate_ids.map(id => `<a href="/decisions#${id.toLowerCase()}">${escapeHtml(id)}</a>`),
+      ...item.adr_ids.map(id => `<a href="/decisions#adr-${id.toLowerCase().replace("adr ", "")}">${escapeHtml(id)}</a>`)
+    ];
     const criteria = item.acceptance.length
       ? `<ul class="acceptance">${item.acceptance.map(entry => `<li class="${entry.complete ? "complete" : ""}">${entry.complete ? "✓ " : "○ "}${escapeHtml(entry.text)}</li>`).join("")}</ul>`
       : `<span class="muted">No acceptance criteria found.</span>`;
@@ -258,6 +262,7 @@
       <div class="detail-block"><h3>Blocked by / dependents</h3><div class="link-list">${linkList(item.dependent_ids, "No listed tasks depend on this item.")}</div></div>
       <div class="detail-block"><h3>References</h3>${references}
         ${item.reference_ids.length ? `<div class="link-list">${linkList(item.reference_ids, "")}</div>` : ""}</div>
+      <div class="detail-block"><h3>Connected decisions</h3><div class="link-list">${decisions.length ? decisions.join("") : `<span class="muted">No linked roadmap gates or ADRs.</span>`}</div></div>
       <div class="detail-block"><h3>Acceptance criteria</h3>${criteria}</div>`;
     drawGraph(item);
   }

@@ -14,7 +14,7 @@
   </style>
 </head>
 <body>
-  <header><nav class="nav" aria-label="Backlog navigation"><a href="/">Backlog</a><a href="/task-order">Plan</a><a href="/dependencies">Dependencies</a><a href="/reports">Reports</a><a href="/todos">Source TODOs</a><a href="/history">History</a></nav>{{ file }}</header>
+  <header><nav class="nav" aria-label="Backlog navigation"><a href="/">Backlog</a><a href="/task-order">Plan</a><a href="/dependencies">Dependencies</a><a href="/decisions">Decisions</a><a href="/reports">Reports</a><a href="/todos">Source TODOs</a><a href="/history">History</a></nav>{{ file }}</header>
   <pre>{% for line in lines %}<span class="line" id="L{{ loop.index }}"><span class="number">{{ loop.index }}</span>{{ line }}</span>{% endfor %}</pre>
 </body>
 </html>

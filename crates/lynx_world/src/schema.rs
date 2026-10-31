@@ -32,6 +32,14 @@ const MIGRATIONS: &[(&str, &[u8])] = &[
         "0007_zone_fencing",
         include_bytes!("../../../server/migrations/0007_zone_fencing.sql"),
     ),
+    (
+        "0008_inventory_revisions",
+        include_bytes!("../../../server/migrations/0008_inventory_revisions.sql"),
+    ),
+    (
+        "0009_inventory_transfer_ledger",
+        include_bytes!("../../../server/migrations/0009_inventory_transfer_ledger.sql"),
+    ),
 ];
 
 /// Schema compatibility against the migrations embedded in this binary.

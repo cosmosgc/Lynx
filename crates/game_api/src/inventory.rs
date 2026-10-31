@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use engine_core::IdKind;
-use engine_core::inventory::{ItemStack, MAX_SLOTS};
+use engine_core::inventory::{ItemStack, MAX_SLOTS, TransferReceipt};
 use serde::{Deserialize, Serialize};
 
 use crate::character::CharacterId;
@@ -21,6 +21,41 @@ pub struct InventorySlot {
     pub slot: u16,
     /// Item definition, quantity, and optional unique instance.
     pub stack: ItemStack,
+}
+
+/// An inventory snapshot paired with its optimistic concurrency version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VersionedInventory {
+    /// Monotonically increasing version for this inventory aggregate.
+    pub version: i64,
+    /// Occupied slots, sorted by slot index by adapters.
+    pub slots: Vec<InventorySlot>,
+}
+
+/// One expected-version inventory snapshot participating in a transfer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferInventoryUpdate<'a> {
+    /// Character inventory to replace.
+    pub character_id: CharacterId,
+    /// Version observed before the authoritative transfer.
+    pub expected_version: i64,
+    /// Complete resulting snapshot.
+    pub slots: &'a [InventorySlot],
+}
+
+/// Operator-facing counts for checking inventory state against its ledger.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InventoryReconciliation {
+    /// Character inventory inspected.
+    pub character_id: CharacterId,
+    /// Persisted optimistic concurrency version.
+    pub version: i64,
+    /// Number of occupied slots.
+    pub occupied_slots: i64,
+    /// Total item quantity across occupied slots.
+    pub total_quantity: i64,
+    /// Number of receipts where this character was either endpoint.
+    pub transfer_receipts: i64,
 }
 
 impl InventorySlot {
@@ -99,10 +134,41 @@ pub trait InventoryStore {
     /// Load the last persisted snapshot for a character.
     fn load_inventory(&self, character_id: CharacterId) -> Result<Vec<InventorySlot>, ApiError>;
 
+    /// Load slots and their current aggregate version consistently.
+    fn load_versioned_inventory(
+        &self,
+        character_id: CharacterId,
+    ) -> Result<VersionedInventory, ApiError>;
+
     /// Replace a character's persisted snapshot atomically.
     fn replace_inventory(
         &self,
         character_id: CharacterId,
         slots: &[InventorySlot],
     ) -> Result<(), ApiError>;
+
+    /// Replace an inventory only if its current version equals `expected`.
+    ///
+    /// Implementations must perform the version check and replacement in one
+    /// transaction/critical section and return the new version.
+    fn replace_inventory_if_version(
+        &self,
+        character_id: CharacterId,
+        expected: i64,
+        slots: &[InventorySlot],
+    ) -> Result<i64, ApiError>;
+
+    /// Atomically replace both inventories and record the transfer receipt.
+    ///
+    /// Adapters must return an existing receipt for a repeated key without
+    /// applying the snapshots again. New requests must check both versions,
+    /// update both snapshots, advance both versions, and insert the receipt in
+    /// one transaction/critical section.
+    fn commit_transfer(
+        &self,
+        key: &str,
+        receipt: &TransferReceipt,
+        source: TransferInventoryUpdate<'_>,
+        destination: TransferInventoryUpdate<'_>,
+    ) -> Result<TransferReceipt, ApiError>;
 }

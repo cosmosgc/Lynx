@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Decisions · Lynx backlog</title>
+  <style>
+    :root { color-scheme:dark; --bg:#11151b; --panel:#1a2029; --line:#303a47; --muted:#a3afbd; --text:#edf2f7; --blue:#76b7ff; --green:#66d19e; --yellow:#f0c674; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:14px/1.55 system-ui,sans-serif; }
+    main { max-width:1400px; margin:auto; padding:24px 20px 50px; }
+    h1,h2,h3,p { margin-top:0; }
+    h1 { margin-bottom:4px; font-size:clamp(24px,4vw,34px); }
+    a { color:var(--blue); }
+    .muted { color:var(--muted); }
+    .nav { display:flex; flex-wrap:wrap; gap:8px; margin:16px 0 24px; }
+    .nav a { border:1px solid var(--line); border-radius:7px; padding:7px 10px; color:var(--text); text-decoration:none; }
+    .nav a:hover,.nav a[aria-current=page] { border-color:var(--blue); background:#17334b; }
+    .section { margin:28px 0; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,390px),1fr)); gap:12px; }
+    .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:17px; min-width:0; }
+    .card h3 { margin:0; font-size:17px; }
+    .card-head { display:flex; justify-content:space-between; align-items:start; gap:10px; }
+    .badge { display:inline-block; border:1px solid var(--line); border-radius:99px; padding:2px 8px; color:var(--muted); white-space:nowrap; font-size:12px; }
+    .accepted { color:var(--green); }.proposed { color:var(--yellow); }
+    .question { margin:12px 0; font-size:15px; }
+    .summary { color:#d1d9e2; }
+    .meta { color:var(--muted); font-size:13px; margin:8px 0; }
+    .connections { border-top:1px solid var(--line); margin-top:13px; padding-top:12px; }
+    .connections h4 { margin:0 0 7px; color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+    .links { display:flex; flex-wrap:wrap; gap:6px; }
+    .links a { display:inline-block; border:1px solid var(--line); border-radius:6px; padding:3px 7px; text-decoration:none; }
+    .empty { padding:18px; color:var(--muted); border:1px dashed var(--line); border-radius:9px; }
+    @media(max-width:550px) { main { padding:18px 10px 35px; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Architecture decisions</h1>
+    <p class="muted">Decision gates from the roadmap and ADRs are connected to the tasks they unblock or reference. Source files remain authoritative.</p>
+    <nav class="nav" aria-label="Backlog navigation">
+      <a href="/">Backlog</a><a href="/task-order">Plan</a><a href="/dependencies">Dependencies</a><a href="/decisions" aria-current="page">Decisions</a><a href="/reports">Reports</a><a href="/todos">Source TODOs</a><a href="/history">History</a>
+    </nav>
+  </header>
+
+  <section class="section" aria-labelledby="gates-heading">
+    <h2 id="gates-heading">Roadmap decision gates <span class="badge">{{ gates|length }} gates</span></h2>
+    {% if gates %}
+    <div class="grid">
+      {% for gate in gates %}
+      <article class="card" id="{{ gate.id|lower }}">
+        <div class="card-head"><h3>{{ gate.id }} — {{ gate.title }}</h3><a class="badge" href="/source?file={{ gate.file|urlencode }}#L{{ gate.line }}">Roadmap source</a></div>
+        <p class="question">{{ gate.question }}</p>
+        <p class="meta"><strong>Owner:</strong> {{ gate.owner }}</p>
+        <div class="connections"><h4>Unblocks / related tasks</h4>
+          <div class="links">
+            {% for task_id in gate.related_task_ids %}<a href="/?task={{ task_id }}">{{ task_id }}</a>{% else %}<span class="muted">No linked backlog tasks.</span>{% endfor %}
+          </div>
+        </div>
+        <div class="connections"><h4>Related ADRs</h4>
+          <div class="links">
+            {% for adr in gate.related_adrs %}<a href="/source?file={{ adr.file|urlencode }}#L{{ adr.line }}">{{ adr.id }} · {{ adr.title }}</a>{% else %}<span class="muted">No ADR explicitly connected.</span>{% endfor %}
+          </div>
+        </div>
+      </article>
+      {% endfor %}
+    </div>
+    {% else %}<p class="empty">No roadmap decision gates found.</p>{% endif %}
+  </section>
+
+  <section class="section" aria-labelledby="adrs-heading">
+    <h2 id="adrs-heading">Architecture decision records <span class="badge">{{ adrs|length }} ADRs</span></h2>
+    {% if adrs %}
+    <div class="grid">
+      {% for adr in adrs %}
+      <article class="card" id="adr-{{ adr.id|lower|replace('adr ', '') }}">
+        <div class="card-head">
+          <h3><a href="/source?file={{ adr.file|urlencode }}#L{{ adr.line }}">{{ adr.id }} — {{ adr.title }}</a></h3>
+          <span class="badge {% if 'accepted' in adr.status|lower %}accepted{% elif 'proposed' in adr.status|lower %}proposed{% endif %}">{{ adr.status }}</span>
+        </div>
+        <p class="summary">{{ adr.summary }}</p>
+        <div class="connections"><h4>Connected tasks</h4>
+          <div class="links">
+            {% for task in adr.related_tasks %}<a href="/?task={{ task.id }}">{{ task.id }} · {{ task.title }}</a>{% else %}<span class="muted">No tasks explicitly reference this ADR.</span>{% endfor %}
+          </div>
+        </div>
+        <div class="connections"><h4>Connected decision gates</h4>
+          <div class="links">
+            {% for gate_id in adr.gate_ids %}<a href="#{{ gate_id|lower }}">{{ gate_id }}</a>{% else %}<span class="muted">No roadmap gate explicitly connects to this ADR.</span>{% endfor %}
+          </div>
+        </div>
+      </article>
+      {% endfor %}
+    </div>
+    {% else %}<p class="empty">No ADR documents found.</p>{% endif %}
+  </section>
+</main>
+</body>
+</html>

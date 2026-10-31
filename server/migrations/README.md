@@ -80,6 +80,8 @@ edit applied migration files to resolve a mismatch.
 | `0005_world_events.sql` | Calendar events, bounded conflict sides, append-only lifecycle transitions, enrollment, conflict results, consistency triggers, and calendar views. |
 | `0006_world_snapshots.sql` | One resumable whole-world snapshot per world: serialized zone, calendar, and faction state with a payload hash. |
 | `0007_zone_fencing.sql` | Persistent fencing generations for single-writer zone leases. |
+| `0008_inventory_revisions.sql` | Optimistic aggregate versions for inventory snapshots. |
+| `0009_inventory_transfer_ledger.sql` | Append-only transfer receipts and idempotency keys. |
 
 ## Audit retention
 
