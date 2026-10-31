@@ -117,22 +117,32 @@ impl PostgresZoneLeaseStore {
         token: i64,
         event: ZoneEventInput<'_>,
     ) -> Result<i64, EngineError> {
-        let ZoneEventInput {
-            tick,
-            kind,
-            actor_id,
-            payload,
-            schema_version,
-        } = event;
+        self.append_events(zone_id, owner, token, &[event])
+            .map(|mut sequences| sequences.remove(0))
+    }
+
+    /// Append a group of events in one transaction under the current lease.
+    pub fn append_events(
+        &self,
+        zone_id: &str,
+        owner: &str,
+        token: i64,
+        events: &[ZoneEventInput<'_>],
+    ) -> Result<Vec<i64>, EngineError> {
         if !valid_zone_id(zone_id)
             || owner.is_empty()
-            || tick < 0
-            || kind.is_empty()
-            || kind.len() > 128
-            || schema_version < 1
-            || !payload.is_object()
+            || events.iter().any(|event| {
+                event.tick < 0
+                    || event.kind.is_empty()
+                    || event.kind.len() > 128
+                    || event.schema_version < 1
+                    || !event.payload.is_object()
+            })
         {
             return Err(invalid_lease());
+        }
+        if events.is_empty() {
+            return Ok(Vec::new());
         }
         let mut client = self.client.lock().map_err(|_| store_unavailable())?;
         let mut tx = client
@@ -142,17 +152,31 @@ impl PostgresZoneLeaseStore {
         if held.is_none() {
             return Err(stale_lease());
         }
-        let seq: i64 = tx
+        let first_sequence: i64 = tx
             .query_one(
                 "SELECT COALESCE(MAX(sequence) + 1, 0) FROM lynx.zone_events WHERE zone_id = $1",
                 &[&zone_id],
             )
             .map_err(|error| store_error("the zone event sequence could not be read", &error))?
             .get(0);
-        tx.execute("INSERT INTO lynx.zone_events (zone_id, sequence, tick, occurred_at, kind, actor_id, payload, schema_version) VALUES ($1, $2, $3, clock_timestamp(), $4, $5, $6, $7)", &[&zone_id, &seq, &tick, &kind, &actor_id, payload, &schema_version]).map_err(|error| store_error("the zone event could not be appended", &error))?;
+        let mut sequences = Vec::with_capacity(events.len());
+        for (offset, event) in events.iter().enumerate() {
+            let sequence = first_sequence
+                .checked_add(
+                    i64::try_from(offset)
+                        .map_err(|_| snapshot_error("the zone event batch is too large"))?,
+                )
+                .ok_or_else(|| snapshot_error("the zone event sequence cannot be advanced"))?;
+            tx.execute(
+                "INSERT INTO lynx.zone_events (zone_id, sequence, tick, occurred_at, kind, actor_id, payload, schema_version) VALUES ($1, $2, $3, clock_timestamp(), $4, $5, $6, $7)",
+                &[&zone_id, &sequence, &event.tick, &event.kind, &event.actor_id, &event.payload, &event.schema_version],
+            )
+            .map_err(|error| store_error("the zone event batch could not be appended", &error))?;
+            sequences.push(sequence);
+        }
         tx.commit()
-            .map_err(|error| store_error("the zone event could not be committed", &error))?;
-        Ok(seq)
+            .map_err(|error| store_error("the zone event batch could not be committed", &error))?;
+        Ok(sequences)
     }
 
     /// Fetch ordered events strictly after a sequence (use `-1` for all events).
@@ -227,6 +251,16 @@ impl ZoneLeaseStore for PostgresZoneLeaseStore {
         event: ZoneEventInput<'_>,
     ) -> Result<i64, EngineError> {
         PostgresZoneLeaseStore::append_event(self, zone_id, owner, token, event)
+    }
+
+    fn append_events(
+        &self,
+        zone_id: &str,
+        owner: &str,
+        token: i64,
+        events: &[ZoneEventInput<'_>],
+    ) -> Result<Vec<i64>, EngineError> {
+        PostgresZoneLeaseStore::append_events(self, zone_id, owner, token, events)
     }
 
     fn events_after(&self, zone_id: &str, sequence: i64) -> Result<Vec<ZoneEvent>, EngineError> {

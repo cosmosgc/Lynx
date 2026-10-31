@@ -264,10 +264,12 @@ operational verification, retention, and a measured recovery target.
 
 **Decision (D4):** Use a hybrid whole-world checkpoint plus append-only event
 log. The snapshot row remains authoritative; each fenced save atomically records
-the exact sequence of its `world.snapshot` checkpoint event. The current event
-log contains lifecycle markers and full checkpoint payloads, not gameplay delta
-events, so recovery reaches the last committed checkpoint but does not recover
-changes made after it.
+the exact sequence of its `world.snapshot` checkpoint event. After each
+successful authoritative tick, the service compares persistent entity records
+with the previous checkpoint/event state and appends all changed/created/removed
+records in one fenced transaction. Links, action caches, cooldowns, transfer
+receipts, calendar, and faction state remain checkpoint-only, so this is not yet
+complete multi-tick world recovery.
 
 **Implementation in progress:** Migration `0010_snapshot_event_checkpoints.sql`
 pins each snapshot row to its checkpoint event; `0011_snapshot_checkpoint_zone.sql`
@@ -283,8 +285,8 @@ repeatable-read transaction without acquiring a lease; it distinguishes
 verified, legacy-uncheckpointed, and absent state. The replay reducer now
 understands version-1 `zone.entity.upsert` and `zone.entity.remove` events after
 the latest checkpoint, validates their tick/actor/entity identity and
-persistence policy, and returns the recovered entity state. Gameplay mutation
-paths do not yet emit these deltas, so the reducer is not end-to-end durability.
+persistence policy, and returns the recovered entity state. The service emits
+these events atomically per tick; append failure stops the authority loop.
 
 ---
 

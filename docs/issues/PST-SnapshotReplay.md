@@ -20,18 +20,18 @@ accepted only when the event log contains no checkpoint event for that world.
 Operators can run `lynx-world verify-snapshot` for a read-only point-in-time
 check without taking the zone lease.
 
-This does not yet replay gameplay delta events: state after the latest committed
-checkpoint can still be lost unless the event log contains the supported
-`zone.entity.upsert` / `zone.entity.remove` records. The reducer applies those
-version-1 events after the latest checkpoint and fails closed on invalid,
-non-persistent, misidentified, or pre-checkpoint entity changes. The live world
-does not yet emit these events for gameplay mutations, so this is a replay
-contract and reducer, not end-to-end delta durability. Replayed state is still
-passed through strict zone restoration; invalid entities fail startup rather
-than being silently dropped. A durable quarantine record and operator-visible
-recovery report are not implemented. Reference quarantine, end-to-end event
-emission, dry-run verification, and the measured 60-second recovery target
-remain open PST-005 work.
+The service now emits `zone.entity.upsert` / `zone.entity.remove` records for
+changed persistent entity records after each successful authoritative tick.
+Each tick's event batch is atomic and fenced; append failure stops the authority
+loop rather than continuing with unrecorded state. The reducer validates event
+tick/actor/entity identity and persistence policy and applies events after the
+latest checkpoint. This is deliberately bounded: links, action caches,
+cooldowns, transfer receipts, calendar, and faction changes are still only
+captured by whole-world checkpoints, so complete multi-tick recovery is not yet
+provided. Replayed state passes through strict zone restoration; invalid
+entities fail startup rather than being silently dropped. A durable quarantine
+record, operator-visible restore report, full aggregate event coverage, and the
+measured 60-second recovery target remain open PST-005 work.
 
 Partial hardening: `engine_sim::Zone::restore` now rejects duplicate action,
 link, and transfer idempotency keys, mismatched action cache keys, oversized

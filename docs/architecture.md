@@ -225,11 +225,10 @@ format, validation rules, and formatting policy are specified in
   event hash, and replayed snapshot agree. Existing rows are backfilled only
   when the matching checkpoint identifies one unambiguous zone; untracked
   legacy rows remain readable only when no checkpoint event claims them.
-  Lifecycle events are not gameplay deltas, so state changes after the latest
-  committed checkpoint can still be lost unless a typed entity delta is
-  recorded. The recovery reducer supports version-1 persistent entity upsert
-  and removal events after a checkpoint, but live gameplay mutation paths do
-  not yet emit them.
+  Persistent entity record changes are emitted as an atomic fenced batch after
+  each successful authoritative tick and replayed after the checkpoint. Links,
+  action caches, cooldowns, transfer receipts, calendar, and faction state
+  remain checkpoint-only; full multi-tick recovery is not yet guaranteed.
 - `backend_nakama` provides PostgreSQL-backed account mapping and character
   services, including character-bound world-entry records. `lynx-world` uses
   them for production session and ownership admission, but admits only actors

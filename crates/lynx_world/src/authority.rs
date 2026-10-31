@@ -137,6 +137,21 @@ impl ZoneAuthority {
         )
     }
 
+    /// Atomically append multiple events under this authority's lease fence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorCode::Conflict`] when ownership was lost or superseded,
+    /// and an engine error when the store cannot atomically append the batch.
+    pub fn append_events(&self, events: &[ZoneEventInput<'_>]) -> Result<Vec<i64>, EngineError> {
+        self.store.append_events(
+            &self.lease.zone_id,
+            &self.lease.owner,
+            self.lease.fencing_token,
+            events,
+        )
+    }
+
     /// Read the zone event log after `sequence`.
     ///
     /// # Errors
@@ -230,18 +245,22 @@ pub(crate) mod tests {
 
         fn append_event(
             &self,
-            _zone_id: &str,
+            zone_id: &str,
             owner: &str,
             token: i64,
             event: ZoneEventInput<'_>,
         ) -> Result<i64, EngineError> {
-            let ZoneEventInput {
-                tick,
-                kind,
-                actor_id,
-                payload,
-                schema_version,
-            } = event;
+            self.append_events(zone_id, owner, token, &[event])
+                .map(|mut sequences| sequences.remove(0))
+        }
+
+        fn append_events(
+            &self,
+            _zone_id: &str,
+            owner: &str,
+            token: i64,
+            events: &[ZoneEventInput<'_>],
+        ) -> Result<Vec<i64>, EngineError> {
             let mut state = self.state.lock().unwrap();
             if state.owner.as_deref() != Some(owner) || state.token != token {
                 return Err(EngineError::new(
@@ -249,17 +268,37 @@ pub(crate) mod tests {
                     "the zone lease is no longer authoritative",
                 ));
             }
-            let sequence = i64::try_from(state.events.len()).unwrap();
-            state.events.push(ZoneEvent {
-                sequence,
-                tick,
-                occurred_at: SystemTime::now(),
-                kind: kind.to_owned(),
-                actor_id: actor_id.map(str::to_owned),
-                payload: payload.clone(),
-                schema_version,
-            });
-            Ok(sequence)
+            let first_sequence = i64::try_from(state.events.len()).map_err(|_| {
+                EngineError::new(ErrorCode::Internal, "the zone event sequence overflowed")
+            })?;
+            let event_count = i64::try_from(events.len()).map_err(|_| {
+                EngineError::new(ErrorCode::Internal, "the zone event batch is too large")
+            })?;
+            first_sequence.checked_add(event_count).ok_or_else(|| {
+                EngineError::new(ErrorCode::Internal, "the zone event sequence overflowed")
+            })?;
+            let mut sequences = Vec::with_capacity(events.len());
+            for event in events {
+                let ZoneEventInput {
+                    tick,
+                    kind,
+                    actor_id,
+                    payload,
+                    schema_version,
+                } = *event;
+                let sequence = first_sequence + i64::try_from(sequences.len()).unwrap();
+                sequences.push(sequence);
+                state.events.push(ZoneEvent {
+                    sequence,
+                    tick,
+                    occurred_at: SystemTime::now(),
+                    kind: kind.to_owned(),
+                    actor_id: actor_id.map(str::to_owned),
+                    payload: payload.clone(),
+                    schema_version,
+                });
+            }
+            Ok(sequences)
         }
 
         fn events_after(

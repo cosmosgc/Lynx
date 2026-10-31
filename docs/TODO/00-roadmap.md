@@ -210,7 +210,7 @@ first playable build.
 | **D1 — Auth** | Validate Nakama sessions at the world edge, or introduce a separate identity service? | Networking + backend | `NET-001`, `CLT-002` |
 | **D2 — Client shell** | Bevy client crate layout, camera/input abstraction, and asset formats. Write the missing ADRs. | Client + architecture | `CLT-001`, `CLT-004`, `QUA-017` |
 | **D3 — Combat model** | Accept, revise, or reject ADR 0022 (dynamic classes and Treat targeting). | Combat + AI + persistence | `SIM-004` |
-| **D4 — Persistence authority** | **Decided: hybrid whole-world checkpoints plus a sequence-ordered zone event log.** Checkpoints are authoritative; events currently record lifecycle boundaries and checkpoint payloads, not gameplay deltas. | Persistence | `PST-003`, `PST-005` |
+| **D4 — Persistence authority** | **Decided: hybrid whole-world checkpoints plus a sequence-ordered zone event log.** Checkpoints are authoritative; fenced ticks atomically append changed persistent entity records, while non-entity aggregates remain checkpoint-only. | Persistence | `PST-003`, `PST-005` |
 | **D5 — Editor scope** | In-engine Bevy editor, standalone tool, or CLI-first authoring? | Content + client | `CNT-001`–`CNT-007` |
 | **D6 — User content** | Ownership, moderation, publishing, and revocation policy before any public upload. | Security + content | `CNT-008`, `NET-009` |
 | **D7 — Multi-zone** | When does one authority loop stop being enough, and how are zones handed off? | Simulation + networking | `SIM-014`, `NET-005`, `PST-012` |

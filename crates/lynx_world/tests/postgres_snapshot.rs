@@ -128,6 +128,41 @@ fn assert_snapshot_event_replays(
     Ok(())
 }
 
+fn assert_event_batch_appends_contiguously(
+    store: &PostgresZoneLeaseStore,
+    zone: &str,
+    token: i64,
+) -> anyhow::Result<()> {
+    let first_payload = serde_json::json!({ "entity": "first" });
+    let second_payload = serde_json::json!({ "entity": "second" });
+    let batch = [
+        ZoneEventInput {
+            tick: 4,
+            kind: "test.batch",
+            actor_id: None,
+            payload: &first_payload,
+            schema_version: 1,
+        },
+        ZoneEventInput {
+            tick: 4,
+            kind: "test.batch",
+            actor_id: None,
+            payload: &second_payload,
+            schema_version: 1,
+        },
+    ];
+    assert_eq!(store.append_events(zone, "owner-b", token, &batch)?, [3, 4]);
+    assert_eq!(
+        store
+            .events_after(zone, -1)?
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2, 3, 4]
+    );
+    Ok(())
+}
+
 #[test]
 fn postgres_zone_lease_takeover_fences_old_owner_writes() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
@@ -220,13 +255,14 @@ fn postgres_zone_lease_takeover_fences_old_owner_writes() -> anyhow::Result<()> 
         )?,
         2
     );
+    assert_event_batch_appends_contiguously(&store, &zone, second.fencing_token)?;
     let events = store.events_after(&zone, -1)?;
     assert_eq!(
         events
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![0, 1, 2]
+        vec![0, 1, 2, 3, 4]
     );
     assert!(store.release(&zone, "owner-b", second.fencing_token)?);
     snapshots.delete()?;

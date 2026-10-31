@@ -346,6 +346,19 @@ pub trait ZoneLeaseStore: std::fmt::Debug + Send + Sync {
         event: ZoneEventInput<'_>,
     ) -> Result<i64, EngineError>;
 
+    /// Append a group of events atomically under the same lease fence.
+    ///
+    /// Implementations must either persist every event in order or persist
+    /// none of them. This is used when one simulation tick changes multiple
+    /// persistent entity records.
+    fn append_events(
+        &self,
+        zone_id: &str,
+        owner: &str,
+        token: i64,
+        events: &[ZoneEventInput<'_>],
+    ) -> Result<Vec<i64>, EngineError>;
+
     /// Read events strictly after `sequence`, ordered by sequence.
     ///
     /// # Errors

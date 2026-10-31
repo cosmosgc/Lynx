@@ -19,6 +19,7 @@ use engine_core::time::{Millis, Tick};
 use engine_net::envelope::{Envelope, MessageId, MessageKind};
 use engine_net::protocol::{ErrorPayload, Handshake};
 use engine_net::replication::SessionId;
+use engine_sim::entity::EntityRecord;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::MissedTickBehavior;
@@ -27,7 +28,10 @@ use world_server::{CloseReason, ConnectionId, Opened, Outbound, WorldServer};
 
 use crate::auth::Grant;
 use crate::authority::{EVENT_WORLD_SNAPSHOT, EVENT_WORLD_STOPPED, ZoneAuthority};
-use crate::persistence::{SnapshotStore, WorldSnapshot, WorldSnapshotInputs};
+use crate::persistence::{
+    EVENT_ENTITY_REMOVE, EVENT_ENTITY_UPSERT, SnapshotStore, WorldSnapshot, WorldSnapshotInputs,
+    ZoneEventInput,
+};
 
 /// Client handshake message kind. Its body is [`Hello`].
 pub const HELLO_KIND: &str = "session.hello";
@@ -122,6 +126,10 @@ pub struct Service {
     token_sequence: u64,
     persistence: Option<Persistence>,
     authority: Option<ZoneAuthority>,
+    /// Last persistent entity state covered by the checkpoint or event log.
+    evented_entities: Option<BTreeMap<StableId, EntityRecord>>,
+    /// Stop serving after an event batch cannot be durably appended.
+    authority_write_failed: bool,
     metrics: Arc<Metrics>,
 }
 
@@ -387,6 +395,8 @@ impl Service {
             token_sequence: 0,
             persistence: None,
             authority: None,
+            evented_entities: None,
+            authority_write_failed: false,
             metrics: Arc::new(Metrics::default()),
         };
         service.update_gauges();
@@ -472,10 +482,12 @@ impl Service {
     ///
     /// The caller must already hold the lease and must bind the same lease to
     /// the snapshot store; this method does not acquire or renew it. The
-    /// service appends a `world.snapshot` event after each successful save and
-    /// a `world.stopped` event when the loop ends. If another process takes the
-    /// lease over, those writes fail with [`ErrorCode::Conflict`] instead of
-    /// silently extending a log this process no longer owns.
+    /// service appends persistent-entity deltas after successful ticks, a
+    /// `world.snapshot` event after each successful save, and a
+    /// `world.stopped` event when the loop ends. If a delta batch fails, the
+    /// authority loop stops; if another process took the lease, writes fail
+    /// with [`ErrorCode::Conflict`] instead of extending a log this process no
+    /// longer owns.
     #[must_use]
     pub fn with_zone_authority(mut self, authority: ZoneAuthority) -> Self {
         self.metrics.set_lease_held(true);
@@ -513,6 +525,9 @@ impl Service {
                     }
                     next_deadline += self.tick;
                     self.advance();
+                    if self.authority_write_failed {
+                        break;
+                    }
                     ticks_since_save = ticks_since_save.wrapping_add(1);
                     if let Some(persistence) = &self.persistence
                         && ticks_since_save >= persistence.interval_ticks
@@ -583,7 +598,74 @@ impl Service {
         if result.is_ok() && !store.records_snapshot_events_transactionally() {
             self.record_snapshot_event(&world);
         }
+        if result.is_ok()
+            && store.records_snapshot_events_transactionally()
+            && self.authority.is_some()
+        {
+            self.evented_entities = Some(entity_records(&world));
+        }
         result
+    }
+
+    /// Persist changed persistent entity records as one all-or-nothing tick batch.
+    fn record_entity_changes(&mut self) -> Result<(), EngineError> {
+        let (Some(authority), Some(persistence)) = (&self.authority, &self.persistence) else {
+            return Ok(());
+        };
+        if !persistence.store.records_snapshot_events_transactionally() {
+            return Ok(());
+        }
+        let previous = self.evented_entities.as_ref().ok_or_else(|| {
+            EngineError::new(
+                ErrorCode::Conflict,
+                "persistent entity events cannot precede the initial checkpoint",
+            )
+        })?;
+        let current: BTreeMap<_, _> = self
+            .server
+            .gateway()
+            .zone()
+            .snapshot()
+            .entities
+            .into_iter()
+            .map(|entity| (entity.id, entity))
+            .collect();
+        let tick = i64::try_from(self.server.gateway().zone().tick().0).map_err(|_| {
+            EngineError::new(
+                ErrorCode::InvalidRequest,
+                "the zone event tick is out of range",
+            )
+        })?;
+
+        let mut pending = Vec::new();
+        for (id, entity) in &current {
+            if previous.get(id) != Some(entity) {
+                let payload = serde_json::json!({ "entity": entity });
+                pending.push((id.to_string(), EVENT_ENTITY_UPSERT, payload));
+            }
+        }
+        for id in previous.keys().filter(|id| !current.contains_key(id)) {
+            let payload = serde_json::json!({ "entity_id": id.to_string() });
+            pending.push((id.to_string(), EVENT_ENTITY_REMOVE, payload));
+        }
+        pending.sort_by(|left, right| left.0.cmp(&right.0));
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        let inputs: Vec<_> = pending
+            .iter()
+            .map(|(actor_id, kind, payload)| ZoneEventInput {
+                tick,
+                kind,
+                actor_id: Some(actor_id),
+                payload,
+                schema_version: 1,
+            })
+            .collect();
+        authority.append_events(&inputs)?;
+        self.evented_entities = Some(current);
+        Ok(())
     }
 
     /// Append a boundary marker for stores that do not write it transactionally.
@@ -875,15 +957,27 @@ impl Service {
         // This is the configured interval, not elapsed wall time: late ticks
         // do not grant extra movement or bank unused time.
         let interval_ms = u32::try_from(self.tick.as_millis()).unwrap_or(u32::MAX);
-        match self.server.tick_with_interval(clock(), interval_ms) {
-            Ok(outbound) => self.dispatch(outbound),
+        let tick_succeeded = match self.server.tick_with_interval(clock(), interval_ms) {
+            Ok(outbound) => {
+                self.dispatch(outbound);
+                true
+            }
             Err(error) => {
                 self.metrics.tick_failures.fetch_add(1, Ordering::Relaxed);
                 tracing::error!(
                     code = ?error.code(),
                     "authoritative tick failed"
                 );
+                false
             }
+        };
+        if tick_succeeded && let Err(error) = self.record_entity_changes() {
+            self.authority_write_failed = true;
+            tracing::error!(
+                code = ?error.code(),
+                details = %error,
+                "persistent entity event batch failed; stopping authority loop"
+            );
         }
         let elapsed = started.elapsed();
         self.metrics.ticks.fetch_add(1, Ordering::Relaxed);
@@ -1043,6 +1137,16 @@ impl Service {
 
 fn message_kind(value: &str) -> MessageKind {
     MessageKind::parse(value).expect("literal message kinds are valid")
+}
+
+fn entity_records(world: &WorldSnapshot) -> BTreeMap<StableId, EntityRecord> {
+    world
+        .zone
+        .entities
+        .iter()
+        .cloned()
+        .map(|entity| (entity.id, entity))
+        .collect()
 }
 
 fn clock() -> Millis {
@@ -1827,6 +1931,145 @@ mod tests {
             state.last = Some(snapshot.clone());
             Ok(())
         }
+    }
+
+    #[derive(Debug, Default)]
+    struct TransactionalMemoryStore {
+        last: std::sync::Mutex<Option<WorldSnapshot>>,
+    }
+
+    impl crate::persistence::SnapshotStore for TransactionalMemoryStore {
+        fn load(&self) -> Result<Option<WorldSnapshot>, EngineError> {
+            Ok(self.last.lock().unwrap().clone())
+        }
+
+        fn save(&self, snapshot: &WorldSnapshot) -> Result<(), EngineError> {
+            *self.last.lock().unwrap() = Some(snapshot.clone());
+            Ok(())
+        }
+
+        fn records_snapshot_events_transactionally(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn a_tick_appends_all_persistent_entity_changes_as_one_batch() {
+        use crate::authority::tests::MemoryLeases;
+        use crate::persistence::ZoneLeaseStore;
+
+        let (service, _, _) = service();
+        let zone_id = service
+            .server
+            .gateway()
+            .zone()
+            .config()
+            .instance
+            .to_string();
+        let leases = Arc::new(MemoryLeases::default());
+        let lease_store: Arc<dyn ZoneLeaseStore> = leases.clone();
+        let authority = ZoneAuthority::acquire(
+            lease_store,
+            &zone_id,
+            "entity-delta-owner",
+            Duration::from_secs(30),
+        )
+        .unwrap()
+        .unwrap();
+        let mut service = service
+            .with_persistence(
+                Arc::new(TransactionalMemoryStore::default()),
+                Duration::from_secs(1),
+            )
+            .with_zone_authority(authority.clone());
+        service.try_save_snapshot().unwrap();
+
+        let changed_ids: Vec<_> = service
+            .server
+            .gateway()
+            .zone()
+            .snapshot()
+            .entities
+            .iter()
+            .take(2)
+            .map(|entity| entity.id)
+            .collect();
+        for id in &changed_ids {
+            let entity = service
+                .server
+                .gateway_mut()
+                .zone_mut()
+                .entity_mut(*id)
+                .unwrap();
+            entity.transform.position.x += 0.25;
+        }
+
+        service.advance();
+
+        let events = authority.events_after(-1).unwrap();
+        assert!(events.len() >= changed_ids.len());
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            (0..i64::try_from(events.len()).unwrap()).collect::<Vec<_>>()
+        );
+        assert!(events.iter().all(|event| event.kind == EVENT_ENTITY_UPSERT));
+        let event_actors: std::collections::BTreeSet<_> = events
+            .iter()
+            .filter_map(|event| event.actor_id.as_deref())
+            .collect();
+        for id in changed_ids {
+            assert!(event_actors.contains(id.to_string().as_str()));
+        }
+    }
+
+    #[test]
+    fn a_failed_entity_event_batch_marks_the_authority_loop_to_stop() {
+        use crate::authority::tests::MemoryLeases;
+        use crate::persistence::ZoneLeaseStore;
+
+        let (service, _, _) = service();
+        let zone_id = service
+            .server
+            .gateway()
+            .zone()
+            .config()
+            .instance
+            .to_string();
+        let leases = Arc::new(MemoryLeases::default());
+        let lease_store: Arc<dyn ZoneLeaseStore> = leases.clone();
+        let authority = ZoneAuthority::acquire(
+            lease_store,
+            &zone_id,
+            "entity-delta-owner",
+            Duration::from_secs(30),
+        )
+        .unwrap()
+        .unwrap();
+        let mut service = service
+            .with_persistence(
+                Arc::new(TransactionalMemoryStore::default()),
+                Duration::from_secs(1),
+            )
+            .with_zone_authority(authority.clone());
+        service.try_save_snapshot().unwrap();
+        let id = service.server.gateway().zone().snapshot().entities[0].id;
+        service
+            .server
+            .gateway_mut()
+            .zone_mut()
+            .entity_mut(id)
+            .unwrap()
+            .transform
+            .position
+            .x += 0.25;
+        assert!(authority.release().unwrap());
+
+        service.advance();
+
+        assert!(service.authority_write_failed);
     }
 
     #[test]
