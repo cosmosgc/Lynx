@@ -659,3 +659,98 @@ graphical clients will expose tick overruns as lag.
 - [ ] Replaying the same inputs produces byte-identical snapshots.
 - [ ] Overload behavior is documented and tested.
 - [ ] Budget regressions fail CI or a nightly job.
+
+---
+
+## SIM-019 — Zone systems and shared utilities
+
+- **Priority:** P2
+- **Status:** Blocked — `SIM-014`, `PST-005`, `SIM-018`, `CNT-005`
+- **Depends on:** `SIM-014`, `PST-005`, `SIM-018`, `CNT-005`
+- **References:** [world simulation §Zone systems, work, and local economy](../world-simulation.md#zone-systems-work-and-local-economy),
+  [content authoring](../content-authoring.md)
+
+**Why:** Zones should be places with distinct, interdependent mechanics, not
+only maps containing independent entities. Shared local infrastructure creates
+cooperative goals and gives later jobs and trade systems meaningful outputs.
+
+**Scope**
+
+- Define a bounded, data-driven zone-system model with configurable inputs,
+  outputs, consumers, failure behavior, update cadence, and offline policy.
+- Implement a zone-scoped power network: generation, storage, distribution,
+  demand, priority, outages, and recovery. Consumers such as doors, lights,
+  pumps, and workstations use the same authoritative zone supply.
+- Allow other zone mechanics (production, hazards, or local services) to use
+  the same bounded system contracts without requiring every zone to enable them.
+- Resolve player operation/repair through server-validated actions; clients may
+  inspect replicated status but cannot set supply or consumer outcomes.
+- Persist and version consequential system state, with deterministic replay,
+  diagnostics, limits, and migration/quarantine behavior.
+- Define behavior for essential services when no players are present and prevent
+  unbounded simulation work or resource accumulation.
+
+**Acceptance criteria**
+
+- [ ] Two consumers in one zone compete for the same configured supply and
+      priorities/outages produce deterministic documented results.
+- [ ] A client cannot forge power, repair outcomes, or system state.
+- [ ] Save/restore and replay preserve system state and reject incompatible
+      versions with actionable diagnostics.
+- [ ] Offline progression, resource caps, failure recovery, and tick budgets are
+      tested, including a zone with no active players.
+- [ ] Zones can opt into different system configurations without engine forks.
+
+---
+
+## SIM-020 — Zone work, dynamic markets, and faction contribution
+
+- **Priority:** P2
+- **Status:** Blocked — `SIM-019`, `SIM-010`, `SIM-011`, `SIM-014`, `PST-003`, `PST-014`
+- **Depends on:** `SIM-019`, `SIM-010`, `SIM-011`, `SIM-014`, `PST-003`, `PST-014`
+- **References:** [world simulation §Zone systems, work, and local economy](../world-simulation.md#zone-systems-work-and-local-economy),
+  [SIM-010](#sim-010--trade-and-economy-integrity),
+  [SIM-011](#sim-011--progression-and-quests)
+
+**Why:** Players need repeatable, server-validated ways to keep zone systems
+working and produce useful goods. Local supply and demand can then create
+regional trade opportunities, while explicit accounting connects local success
+to faction wealth without conflating the two.
+
+**Scope**
+
+- Add configurable work/contracts such as farming, repeatable local requests,
+  courier deliveries over validated routes, and machinery or utility repair.
+  Activities may use skills, credentials, faction policy, or contract limits;
+  they need not be permanent character classes.
+- Make work produce concrete outputs (goods, delivered stock, repaired capacity,
+  or completed service) and use idempotent, auditable reward grants. Reuse
+  quest/progression and trade contracts rather than introducing duplicate
+  reward or inventory paths.
+- Track per-zone configured stock, consumption, demand, and market orders; derive
+  prices from bounded, smoothed inputs with floors/ceilings and explicit update
+  cadence.
+- Support import/export along valid routes, accounting for travel time,
+  capacity, fees, risk/loss, and market refresh. Prevent guaranteed or
+  repeatable value creation through arbitrage, stale prices, or duplicate
+  deliveries.
+- Define explicit transfers for configured zone revenue, taxes, upkeep, and
+  losses into/out of faction treasury. Keep local economic health separate from
+  faction balances and power; make every movement reconcilable and auditable.
+- Provide player-visible stock/price information and enough history to make
+  informed choices without promising fixed profits.
+
+**Acceptance criteria**
+
+- [ ] Work, delivery, and reward requests are server-authorized, bounded,
+      idempotent, and cannot be repeated to mint value.
+- [ ] Supply/demand changes affect prices within documented bounds and cadence;
+      deterministic replay yields the same market state.
+- [ ] Import/export requires a valid route and cannot double-spend stock or
+      guarantee infinite profit under repeated transactions.
+- [ ] Player, zone, and faction balances reconcile; faction contributions are
+      explicit transfers and do not count value twice.
+- [ ] Offline market/work progression, persistence, migration, and recovery are
+      documented and tested.
+- [ ] Tests cover shortages/surpluses, price limits, fees/loss, concurrent
+      orders, failed deliveries, duplicate rewards, and faction accounting.

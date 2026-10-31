@@ -68,6 +68,71 @@ routes, invalid endpoints, orphaned territory records, and broken references
 between maps, zones, lore, factions, and events. Publishing a map change must
 show a diff and must not silently transfer live ownership.
 
+## Zone systems, work, and local economy
+
+Zones may have distinct, systemic mechanics rather than being only scenery and
+quest locations. Draw inspiration from the interdependent station simulation
+and player-operated roles of *Space Station 13*, and the regional economies and
+professions of *Wakfu*, without requiring every zone to use the same mechanics.
+Creators can configure which systems a zone has (for example utilities,
+production, hazards, or local services), their inputs and outputs, and how they
+interact. Mechanics should be legible and provide meaningful ways for players
+to cooperate, maintain, disrupt, or recover a place.
+
+Power and similar utilities are scoped to a zone. Consumers in a zone draw from
+that zone's shared supply and network, rather than each player or entity having
+an unrelated private resource pool. For example, powered doors, workstations,
+lights, pumps, and production equipment can all depend on the same grid. The
+simulation defines generation, storage, distribution, demand, priorities, and
+failure behavior; players can operate or repair the infrastructure where the
+game allows it. Cross-zone connections are explicit routes or trade flows, not
+implicit access to another zone's supply. The authoritative server resolves
+changes and persists consequential state, while replication can summarize
+read-only status to clients.
+
+Jobs and repeatable activities give players practical ways to make local
+systems work and contribute to a zone. Examples include farming, fulfilling
+repeatable local requests, courier work between zones, and maintaining
+machinery or utilities. These are activities and responsibilities, not
+necessarily permanent character classes: a game can gate them by skills,
+credentials, faction policy, or available contracts. Their outputs should be
+concrete and auditable—such as delivered goods, repaired capacity, produced
+stock, or completed service—so progress is not an opaque score or an easily
+automated currency faucet. Contracts and production must define limits,
+validation, and reward sources to resist duplication and bot abuse.
+
+Each zone can maintain local supply, demand, and market prices for configured
+goods. Prices respond to actual, bounded signals such as stock, consumption,
+and outstanding orders, with smoothing, floors/ceilings, and update cadence to
+avoid runaway swings or trivial price manipulation. Zones may specialize or
+have shortages, making import and export useful player activities: players can
+buy or acquire goods where they are available, transport them along valid
+routes, and sell them where demand justifies the risk and cost. Trade rules
+must account for travel time, capacity, fees, loss, and market refresh so
+arbitrage is a deliberate opportunity rather than a guaranteed infinite-money
+loop. Show players enough market history and stock information to make informed
+choices without promising a fixed profit.
+
+Local economic activity can contribute to the owning faction's wealth, but the
+relationship is configured and explicit. Define which zone revenues, taxes,
+production, upkeep, and losses enter faction accounts, who can spend those
+funds, and when aggregates are updated. Do not count the same transaction as
+both player wealth and faction wealth without a corresponding transfer. Zone
+wealth and faction wealth remain distinguishable: the former describes local
+economic health and the latter is the faction's durable, inspectable account
+and power input. Changes in faction wealth may affect configured strategic
+capabilities under the rules above; they should not silently rewrite local
+prices or grant direct combat advantages.
+
+Keep zone simulation bounded and configurable. Define update cadence, offline
+progression, resource and price limits, recovery from outages, and what happens
+when a zone has too few players to operate essential services. Persistent state
+must be versioned and changed through server-validated commands or deterministic
+simulation, with an audit trail for consequential economic and infrastructure
+changes. Editors should expose system dependencies, job and contract rewards,
+market rules, and faction transfers for validation and preview. These systems
+are design goals, not claims about current implementation.
+
 ## Factions, guilds, and wealth
 
 Use one faction domain model for player-founded groups, guilds, and NPC

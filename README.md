@@ -339,6 +339,7 @@ root.
 | [`docs/content-authoring.md`](docs/content-authoring.md) | RON formats, kind directories, validation gates, bundles/manifests. |
 | [`docs/world-simulation.md`](docs/world-simulation.md) | Faction parity, territory, world events, calendar, map authoring. |
 | [`docs/internationalization.md`](docs/internationalization.md) | `pt-BR` defaults, key-based catalogs, locale negotiation. |
+| [`docs/glossary/index.md`](docs/glossary/index.md) | Plain-language dictionary of technical and project-specific terms. |
 | [`docs/platforms.md`](docs/platforms.md) | Which targets are supported and how they are CI-tested. |
 | [`docs/ai-tooling.md`](docs/ai-tooling.md) | Optional MCP tooling policy and shell-execution rules. |
 | [`docs/ai-tooling.md#visual-ui-test-and-task-report-protocol`](docs/ai-tooling.md#visual-ui-test-and-task-report-protocol) | Required visual validation and task-report protocol for AI-authored UI changes. |

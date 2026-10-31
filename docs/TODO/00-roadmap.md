@@ -167,6 +167,9 @@ rolls it back with an audit trail. This closes Phase 6.
 | `SIM-015` | Simulation | `SIM-001`, `SIM-006` |
 | `SIM-016` | Simulation | `PST-003` |
 | `SIM-017` | Simulation | `CNT-005` |
+| `SIM-019` | Simulation | `SIM-014`, `PST-005`, `SIM-018`, `CNT-005` |
+| `SIM-020` | Simulation | `SIM-019`, `SIM-010`, `SIM-011`, `SIM-014`, `PST-003`, `PST-014` |
+| `CNT-018` | Content | `CNT-005`, `SIM-019`, `SIM-020` |
 | `PST-011` | Persistence | `PST-014` |
 | `PST-012` | Persistence | `SIM-014`, `NET-005` |
 | `NET-005` | Networking | `SIM-014`, `PST-004` |

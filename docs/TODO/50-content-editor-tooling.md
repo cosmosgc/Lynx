@@ -468,3 +468,37 @@ targets); generated command reference and shell completion remain unimplemented.
 - [ ] CI fails when schemas change without regenerating the reference.
 - [ ] Every validation code has a documented remedy.
 - [ ] The reference is versioned with the engine.
+
+---
+
+## CNT-018 — Zone systems, work, and market authoring
+
+- **Priority:** P2
+- **Status:** Blocked — `CNT-005`, `SIM-019`, `SIM-020`
+- **Depends on:** `CNT-005`, `SIM-019`, `SIM-020`
+- **References:** [world simulation §Zone systems, work, and local economy](../world-simulation.md#zone-systems-work-and-local-economy),
+  [SIM-019](10-simulation-gameplay.md#sim-019--zone-systems-and-shared-utilities),
+  [SIM-020](10-simulation-gameplay.md#sim-020--zone-work-dynamic-markets-and-faction-contribution)
+
+**Scope**
+
+- Author and validate zone system configurations, utility networks/consumers,
+  capacities, priorities, dependencies, and failure/recovery behavior.
+- Author jobs/contracts, repeatable limits, requirements, inputs/outputs,
+  rewards, and valid courier routes without embedding engine-specific code.
+- Configure market goods, stock sources/sinks, price bounds/formulas/cadence,
+  trade costs, and explicit zone-to-faction transfers.
+- Preview system dependencies, production/consumption, market outcomes, and
+  faction accounting; report cycles, missing goods/routes, invalid limits, and
+  impossible configurations before publish.
+- Include these definitions and their compatible persisted-state versions in
+  content hashes, diffs, and migration/rollback workflows.
+
+**Acceptance criteria**
+
+- [ ] A creator can configure different zone systems, jobs, and markets using
+      canonical content and load them without engine edits.
+- [ ] Validation identifies broken dependencies, invalid reward loops, and
+      unreachable courier routes before publish.
+- [ ] Preview matches authoritative runtime rules and cannot mutate live state.
+- [ ] Content diffs and migrations identify affected zones and persisted state.

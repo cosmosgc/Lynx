@@ -103,6 +103,7 @@ the quick audit; update it when a gap is found or closed.
 | macOS, client connect/render/move smoke, and automated CI duration/flakiness tracking are missing | [platforms](../platforms.md), [CI](../../.github/workflows/ci.yml) | `OPS-006` |
 | ADR 0022 (dynamic classes and Treat targeting) is Proposed | [ADR 0022](../adr/0022-dynamic-character-classes-and-combat-targeting.md) | `SIM-004` |
 | Guilds, quests, progression, economy, trading, parties | [README](../../README.md#phase-8--expand-and-stabilize--selected-systems-delivered-early) | `SIM-009`–`SIM-013` |
+| Zone-specific mechanics, shared utilities, player work, demand-based markets, and local-to-faction wealth transfers | [world simulation](../world-simulation.md#zone-systems-work-and-local-economy) | `SIM-019`, `SIM-020`, `CNT-018` |
 | No checked-in vulnerability reporting policy or documented private contact | [issue](../issues/AUTH-SecurityDocumentationGap.md) | `QUA-009` |
 
 ## Working conventions
