@@ -448,7 +448,7 @@ impl WorldServer {
             Ok(opened) => Ok(opened),
             Err(error) => {
                 let _ = self.connections.remove(&connection);
-                let _ = self.gateway.close_session(&session);
+                self.gateway.close_session(&session)?;
                 Err(error)
             }
         }

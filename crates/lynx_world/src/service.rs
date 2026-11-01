@@ -928,7 +928,14 @@ impl Service {
         if let Some(session) = session {
             // Revocation cancels queued movement and invalidates the token. A
             // second disconnect removes the server's now-stale connection.
-            self.server.gateway_mut().close_session(&session);
+            if let Err(error) = self.server.gateway_mut().close_session(&session) {
+                tracing::error!(
+                    connection = %connection,
+                    code = ?error.code(),
+                    "durable session revocation failed; retaining fail-closed session state"
+                );
+                return;
+            }
             if let Err(error) = self.server.disconnect(connection, Tick::ZERO, clock()) {
                 tracing::error!(connection = %connection, code = ?error.code(), "revoked connection could not be removed");
             }

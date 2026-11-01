@@ -487,12 +487,19 @@ impl WorldGateway {
     /// Use this for administrative kicks, aborted handshakes, and any state
     /// that must not be resumable. An ordinary transport drop should call
     /// [`WorldGateway::disconnect`] instead so the player can reconnect.
-    pub fn close_session(&mut self, session: &SessionId) -> Option<GatewaySession> {
+    pub fn close_session(
+        &mut self,
+        session: &SessionId,
+    ) -> Result<Option<GatewaySession>, EngineError> {
         if let (Some(store), Some(generation)) = (
             self.resume_store.as_ref(),
             self.resume_generations.get(session).copied(),
-        ) {
-            let _ = store.revoke(session.as_str(), generation);
+        ) && !store.revoke(session.as_str(), generation)?
+        {
+            return Err(EngineError::new(
+                ErrorCode::Conflict,
+                "the durable session fence is stale; session was not closed",
+            ));
         }
         let _ = self.resume_generations.remove(session);
         let removed = self.sessions.remove(session);
@@ -500,7 +507,7 @@ impl WorldGateway {
             self.cancel_session_movement(removed);
         }
         let _ = self.interest.remove_session(session);
-        removed
+        Ok(removed)
     }
 
     /// Create a session for authenticated claims and bind its character.
@@ -538,7 +545,7 @@ impl WorldGateway {
         let snapshot = match self.initial_delivery(&session) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                let _ = self.close_session(&session.id);
+                self.close_session(&session.id)?;
                 return Err(error);
             }
         };
@@ -644,7 +651,12 @@ impl WorldGateway {
             let session = match restored {
                 Ok(session) if record_matches(&record, &session, &next, now) => session,
                 _ => {
-                    let _ = store.revoke(&record.session_id, record.generation);
+                    if !store.revoke(&record.session_id, record.generation)? {
+                        return Err(EngineError::new(
+                            ErrorCode::Conflict,
+                            "the durable session fence is stale; invalid session was not revoked",
+                        ));
+                    }
                     if let Ok(id) = SessionId::new(record.session_id.clone()) {
                         let _ = self.sessions.remove(&id);
                     }
@@ -665,7 +677,7 @@ impl WorldGateway {
         if self.zone.entity(session.actor).is_none()
             || self.resolve_actor(session.principal).ok() != Some(session.actor)
         {
-            let _ = self.close_session(&session.id);
+            self.close_session(&session.id)?;
             return Err(EngineError::new(
                 ErrorCode::SessionExpired,
                 "the session's character is no longer in the zone",
@@ -677,7 +689,7 @@ impl WorldGateway {
         let snapshot = match self.initial_delivery(&session) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                let _ = self.close_session(&session.id);
+                self.close_session(&session.id)?;
                 return Err(error);
             }
         };
@@ -803,7 +815,7 @@ impl WorldGateway {
         let mut refreshed = Vec::with_capacity(sessions.len());
         for session in sessions {
             let Some(observer) = self.observer_for(&session) else {
-                let _ = self.close_session(&session.id);
+                self.close_session(&session.id)?;
                 continue;
             };
             let update = self.interest.refresh(&observer, &self.world)?;

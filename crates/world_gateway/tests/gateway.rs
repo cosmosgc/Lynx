@@ -1,5 +1,6 @@
 //! End-to-end tests for session authority, interest isolation, and reconnect.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use engine_core::error::ErrorCode;
@@ -30,11 +31,14 @@ use world_gateway::{
 };
 
 #[derive(Debug, Default)]
-struct MemoryResumeStore(Mutex<Option<ResumeSessionRecord>>);
+struct MemoryResumeStore {
+    record: Mutex<Option<ResumeSessionRecord>>,
+    fail_next_revoke: AtomicBool,
+}
 
 impl ResumeSessionStore for MemoryResumeStore {
     fn create(&self, record: &ResumeSessionRecord) -> Result<(), engine_core::error::EngineError> {
-        *self.0.lock().unwrap() = Some(record.clone());
+        *self.record.lock().unwrap() = Some(record.clone());
         Ok(())
     }
 
@@ -44,7 +48,7 @@ impl ResumeSessionStore for MemoryResumeStore {
         expected_generation: i64,
         expires_at_ms: i64,
     ) -> Result<bool, engine_core::error::EngineError> {
-        let mut state = self.0.lock().unwrap();
+        let mut state = self.record.lock().unwrap();
         let Some(record) = state.as_mut() else {
             return Ok(false);
         };
@@ -67,7 +71,7 @@ impl ResumeSessionStore for MemoryResumeStore {
         _fencing_token: i64,
         expires_at_ms: i64,
     ) -> Result<u64, engine_core::error::EngineError> {
-        let mut state = self.0.lock().unwrap();
+        let mut state = self.record.lock().unwrap();
         let Some(record) = state.as_mut() else {
             return Ok(0);
         };
@@ -86,7 +90,7 @@ impl ResumeSessionStore for MemoryResumeStore {
         next: TokenDigest,
         now_ms: i64,
     ) -> Result<Option<ResumeSessionRecord>, engine_core::error::EngineError> {
-        let mut state = self.0.lock().unwrap();
+        let mut state = self.record.lock().unwrap();
         let Some(record) = state.as_mut() else {
             return Ok(None);
         };
@@ -112,7 +116,13 @@ impl ResumeSessionStore for MemoryResumeStore {
         session_id: &str,
         expected_generation: i64,
     ) -> Result<bool, engine_core::error::EngineError> {
-        let mut state = self.0.lock().unwrap();
+        if self.fail_next_revoke.swap(false, Ordering::SeqCst) {
+            return Err(engine_core::error::EngineError::new(
+                ErrorCode::Internal,
+                "simulated durable revocation failure",
+            ));
+        }
+        let mut state = self.record.lock().unwrap();
         let Some(record) = state.as_mut() else {
             return Ok(false);
         };
@@ -128,7 +138,7 @@ impl ResumeSessionStore for MemoryResumeStore {
     }
 
     fn sweep_expired(&self, now_ms: i64) -> Result<u64, engine_core::error::EngineError> {
-        let mut state = self.0.lock().unwrap();
+        let mut state = self.record.lock().unwrap();
         if state.as_ref().is_some_and(|record| {
             record.revoked
                 || record
@@ -467,7 +477,7 @@ fn session_lifecycle_cancels_queued_movement() {
             ))
             .unwrap();
         if lifecycle == "close" {
-            f.gateway.close_session(&alice.session).unwrap();
+            f.gateway.close_session(&alice.session).unwrap().unwrap();
         } else {
             f.gateway
                 .disconnect(&alice.session, Tick::ZERO, Millis::new(1_100))
@@ -526,7 +536,7 @@ fn resume_baseline_includes_cancelled_sequence_but_new_session_does_not() {
             .as_str(),
         "protocol.error"
     );
-    f.gateway.close_session(&resumed.session);
+    f.gateway.close_session(&resumed.session).unwrap();
     let new = connect(&mut f.gateway, "alice", f.alice_principal);
     assert_eq!(new.snapshot.movement.unwrap().last_consumed_sequence, None);
     let fresh = envelope(
@@ -1221,7 +1231,7 @@ fn assert_movement_budget_and_close(f: &mut Fixture, alice: &Connection) {
         send(&mut f.gateway, pending)[0].kind.as_str(),
         "movement.queued"
     );
-    f.gateway.close_session(&alice.session).unwrap();
+    f.gateway.close_session(&alice.session).unwrap().unwrap();
     f.gateway
         .tick_with_interval(Millis::new(1_000_001), 100)
         .unwrap();
@@ -1979,6 +1989,43 @@ fn durable_resume_restores_a_session_after_gateway_restart() {
             .unwrap_err()
             .code(),
         ErrorCode::SessionExpired
+    );
+}
+
+#[test]
+fn durable_revocation_failure_keeps_the_session_fail_closed_in_memory() {
+    let store = Arc::new(MemoryResumeStore::default());
+    let mut fixture = fixture();
+    fixture.gateway.attach_resume_store(store.clone());
+    let connected = connect(
+        &mut fixture.gateway,
+        "account-alice",
+        fixture.alice_principal,
+    );
+    store.fail_next_revoke.store(true, Ordering::SeqCst);
+
+    let error = fixture
+        .gateway
+        .close_session(&connected.session)
+        .expect_err("a failed durable revoke must be reported");
+    assert_eq!(error.code(), ErrorCode::Internal);
+    assert!(
+        fixture.gateway.session(&connected.session).is_some(),
+        "do not forget the session in memory when durable revocation failed"
+    );
+    assert_eq!(
+        fixture
+            .gateway
+            .resume(
+                &connected.token,
+                &handshake(),
+                Tick::ZERO,
+                Millis::new(2_000)
+            )
+            .unwrap_err()
+            .code(),
+        ErrorCode::SessionExpired,
+        "the still-connected durable record cannot be resumed"
     );
 }
 

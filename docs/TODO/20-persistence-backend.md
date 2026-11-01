@@ -365,9 +365,10 @@ rotation are atomic; startup detaches stale connected records only under the
 current zone lease. The gateway wires create/detach/rotate/revoke and restores
 eligible sessions from the replayed zone, rebuilding interest and sending a
 fresh snapshot. Nakama-mode admission routes resume credentials without
-trusting selection headers. Remaining work includes explicit role-change
-revocation and failure handling when revocation cannot be durably recorded;
-pooling and remote TLS work remain PST-007.
+trusting selection headers. Revocation is fail-closed: the in-memory session is
+not removed if its durable revoke fails, and the failure is surfaced to the
+service. Remaining work includes an explicit trusted role-change revocation
+hook; pooling and remote TLS work remain PST-007.
 
 ---
 
