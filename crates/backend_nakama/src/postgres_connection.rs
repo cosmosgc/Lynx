@@ -38,6 +38,11 @@ pub fn config_from_env(application_name: &str) -> Result<Config, &'static str> {
         .password(&password)
         .application_name(application_name)
         .connect_timeout(Duration::from_secs(5))
+        .tcp_user_timeout(Duration::from_secs(5))
+        .keepalives(true)
+        .keepalives_idle(Duration::from_secs(5))
+        .keepalives_interval(Duration::from_secs(2))
+        .keepalives_retries(3)
         .options("-c statement_timeout=5000 -c lock_timeout=2000 -c idle_in_transaction_session_timeout=5000");
     Ok(config)
 }
@@ -52,8 +57,15 @@ pub fn connect(config: &Config) -> Result<Client, ConnectionError> {
         return config.connect(postgres::NoTls).map_err(|_| ConnectionError);
     }
 
+    connect_tls(config, std::env::var_os(CA_CERT))
+}
+
+fn connect_tls(
+    config: &Config,
+    ca_path: Option<std::ffi::OsString>,
+) -> Result<Client, ConnectionError> {
     let mut tls_builder = native_tls::TlsConnector::builder();
-    if let Some(path) = std::env::var_os(CA_CERT) {
+    if let Some(path) = ca_path {
         let pem = fs::read(path).map_err(|_| ConnectionError)?;
         let certificates = rustls_pemfile::certs(&mut Cursor::new(pem))
             .collect::<Result<Vec<_>, _>>()
@@ -130,6 +142,66 @@ fn is_true_flag(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Instant;
+
+    // This self-signed localhost key pair is test-only and must never be used
+    // outside the in-process TLS probe below.
+    fn tls_probe_server() -> (Config, u16, mpsc::Receiver<bool>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (handshake_tx, handshake_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let Ok((mut socket, _)) = listener.accept() else {
+                let _ = handshake_tx.send(false);
+                return;
+            };
+            let _ = socket.set_read_timeout(Some(Duration::from_secs(3)));
+            let mut request = [0_u8; 8];
+            if socket.read_exact(&mut request).is_err()
+                || u32::from_be_bytes(request[0..4].try_into().unwrap()) != 8
+                || u32::from_be_bytes(request[4..8].try_into().unwrap()) != 80_877_103
+                || socket.write_all(b"S").is_err()
+            {
+                let _ = handshake_tx.send(false);
+                return;
+            }
+            let identity = native_tls::Identity::from_pkcs8(
+                include_bytes!("../tests/fixtures/postgres-localhost-cert.pem"),
+                include_bytes!("../tests/fixtures/postgres-localhost-key.pem"),
+            )
+            .unwrap();
+            let acceptor = native_tls::TlsAcceptor::new(identity).unwrap();
+            let Ok(mut tls) = acceptor.accept(socket) else {
+                let _ = handshake_tx.send(false);
+                return;
+            };
+            // Read the PostgreSQL startup packet, then close without an
+            // authentication response. The TLS handshake itself is the subject
+            // of this probe, not PostgreSQL authentication.
+            let mut length = [0_u8; 4];
+            let startup_received = tls.read_exact(&mut length).is_ok();
+            let _ = handshake_tx.send(startup_received);
+            if startup_received {
+                let packet_length = u32::from_be_bytes(length) as usize;
+                if (4..=16 * 1024).contains(&packet_length) {
+                    let mut packet = vec![0_u8; packet_length - 4];
+                    let _ = tls.read_exact(&mut packet);
+                }
+            }
+        });
+        let mut config = Config::new();
+        config
+            .host("localhost")
+            .port(port)
+            .user("tls-test")
+            .dbname("tls-test")
+            .connect_timeout(Duration::from_secs(3));
+        (config, port, handshake_rx, server)
+    }
 
     #[test]
     fn recognizes_ip_and_name_loopback_hosts() {
@@ -174,5 +246,63 @@ mod tests {
         let message = ConnectionError.to_string();
         assert!(!message.contains("password"));
         assert!(!message.contains("postgres://"));
+    }
+
+    #[test]
+    fn verified_tls_handshake_accepts_configured_ca_and_matching_hostname() {
+        let (config, _, handshake, server) = tls_probe_server();
+        let ca = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/postgres-localhost-cert.pem")
+            .into_os_string();
+        assert!(connect_tls(&config, Some(ca)).is_err());
+        assert!(handshake.recv_timeout(Duration::from_secs(4)).unwrap());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn verified_tls_handshake_rejects_hostname_mismatch() {
+        let (_, port, handshake, server) = tls_probe_server();
+        let mut config = Config::new();
+        config
+            .host("127.0.0.1")
+            .port(port)
+            .user("tls-test")
+            .dbname("tls-test")
+            .connect_timeout(Duration::from_secs(3));
+        let ca = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/postgres-localhost-cert.pem")
+            .into_os_string();
+        assert!(connect_tls(&config, Some(ca)).is_err());
+        assert!(!handshake.recv_timeout(Duration::from_secs(4)).unwrap());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn verified_tls_handshake_rejects_an_untrusted_certificate() {
+        let (config, _, handshake, server) = tls_probe_server();
+        assert!(connect_tls(&config, None).is_err());
+        assert!(!handshake.recv_timeout(Duration::from_secs(4)).unwrap());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn initial_connection_retry_uses_a_bounded_budget() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let mut config = Config::new();
+        config
+            .host("127.0.0.1")
+            .port(port)
+            .user("retry-test")
+            .dbname("retry-test")
+            .connect_timeout(Duration::from_secs(1));
+        let started = Instant::now();
+        let error = connect_with_retry(&config).err().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(4));
+        assert_eq!(
+            error.to_string(),
+            "PostgreSQL connection failed or configuration is invalid"
+        );
     }
 }

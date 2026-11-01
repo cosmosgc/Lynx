@@ -170,10 +170,12 @@ zone.
 With `--state-postgres`, the whole-world snapshot lives in
 `lynx.world_snapshots` (one row per world, written atomically by an upsert, so
 a failed write keeps the previous world) and the connection comes from the
-same `LYNX_PG_*` variables the setup scripts use. Connection establishment is
-limited to five seconds, and PostgreSQL statement, lock, and idle-transaction
+same `LYNX_PG_*` variables the setup scripts use. Each socket connection
+attempt is limited to five seconds; the three-attempt initial-connect budget is
+bounded. PostgreSQL statement, lock, and idle-transaction
 timeouts are configured to five, two, and five seconds respectively. Initial
-connection attempts use a bounded three-attempt backoff. Queries are not
+connection attempts use a bounded three-attempt backoff. TCP user timeout and
+keepalive probes are also configured to detect dead connections. Queries are not
 automatically retried because a lost response can make a write outcome
 ambiguous. PostgreSQL connections use verified TLS by default, including remote
 hosts; certificates are checked against the platform's native trust store.

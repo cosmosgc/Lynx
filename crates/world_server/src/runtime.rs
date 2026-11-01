@@ -232,6 +232,29 @@ impl WorldServer {
             .map(|(connection, _)| *connection)
     }
 
+    /// Revoke every retained session for a trusted principal and return active
+    /// transports that must be closed by the caller.
+    pub fn revoke_principal_sessions(
+        &mut self,
+        principal: StableId,
+    ) -> Result<(usize, Vec<ConnectionId>), EngineError> {
+        let connections: Vec<_> = self
+            .connections
+            .iter()
+            .filter_map(|(connection, session)| {
+                self.gateway
+                    .session(session)
+                    .is_some_and(|view| view.principal == principal)
+                    .then_some(*connection)
+            })
+            .collect();
+        let revoked = self.gateway.revoke_principal_sessions(principal)?;
+        for connection in &connections {
+            let _ = self.connections.remove(connection);
+        }
+        Ok((revoked, connections))
+    }
+
     /// Create a session for already-authenticated claims.
     ///
     /// # Errors

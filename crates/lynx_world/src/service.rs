@@ -93,6 +93,13 @@ pub enum ServerEvent {
         /// Connection that ended.
         connection: ConnectionId,
     },
+    /// Revoke sessions after a trusted identity or authorization change.
+    RevokePrincipal {
+        /// Server-verified principal whose retained sessions must be revoked.
+        principal: StableId,
+        /// Number of removed sessions, or the durable-store failure.
+        reply: oneshot::Sender<Result<usize, EngineError>>,
+    },
 }
 
 /// Output for one connection.
@@ -747,6 +754,10 @@ impl Service {
                 envelope,
             } => self.receive(connection, &envelope),
             ServerEvent::Leave { connection } => self.leave(connection),
+            ServerEvent::RevokePrincipal { principal, reply } => {
+                let result = self.revoke_principal_sessions(principal);
+                let _ = reply.send(result);
+            }
         }
         self.update_gauges();
     }
@@ -918,6 +929,19 @@ impl Service {
                 self.revoke_after_disconnect_error(connection);
             }
         }
+    }
+
+    fn revoke_principal_sessions(&mut self, principal: StableId) -> Result<usize, EngineError> {
+        let (revoked, connections) = self.server.revoke_principal_sessions(principal)?;
+        for connection in connections {
+            if let Some(writer) = self.writers.remove(&connection) {
+                let _ = writer.try_send(ServerFrame::Close);
+            }
+            self.metrics
+                .session_expired_closes
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(revoked)
     }
 
     fn revoke_after_disconnect_error(&mut self, connection: ConnectionId) {
@@ -1357,6 +1381,41 @@ mod tests {
             metrics
                 .render()
                 .contains("lynx_world_retained_sessions 1\n")
+        );
+    }
+
+    #[test]
+    fn trusted_principal_revocation_closes_attached_transports() {
+        let (mut service, grant, _) = service();
+        let (outbound, mut receiver) = mpsc::channel(16);
+        let admitted = service
+            .admit(
+                &Credential::Static(grant.clone()),
+                &Hello {
+                    handshake: demo::handshake().unwrap(),
+                    last_ack_tick: Tick::ZERO,
+                },
+                &outbound,
+            )
+            .unwrap();
+        while receiver.try_recv().is_ok() {}
+
+        let (reply, mut response) = oneshot::channel();
+        service.handle(ServerEvent::RevokePrincipal {
+            principal: grant.principal,
+            reply,
+        });
+
+        assert_eq!(response.try_recv().unwrap().unwrap(), 1);
+        assert_eq!(service.server.connection_count(), 0);
+        assert_eq!(service.writers.len(), 0);
+        assert!(matches!(receiver.try_recv().unwrap(), ServerFrame::Close));
+        assert!(
+            service
+                .server
+                .gateway()
+                .session(&admitted.session)
+                .is_none()
         );
     }
 

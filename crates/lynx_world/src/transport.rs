@@ -387,6 +387,32 @@ impl AppState {
         self
     }
 
+    /// Revoke a principal's sessions after a trusted authorization change.
+    /// This is a server-side control method, not an HTTP route; callers must
+    /// supply a principal obtained from the identity provider or operator
+    /// control plane, never from an untrusted request body.
+    pub async fn revoke_principal_sessions(
+        &self,
+        principal: StableId,
+    ) -> Result<usize, EngineError> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.events
+            .send(ServerEvent::RevokePrincipal { principal, reply })
+            .await
+            .map_err(|_| {
+                EngineError::new(
+                    ErrorCode::Internal,
+                    "the authority loop is unavailable for session revocation",
+                )
+            })?;
+        response.await.map_err(|_| {
+            EngineError::new(
+                ErrorCode::Internal,
+                "the authority loop did not complete session revocation",
+            )
+        })?
+    }
+
     /// Mark readiness for load balancers and operators.
     pub fn set_ready(&self, ready: bool) {
         let mut capacity = self.capacity.lock().expect("capacity lock poisoned");
@@ -1250,6 +1276,29 @@ mod tests {
     use game_api::{AccountId, Character, CharacterCreationReceipt, CharacterStatus};
 
     const CHARACTER_TOKEN: &str = "character-api-secret";
+
+    #[tokio::test]
+    async fn trusted_revocation_control_uses_authority_event_channel() {
+        let (events, mut receiver) = event_channel();
+        let state = Arc::new(AppState::new(
+            events,
+            Authenticator::new(&[crate::auth::digest("unused")]).unwrap(),
+        ));
+        let principal = StableId::from_parts(IdKind::Character, 1, 99);
+        let request_state = Arc::clone(&state);
+        let request =
+            tokio::spawn(async move { request_state.revoke_principal_sessions(principal).await });
+        let Some(ServerEvent::RevokePrincipal {
+            principal: event_principal,
+            reply,
+        }) = receiver.recv().await
+        else {
+            panic!("expected trusted principal revocation event");
+        };
+        assert_eq!(event_principal, principal);
+        reply.send(Ok(1)).unwrap();
+        assert_eq!(request.await.unwrap().unwrap(), 1);
+    }
 
     struct FakeCharacters;
 

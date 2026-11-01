@@ -332,7 +332,7 @@ across a crash, then verifies replay after checkpoint pruning.
 ## PST-006 — Durable sessions and resume windows
 
 - **Priority:** P2
-- **Status:** In progress
+- **Status:** In progress — durable lifecycle implemented; role-change source integration pending
 - **Depends on:** `PST-001`, `NET-001`
 - **References:** [networking §Reconnect and recovery](../networking.md#reconnect-and-recovery),
   ADR 0013
@@ -368,15 +368,18 @@ fresh snapshot. Nakama-mode admission routes resume credentials without
 trusting selection headers. Revocation is fail-closed: the in-memory session is
 not removed if its durable revoke fails, and the failure is surfaced to the
 service. A trusted principal-wide revocation hook invalidates retained durable
-claims and local sessions; wiring it to an external role-change event source
-remains deployment-specific. Pooling and remote TLS work remain PST-007.
+claims and local sessions, closes active transports through the authority event
+channel, and is exposed as a server-side `AppState` control method (never an
+HTTP/client route). The production Nakama adapter does not currently expose a
+role-change feed, so the integration receiving authoritative role updates must
+invoke this method.
 
 ---
 
 ## PST-007 — PostgreSQL connection hardening
 
 - **Priority:** P1
-- **Status:** In progress
+- **Status:** Done — verified TLS, bounded pool, and migration/runtime role split
 - **Depends on:** —
 - **References:** `crates/lynx_world/src/persistence/postgres.rs`,
   [operations](../operations.md)
@@ -389,23 +392,23 @@ database and not acceptable for a remote one.
 
 - Add TLS support (rustls or native-tls) and a configuration switch; keep plain
   TCP only for loopback/trusted development with an explicit opt-in.
-- Add connection pooling, connect/read/write timeouts, and bounded retry with
-  backoff for retryable failures.
+- Add bounded connection pooling, connect and server-side operation timeouts,
+  TCP dead-peer detection, and bounded initial-connect retry with backoff.
 - Separate migration/setup credentials from the runtime role; document least
   privilege.
 - Make failures observable without leaking DSNs, passwords, or payload data.
-- Test TLS and retry behavior against a local PostgreSQL instance; skip cleanly
-  when unconfigured.
+- Test TLS handshake and retry behavior against a local protocol probe; skip
+  database integration tests cleanly when unconfigured.
 
 **Acceptance criteria**
 
-- [ ] TLS is verified (not just enabled) against a test server or documented
+- [x] TLS is verified (not just enabled) against a test server or documented
       trust root.
-- [ ] A remote DSN without TLS is refused unless explicitly allowed.
-- [ ] Transient failures retry within a bounded budget and then surface a
+- [x] A remote DSN without TLS is refused unless explicitly allowed.
+- [x] Transient failures retry within a bounded budget and then surface a
       structured error.
-- [ ] Pool exhaustion and shutdown do not hang the authority loop.
-- [ ] Credentials never appear in logs or error details.
+- [x] Pool exhaustion and shutdown do not hang the authority loop.
+- [x] Credentials never appear in logs or error details.
 
 **Implementation state:** `backend_nakama::postgres_connection` centralizes
 Rust PostgreSQL configuration, verified native TLS (including optional PEM
@@ -417,10 +420,12 @@ deadline is shared by world-state stores and by identity/character stores;
 inventory adapters can also use the pool seam. The libpq setup and migration
 scripts now apply the same verified-TLS-by-default policy, including the
 explicit loopback-only plaintext opt-in and private CA setting. Remaining scope
-includes live TLS handshake and transient-failure tests, validating shutdown
-under concurrent acquisition, and verifying the optional restricted runtime /
-migration-role setup end to end on supported platforms. Queries/writes are not
-replayed on ambiguous failures.
+is limited to operational monitoring of pool and TLS failures. TLS tests perform
+real native-TLS handshakes against a local PostgreSQL-protocol probe, checking a
+trusted CA, hostname mismatch, and an untrusted chain; retry tests verify the
+bounded failure budget. Split-role setup and migration were exercised on both
+PowerShell and Bash against disposable PostgreSQL databases. Queries/writes are
+not replayed on ambiguous failures.
 
 ---
 
