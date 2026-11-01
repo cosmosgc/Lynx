@@ -85,6 +85,8 @@ function Get-LynxPgConfig {
         Database = Get-LynxSetting 'LYNX_PG_DATABASE' 'lynx'
         User     = Get-LynxSetting 'LYNX_PG_USER' 'lynx'
         Password = Get-LynxSetting 'LYNX_PG_PASSWORD' ''
+        MigrationUser = Get-LynxSetting 'LYNX_PG_MIGRATION_USER' ''
+        MigrationPassword = Get-LynxSetting 'LYNX_PG_MIGRATION_PASSWORD' ''
     }
 
     if ($config.Host -notmatch '^[A-Za-z0-9.:\[\]_-]+$') {
@@ -103,14 +105,44 @@ function Get-LynxPgConfig {
     if ($config.User -notmatch '^[a-z_][a-z0-9_]{0,62}$') {
         throw "LYNX_PG_USER must be a lowercase PostgreSQL identifier."
     }
+    if (-not $config.MigrationUser) { $config.MigrationUser = $config.User }
+    if (-not $config.MigrationPassword) { $config.MigrationPassword = $config.Password }
+    if ($config.MigrationUser -notmatch '^[a-z_][a-z0-9_]{0,62}$') {
+        throw 'LYNX_PG_MIGRATION_USER must be a lowercase PostgreSQL identifier.'
+    }
     if ([string]::IsNullOrEmpty($config.Password)) {
         throw 'LYNX_PG_PASSWORD is not set. Copy .env.example to .env and fill it in, or export the variable.'
     }
     if ($config.Password.Length -gt 1024 -or $config.Password.Contains("`n") -or $config.Password.Contains("`r")) {
         throw 'LYNX_PG_PASSWORD must be at most 1024 characters on a single line.'
     }
+    if ($config.MigrationPassword.Length -gt 1024 -or $config.MigrationPassword.Contains("`n") -or $config.MigrationPassword.Contains("`r")) {
+        throw 'LYNX_PG_MIGRATION_PASSWORD must be at most 1024 characters on a single line.'
+    }
 
+    Set-LynxLibpqTlsPolicy -Config $config
     return $config
+}
+
+# libpq is used by setup and migration scripts. Match the native Rust connector:
+# require hostname-verified TLS by default, with plaintext only for explicitly
+# opted-in loopback development.
+function Set-LynxLibpqTlsPolicy {
+    param([Parameter(Mandatory = $true)]$Config)
+
+    $hostName = $Config.Host.Trim('[', ']')
+    $address = [System.Net.IPAddress]::None
+    $isLoopback = $hostName -ieq 'localhost' -or
+        ([System.Net.IPAddress]::TryParse($hostName, [ref]$address) -and [System.Net.IPAddress]::IsLoopback($address))
+    if ($isLoopback -and (Get-LynxSetting 'LYNX_PG_ALLOW_INSECURE_LOOPBACK' '') -ceq 'true') {
+        $env:PGSSLMODE = 'disable'
+    } else {
+        $env:PGSSLMODE = 'verify-full'
+    }
+    $ca = Get-LynxSetting 'LYNX_PG_TLS_CA_CERT' ''
+    if ($ca) {
+        $env:PGSSLROOTCERT = $ca
+    }
 }
 
 function New-LynxPsqlArguments {

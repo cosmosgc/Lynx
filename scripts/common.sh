@@ -49,6 +49,8 @@ lynx_require_pg() {
     LYNX_PG_PORT="${LYNX_PG_PORT:-5432}"
     LYNX_PG_DATABASE="${LYNX_PG_DATABASE:-lynx}"
     LYNX_PG_USER="${LYNX_PG_USER:-lynx}"
+    LYNX_PG_MIGRATION_USER="${LYNX_PG_MIGRATION_USER:-$LYNX_PG_USER}"
+    LYNX_PG_MIGRATION_PASSWORD="${LYNX_PG_MIGRATION_PASSWORD:-${LYNX_PG_PASSWORD-}}"
 
     [[ "$LYNX_PG_HOST" =~ ^[]A-Za-z0-9.:[_-]+$ ]] ||
         lynx_die "LYNX_PG_HOST contains unsupported characters: '$LYNX_PG_HOST'"
@@ -61,14 +63,39 @@ lynx_require_pg() {
         lynx_die 'LYNX_PG_DATABASE must be a lowercase PostgreSQL identifier'
     [[ "$LYNX_PG_USER" =~ ^[a-z_][a-z0-9_]{0,62}$ ]] ||
         lynx_die 'LYNX_PG_USER must be a lowercase PostgreSQL identifier'
+    [[ "$LYNX_PG_MIGRATION_USER" =~ ^[a-z_][a-z0-9_]{0,62}$ ]] ||
+        lynx_die 'LYNX_PG_MIGRATION_USER must be a lowercase PostgreSQL identifier'
     [[ -n "${LYNX_PG_PASSWORD-}" ]] ||
         lynx_die 'LYNX_PG_PASSWORD is not set. Copy .env.example to .env and fill it in, or export the variable.'
     ((${#LYNX_PG_PASSWORD} <= 1024)) ||
         lynx_die 'LYNX_PG_PASSWORD must be at most 1024 characters'
     [[ "$LYNX_PG_PASSWORD" != *$'\n'* && "$LYNX_PG_PASSWORD" != *$'\r'* ]] ||
         lynx_die 'LYNX_PG_PASSWORD must be on a single line'
+    [[ -n "$LYNX_PG_MIGRATION_PASSWORD" ]] ||
+        lynx_die 'LYNX_PG_MIGRATION_PASSWORD is not set'
+    ((${#LYNX_PG_MIGRATION_PASSWORD} <= 1024)) ||
+        lynx_die 'LYNX_PG_MIGRATION_PASSWORD must be at most 1024 characters'
+    [[ "$LYNX_PG_MIGRATION_PASSWORD" != *$'\n'* && "$LYNX_PG_MIGRATION_PASSWORD" != *$'\r'* ]] ||
+        lynx_die 'LYNX_PG_MIGRATION_PASSWORD must be on a single line'
+
+    # Match the native Rust connector for libpq-backed setup/migration scripts.
+    # Remote hosts always use verified TLS; plaintext is an explicit loopback
+    # development-only opt-in.
+    local loopback=false
+    case "$LYNX_PG_HOST" in
+        localhost | LOCALHOST | 127.* | ::1 | '[::1]') loopback=true ;;
+    esac
+    if [[ "$loopback" == true && "${LYNX_PG_ALLOW_INSECURE_LOOPBACK:-}" == true ]]; then
+        export PGSSLMODE=disable
+    else
+        export PGSSLMODE=verify-full
+    fi
+    if [[ -n "${LYNX_PG_TLS_CA_CERT:-}" ]]; then
+        export PGSSLROOTCERT="$LYNX_PG_TLS_CA_CERT"
+    fi
 
     export LYNX_PG_HOST LYNX_PG_PORT LYNX_PG_DATABASE LYNX_PG_USER LYNX_PG_PASSWORD
+    export LYNX_PG_MIGRATION_USER LYNX_PG_MIGRATION_PASSWORD
 }
 
 lynx_require_psql() {

@@ -10,7 +10,7 @@
     checksum aborts the run.
 
     The script reads LYNX_PG_* from the environment or .env and connects as the
-    application role. Run scripts/setup-postgres.ps1 first.
+    restricted migration role when configured. Run scripts/setup-postgres.ps1 first.
 
 .PARAMETER Status
     Print each migration as applied or pending without changing the database.
@@ -45,12 +45,12 @@ if ($files.Count -eq 0) {
     throw "No migrations found in $migrationDirectory."
 }
 
-$psqlArgs = New-LynxPsqlArguments -Config $pg
+$psqlArgs = New-LynxPsqlArguments -Config $pg -User $pg.MigrationUser
 
 $hasSchema = Invoke-LynxPsqlScalar `
     -Arguments $psqlArgs `
     -Sql "SELECT to_regnamespace('lynx') IS NOT NULL;" `
-    -Password $pg.Password
+    -Password $pg.MigrationPassword
 if ($hasSchema -ne 't') {
     throw "The 'lynx' schema does not exist in database '$($pg.Database)'. Run scripts/setup-postgres.ps1 first."
 }
@@ -58,7 +58,7 @@ if ($hasSchema -ne 't') {
 $hasHistory = Invoke-LynxPsqlScalar `
     -Arguments $psqlArgs `
     -Sql "SELECT to_regclass('lynx.schema_migrations') IS NOT NULL;" `
-    -Password $pg.Password
+    -Password $pg.MigrationPassword
 
 if (-not $Status -and $hasHistory -ne 't') {
     $bootstrapSql = @'
@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS lynx.schema_migrations (
 );
 COMMIT;
 '@
-    Invoke-LynxPsql -Arguments $psqlArgs -Sql $bootstrapSql -Password $pg.Password | Out-Null
+    Invoke-LynxPsql -Arguments $psqlArgs -Sql $bootstrapSql -Password $pg.MigrationPassword | Out-Null
     $hasHistory = 't'
 }
 
@@ -86,7 +86,7 @@ if ($hasHistory -eq 't') {
     $rows = Invoke-LynxPsql `
         -Arguments $psqlArgs `
         -Sql "SELECT version || '|' || checksum FROM lynx.schema_migrations ORDER BY version;" `
-        -Password $pg.Password
+        -Password $pg.MigrationPassword
     foreach ($row in @($rows)) {
         $line = "$row"
         if ([string]::IsNullOrWhiteSpace($line)) {
@@ -130,7 +130,7 @@ if ($checksumFailures.Count -gt 0 -and -not $Status) {
 $checksumFailures = @()
 
 Write-Host "Lynx migrations in $migrationDirectory"
-Write-Host "  database: $($pg.Database) on $($pg.Host):$($pg.Port) as $($pg.User)"
+Write-Host "  database: $($pg.Database) on $($pg.Host):$($pg.Port) as migration role $($pg.MigrationUser)"
 Write-Host ''
 
 foreach ($file in $files) {
@@ -174,7 +174,7 @@ INSERT INTO lynx.schema_migrations (version, checksum) VALUES ('$version', '$che
 COMMIT;
 "@
     try {
-        Invoke-LynxPsql -Arguments ($psqlArgs + @('-f', '-')) -Sql $wrapped -Password $pg.Password | Out-Null
+        Invoke-LynxPsql -Arguments ($psqlArgs + @('-f', '-')) -Sql $wrapped -Password $pg.MigrationPassword | Out-Null
     } catch {
         Write-Host ' failed' -ForegroundColor Red
         throw "Migration $version failed: $($_.Exception.Message)"

@@ -414,10 +414,13 @@ loopback plaintext requires `LYNX_PG_ALLOW_INSECURE_LOOPBACK=true`. World,
 schema inspection, and normalized stores use this policy, and failures avoid
 exposing connection details. A bounded pool with a two-second acquisition
 deadline is shared by world-state stores and by identity/character stores;
-inventory adapters can also use the pool seam. Remaining scope includes live
-TLS handshake and transient-failure tests, TLS parity in the libpq
-setup/migration scripts, and distinct restricted runtime versus migration
-credentials. Queries/writes are not replayed on ambiguous failures.
+inventory adapters can also use the pool seam. The libpq setup and migration
+scripts now apply the same verified-TLS-by-default policy, including the
+explicit loopback-only plaintext opt-in and private CA setting. Remaining scope
+includes live TLS handshake and transient-failure tests, validating shutdown
+under concurrent acquisition, and verifying the optional restricted runtime /
+migration-role setup end to end on supported platforms. Queries/writes are not
+replayed on ambiguous failures.
 
 ---
 

@@ -7,7 +7,7 @@
 # checksum aborts the run.
 #
 # The script reads LYNX_PG_* from the environment or .env and connects as the
-# application role. Run scripts/setup-postgres.sh first.
+# restricted migration role when configured. Run scripts/setup-postgres.sh first.
 #
 # Usage:
 #   ./scripts/db-migrate.sh
@@ -41,9 +41,9 @@ files=("$migration_dir"/*.sql)
 shopt -u nullglob
 ((${#files[@]} > 0)) || lynx_die "no migrations found in $migration_dir"
 
-# The application role owns the schema; authenticate with its password.
-export PGPASSWORD="$LYNX_PG_PASSWORD"
-lynx_psql_args
+# The migration role owns the schema; authenticate separately from the runtime.
+export PGPASSWORD="$LYNX_PG_MIGRATION_PASSWORD"
+LYNX_PSQL_USER="$LYNX_PG_MIGRATION_USER" lynx_psql_args
 
 has_schema="$(lynx_psql -c "SELECT to_regnamespace('lynx') IS NOT NULL;")"
 [[ "$has_schema" == "t" ]] ||
@@ -101,8 +101,8 @@ fi
 checksum_failures=""
 
 printf 'Lynx migrations in %s\n' "$migration_dir"
-printf '  database: %s on %s:%s as %s\n\n' \
-    "$LYNX_PG_DATABASE" "$LYNX_PG_HOST" "$LYNX_PG_PORT" "$LYNX_PG_USER"
+printf '  database: %s on %s:%s as migration role %s\n\n' \
+    "$LYNX_PG_DATABASE" "$LYNX_PG_HOST" "$LYNX_PG_PORT" "$LYNX_PG_MIGRATION_USER"
 
 for file in "${files[@]}"; do
     name="$(basename "$file")"

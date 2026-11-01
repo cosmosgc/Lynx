@@ -17,7 +17,7 @@ SCRIPTS = Path(__file__).resolve().parent
 BASH_HELPERS = r'''
 lynx_die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 lynx_import_env() { :; }
-lynx_require_pg() { LYNX_PG_HOST=mock; LYNX_PG_PORT=5432; LYNX_PG_DATABASE=mock; LYNX_PG_USER=mock; LYNX_PG_PASSWORD=mock; }
+lynx_require_pg() { LYNX_PG_HOST=mock; LYNX_PG_PORT=5432; LYNX_PG_DATABASE=mock; LYNX_PG_USER=mock; LYNX_PG_PASSWORD=mock; LYNX_PG_MIGRATION_USER=mock_migration; LYNX_PG_MIGRATION_PASSWORD=mock_migration_password; }
 lynx_require_psql() { :; }
 lynx_psql_args() { :; }
 lynx_sha256_file() { sha256sum "$1" | awk '{print $1}'; }
@@ -38,8 +38,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 function Get-LynxRepoRoot { (Resolve-Path (Join-Path $PSScriptRoot '..')).Path }
 function Import-LynxEnv { param($Root) }
-function Get-LynxPgConfig { @{ Host='mock'; Port='5432'; Database='mock'; User='mock'; Password='mock' } }
-function New-LynxPsqlArguments { param($Config) @('mock', 'connection') }
+function Get-LynxPgConfig { @{ Host='mock'; Port='5432'; Database='mock'; User='mock'; Password='mock'; MigrationUser='mock_migration'; MigrationPassword='mock_migration_password' } }
+function New-LynxPsqlArguments { param($Config, $User) @('mock', 'connection') }
 function Invoke-LynxPsqlScalar { param($Arguments, $Sql, $Password) 't' }
 function Invoke-LynxPsql {
     param($Arguments, $Sql, $Password)

@@ -187,9 +187,16 @@ World-state stores share a bounded eight-connection pool with a two-second
 acquisition deadline; identity and character stores share a separate pool with
 the same limits. Pool exhaustion returns a sanitized error rather than waiting
 indefinitely.
-The setup and migration scripts use libpq rather than the Rust connector; for
-remote script connections, configure libpq separately with `PGSSLMODE=verify-full`
-and `PGSSLROOTCERT` pointing to the trusted CA bundle.
+The setup and migration scripts use libpq and apply the same TLS policy
+automatically: remote hosts use `verify-full`, with `LYNX_PG_TLS_CA_CERT` mapped
+to libpq's root-certificate setting. Plaintext is enabled for scripts only when
+the configured hosts are loopback and the explicit development opt-in is set.
+For production, configure `LYNX_PG_USER`/`LYNX_PG_PASSWORD` as the runtime role
+and `LYNX_PG_MIGRATION_USER`/`LYNX_PG_MIGRATION_PASSWORD` as a separate schema
+owner used only by setup and migration scripts. The setup script grants the
+runtime role DML on Lynx tables and sequence usage, while future migration-owned
+tables receive the same defaults; do not pass migration credentials to the
+world service.
 
 With `--state-postgres`, the service also takes a single-writer lease on the
 demo zone in `lynx.zone_leases` before it loads the snapshot. A second process

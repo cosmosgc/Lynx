@@ -11,7 +11,8 @@
     The script connects as a superuser (LYNX_PG_SUPERUSER, default "postgres")
     and uses libpq authentication for that connection. Set PGPASSWORD or a
     pgpass file if the superuser needs a password. The application password is
-    read from LYNX_PG_PASSWORD and never appears in an argument list.
+    read from LYNX_PG_PASSWORD and never appears in an argument list. Optional
+    LYNX_PG_MIGRATION_USER/PASSWORD separates the schema owner from runtime DML.
 
 .EXAMPLE
     ./scripts/setup-postgres.ps1
@@ -30,6 +31,8 @@ param(
 $root = Get-LynxRepoRoot
 Import-LynxEnv -Root $root
 $pg = Get-LynxPgConfig
+$env:LYNX_PG_MIGRATION_USER = $pg.MigrationUser
+$env:LYNX_PG_MIGRATION_PASSWORD = $pg.MigrationPassword
 
 if (-not $Superuser) {
     $Superuser = Get-LynxSetting 'LYNX_PG_SUPERUSER' 'postgres'
@@ -61,10 +64,15 @@ if ($serverVersion -ge 180000) {
 # \getenv keeps the application password out of the psql argument list.
 $roleSql = @'
 \getenv app_password LYNX_PG_PASSWORD
+\getenv migration_password LYNX_PG_MIGRATION_PASSWORD
 SELECT format('CREATE ROLE %I LOGIN', :'app_user')
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'app_user')
 \gexec
+SELECT format('CREATE ROLE %I LOGIN', :'migration_user')
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'migration_user')
+\gexec
 ALTER ROLE :"app_user" WITH LOGIN PASSWORD :'app_password';
+ALTER ROLE :"migration_user" WITH LOGIN PASSWORD :'migration_password';
 SELECT format('CREATE DATABASE %I', :'db_name')
 WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = :'db_name')
 \gexec
@@ -72,27 +80,48 @@ WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = :'db_name')
 
 Write-Host 'Creating role and database (idempotent)...'
 Invoke-LynxPsql `
-    -Arguments ($superArgs + @('-v', "app_user=$($pg.User)", '-v', "db_name=$($pg.Database)")) `
+    -Arguments ($superArgs + @('-v', "app_user=$($pg.User)", '-v', "migration_user=$($pg.MigrationUser)", '-v', "db_name=$($pg.Database)")) `
     -Sql $roleSql | Out-Null
 
 $databaseArgs = New-LynxPsqlArguments -Config $pg -Database $pg.Database -User $Superuser
 $schemaSql = @'
-CREATE SCHEMA IF NOT EXISTS lynx AUTHORIZATION :"app_user";
-ALTER SCHEMA lynx OWNER TO :"app_user";
+CREATE SCHEMA IF NOT EXISTS lynx AUTHORIZATION :"migration_user";
+ALTER SCHEMA lynx OWNER TO :"migration_user";
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
+SELECT format(
+    'ALTER %s %I.%I OWNER TO %I',
+    CASE c.relkind WHEN 'S' THEN 'SEQUENCE' WHEN 'v' THEN 'VIEW'
+        WHEN 'm' THEN 'MATERIALIZED VIEW' WHEN 'f' THEN 'FOREIGN TABLE' ELSE 'TABLE' END,
+    n.nspname, c.relname, :'migration_user')
+FROM pg_class AS c
+JOIN pg_namespace AS n ON n.oid = c.relnamespace
+JOIN pg_roles AS r ON r.oid = c.relowner
+WHERE n.nspname = 'lynx' AND r.rolname = :'app_user'
+  AND :'app_user' <> :'migration_user'
+  AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
+\gexec
 GRANT CONNECT ON DATABASE :"db_name" TO :"app_user";
+GRANT CONNECT ON DATABASE :"db_name" TO :"migration_user";
+GRANT USAGE ON SCHEMA lynx TO :"app_user";
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA lynx TO :"app_user";
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA lynx TO :"app_user";
+GRANT SELECT ON ALL TABLES IN SCHEMA lynx TO :"migration_user";
+ALTER DEFAULT PRIVILEGES FOR ROLE :"migration_user" IN SCHEMA lynx
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO :"app_user";
+ALTER DEFAULT PRIVILEGES FOR ROLE :"migration_user" IN SCHEMA lynx
+    GRANT USAGE, SELECT ON SEQUENCES TO :"app_user";
 GRANT USAGE, CREATE ON SCHEMA public TO :"app_user";
 '@
 
 Write-Host 'Creating schema, extension, and grants (idempotent)...'
 Invoke-LynxPsql `
-    -Arguments ($databaseArgs + @('-v', "app_user=$($pg.User)", '-v', "db_name=$($pg.Database)")) `
+    -Arguments ($databaseArgs + @('-v', "app_user=$($pg.User)", '-v', "migration_user=$($pg.MigrationUser)", '-v', "db_name=$($pg.Database)")) `
     -Sql $schemaSql | Out-Null
 
 $version = Invoke-LynxPsqlScalar -Arguments $superArgs -Sql 'SHOW server_version;'
 Write-Host ''
 Write-Host "PostgreSQL $version is ready."
-Write-Host "Schema 'lynx' is owned by role '$($pg.User)'."
+Write-Host "Schema 'lynx' is owned by role '$($pg.MigrationUser)'."
 Write-Host 'Next: ./scripts/db-migrate.ps1'
 Write-Host ''
 Write-Host 'Note: Nakama shares this database and creates its own tables in the public schema.' -ForegroundColor DarkGray
