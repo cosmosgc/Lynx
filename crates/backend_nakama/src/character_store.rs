@@ -5,6 +5,7 @@
 //! mapping; accepting an account ID directly from a client is unsafe.
 
 use std::sync::Mutex;
+use std::time::Duration;
 
 use engine_core::IdKind;
 use engine_core::id::{IdGenerator, StableId, SystemIdGenerator};
@@ -12,16 +13,18 @@ use engine_core::time::Millis;
 use game_api::{AccountId, ApiError, Character, CharacterId, CharacterStatus, CreateCharacter};
 use postgres::{Client, Row};
 
+use crate::postgres_pool::{ConnectionPool, PostgresPool};
+
 const COLUMNS: &str = "character_id, name, zone_id, status, \
     (extract(epoch FROM created_at) * 1000)::bigint AS created_ms";
 
-/// Character repository using a caller-provided PostgreSQL connection.
+/// Character repository using a bounded PostgreSQL connection pool.
 ///
 /// This does not validate tokens, create accounts, or enter
-/// the world. Connections are serialized and are not automatically reconnected.
+/// the world. Each operation leases and releases one pooled connection.
 pub struct PostgresCharacterStore {
     telemetry: crate::Telemetry,
-    client: Mutex<Client>,
+    pool: PostgresPool,
 }
 
 impl std::fmt::Debug for PostgresCharacterStore {
@@ -35,9 +38,19 @@ impl PostgresCharacterStore {
     /// Wrap an already established connection to the migrated Lynx database.
     #[must_use]
     pub fn new(client: Client) -> Self {
+        let client = Mutex::new(Some(client));
+        let pool = ConnectionPool::new(1, Duration::from_secs(2), move || {
+            client.lock().map_err(|_| ())?.take().ok_or(())
+        });
+        Self::with_pool(pool)
+    }
+
+    /// Create a store that leases connections from a shared bounded pool.
+    #[must_use]
+    pub fn with_pool(pool: PostgresPool) -> Self {
         Self {
             telemetry: crate::Telemetry::default(),
-            client: Mutex::new(client),
+            pool,
         }
     }
 
@@ -50,7 +63,7 @@ impl PostgresCharacterStore {
     /// List the trusted account's non-deleted characters in stable order.
     pub fn characters(&self, account: &AccountId) -> Result<Vec<Character>, ApiError> {
         self.telemetry.measure(|| {
-            let mut client = self.client.lock().map_err(|_| unavailable())?;
+            let mut client = self.pool.acquire().map_err(|_| unavailable())?;
             let sql = format!(
                 "SELECT {COLUMNS} FROM lynx.characters \
             WHERE account_id = $1 AND deleted_at IS NULL ORDER BY character_id"
@@ -72,7 +85,7 @@ impl PostgresCharacterStore {
         id: CharacterId,
     ) -> Result<Character, ApiError> {
         self.telemetry.measure(|| {
-            let mut client = self.client.lock().map_err(|_| unavailable())?;
+            let mut client = self.pool.acquire().map_err(|_| unavailable())?;
             let sql = format!(
                 "SELECT {COLUMNS} FROM lynx.characters \
             WHERE account_id = $1 AND character_id = $2 AND deleted_at IS NULL"
@@ -98,7 +111,7 @@ impl PostgresCharacterStore {
     /// All character writers must lock the account row before changing state.
     pub fn delete_character(&self, account: &AccountId, id: CharacterId) -> Result<(), ApiError> {
         self.telemetry.measure(|| {
-        let mut client = self.client.lock().map_err(|_| unavailable())?;
+        let mut client = self.pool.acquire().map_err(|_| unavailable())?;
         let mut tx = client.transaction().map_err(|_| unavailable())?;
         if tx
             .query_opt(
@@ -173,7 +186,7 @@ impl PostgresCharacterStore {
         if key.is_empty() || key.chars().count() > 128 || key.chars().any(char::is_control) {
             return Err(ApiError::InvalidRequest("invalid idempotency key".into()));
         }
-        let mut client = self.client.lock().map_err(|_| unavailable())?;
+        let mut client = self.pool.acquire().map_err(|_| unavailable())?;
         let mut tx = client.transaction().map_err(|_| unavailable())?;
         if tx
             .query_opt(
@@ -248,7 +261,7 @@ impl PostgresCharacterStore {
         action: &str,
     ) -> Result<Character, ApiError> {
         self.telemetry.measure(|| {
-        let mut client = self.client.lock().map_err(|_| unavailable())?;
+        let mut client = self.pool.acquire().map_err(|_| unavailable())?;
         let mut tx = client.transaction().map_err(|_| unavailable())?;
         if tx
             .query_opt(

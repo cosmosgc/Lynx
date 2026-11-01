@@ -1,9 +1,8 @@
 //! PostgreSQL adapter for the gateway's durable resume-session contract.
 
-use std::sync::Mutex;
-
+use backend_nakama::postgres_pool::PostgresPool;
 use engine_core::error::{EngineError, ErrorCode};
-use postgres::{Client, Config, Row};
+use postgres::{Config, Row};
 use world_gateway::{ResumeSessionRecord, ResumeSessionStore, TokenDigest};
 
 /// PostgreSQL-backed durable resume session store.
@@ -12,7 +11,7 @@ use world_gateway::{ResumeSessionRecord, ResumeSessionStore, TokenDigest};
 /// adapters. Each token rotation is one conditional SQL `UPDATE`, so competing
 /// uses serialize on the row and only one can consume the prior digest.
 pub struct PostgresResumeSessionStore {
-    client: Mutex<Client>,
+    pool: PostgresPool,
 }
 
 impl std::fmt::Debug for PostgresResumeSessionStore {
@@ -25,11 +24,17 @@ impl std::fmt::Debug for PostgresResumeSessionStore {
 impl PostgresResumeSessionStore {
     /// Connect using the supplied PostgreSQL configuration.
     pub fn connect(config: &Config) -> Result<Self, EngineError> {
-        let client = backend_nakama::postgres_connection::connect_with_retry(config)
-            .map_err(|_| store_unavailable())?;
-        Ok(Self {
-            client: Mutex::new(client),
-        })
+        Self::with_pool(backend_nakama::postgres_pool::pool(
+            config.clone(),
+            8,
+            std::time::Duration::from_secs(2),
+        ))
+    }
+
+    /// Create a store that leases connections from the shared bounded pool.
+    pub fn with_pool(pool: PostgresPool) -> Result<Self, EngineError> {
+        pool.acquire().map_err(|_| store_unavailable())?;
+        Ok(Self { pool })
     }
 
     /// Connect using the world service's configured database.
@@ -51,7 +56,7 @@ impl ResumeSessionStore for PostgresResumeSessionStore {
                 "invalid initial resume-session record",
             ));
         }
-        let mut client = self.client.lock().map_err(|_| store_poisoned())?;
+        let mut client = self.pool.acquire().map_err(|_| store_poisoned())?;
         client.execute(
             "INSERT INTO lynx.resume_sessions (session_id, account_id, principal_id, actor_id, token_digest, expires_at_ms, connected, generation, revoked, staff) VALUES ($1, $2, $3, $4, $5, NULL, true, $6, false, $7)",
             &[&record.session_id, &record.account_id, &record.principal_id, &record.actor_id, &&record.token_digest.as_bytes()[..], &record.generation, &record.staff],
@@ -66,7 +71,7 @@ impl ResumeSessionStore for PostgresResumeSessionStore {
         fencing_token: i64,
         expires_at_ms: i64,
     ) -> Result<u64, EngineError> {
-        let mut client = self.client.lock().map_err(|_| store_poisoned())?;
+        let mut client = self.pool.acquire().map_err(|_| store_poisoned())?;
         let mut tx = client.transaction().map_err(store_error)?;
         let held = tx.query_opt(
             "SELECT 1 FROM lynx.zone_leases WHERE zone_id = $1 AND owner = $2 AND fencing_token = $3 AND expires_at > clock_timestamp() FOR UPDATE",
@@ -92,7 +97,7 @@ impl ResumeSessionStore for PostgresResumeSessionStore {
         expected_generation: i64,
         expires_at_ms: i64,
     ) -> Result<bool, EngineError> {
-        let mut client = self.client.lock().map_err(|_| store_poisoned())?;
+        let mut client = self.pool.acquire().map_err(|_| store_poisoned())?;
         let changed = client.execute(
             "UPDATE lynx.resume_sessions SET connected = false, expires_at_ms = $3, generation = generation + 1 WHERE session_id = $1 AND generation = $2 AND connected AND NOT revoked",
             &[&session_id, &expected_generation, &expires_at_ms],
@@ -112,7 +117,7 @@ impl ResumeSessionStore for PostgresResumeSessionStore {
                 "resume token rotation must use a fresh token",
             ));
         }
-        let mut client = self.client.lock().map_err(|_| store_poisoned())?;
+        let mut client = self.pool.acquire().map_err(|_| store_poisoned())?;
         let mut tx = client.transaction().map_err(store_error)?;
         let row = tx.query_opt(
             "SELECT session_id, account_id, principal_id, actor_id, token_digest, expires_at_ms, connected, generation, revoked, staff FROM lynx.resume_sessions WHERE token_digest = $1 AND NOT connected AND NOT revoked AND expires_at_ms > $2 FOR UPDATE",
@@ -142,7 +147,7 @@ impl ResumeSessionStore for PostgresResumeSessionStore {
     }
 
     fn revoke(&self, session_id: &str, expected_generation: i64) -> Result<bool, EngineError> {
-        let mut client = self.client.lock().map_err(|_| store_poisoned())?;
+        let mut client = self.pool.acquire().map_err(|_| store_poisoned())?;
         let changed = client.execute(
             "UPDATE lynx.resume_sessions SET revoked = true, connected = false, expires_at_ms = NULL, generation = generation + 1 WHERE session_id = $1 AND generation = $2 AND NOT revoked",
             &[&session_id, &expected_generation],
@@ -151,7 +156,7 @@ impl ResumeSessionStore for PostgresResumeSessionStore {
     }
 
     fn sweep_expired(&self, now_ms: i64) -> Result<u64, EngineError> {
-        let mut client = self.client.lock().map_err(|_| store_poisoned())?;
+        let mut client = self.pool.acquire().map_err(|_| store_poisoned())?;
         client.execute(
             "DELETE FROM lynx.resume_sessions WHERE revoked OR (NOT connected AND expires_at_ms <= $1)",
             &[&now_ms],

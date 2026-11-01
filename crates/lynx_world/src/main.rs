@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use backend_nakama::postgres_pool::pool as postgres_pool;
 use backend_nakama::{
     NakamaClient, NakamaConfig, NakamaPostgresBackend, PostgresCharacterStore,
     PostgresFactionCalendarStore, PostgresIdentityStore,
@@ -45,6 +46,9 @@ use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
 use world_gateway::{ResumeSessionStore, SystemResumeTokens, WorldGateway};
 use world_server::WorldServer;
+
+const POSTGRES_POOL_MAXIMUM: usize = 8;
+const POSTGRES_POOL_ACQUISITION_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Parser)]
 #[command(name = "lynx-world")]
@@ -577,18 +581,20 @@ fn production_identity_backend() -> Result<Arc<NakamaIdentityBackend>> {
     nakama_config.timeout = Duration::from_secs(10);
     let nakama = NakamaClient::new(nakama_config)
         .map_err(|_| anyhow::anyhow!("invalid Nakama identity configuration"))?;
-    let identities = PostgresIdentityStore::new(
-        backend_nakama::postgres_connection::connect_with_retry(
-            &postgres_config_from_env().context("invalid PostgreSQL identity configuration")?,
-        )
-        .context("failed to connect the PostgreSQL identity store")?,
+    let config = postgres_config_from_env().context("invalid PostgreSQL identity configuration")?;
+    let pool = postgres_pool(
+        config,
+        POSTGRES_POOL_MAXIMUM,
+        POSTGRES_POOL_ACQUISITION_TIMEOUT,
     );
-    let characters = PostgresCharacterStore::new(
-        backend_nakama::postgres_connection::connect_with_retry(
-            &postgres_config_from_env().context("invalid PostgreSQL character configuration")?,
-        )
-        .context("failed to connect the PostgreSQL character store")?,
+    // Fail startup if the shared identity/character pool cannot establish its
+    // first connection. Subsequent operations still use bounded acquisitions.
+    drop(
+        pool.acquire()
+            .context("failed to connect the PostgreSQL identity backend")?,
     );
+    let identities = PostgresIdentityStore::with_pool(pool.clone());
+    let characters = PostgresCharacterStore::with_pool(pool);
     Ok(Arc::new(NakamaIdentityBackend::new(
         NakamaPostgresBackend::new(nakama, identities, characters),
     )))
@@ -610,23 +616,23 @@ struct DurableStores {
 
 fn durable_stores(args: &ServeArgs) -> Result<DurableStores> {
     if args.state_postgres {
+        let config = postgres_config_from_env().context("invalid PostgreSQL configuration")?;
+        let pool = postgres_pool(
+            config,
+            POSTGRES_POOL_MAXIMUM,
+            POSTGRES_POOL_ACQUISITION_TIMEOUT,
+        );
         let postgres = Arc::new(
-            PostgresSnapshotStore::from_env(demo::DEMO_WORLD_ID)
+            PostgresSnapshotStore::with_pool(pool.clone(), demo::DEMO_WORLD_ID)
                 .context("failed to open the PostgreSQL snapshot store")?,
         );
         let leases = Arc::new(
-            PostgresZoneLeaseStore::from_env()
+            PostgresZoneLeaseStore::with_pool(pool.clone())
                 .context("failed to open the PostgreSQL zone lease store")?,
         );
-        let faction_calendar = Arc::new(PostgresFactionCalendarStore::new(
-            backend_nakama::postgres_connection::connect_with_retry(
-                &postgres_config_from_env()
-                    .context("invalid PostgreSQL faction/calendar configuration")?,
-            )
-            .context("failed to connect the PostgreSQL faction/calendar store")?,
-        ));
+        let faction_calendar = Arc::new(PostgresFactionCalendarStore::with_pool(pool.clone()));
         let resume_sessions = Arc::new(
-            PostgresResumeSessionStore::connect_from_env()
+            PostgresResumeSessionStore::with_pool(pool)
                 .context("failed to open the PostgreSQL resume-session store")?,
         );
         let snapshot: Arc<dyn SnapshotStore + Send + Sync> = postgres.clone();

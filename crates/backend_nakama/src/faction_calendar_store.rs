@@ -7,6 +7,7 @@
 
 use std::sync::Mutex;
 
+use crate::postgres_pool::{ConnectionPool, PostgresPool};
 use engine_core::{IdKind, StableId, faction::FactionSnapshot, world_event::CalendarSnapshot};
 use game_api::{ApiError, CalendarStore, FactionStore, validate_calendar_snapshot};
 use postgres::{Client, Config, Transaction};
@@ -27,11 +28,11 @@ struct LeaseFence {
 
 /// PostgreSQL storage for the normalized, paired faction/calendar world state.
 ///
-/// The store serializes access to its connection. When a zone lease is bound,
-/// every replacement locks and validates that lease in the same transaction as
-/// the normalized writes.
+/// The store leases one connection at a time from its shared pool. When a zone
+/// lease is bound, every replacement locks and validates that lease in the same
+/// transaction as the normalized writes.
 pub struct PostgresFactionCalendarStore {
-    client: Mutex<Client>,
+    pool: PostgresPool,
     fence: Mutex<Option<LeaseFence>>,
 }
 
@@ -44,19 +45,30 @@ impl std::fmt::Debug for PostgresFactionCalendarStore {
 
 impl PostgresFactionCalendarStore {
     /// Wrap an established connection to a database with migrations 0004/0005.
+    /// This compatibility constructor creates a one-connection bounded pool.
     #[must_use]
     pub fn new(client: Client) -> Self {
-        Self {
-            client: Mutex::new(client),
-            fence: Mutex::new(None),
-        }
+        let client = Mutex::new(Some(client));
+        let pool = ConnectionPool::new(1, std::time::Duration::from_secs(2), move || {
+            client.lock().map_err(|_| ())?.take().ok_or(())
+        });
+        Self::with_pool(pool)
     }
 
     /// Connect using a PostgreSQL configuration.
     pub fn connect(config: &Config) -> Result<Self, ApiError> {
-        let client =
-            super::postgres_connection::connect_with_retry(config).map_err(|_| unavailable())?;
-        Ok(Self::new(client))
+        let pool = super::postgres_pool::pool(config.clone(), 8, std::time::Duration::from_secs(2));
+        pool.acquire().map_err(|_| unavailable())?;
+        Ok(Self::with_pool(pool))
+    }
+
+    /// Create a store that leases connections from a shared bounded pool.
+    #[must_use]
+    pub fn with_pool(pool: PostgresPool) -> Self {
+        Self {
+            pool,
+            fence: Mutex::new(None),
+        }
     }
 
     /// Bind subsequent replacement transactions to a held zone lease.
@@ -84,7 +96,7 @@ impl PostgresFactionCalendarStore {
     pub fn load_world_state(
         &self,
     ) -> Result<Option<(CalendarSnapshot, FactionSnapshot)>, ApiError> {
-        let mut client = self.client.lock().map_err(|_| unavailable())?;
+        let mut client = self.pool.acquire().map_err(|_| unavailable())?;
         let mut tx = client
             .build_transaction()
             .isolation_level(postgres::IsolationLevel::RepeatableRead)
@@ -140,7 +152,7 @@ impl PostgresFactionCalendarStore {
         factions: &FactionSnapshot,
     ) -> Result<(), ApiError> {
         validate_calendar_snapshot(calendar, factions)?;
-        let mut client = self.client.lock().map_err(|_| unavailable())?;
+        let mut client = self.pool.acquire().map_err(|_| unavailable())?;
         let mut tx = client.transaction().map_err(|_| unavailable())?;
         self.validate_fence(&mut tx)?;
         // The migrations use deferred constraint triggers for leader,
@@ -170,7 +182,7 @@ impl PostgresFactionCalendarStore {
         factions: &FactionSnapshot,
     ) -> Result<(), ApiError> {
         validate_calendar_snapshot(calendar, factions)?;
-        let mut client = self.client.lock().map_err(|_| unavailable())?;
+        let mut client = self.pool.acquire().map_err(|_| unavailable())?;
         let mut tx = client.transaction().map_err(|_| unavailable())?;
         if self.fence.lock().map_err(|_| unavailable())?.is_none() {
             return Err(ApiError::Conflict(
@@ -250,7 +262,7 @@ impl FactionStore for PostgresFactionCalendarStore {
         snapshot
             .validate()
             .map_err(|_| ApiError::InvalidRequest("faction snapshot is invalid".into()))?;
-        let mut client = self.client.lock().map_err(|_| unavailable())?;
+        let mut client = self.pool.acquire().map_err(|_| unavailable())?;
         let mut tx = client.transaction().map_err(|_| unavailable())?;
         self.validate_fence(&mut tx)?;
         tx.batch_execute("SET CONSTRAINTS ALL DEFERRED")
@@ -282,7 +294,7 @@ impl CalendarStore for PostgresFactionCalendarStore {
         snapshot
             .validate()
             .map_err(|_| ApiError::InvalidRequest("calendar snapshot is invalid".into()))?;
-        let mut client = self.client.lock().map_err(|_| unavailable())?;
+        let mut client = self.pool.acquire().map_err(|_| unavailable())?;
         let mut tx = client.transaction().map_err(|_| unavailable())?;
         self.validate_fence(&mut tx)?;
         tx.batch_execute("SET CONSTRAINTS ALL DEFERRED")

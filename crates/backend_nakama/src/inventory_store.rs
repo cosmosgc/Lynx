@@ -1,6 +1,7 @@
 //! PostgreSQL persistence for authoritative character inventories.
 
 use std::sync::Mutex;
+use std::time::Duration;
 
 use engine_core::inventory::TransferReceipt;
 use engine_core::{StableId, id::DefinitionId, inventory::ItemStack};
@@ -10,9 +11,11 @@ use game_api::{
 };
 use postgres::{Client, Error, error::SqlState};
 
+use crate::postgres_pool::{ConnectionPool, PooledConnection, PostgresPool};
+
 /// PostgreSQL inventory snapshots with atomic optimistic concurrency control.
 pub struct PostgresInventoryStore {
-    client: Mutex<Client>,
+    pool: PostgresPool,
 }
 
 impl std::fmt::Debug for PostgresInventoryStore {
@@ -26,13 +29,21 @@ impl PostgresInventoryStore {
     /// Wrap a connection to a migrated Lynx database.
     #[must_use]
     pub fn new(client: Client) -> Self {
-        Self {
-            client: Mutex::new(client),
-        }
+        let client = Mutex::new(Some(client));
+        let pool = ConnectionPool::new(1, Duration::from_secs(2), move || {
+            client.lock().map_err(|_| ())?.take().ok_or(())
+        });
+        Self::with_pool(pool)
     }
 
-    fn client(&self) -> Result<std::sync::MutexGuard<'_, Client>, ApiError> {
-        self.client.lock().map_err(|_| unavailable())
+    /// Create a store that leases connections from a shared bounded pool.
+    #[must_use]
+    pub fn with_pool(pool: PostgresPool) -> Self {
+        Self { pool }
+    }
+
+    fn client(&self) -> Result<PooledConnection<Client>, ApiError> {
+        self.pool.acquire().map_err(|_| unavailable())
     }
 
     fn replace(

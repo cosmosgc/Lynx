@@ -410,11 +410,12 @@ Rust PostgreSQL configuration, verified native TLS (including optional PEM
 trust roots), and bounded initial-connect retry. Remote plaintext is refused;
 loopback plaintext requires `LYNX_PG_ALLOW_INSECURE_LOOPBACK=true`. World,
 schema inspection, and normalized stores use this policy, and failures avoid
-exposing connection details. Remaining scope includes bounded pooling and
-acquisition/shutdown behavior, TLS parity in the libpq setup/migration scripts,
-live TLS handshake and transient-failure tests, and distinct restricted runtime
-versus migration credentials. Queries/writes are not replayed on ambiguous
-failures.
+exposing connection details. A bounded pool with a two-second acquisition
+deadline is shared by world-state stores and by identity/character stores;
+inventory adapters can also use the pool seam. Remaining scope includes live
+TLS handshake and transient-failure tests, TLS parity in the libpq
+setup/migration scripts, and distinct restricted runtime versus migration
+credentials. Queries/writes are not replayed on ambiguous failures.
 
 ---
 

@@ -6,8 +6,9 @@
 //! still passes on an offline workstation or in CI without PostgreSQL. Set
 //! `LYNX_REQUIRE_POSTGRES_TEST=1` to fail instead of skipping when unconfigured.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use backend_nakama::postgres_pool::pool as postgres_pool;
 use engine_core::id::{DefinitionId, IdKind, StableId};
 use engine_core::inventory::TransferReceipt;
 use engine_core::math::Vec3;
@@ -52,6 +53,45 @@ fn schema_inspection_does_not_change_history() -> anyhow::Result<()> {
             .compatible()
     );
     assert_eq!(before, history(&mut client)?);
+    Ok(())
+}
+
+#[test]
+fn postgres_zone_store_releases_pool_leases_and_bounds_exhaustion_wait() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+    if std::env::var("LYNX_PG_PASSWORD").is_err() {
+        anyhow::ensure!(
+            std::env::var_os("LYNX_REQUIRE_POSTGRES_TEST").is_none(),
+            "PostgreSQL test required but not configured"
+        );
+        return Ok(());
+    }
+    let config = lynx_world::persistence::postgres_config_from_env()?;
+    let timeout = Duration::from_millis(40);
+    let pool = postgres_pool(config, 1, timeout);
+    let store = PostgresZoneLeaseStore::with_pool(pool.clone())?;
+
+    // Constructor schema inspection acquired and returned its connection; the
+    // same pool can be leased by another consumer and then by the store again.
+    let held = pool
+        .acquire()
+        .map_err(|_| anyhow::anyhow!("pool lease failed"))?;
+    let started = Instant::now();
+    let error = store
+        .events_after("zone_00000000000000000000000000", -1)
+        .expect_err("an exhausted pool must return its acquisition timeout");
+    let elapsed = started.elapsed();
+    assert!(elapsed >= timeout.saturating_sub(Duration::from_millis(10)));
+    assert!(elapsed < Duration::from_millis(500));
+    assert!(!error.to_string().contains("password"));
+
+    drop(held);
+    assert_eq!(
+        store
+            .events_after("zone_00000000000000000000000000", -1)?
+            .len(),
+        0
+    );
     Ok(())
 }
 

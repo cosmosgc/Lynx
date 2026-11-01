@@ -183,6 +183,10 @@ For isolated local development only, set
 `LYNX_PG_ALLOW_INSECURE_LOOPBACK=true` to permit plaintext when all configured
 hosts are loopback addresses/names; leave it unset in deployed environments.
 Without that opt-in, loopback connections also require verified TLS.
+World-state stores share a bounded eight-connection pool with a two-second
+acquisition deadline; identity and character stores share a separate pool with
+the same limits. Pool exhaustion returns a sanitized error rather than waiting
+indefinitely.
 The setup and migration scripts use libpq rather than the Rust connector; for
 remote script connections, configure libpq separately with `PGSSLMODE=verify-full`
 and `PGSSLROOTCERT` pointing to the trusted CA bundle.

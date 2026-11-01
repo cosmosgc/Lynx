@@ -11,8 +11,9 @@
 //! plaintext requires an explicit development-only opt-in.
 
 use std::fmt;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::Mutex;
 
+use backend_nakama::postgres_pool::{PooledConnection, PostgresPool};
 use engine_core::error::{EngineError, ErrorCode};
 use engine_core::id::StableId;
 use engine_sim::snapshot::QuarantinedRecord;
@@ -26,7 +27,7 @@ use super::{
 
 /// PostgreSQL lease and event-log operations for one zone at a time.
 pub struct PostgresZoneLeaseStore {
-    client: Mutex<Client>,
+    pool: PostgresPool,
 }
 
 impl fmt::Debug for PostgresZoneLeaseStore {
@@ -44,20 +45,24 @@ impl PostgresZoneLeaseStore {
 
     /// Connect with an explicit PostgreSQL configuration.
     pub fn connect(config: &Config) -> Result<Self, EngineError> {
-        let mut client = connect_with_retry(config).map_err(|_| {
-            EngineError::new(
-                ErrorCode::Internal,
-                "the PostgreSQL zone store could not connect",
-            )
-        })?;
+        Self::with_pool(backend_nakama::postgres_pool::pool(
+            config.clone(),
+            8,
+            std::time::Duration::from_secs(2),
+        ))
+    }
+
+    /// Create a store that leases connections from the shared bounded pool.
+    pub fn with_pool(pool: PostgresPool) -> Result<Self, EngineError> {
+        let mut client = pool
+            .acquire()
+            .map_err(|_| pool_engine_error("the PostgreSQL zone store is unavailable"))?;
         let status = crate::schema::inspect(&mut client)
             .map_err(|message| EngineError::new(ErrorCode::Internal, message))?;
         if !status.compatible() {
             return Err(EngineError::new(ErrorCode::Internal, status.diagnostic()));
         }
-        Ok(Self {
-            client: Mutex::new(client),
-        })
+        Ok(Self { pool })
     }
 
     /// Acquire an absent/expired zone lease. Expired takeovers increment its token.
@@ -69,7 +74,10 @@ impl PostgresZoneLeaseStore {
     ) -> Result<Option<ZoneLease>, EngineError> {
         validate_zone_owner(zone_id, owner, ttl)?;
         let ttl_ms = i64::try_from(ttl.as_millis()).map_err(|_| invalid_lease())?;
-        let mut client = self.client.lock().map_err(|_| store_unavailable())?;
+        let mut client = self
+            .pool
+            .acquire()
+            .map_err(|_| pool_engine_error("the PostgreSQL zone store is unavailable"))?;
         let row = client.query_opt(
             "INSERT INTO lynx.zone_leases (zone_id, owner, expires_at) VALUES ($1, $2, clock_timestamp() + ($3::bigint::double precision * interval '1 millisecond')) ON CONFLICT (zone_id) DO UPDATE SET owner = EXCLUDED.owner, acquired_at = clock_timestamp(), expires_at = EXCLUDED.expires_at, fencing_token = lynx.zone_leases.fencing_token + 1 WHERE lynx.zone_leases.expires_at <= clock_timestamp() RETURNING zone_id, owner, fencing_token, expires_at",
             &[&zone_id, &owner, &ttl_ms],
@@ -92,7 +100,10 @@ impl PostgresZoneLeaseStore {
     ) -> Result<Option<ZoneLease>, EngineError> {
         validate_zone_owner(zone_id, owner, ttl)?;
         let ttl_ms = i64::try_from(ttl.as_millis()).map_err(|_| invalid_lease())?;
-        let mut client = self.client.lock().map_err(|_| store_unavailable())?;
+        let mut client = self
+            .pool
+            .acquire()
+            .map_err(|_| pool_engine_error("the PostgreSQL zone store is unavailable"))?;
         let row = client.query_opt("UPDATE lynx.zone_leases SET expires_at = clock_timestamp() + ($4::bigint::double precision * interval '1 millisecond') WHERE zone_id = $1 AND owner = $2 AND fencing_token = $3 AND expires_at > clock_timestamp() RETURNING zone_id, owner, fencing_token, expires_at", &[&zone_id, &owner, &token, &ttl_ms]).map_err(|error| store_error("the zone lease could not be renewed", &error))?;
         Ok(row.map(|row| ZoneLease {
             zone_id: row.get(0),
@@ -104,7 +115,10 @@ impl PostgresZoneLeaseStore {
 
     /// Expire a lease without deleting its generation history.
     pub fn release(&self, zone_id: &str, owner: &str, token: i64) -> Result<bool, EngineError> {
-        let mut client = self.client.lock().map_err(|_| store_unavailable())?;
+        let mut client = self
+            .pool
+            .acquire()
+            .map_err(|_| pool_engine_error("the PostgreSQL zone store is unavailable"))?;
         let count = client.execute("UPDATE lynx.zone_leases SET expires_at = clock_timestamp() WHERE zone_id = $1 AND owner = $2 AND fencing_token = $3 AND expires_at > clock_timestamp()", &[&zone_id, &owner, &token]).map_err(|error| store_error("the zone lease could not be released", &error))?;
         Ok(count == 1)
     }
@@ -144,7 +158,10 @@ impl PostgresZoneLeaseStore {
         if events.is_empty() {
             return Ok(Vec::new());
         }
-        let mut client = self.client.lock().map_err(|_| store_unavailable())?;
+        let mut client = self
+            .pool
+            .acquire()
+            .map_err(|_| pool_engine_error("the PostgreSQL zone store is unavailable"))?;
         let mut tx = client
             .transaction()
             .map_err(|error| store_error("the zone event could not be appended", &error))?;
@@ -188,7 +205,10 @@ impl PostgresZoneLeaseStore {
         if !valid_zone_id(zone_id) {
             return Err(invalid_lease());
         }
-        let mut client = self.client.lock().map_err(|_| store_unavailable())?;
+        let mut client = self
+            .pool
+            .acquire()
+            .map_err(|_| pool_engine_error("the PostgreSQL zone store is unavailable"))?;
         let rows = client.query("SELECT sequence, tick, occurred_at, kind, actor_id, payload, schema_version FROM lynx.zone_events WHERE zone_id = $1 AND sequence > $2 ORDER BY sequence", &[&zone_id, &sequence]).map_err(|error| store_error("the zone events could not be read", &error))?;
         Ok(rows
             .into_iter()
@@ -302,6 +322,9 @@ fn store_unavailable() -> EngineError {
         "the PostgreSQL zone store is unavailable",
     )
 }
+fn pool_engine_error(message: &'static str) -> EngineError {
+    EngineError::new(ErrorCode::Internal, message)
+}
 fn store_error(message: &'static str, _error: &postgres::Error) -> EngineError {
     EngineError::new(ErrorCode::Internal, message)
 }
@@ -343,11 +366,11 @@ struct SnapshotFence {
 
 /// A [`SnapshotStore`] that keeps the whole world in PostgreSQL.
 ///
-/// Clones are not provided: the store owns one connection behind a mutex, and
-/// the service shares it through an `Arc`. A dropped connection is not retried;
-/// the next save reports the failure to the caller.
+/// Clones are not provided: the store shares its bounded pool handle through an
+/// `Arc` at the service layer. A failed SQL operation is not retried; the next
+/// operation reports its own failure to the caller.
 pub struct PostgresSnapshotStore {
-    client: Mutex<Client>,
+    pool: PostgresPool,
     world_id: String,
     fence: Mutex<Option<SnapshotFence>>,
 }
@@ -383,6 +406,18 @@ impl PostgresSnapshotStore {
     ///
     /// Returns an error if the connection or schema compatibility check fails.
     pub fn connect(config: &Config, world_id: impl Into<String>) -> Result<Self, EngineError> {
+        Self::with_pool(
+            backend_nakama::postgres_pool::pool(
+                config.clone(),
+                8,
+                std::time::Duration::from_secs(2),
+            ),
+            world_id,
+        )
+    }
+
+    /// Create a snapshot store that leases connections from the shared pool.
+    pub fn with_pool(pool: PostgresPool, world_id: impl Into<String>) -> Result<Self, EngineError> {
         let world_id = world_id.into();
         if !valid_world_id(&world_id) {
             return Err(EngineError::new(
@@ -390,19 +425,16 @@ impl PostgresSnapshotStore {
                 "the world snapshot ID is invalid",
             ));
         }
-        let mut client = connect_with_retry(config).map_err(|_| {
-            EngineError::new(
-                ErrorCode::Internal,
-                "the PostgreSQL snapshot store could not connect",
-            )
-        })?;
+        let mut client = pool
+            .acquire()
+            .map_err(|_| pool_engine_error("the PostgreSQL snapshot store is unavailable"))?;
         let status = crate::schema::inspect(&mut client)
             .map_err(|message| EngineError::new(ErrorCode::Internal, message))?;
         if !status.compatible() {
             return Err(EngineError::new(ErrorCode::Internal, status.diagnostic()));
         }
         Ok(Self {
-            client: Mutex::new(client),
+            pool,
             world_id,
             fence: Mutex::new(None),
         })
@@ -619,13 +651,10 @@ impl PostgresSnapshotStore {
             .collect())
     }
 
-    fn client(&self) -> Result<MutexGuard<'_, Client>, EngineError> {
-        self.client.lock().map_err(|_| {
-            EngineError::new(
-                ErrorCode::Internal,
-                "the PostgreSQL snapshot connection is unavailable",
-            )
-        })
+    fn client(&self) -> Result<PooledConnection<Client>, EngineError> {
+        self.pool
+            .acquire()
+            .map_err(|_| pool_engine_error("the PostgreSQL snapshot connection is unavailable"))
     }
 }
 
@@ -637,14 +666,6 @@ pub fn postgres_config_from_env() -> Result<Config, EngineError> {
             "PostgreSQL configuration is missing or invalid",
         )
     })
-}
-
-/// Retry connection establishment with a bounded exponential backoff. Queries
-/// are not replayed because a lost response can make a write's outcome unknown.
-fn connect_with_retry(
-    config: &Config,
-) -> Result<Client, backend_nakama::postgres_connection::ConnectionError> {
-    backend_nakama::postgres_connection::connect_with_retry(config)
 }
 
 impl SnapshotStore for PostgresSnapshotStore {

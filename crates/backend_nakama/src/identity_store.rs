@@ -1,10 +1,13 @@
 //! Lookup of existing Lynx accounts by authenticated Nakama identity.
 
 use std::sync::Mutex;
+use std::time::Duration;
 
 use engine_core::Locale;
 use game_api::{AccountId, ApiError};
 use postgres::Client;
+
+use crate::postgres_pool::{ConnectionPool, PostgresPool};
 
 /// Read-only identity mapping over a migrated Lynx database.
 ///
@@ -13,7 +16,7 @@ use postgres::Client;
 /// or a trusted Nakama response, never from a client-supplied account or user ID.
 pub struct PostgresIdentityStore {
     telemetry: crate::Telemetry,
-    client: Mutex<Client>,
+    pool: PostgresPool,
 }
 
 impl std::fmt::Debug for PostgresIdentityStore {
@@ -27,9 +30,19 @@ impl PostgresIdentityStore {
     /// Wrap an established connection to the migrated Lynx database.
     #[must_use]
     pub fn new(client: Client) -> Self {
+        let client = Mutex::new(Some(client));
+        let pool = ConnectionPool::new(1, Duration::from_secs(2), move || {
+            client.lock().map_err(|_| ())?.take().ok_or(())
+        });
+        Self::with_pool(pool)
+    }
+
+    /// Create a store that leases connections from a shared bounded pool.
+    #[must_use]
+    pub fn with_pool(pool: PostgresPool) -> Self {
         Self {
             telemetry: crate::Telemetry::default(),
-            client: Mutex::new(client),
+            pool,
         }
     }
 
@@ -49,7 +62,7 @@ impl PostgresIdentityStore {
             if !is_uuid(nakama_user_id) {
                 return Err(ApiError::Unauthenticated);
             }
-            let mut client = self.client.lock().map_err(|_| unavailable())?;
+            let mut client = self.pool.acquire().map_err(|_| unavailable())?;
             let row = client
                 .query_opt(
                     "SELECT account_id FROM lynx.accounts WHERE nakama_user_id = $1::text::uuid",
@@ -79,7 +92,7 @@ impl PostgresIdentityStore {
             }
             let account_id = AccountId::new(nakama_user_id.to_ascii_lowercase())
                 .map_err(|_| ApiError::Unauthenticated)?;
-            let mut client = self.client.lock().map_err(|_| unavailable())?;
+            let mut client = self.pool.acquire().map_err(|_| unavailable())?;
             let row = client
                 .query_one(
                     "INSERT INTO lynx.accounts (account_id, nakama_user_id, locale) \
@@ -109,7 +122,10 @@ fn unavailable() -> ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::is_uuid;
+    use super::{PostgresIdentityStore, is_uuid};
+    use crate::postgres_pool::ConnectionPool;
+    use postgres::Client;
+    use std::time::Duration;
 
     #[test]
     fn accepts_only_canonical_uuid_shape() {
@@ -123,5 +139,23 @@ mod tests {
         ] {
             assert!(!is_uuid(invalid));
         }
+    }
+
+    #[test]
+    fn pool_acquisition_errors_are_sanitized_as_store_unavailable() {
+        let pool = ConnectionPool::<Client>::new(1, Duration::from_millis(1), || {
+            Err::<Client, _>("postgres://user:secret@db")
+        });
+        let store = PostgresIdentityStore::with_pool(pool);
+        let error = store
+            .resolve_account("12345678-1234-abcd-9876-123456789abc")
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "backend unavailable: identity store unavailable"
+        );
+        assert!(!error.to_string().contains("secret"));
+        assert!(!error.to_string().contains("db"));
     }
 }
