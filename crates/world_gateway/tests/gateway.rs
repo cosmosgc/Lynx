@@ -137,6 +137,21 @@ impl ResumeSessionStore for MemoryResumeStore {
         Ok(true)
     }
 
+    fn revoke_principal(&self, principal_id: &str) -> Result<u64, engine_core::error::EngineError> {
+        let mut state = self.record.lock().unwrap();
+        let Some(record) = state.as_mut() else {
+            return Ok(0);
+        };
+        if record.principal_id != principal_id || record.revoked {
+            return Ok(0);
+        }
+        record.revoked = true;
+        record.connected = false;
+        record.expires_at_ms = None;
+        record.generation += 1;
+        Ok(1)
+    }
+
     fn sweep_expired(&self, now_ms: i64) -> Result<u64, engine_core::error::EngineError> {
         let mut state = self.record.lock().unwrap();
         if state.as_ref().is_some_and(|record| {
@@ -2026,6 +2041,41 @@ fn durable_revocation_failure_keeps_the_session_fail_closed_in_memory() {
             .code(),
         ErrorCode::SessionExpired,
         "the still-connected durable record cannot be resumed"
+    );
+}
+
+#[test]
+fn trusted_principal_revocation_removes_sessions_and_durable_resume_claims() {
+    let store = Arc::new(MemoryResumeStore::default());
+    let mut fixture = fixture();
+    fixture.gateway.attach_resume_store(store.clone());
+    let connected = connect(
+        &mut fixture.gateway,
+        "account-alice",
+        fixture.alice_principal,
+    );
+
+    assert_eq!(
+        fixture
+            .gateway
+            .revoke_principal_sessions(fixture.alice_principal)
+            .unwrap(),
+        1
+    );
+    assert!(fixture.gateway.session(&connected.session).is_none());
+    assert!(store.record.lock().unwrap().as_ref().unwrap().revoked);
+    assert_eq!(
+        fixture
+            .gateway
+            .resume(
+                &connected.token,
+                &handshake(),
+                Tick::ZERO,
+                Millis::new(2_000)
+            )
+            .unwrap_err()
+            .code(),
+        ErrorCode::SessionExpired
     );
 }
 

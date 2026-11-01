@@ -353,6 +353,11 @@ impl SessionRegistry {
             .map(|record| &record.view)
     }
 
+    /// Iterate over all retained sessions in stable ID order.
+    pub(crate) fn retained(&self) -> impl Iterator<Item = &GatewaySession> {
+        self.sessions.values().map(|record| &record.view)
+    }
+
     /// The negotiated handshake retained for a session's locale and features.
     #[must_use]
     pub fn negotiated(&self, id: &SessionId) -> Option<&Negotiated> {

@@ -304,6 +304,16 @@ fn startup_detach_requires_the_current_zone_lease() -> anyhow::Result<()> {
             .is_none(),
         "the pre-restart token cannot be replayed"
     );
+    anyhow::ensure!(
+        store.revoke_principal("principal")? == 1,
+        "trusted principal revocation invalidates all retained claims"
+    );
+    anyhow::ensure!(
+        store
+            .consume_and_rotate(rotated, TokenDigest::of("post-revocation token"), 10_000)?
+            .is_none(),
+        "a token is not resumable after principal revocation"
+    );
     client.execute(
         "DELETE FROM lynx.zone_leases WHERE zone_id = $1 AND owner = $2",
         &[&zone_id, &owner],

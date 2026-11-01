@@ -155,6 +155,16 @@ impl ResumeSessionStore for PostgresResumeSessionStore {
         Ok(changed == 1)
     }
 
+    fn revoke_principal(&self, principal_id: &str) -> Result<u64, EngineError> {
+        let mut client = self.pool.acquire().map_err(|_| store_poisoned())?;
+        client
+            .execute(
+                "UPDATE lynx.resume_sessions SET revoked = true, connected = false, expires_at_ms = NULL, generation = generation + 1 WHERE principal_id = $1 AND NOT revoked",
+                &[&principal_id],
+            )
+            .map_err(store_error)
+    }
+
     fn sweep_expired(&self, now_ms: i64) -> Result<u64, EngineError> {
         let mut client = self.pool.acquire().map_err(|_| store_poisoned())?;
         client.execute(

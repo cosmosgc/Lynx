@@ -501,13 +501,37 @@ impl WorldGateway {
                 "the durable session fence is stale; session was not closed",
             ));
         }
+        Ok(self.remove_session_local(session))
+    }
+
+    /// Revoke all retained sessions for a principal after a trusted
+    /// authorization or role change. Callers must not expose this operation to
+    /// client-selected principal identifiers.
+    pub fn revoke_principal_sessions(&mut self, principal: StableId) -> Result<usize, EngineError> {
+        if let Some(store) = self.resume_store.as_ref() {
+            let _ = store.revoke_principal(&principal.to_string())?;
+        }
+        let sessions: Vec<_> = self
+            .sessions
+            .retained()
+            .filter(|session| session.principal == principal)
+            .map(|session| session.id.clone())
+            .collect();
+        let count = sessions.len();
+        for session in sessions {
+            let _ = self.remove_session_local(&session);
+        }
+        Ok(count)
+    }
+
+    fn remove_session_local(&mut self, session: &SessionId) -> Option<GatewaySession> {
         let _ = self.resume_generations.remove(session);
         let removed = self.sessions.remove(session);
         if let Some(removed) = &removed {
             self.cancel_session_movement(removed);
         }
         let _ = self.interest.remove_session(session);
-        Ok(removed)
+        removed
     }
 
     /// Create a session for authenticated claims and bind its character.

@@ -367,8 +367,9 @@ eligible sessions from the replayed zone, rebuilding interest and sending a
 fresh snapshot. Nakama-mode admission routes resume credentials without
 trusting selection headers. Revocation is fail-closed: the in-memory session is
 not removed if its durable revoke fails, and the failure is surfaced to the
-service. Remaining work includes an explicit trusted role-change revocation
-hook; pooling and remote TLS work remain PST-007.
+service. A trusted principal-wide revocation hook invalidates retained durable
+claims and local sessions; wiring it to an external role-change event source
+remains deployment-specific. Pooling and remote TLS work remain PST-007.
 
 ---
 

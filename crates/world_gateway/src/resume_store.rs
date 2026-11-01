@@ -123,6 +123,10 @@ pub trait ResumeSessionStore: std::fmt::Debug + Send + Sync {
     /// Revoke a session only when its generation still matches.
     fn revoke(&self, session_id: &str, expected_generation: i64) -> Result<bool, EngineError>;
 
+    /// Revoke every retained session for a trusted principal, for example
+    /// after its authorization claims change.
+    fn revoke_principal(&self, principal_id: &str) -> Result<u64, EngineError>;
+
     /// Remove detached records whose expiry has elapsed.
     fn sweep_expired(&self, now_ms: i64) -> Result<u64, EngineError>;
 }
