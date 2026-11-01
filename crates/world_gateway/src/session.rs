@@ -489,7 +489,15 @@ impl SessionRegistry {
     /// them independent means exposing a session ID never exposes a token.
     fn next_session_id(&mut self) -> Result<SessionId, EngineError> {
         loop {
-            let candidate = format!("sess-{:016x}", self.next_session);
+            let mut entropy = [0_u8; 8];
+            getrandom::fill(&mut entropy).map_err(|error| {
+                EngineError::new(
+                    ErrorCode::Internal,
+                    "failed to generate a session identifier",
+                )
+                .with_detail("error", error.to_string())
+            })?;
+            let candidate = format!("sess-{}-{:016x}", hex(&entropy), self.next_session);
             self.next_session = self.next_session.wrapping_add(1);
             let id = SessionId::new(candidate)?;
             if !self.sessions.contains_key(&id) {
@@ -539,6 +547,68 @@ impl SessionRegistry {
         last_ack_tick: Tick,
         now: Millis,
     ) -> Result<(GatewaySession, ResumeToken), EngineError> {
+        let next = self.issue_token()?;
+        self.resume_rotated(token, next, last_ack_tick, now)
+    }
+
+    pub(crate) fn issue_token(&mut self) -> Result<ResumeToken, EngineError> {
+        self.source.issue()
+    }
+
+    pub(crate) fn has_token(&self, token: &ResumeToken) -> bool {
+        self.tokens.contains_key(token)
+    }
+
+    pub(crate) fn restore_rotated(
+        &mut self,
+        view: GatewaySession,
+        token: ResumeToken,
+        negotiated: Negotiated,
+    ) -> Result<GatewaySession, EngineError> {
+        if self.sessions.contains_key(&view.id) {
+            return Err(EngineError::new(
+                ErrorCode::Conflict,
+                "the stored session identifier is already active",
+            ));
+        }
+        if self.sessions.len() >= self.max_sessions || self.tokens.contains_key(&token) {
+            return Err(EngineError::new(
+                ErrorCode::CapacityExceeded,
+                "world session limit reached",
+            ));
+        }
+        let identity_conflict = self.sessions.values().any(|record| match self.policy {
+            ConcurrentSessionPolicy::PerCharacter => record.view.principal == view.principal,
+            ConcurrentSessionPolicy::PerAccount => record.view.account == view.account,
+        });
+        if identity_conflict {
+            return Err(EngineError::new(
+                ErrorCode::Conflict,
+                "an identity covered by the session policy already has a retained session",
+            ));
+        }
+        let id = view.id.clone();
+        self.tokens.insert(token.clone(), id.clone());
+        self.sessions.insert(
+            id,
+            SessionRecord {
+                view: view.clone(),
+                negotiated,
+                token,
+                resume: None,
+                panel: None,
+            },
+        );
+        Ok(view)
+    }
+
+    pub(crate) fn resume_rotated(
+        &mut self,
+        token: &ResumeToken,
+        next: ResumeToken,
+        last_ack_tick: Tick,
+        now: Millis,
+    ) -> Result<(GatewaySession, ResumeToken), EngineError> {
         let _ = self.sweep(now);
         let id = self
             .tokens
@@ -562,7 +632,6 @@ impl SessionRegistry {
             return Err(session_expired());
         }
 
-        let next = self.source.issue()?;
         if self.tokens.contains_key(&next) {
             return Err(EngineError::new(
                 ErrorCode::Internal,
@@ -775,6 +844,30 @@ mod tests {
                 == ErrorCode::Conflict,
             "a connected session cannot be resumed concurrently"
         );
+    }
+
+    #[test]
+    fn restart_restoration_installs_rotated_session_in_registry() {
+        let mut registry = registry();
+        let id = SessionId::new("sess-restarted-0001").unwrap();
+        let view = GatewaySession {
+            id: id.clone(),
+            account: AccountId::new("account-restarted").unwrap(),
+            principal: character(91),
+            actor: entity(91),
+            staff: true,
+            connected: true,
+            last_ack_tick: Tick(12),
+        };
+        let rotated = ResumeToken::new("fedcba9876543210").unwrap();
+        registry
+            .restore_rotated(view.clone(), rotated.clone(), negotiated())
+            .unwrap();
+
+        assert_eq!(registry.active(&id).unwrap(), &view);
+        assert_eq!(registry.len(), 1);
+        assert!(!registry.has_token(&ResumeToken::new("0123456789abcdef").unwrap()));
+        assert!(registry.has_token(&rotated));
     }
 
     #[test]

@@ -56,6 +56,14 @@ const MIGRATIONS: &[(&str, &[u8])] = &[
         "0013_fix_event_result_trigger",
         include_bytes!("../../../server/migrations/0013_fix_event_result_trigger.sql"),
     ),
+    (
+        "0014_resume_sessions",
+        include_bytes!("../../../server/migrations/0014_resume_sessions.sql"),
+    ),
+    (
+        "0015_resume_session_staff",
+        include_bytes!("../../../server/migrations/0015_resume_session_staff.sql"),
+    ),
 ];
 
 /// Schema compatibility against the migrations embedded in this binary.
@@ -149,8 +157,7 @@ pub fn inspect(client: &mut Client) -> Result<SchemaStatus, &'static str> {
 pub fn inspect_env() -> Result<SchemaStatus, String> {
     let config = crate::persistence::postgres_config_from_env()
         .map_err(|_| "PostgreSQL configuration is missing or invalid".to_owned())?;
-    let mut client = config
-        .connect(postgres::NoTls)
+    let mut client = backend_nakama::postgres_connection::connect_with_retry(&config)
         .map_err(|_| "could not connect to PostgreSQL".to_owned())?;
     inspect(&mut client).map_err(str::to_owned)
 }
@@ -183,10 +190,7 @@ mod tests {
         assert!(compare(false, &rows).compatible());
         assert!(!compare(true, &[]).compatible());
         rows.pop();
-        assert_eq!(
-            compare(false, &rows).pending,
-            ["0013_fix_event_result_trigger"]
-        );
+        assert_eq!(compare(false, &rows).pending, ["0015_resume_session_staff"]);
         rows[0].1 = "bad".into();
         rows.push(("0007_future".into(), "secret".into()));
         let status = compare(false, &rows);

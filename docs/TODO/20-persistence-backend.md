@@ -15,8 +15,10 @@ authentication, character SQL repositories, and a transactional inventory store,
 while its Nakama HTTP client is limited to health and authentication. Inventory
 storage is available through the trusted persistence seam but is not yet wired
 into live world-service routing. PostgreSQL faction/calendar runtime wiring is
-in progress under PST-003. Social/chat and admin runtime integrations remain
-absent. Most normalized tables are not yet used by the runtime.
+implemented under PST-003; durable resume sessions and PostgreSQL connection
+hardening are in progress under PST-006/PST-007. Social/chat and admin runtime
+integrations remain absent. Most normalized tables are not yet used by the
+runtime.
 
 **Related design:** [architecture §Persistence model](../architecture.md#persistence-model),
 [ADR 0003](../adr/0003-native-nakama-and-postgresql.md),
@@ -330,7 +332,7 @@ across a crash, then verifies replay after checkpoint pruning.
 ## PST-006 — Durable sessions and resume windows
 
 - **Priority:** P2
-- **Status:** Ready
+- **Status:** In progress
 - **Depends on:** `PST-001`, `NET-001`
 - **References:** [networking §Reconnect and recovery](../networking.md#reconnect-and-recovery),
   ADR 0013
@@ -356,12 +358,23 @@ every resume window even though the world and characters survive.
       rotation.
 - [ ] Expired windows are swept without unbounded table growth.
 
+**Implementation state:** Migrations 0014/0015 and a durable store persist
+hashed token digests, verified account/character/actor metadata, expiry,
+connected/revoked state, staff claim, and generation. Token consumption and
+rotation are atomic; startup detaches stale connected records only under the
+current zone lease. The gateway wires create/detach/rotate/revoke and restores
+eligible sessions from the replayed zone, rebuilding interest and sending a
+fresh snapshot. Nakama-mode admission routes resume credentials without
+trusting selection headers. Remaining work includes explicit role-change
+revocation and failure handling when revocation cannot be durably recorded;
+pooling and remote TLS work remain PST-007.
+
 ---
 
 ## PST-007 — PostgreSQL connection hardening
 
 - **Priority:** P1
-- **Status:** Ready
+- **Status:** In progress
 - **Depends on:** —
 - **References:** `crates/lynx_world/src/persistence/postgres.rs`,
   [operations](../operations.md)
@@ -391,6 +404,17 @@ database and not acceptable for a remote one.
       structured error.
 - [ ] Pool exhaustion and shutdown do not hang the authority loop.
 - [ ] Credentials never appear in logs or error details.
+
+**Implementation state:** `backend_nakama::postgres_connection` centralizes
+Rust PostgreSQL configuration, verified native TLS (including optional PEM
+trust roots), and bounded initial-connect retry. Remote plaintext is refused;
+loopback plaintext requires `LYNX_PG_ALLOW_INSECURE_LOOPBACK=true`. World,
+schema inspection, and normalized stores use this policy, and failures avoid
+exposing connection details. Remaining scope includes bounded pooling and
+acquisition/shutdown behavior, TLS parity in the libpq setup/migration scripts,
+live TLS handshake and transient-failure tests, and distinct restricted runtime
+versus migration credentials. Queries/writes are not replayed on ambiguous
+failures.
 
 ---
 

@@ -34,17 +34,16 @@ use lynx_world::backend;
 use lynx_world::config::{AuthMode, ServeArgs};
 use lynx_world::demo;
 use lynx_world::persistence::{
-    FileSnapshotStore, PostgresSnapshotStore, PostgresZoneLeaseStore, RECOVERY_TARGET,
-    SnapshotStore, SnapshotVerification, ZoneLeaseStore, postgres_config_from_env,
+    FileSnapshotStore, PostgresResumeSessionStore, PostgresSnapshotStore, PostgresZoneLeaseStore,
+    RECOVERY_TARGET, SnapshotStore, SnapshotVerification, ZoneLeaseStore, postgres_config_from_env,
 };
 use lynx_world::service::Service;
 use lynx_world::startup;
 use lynx_world::transport::{self, AppState, OriginPolicy};
-use postgres::NoTls;
 use serde_json::json;
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
-use world_gateway::{SystemResumeTokens, WorldGateway};
+use world_gateway::{ResumeSessionStore, SystemResumeTokens, WorldGateway};
 use world_server::WorldServer;
 
 #[derive(Parser)]
@@ -261,6 +260,24 @@ async fn serve(args: ServeArgs) -> Result<()> {
         )?)),
         _ => None,
     };
+    if let (Some(resumes), Some(authority)) = (&stores.resume_sessions, &authority) {
+        let expires = now_ms.saturating_add(gateway_config.resume_ttl.as_i64());
+        let lease = authority.lease();
+        if let Err(error) = resumes.detach_stale_connected(
+            &lease.zone_id,
+            &lease.owner,
+            lease.fencing_token,
+            expires,
+        ) {
+            let _ = authority.release();
+            return Err(error)
+                .context("failed to fence stale durable sessions after acquiring the zone lease");
+        }
+        if let Err(error) = resumes.sweep_expired(now_ms) {
+            let _ = authority.release();
+            return Err(error).context("failed to sweep expired durable sessions at startup");
+        }
+    }
     if let (Some(faction_calendar), Some(authority)) = (&stores.faction_calendar, &authority) {
         let lease = authority.lease();
         if let Err(error) =
@@ -341,6 +358,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
     gateway = gateway
         .with_calendar(calendar, factions)
         .context("failed to attach the demo calendar")?;
+    if let Some(resume_store) = &stores.resume_sessions {
+        let store: Arc<dyn world_gateway::ResumeSessionStore> = resume_store.clone();
+        gateway = gateway.with_resume_store(store);
+    }
     gateway = if let Some(faction_calendar) = &stores.faction_calendar {
         gateway.with_calendar_store(Box::new(backend::PostgresCalendarCommit::new(Arc::clone(
             faction_calendar,
@@ -557,16 +578,16 @@ fn production_identity_backend() -> Result<Arc<NakamaIdentityBackend>> {
     let nakama = NakamaClient::new(nakama_config)
         .map_err(|_| anyhow::anyhow!("invalid Nakama identity configuration"))?;
     let identities = PostgresIdentityStore::new(
-        postgres_config_from_env()
-            .context("invalid PostgreSQL identity configuration")?
-            .connect(NoTls)
-            .context("failed to connect the PostgreSQL identity store")?,
+        backend_nakama::postgres_connection::connect_with_retry(
+            &postgres_config_from_env().context("invalid PostgreSQL identity configuration")?,
+        )
+        .context("failed to connect the PostgreSQL identity store")?,
     );
     let characters = PostgresCharacterStore::new(
-        postgres_config_from_env()
-            .context("invalid PostgreSQL character configuration")?
-            .connect(NoTls)
-            .context("failed to connect the PostgreSQL character store")?,
+        backend_nakama::postgres_connection::connect_with_retry(
+            &postgres_config_from_env().context("invalid PostgreSQL character configuration")?,
+        )
+        .context("failed to connect the PostgreSQL character store")?,
     );
     Ok(Arc::new(NakamaIdentityBackend::new(
         NakamaPostgresBackend::new(nakama, identities, characters),
@@ -583,6 +604,8 @@ struct DurableStores {
     leases: Option<Arc<PostgresZoneLeaseStore>>,
     /// Fenced normalized persistence for the paired calendar/faction state.
     faction_calendar: Option<Arc<PostgresFactionCalendarStore>>,
+    /// Durable resume token metadata, enabled with PostgreSQL world state.
+    resume_sessions: Option<Arc<PostgresResumeSessionStore>>,
 }
 
 fn durable_stores(args: &ServeArgs) -> Result<DurableStores> {
@@ -596,17 +619,23 @@ fn durable_stores(args: &ServeArgs) -> Result<DurableStores> {
                 .context("failed to open the PostgreSQL zone lease store")?,
         );
         let faction_calendar = Arc::new(PostgresFactionCalendarStore::new(
-            postgres_config_from_env()
-                .context("invalid PostgreSQL faction/calendar configuration")?
-                .connect(NoTls)
-                .context("failed to connect the PostgreSQL faction/calendar store")?,
+            backend_nakama::postgres_connection::connect_with_retry(
+                &postgres_config_from_env()
+                    .context("invalid PostgreSQL faction/calendar configuration")?,
+            )
+            .context("failed to connect the PostgreSQL faction/calendar store")?,
         ));
+        let resume_sessions = Arc::new(
+            PostgresResumeSessionStore::connect_from_env()
+                .context("failed to open the PostgreSQL resume-session store")?,
+        );
         let snapshot: Arc<dyn SnapshotStore + Send + Sync> = postgres.clone();
         Ok(DurableStores {
             snapshot: Some(snapshot),
             postgres: Some(postgres),
             leases: Some(leases),
             faction_calendar: Some(faction_calendar),
+            resume_sessions: Some(resume_sessions),
         })
     } else {
         Ok(DurableStores {
@@ -617,6 +646,7 @@ fn durable_stores(args: &ServeArgs) -> Result<DurableStores> {
             postgres: None,
             leases: None,
             faction_calendar: None,
+            resume_sessions: None,
         })
     }
 }

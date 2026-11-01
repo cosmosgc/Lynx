@@ -86,6 +86,8 @@ edit applied migration files to resolve a mismatch.
 | `0011_snapshot_checkpoint_zone.sql` | Binds zone-local checkpoint sequences to their owning zone. |
 | `0012_recovery_quarantine.sql` | Durable report of saved entries isolated during snapshot recovery. |
 | `0013_fix_event_result_trigger.sql` | Removes PL/pgSQL column/variable ambiguity in the deferred calendar-result consistency trigger. |
+| `0014_resume_sessions.sql` | Stores hashed resume-token digests and fenced session expiry/revocation metadata. |
+| `0015_resume_session_staff.sql` | Persists the trusted staff claim for durable session restoration. |
 
 ## Audit retention
 

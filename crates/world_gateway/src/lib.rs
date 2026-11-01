@@ -17,6 +17,7 @@
 pub mod calendar;
 pub mod gateway;
 pub mod replication;
+pub mod resume_store;
 pub mod session;
 
 pub use calendar::{
@@ -32,6 +33,7 @@ pub use replication::{
     DoorSnapshot, EntitySnapshot, HealthSnapshot, InteractionSnapshot, OwnerState, SessionDelivery,
     VISIBILITY_HIDDEN_TAG, VISIBILITY_OWNER_ONLY_TAG, VISIBILITY_STAFF_ONLY_TAG, visibility_tags,
 };
+pub use resume_store::{ResumeSessionRecord, ResumeSessionStore, TokenDigest};
 pub use session::{
     GatewaySession, MAX_RESUME_TOKEN_LEN, MIN_RESUME_TOKEN_LEN, OpenPanel, ResumeToken,
     ResumeTokenSource, SequentialResumeTokens, SessionClaims, SessionRegistry, SystemResumeTokens,

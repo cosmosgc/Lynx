@@ -755,6 +755,10 @@ fn encode_transport_metrics(
     text
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "upgrade admission validates bearer, origin, identity, and rate limits before socket acceptance"
+)]
 async fn world(
     State(state): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<PeerAddress>,
@@ -812,21 +816,45 @@ async fn world(
             },
         },
         AdmissionAuthenticator::Identity(backend) => {
-            let character = match selected_character(&headers) {
-                Ok(character) => character,
-                Err(error) => return identity_rejected(&state, peer.0.ip(), error, None),
-            };
-            let credential = presented.to_owned();
-            let backend = Arc::clone(backend);
-            let verified = tokio::task::spawn_blocking(move || {
-                authenticate_selection(backend.as_ref(), &credential, character)
-            })
-            .await
-            .unwrap_or(Err(IdentityError::Unavailable));
-            match verified {
-                Ok(claims) => Credential::Identity(claims),
-                Err(error) => {
-                    return identity_rejected(&state, peer.0.ip(), error, Some(character));
+            // A resume token is self-authenticating through the durable token
+            // digest, so never derive its identity from selection headers.
+            let selected = selected_character(&headers);
+            if let Ok(character) = selected {
+                let credential = presented.to_owned();
+                let backend = Arc::clone(backend);
+                let verified = tokio::task::spawn_blocking(move || {
+                    authenticate_selection(backend.as_ref(), &credential, character)
+                })
+                .await
+                .unwrap_or(Err(IdentityError::Unavailable));
+                match verified {
+                    Ok(claims) => Credential::Identity(claims),
+                    Err(IdentityError::InvalidSession) => match ResumeToken::new(presented) {
+                        Ok(token) => Credential::Resume(token),
+                        Err(_) => {
+                            return identity_rejected(
+                                &state,
+                                peer.0.ip(),
+                                IdentityError::InvalidSession,
+                                Some(character),
+                            );
+                        }
+                    },
+                    Err(error) => {
+                        return identity_rejected(&state, peer.0.ip(), error, Some(character));
+                    }
+                }
+            } else {
+                match ResumeToken::new(presented) {
+                    Ok(token) => Credential::Resume(token),
+                    Err(_) => {
+                        return identity_rejected(
+                            &state,
+                            peer.0.ip(),
+                            IdentityError::CharacterForbidden,
+                            None,
+                        );
+                    }
                 }
             }
         }

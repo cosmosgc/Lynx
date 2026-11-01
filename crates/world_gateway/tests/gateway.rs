@@ -1,6 +1,6 @@
 //! End-to-end tests for session authority, interest isolation, and reconnect.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use engine_core::error::ErrorCode;
 use engine_core::id::{DefinitionId, IdKind, StableId};
@@ -24,9 +24,123 @@ use engine_sim::zone::{Zone, ZoneConfig};
 use game_api::AccountId;
 use serde_json::json;
 use world_gateway::{
-    Connection, GatewayConfig, OpenPanel, OwnerState, SequentialResumeTokens, SessionClaims,
-    SessionDelivery, UI_ACTION_KIND, UI_CLOSE_KIND, UI_STATE_KIND, UiState, WorldGateway,
+    Connection, GatewayConfig, OpenPanel, OwnerState, ResumeSessionRecord, ResumeSessionStore,
+    SequentialResumeTokens, SessionClaims, SessionDelivery, TokenDigest, UI_ACTION_KIND,
+    UI_CLOSE_KIND, UI_STATE_KIND, UiState, WorldGateway,
 };
+
+#[derive(Debug, Default)]
+struct MemoryResumeStore(Mutex<Option<ResumeSessionRecord>>);
+
+impl ResumeSessionStore for MemoryResumeStore {
+    fn create(&self, record: &ResumeSessionRecord) -> Result<(), engine_core::error::EngineError> {
+        *self.0.lock().unwrap() = Some(record.clone());
+        Ok(())
+    }
+
+    fn detach(
+        &self,
+        session_id: &str,
+        expected_generation: i64,
+        expires_at_ms: i64,
+    ) -> Result<bool, engine_core::error::EngineError> {
+        let mut state = self.0.lock().unwrap();
+        let Some(record) = state.as_mut() else {
+            return Ok(false);
+        };
+        if record.session_id != session_id
+            || !record.connected
+            || record.generation != expected_generation
+        {
+            return Ok(false);
+        }
+        record.connected = false;
+        record.expires_at_ms = Some(expires_at_ms);
+        record.generation += 1;
+        Ok(true)
+    }
+
+    fn detach_stale_connected(
+        &self,
+        _zone_id: &str,
+        _owner: &str,
+        _fencing_token: i64,
+        expires_at_ms: i64,
+    ) -> Result<u64, engine_core::error::EngineError> {
+        let mut state = self.0.lock().unwrap();
+        let Some(record) = state.as_mut() else {
+            return Ok(0);
+        };
+        if !record.connected || record.revoked {
+            return Ok(0);
+        }
+        record.connected = false;
+        record.expires_at_ms = Some(expires_at_ms);
+        record.generation += 1;
+        Ok(1)
+    }
+
+    fn consume_and_rotate(
+        &self,
+        current: TokenDigest,
+        next: TokenDigest,
+        now_ms: i64,
+    ) -> Result<Option<ResumeSessionRecord>, engine_core::error::EngineError> {
+        let mut state = self.0.lock().unwrap();
+        let Some(record) = state.as_mut() else {
+            return Ok(None);
+        };
+        if record.token_digest != current
+            || record.connected
+            || record.revoked
+            || record.expires_at_ms.is_none_or(|expiry| now_ms >= expiry)
+        {
+            return Ok(None);
+        }
+        let mut consumed = record.clone();
+        record.token_digest = next;
+        record.connected = true;
+        record.expires_at_ms = None;
+        record.generation += 1;
+        consumed.token_digest = next;
+        consumed.generation = record.generation;
+        Ok(Some(consumed))
+    }
+
+    fn revoke(
+        &self,
+        session_id: &str,
+        expected_generation: i64,
+    ) -> Result<bool, engine_core::error::EngineError> {
+        let mut state = self.0.lock().unwrap();
+        let Some(record) = state.as_mut() else {
+            return Ok(false);
+        };
+        if record.session_id != session_id
+            || record.generation != expected_generation
+            || record.revoked
+        {
+            return Ok(false);
+        }
+        record.revoked = true;
+        record.generation += 1;
+        Ok(true)
+    }
+
+    fn sweep_expired(&self, now_ms: i64) -> Result<u64, engine_core::error::EngineError> {
+        let mut state = self.0.lock().unwrap();
+        if state.as_ref().is_some_and(|record| {
+            record.revoked
+                || record
+                    .expires_at_ms
+                    .is_some_and(|expires| expires <= now_ms)
+        }) {
+            *state = None;
+            return Ok(1);
+        }
+        Ok(0)
+    }
+}
 
 struct Fixture {
     gateway: WorldGateway,
@@ -175,6 +289,14 @@ fn fixture() -> Fixture {
 }
 
 fn fixture_with_combat(combat: CombatRules) -> Fixture {
+    fixture_with_combat_and_seed(combat, 1)
+}
+
+fn fixture_with_seed(seed: u64) -> Fixture {
+    fixture_with_combat_and_seed(CombatRules::default(), seed)
+}
+
+fn fixture_with_combat_and_seed(combat: CombatRules, token_seed: u64) -> Fixture {
     let config = ZoneConfig::new(
         text("zone.gateway_test"),
         id(IdKind::Zone, 1),
@@ -242,7 +364,7 @@ fn fixture_with_combat(combat: CombatRules) -> Fixture {
         zone,
         handshake(),
         GatewayConfig::default(),
-        SequentialResumeTokens::new(1),
+        SequentialResumeTokens::new(token_seed),
     )
     .unwrap();
 
@@ -1806,6 +1928,57 @@ fn a_retained_session_cannot_be_replaced_by_fresh_authentication() {
             .unwrap()
             .current,
         99
+    );
+}
+
+#[test]
+fn durable_resume_restores_a_session_after_gateway_restart() {
+    let store = Arc::new(MemoryResumeStore::default());
+    let mut first = fixture();
+    first.gateway.attach_resume_store(store.clone());
+    let connected = connect(&mut first.gateway, "account-alice", first.alice_principal);
+    let session_id = connected.session.clone();
+
+    // Simulate process loss while the session is still marked connected. The
+    // new owner converts it to a fenced, expiring resume window after lease
+    // takeover, as startup does for PostgreSQL.
+    store
+        .detach_stale_connected("zone-test", "new-owner", 2, 40_000)
+        .unwrap();
+
+    let mut restarted = fixture_with_seed(2);
+    restarted.gateway.attach_resume_store(store.clone());
+    let resumed = restarted
+        .gateway
+        .resume(&connected.token, &handshake(), Tick(7), Millis::new(11_000))
+        .unwrap();
+
+    assert_eq!(resumed.session, session_id);
+    assert_eq!(resumed.actor, restarted.alice_actor);
+    assert!(resumed.resumed);
+    assert_ne!(resumed.token, connected.token);
+    assert!(
+        resumed
+            .snapshot
+            .interest
+            .set
+            .contains(&restarted.alice_actor)
+    );
+    assert_eq!(
+        restarted
+            .gateway
+            .session(&session_id)
+            .unwrap()
+            .last_ack_tick,
+        Tick::ZERO
+    );
+    assert_eq!(
+        restarted
+            .gateway
+            .resume(&connected.token, &handshake(), Tick(7), Millis::new(11_100))
+            .unwrap_err()
+            .code(),
+        ErrorCode::SessionExpired
     );
 }
 

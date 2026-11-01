@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 use engine_core::{IdKind, StableId, faction::FactionSnapshot, world_event::CalendarSnapshot};
 use game_api::{ApiError, CalendarStore, FactionStore, validate_calendar_snapshot};
-use postgres::{Client, Config, NoTls, Transaction};
+use postgres::{Client, Config, Transaction};
 use serde_json::{Map, Value, json};
 
 const SELECT_HELD_LEASE: &str = "\
@@ -54,7 +54,8 @@ impl PostgresFactionCalendarStore {
 
     /// Connect using a PostgreSQL configuration.
     pub fn connect(config: &Config) -> Result<Self, ApiError> {
-        let client = config.connect(NoTls).map_err(|_| unavailable())?;
+        let client =
+            super::postgres_connection::connect_with_retry(config).map_err(|_| unavailable())?;
         Ok(Self::new(client))
     }
 

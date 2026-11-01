@@ -6,19 +6,17 @@
 //! store writes them. An upsert replaces the row atomically and keeps the
 //! previous good world if the write fails.
 //!
-//! Connection settings come from the same `LYNX_PG_*` variables the setup and
-//! migration scripts use. Only plain TCP is supported today: run PostgreSQL on
-//! loopback (or a trusted private network) and terminate TLS in front of it
-//! before exposing a remote database.
+//! Connection settings and transport policy come from `backend_nakama`'s shared
+//! PostgreSQL abstraction. TLS is verified for remote endpoints; loopback
+//! plaintext requires an explicit development-only opt-in.
 
 use std::fmt;
 use std::sync::{Mutex, MutexGuard};
-use std::time::Duration;
 
 use engine_core::error::{EngineError, ErrorCode};
 use engine_core::id::StableId;
 use engine_sim::snapshot::QuarantinedRecord;
-use postgres::{Client, Config, GenericClient, NoTls, Row};
+use postgres::{Client, Config, GenericClient, Row};
 use serde_json::Value;
 
 use super::{
@@ -633,61 +631,20 @@ impl PostgresSnapshotStore {
 
 /// Read the shared PostgreSQL configuration without exposing its values.
 pub fn postgres_config_from_env() -> Result<Config, EngineError> {
-    let host = environment_or("LYNX_PG_HOST", "127.0.0.1");
-    if !is_loopback_host(&host) && !environment_is_true("LYNX_PG_ALLOW_INSECURE_REMOTE") {
-        return Err(EngineError::new(
+    backend_nakama::postgres_connection::config_from_env("lynx-world").map_err(|_| {
+        EngineError::new(
             ErrorCode::Internal,
-            "remote PostgreSQL connections require TLS support or explicit insecure opt-in",
-        ));
-    }
-    let port = environment_or("LYNX_PG_PORT", "5432")
-        .parse::<u16>()
-        .map_err(|error| {
-            EngineError::new(ErrorCode::Internal, "LYNX_PG_PORT is not a valid port")
-                .with_detail("error", error.to_string())
-        })?;
-    let database = required_environment("LYNX_PG_DATABASE")?;
-    let user = required_environment("LYNX_PG_USER")?;
-    let password = required_environment("LYNX_PG_PASSWORD")?;
-
-    let mut config = Config::new();
-    config
-        .host(&host)
-        .port(port)
-        .dbname(&database)
-        .user(&user)
-        .password(&password)
-        .application_name("lynx-world")
-        .connect_timeout(Duration::from_secs(5))
-        .options("-c statement_timeout=5000 -c lock_timeout=2000 -c idle_in_transaction_session_timeout=5000");
-    Ok(config)
-}
-
-fn is_loopback_host(host: &str) -> bool {
-    matches!(host, "localhost" | "127.0.0.1" | "::1")
-}
-
-fn environment_is_true(name: &str) -> bool {
-    std::env::var(name).is_ok_and(|value| value.eq_ignore_ascii_case("true"))
+            "PostgreSQL configuration is missing or invalid",
+        )
+    })
 }
 
 /// Retry connection establishment with a bounded exponential backoff. Queries
 /// are not replayed because a lost response can make a write's outcome unknown.
-fn connect_with_retry(config: &Config) -> Result<Client, postgres::Error> {
-    const ATTEMPTS: usize = 3;
-    let mut delay = Duration::from_millis(100);
-    let mut last_error = None;
-    for attempt in 0..ATTEMPTS {
-        match config.connect(NoTls) {
-            Ok(client) => return Ok(client),
-            Err(error) => last_error = Some(error),
-        }
-        if attempt + 1 < ATTEMPTS {
-            std::thread::sleep(delay);
-            delay *= 2;
-        }
-    }
-    Err(last_error.expect("at least one connection attempt"))
+fn connect_with_retry(
+    config: &Config,
+) -> Result<Client, backend_nakama::postgres_connection::ConnectionError> {
+    backend_nakama::postgres_connection::connect_with_retry(config)
 }
 
 impl SnapshotStore for PostgresSnapshotStore {
@@ -1025,20 +982,6 @@ fn is_snapshot_event_for(event: &ZoneEvent, world_id: &str) -> bool {
         && event.payload.get("world_id").and_then(Value::as_str) == Some(world_id)
 }
 
-fn environment_or(name: &str, default: &str) -> String {
-    std::env::var(name).unwrap_or_else(|_| default.to_owned())
-}
-
-fn required_environment(name: &str) -> Result<String, EngineError> {
-    std::env::var(name).map_err(|_| {
-        EngineError::new(
-            ErrorCode::Internal,
-            "the PostgreSQL snapshot store is missing an environment variable",
-        )
-        .with_detail("variable", name)
-    })
-}
-
 fn valid_world_id(value: &str) -> bool {
     (1..=64).contains(&value.len())
         && value.bytes().enumerate().all(|(index, byte)| {
@@ -1126,14 +1069,5 @@ mod tests {
         assert!(!snapshot_metadata_matches(version, 123, 2, 2, 123));
         assert!(!snapshot_metadata_matches(version, 123, 1, 3, 123));
         assert!(!snapshot_metadata_matches(version, 123, 1, 2, 124));
-    }
-
-    #[test]
-    fn only_loopback_hosts_are_insecure_by_default() {
-        assert!(is_loopback_host("localhost"));
-        assert!(is_loopback_host("127.0.0.1"));
-        assert!(is_loopback_host("::1"));
-        assert!(!is_loopback_host("db.internal"));
-        assert!(!is_loopback_host("192.168.1.2"));
     }
 }

@@ -60,6 +60,7 @@ use crate::replication::{
 use crate::session::{
     GatewaySession, OpenPanel, ResumeToken, ResumeTokenSource, SessionClaims, SessionRegistry,
 };
+use crate::{ResumeSessionRecord, ResumeSessionStore, TokenDigest};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -259,6 +260,8 @@ pub struct WorldGateway {
     pending_changes: std::collections::BTreeSet<Change>,
     calendar: Option<CalendarStage>,
     calendar_store: Option<Box<dyn CalendarPersistence + Send>>,
+    resume_store: Option<std::sync::Arc<dyn ResumeSessionStore>>,
+    resume_generations: BTreeMap<SessionId, i64>,
     reply_sequence: u64,
 }
 
@@ -305,6 +308,8 @@ impl WorldGateway {
             pending_changes: std::collections::BTreeSet::new(),
             calendar: None,
             calendar_store: None,
+            resume_store: None,
+            resume_generations: BTreeMap::new(),
             reply_sequence: 0,
         };
         let _ = gateway.sync_world();
@@ -334,6 +339,19 @@ impl WorldGateway {
     pub fn with_calendar_store(mut self, store: Box<dyn CalendarPersistence + Send>) -> Self {
         self.calendar_store = Some(store);
         self
+    }
+
+    /// Attach durable storage for resume credentials and lifecycle fencing.
+    /// Existing in-memory behavior is unchanged when this is not configured.
+    #[must_use]
+    pub fn with_resume_store(mut self, store: std::sync::Arc<dyn ResumeSessionStore>) -> Self {
+        self.resume_store = Some(store);
+        self
+    }
+
+    /// Attach durable resume storage to an already-constructed gateway.
+    pub fn attach_resume_store(&mut self, store: std::sync::Arc<dyn ResumeSessionStore>) {
+        self.resume_store = Some(store);
     }
 
     /// The attached calendar stage, when this world runs a calendar.
@@ -470,6 +488,13 @@ impl WorldGateway {
     /// that must not be resumable. An ordinary transport drop should call
     /// [`WorldGateway::disconnect`] instead so the player can reconnect.
     pub fn close_session(&mut self, session: &SessionId) -> Option<GatewaySession> {
+        if let (Some(store), Some(generation)) = (
+            self.resume_store.as_ref(),
+            self.resume_generations.get(session).copied(),
+        ) {
+            let _ = store.revoke(session.as_str(), generation);
+        }
+        let _ = self.resume_generations.remove(session);
         let removed = self.sessions.remove(session);
         if let Some(removed) = &removed {
             self.cancel_session_movement(removed);
@@ -493,9 +518,20 @@ impl WorldGateway {
         claims.validate()?;
         let negotiated = negotiate(client, &self.server)?;
         let actor = self.resolve_actor(claims.principal)?;
+        if let Some(store) = self.resume_store.as_ref() {
+            let _ = store.sweep_expired(now.value())?;
+        }
         let (session, token) = self
             .sessions
             .connect(claims, actor, negotiated.clone(), now)?;
+        if let Some(store) = self.resume_store.as_ref() {
+            let record = resume_record(&session, &token, 0);
+            if let Err(error) = store.create(&record) {
+                let _ = self.sessions.remove(&session.id);
+                return Err(error);
+            }
+            self.resume_generations.insert(session.id.clone(), 0);
+        }
         self.bind_actor(&session);
         let changes = self.sync_world();
         self.pending_changes.extend(changes);
@@ -531,6 +567,22 @@ impl WorldGateway {
         now: Millis,
     ) -> Result<(), EngineError> {
         let last_ack = clamp_tick(last_ack_tick, self.zone.tick());
+        if let (Some(store), Some(generation), Some(current)) = (
+            self.resume_store.as_ref(),
+            self.resume_generations.get(session).copied(),
+            self.sessions.get(session),
+        ) && current.connected
+        {
+            let expires = now.value().saturating_add(self.config.resume_ttl.as_i64());
+            if !store.detach(session.as_str(), generation, expires)? {
+                return Err(EngineError::new(
+                    ErrorCode::Conflict,
+                    "the durable session fence is stale",
+                ));
+            }
+            self.resume_generations
+                .insert(session.clone(), generation.saturating_add(1));
+        }
         let detached = self.sessions.disconnect(session, last_ack, now)?;
         self.cancel_session_movement(&detached);
         let _ = self.interest.remove_session(session);
@@ -557,10 +609,62 @@ impl WorldGateway {
     ) -> Result<Connection, EngineError> {
         let negotiated = negotiate(client, &self.server)?;
         let last_ack = clamp_tick(last_ack_tick, self.zone.tick());
-        let (session, next_token) = self.sessions.resume(token, last_ack, now)?;
+        let (session, next_token) = if let Some(store) = self.resume_store.clone() {
+            let next = self.sessions.issue_token()?;
+            let record = store
+                .consume_and_rotate(
+                    TokenDigest::of(token.expose_secret()),
+                    TokenDigest::of(next.expose_secret()),
+                    now.value(),
+                )?
+                .ok_or_else(|| {
+                    EngineError::new(
+                        ErrorCode::SessionExpired,
+                        "the world session is unknown or has expired",
+                    )
+                })?;
+            let restored = if self.sessions.has_token(token) {
+                self.sessions
+                    .resume_rotated(token, next.clone(), last_ack, now)
+                    .map(|(session, _)| session)
+            } else {
+                restore_session_record(&record, last_ack, now).and_then(|view| {
+                    if self.zone.entity(view.actor).is_none()
+                        || self.resolve_actor(view.principal).ok() != Some(view.actor)
+                    {
+                        return Err(EngineError::new(
+                            ErrorCode::SessionExpired,
+                            "the stored actor is not present in the restored zone",
+                        ));
+                    }
+                    self.sessions
+                        .restore_rotated(view, next.clone(), negotiated.clone())
+                })
+            };
+            let session = match restored {
+                Ok(session) if record_matches(&record, &session, &next, now) => session,
+                _ => {
+                    let _ = store.revoke(&record.session_id, record.generation);
+                    if let Ok(id) = SessionId::new(record.session_id.clone()) {
+                        let _ = self.sessions.remove(&id);
+                    }
+                    return Err(EngineError::new(
+                        ErrorCode::SessionExpired,
+                        "the stored session metadata is invalid",
+                    ));
+                }
+            };
+            self.resume_generations
+                .insert(session.id.clone(), record.generation);
+            (session, next)
+        } else {
+            self.sessions.resume(token, last_ack, now)?
+        };
         self.sessions
             .update_negotiated(&session.id, negotiated.clone())?;
-        if self.zone.entity(session.actor).is_none() {
+        if self.zone.entity(session.actor).is_none()
+            || self.resolve_actor(session.principal).ok() != Some(session.actor)
+        {
             let _ = self.close_session(&session.id);
             return Err(EngineError::new(
                 ErrorCode::SessionExpired,
@@ -1310,6 +1414,91 @@ impl WorldGateway {
         }
         Ok(())
     }
+}
+
+fn resume_record(
+    session: &GatewaySession,
+    token: &ResumeToken,
+    generation: i64,
+) -> ResumeSessionRecord {
+    ResumeSessionRecord {
+        session_id: session.id.to_string(),
+        account_id: session.account.to_string(),
+        principal_id: session.principal.to_string(),
+        actor_id: session.actor.to_string(),
+        staff: session.staff,
+        token_digest: TokenDigest::of(token.expose_secret()),
+        expires_at_ms: None,
+        connected: true,
+        generation,
+        revoked: false,
+    }
+}
+
+fn restore_session_record(
+    record: &ResumeSessionRecord,
+    last_ack: Tick,
+    now: Millis,
+) -> Result<GatewaySession, EngineError> {
+    let account = game_api::service::AccountId::new(record.account_id.clone()).map_err(|_| {
+        EngineError::new(
+            ErrorCode::SessionExpired,
+            "invalid stored account identifier",
+        )
+    })?;
+    let principal = StableId::parse(&record.principal_id).map_err(|_| {
+        EngineError::new(
+            ErrorCode::SessionExpired,
+            "invalid stored principal identifier",
+        )
+    })?;
+    let actor = StableId::parse(&record.actor_id).map_err(|_| {
+        EngineError::new(ErrorCode::SessionExpired, "invalid stored actor identifier")
+    })?;
+    let id = SessionId::new(record.session_id.clone())?;
+    if principal.kind() != engine_core::id::IdKind::Character
+        || actor.kind() != engine_core::id::IdKind::Entity
+        || record.connected
+        || record.revoked
+        || record.generation < 1
+        || record
+            .expires_at_ms
+            .is_none_or(|expiry| now.value() >= expiry)
+    {
+        return Err(EngineError::new(
+            ErrorCode::SessionExpired,
+            "stored session is not eligible for restoration",
+        ));
+    }
+    Ok(GatewaySession {
+        id,
+        account,
+        principal,
+        actor,
+        staff: record.staff,
+        connected: true,
+        last_ack_tick: last_ack,
+    })
+}
+
+fn record_matches(
+    record: &ResumeSessionRecord,
+    session: &GatewaySession,
+    token: &ResumeToken,
+    now: Millis,
+) -> bool {
+    record.session_id == session.id.as_str()
+        && record.account_id == session.account.to_string()
+        && record.principal_id == session.principal.to_string()
+        && record.actor_id == session.actor.to_string()
+        && record.token_digest == TokenDigest::of(token.expose_secret())
+        && record.staff == session.staff
+        && !record.connected
+        && !record.revoked
+        && record.generation >= 1
+        && record
+            .expires_at_ms
+            .is_some_and(|expiry| now.value() < expiry)
 }
 
 fn player_spawn_position(zone: &Zone, principal: StableId) -> Result<Vec3, EngineError> {

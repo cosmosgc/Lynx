@@ -12,7 +12,7 @@ copied from the task entries; a dash means none are declared.
 | [OPS-006](60-operations-release.md#ops-006--ci-matrix-and-live-integration-coverage) | CI matrix and live-integration coverage | P1 | Ready | — | Close client-smoke and CI-duration gaps; useful parallel quality gate. |
 | [SIM-007](10-simulation-gameplay.md#sim-007--navigation-budgets-and-replan-policy) | Navigation budgets and replan policy | P1 | Ready | `SIM-001` | Formalize bounded navigation before authoring integration. |
 | [SIM-018](10-simulation-gameplay.md#sim-018--determinism-and-tick-budget) | Determinism and tick budget | P1 | Ready | — | Establish measured simulation limits alongside feature work. |
-| [PST-007](20-persistence-backend.md#pst-007--postgresql-connection-hardening) | PostgreSQL connection hardening | P1 | Ready | — | Harden remote database access independently. |
+| [PST-007](20-persistence-backend.md#pst-007--postgresql-connection-hardening) | PostgreSQL connection hardening | P1 | In progress | — | Centralize verified TLS policy, timeouts, and bounded connection handling. |
 | [PST-009](20-persistence-backend.md#pst-009--backup-and-restore-verification) | Backup and restore verification | P1 | Ready | — | Define recovery guarantees before OPS-003 automation. |
 | [NET-006](30-networking-security.md#net-006--replication-delivery-slo-and-backpressure) | Replication delivery SLO and backpressure | P1 | Ready | — | Measure delivery limits; informs performance/load work. |
 | [NET-007](30-networking-security.md#net-007--session-and-token-abuse-defenses) | Session and token abuse defenses | P1 | Ready | `NET-002` | Build on existing rate limits; security priority. |
@@ -22,7 +22,7 @@ copied from the task entries; a dash means none are declared.
 | [QUA-014](70-testing-quality.md#qua-014--multi-client-headless-harness) | Multi-client headless harness | P1 | Ready | `CLT-005` | Start when client network loop lands; unblocks QUA-014 consumers. |
 | [OPS-014](60-operations-release.md#ops-014--documentation-changelog-and-release-discipline) | Documentation, changelog, and release discipline | P1 | Ready | — | Continuous process task; keep docs aligned with delivery. |
 | [OPS-011](60-operations-release.md#ops-011--production-topology-and-deployment) | Production topology and deployment | P2 | Ready | `OPS-001` | Follows completion of metrics foundation. |
-| [PST-006](20-persistence-backend.md#pst-006--durable-sessions-and-resume-windows) | Durable sessions and resume windows | P2 | Ready | `PST-001`, `NET-001` | Identity and world-edge admission foundations are complete. |
+| [PST-006](20-persistence-backend.md#pst-006--durable-sessions-and-resume-windows) | Durable sessions and resume windows | P2 | In progress | `PST-001`, `NET-001` | Start hashed-token persistence and atomic resume rotation across restart. |
 | [CNT-014](50-content-editor-tooling.md#cnt-014--content-migration-and-upgrade-tooling) | Content migration and upgrade tooling | P2 | Ready | `CNT-011` | Continue after CLI expansion; prerequisite for OPS-004/PST-013. |
 | [CNT-009](50-content-editor-tooling.md#cnt-009--mcp-server-read-only-tools) | MCP server: read-only tools | P2 | Ready | `CNT-011` | Reuse the CLI automation contracts; security-bounded read-only scope. |
 | [CNT-013](50-content-editor-tooling.md#cnt-013--asset-pipeline-and-import-policy) | Asset pipeline and import policy | P2 | Ready | `CNT-005` | Depends on definition-editor foundation. |

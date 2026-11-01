@@ -6,6 +6,7 @@ pub mod client;
 pub mod faction_calendar_store;
 pub mod identity_store;
 pub mod inventory_store;
+pub mod postgres_connection;
 pub mod telemetry;
 
 pub use backend::{BackendTelemetrySnapshot, NakamaPostgresBackend};

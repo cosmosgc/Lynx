@@ -153,15 +153,19 @@ At startup the service also publishes one open faction conflict over the demo
 zone. Player sessions may enroll through `calendar.command` and inspect the
 calendar with `calendar.query`; lifecycle transitions (schedule, activate,
 resolve, …) are accepted only from `--staff` sessions. Applied commands are
-committed to the in-memory backend together with the faction snapshot.
+committed atomically with the faction snapshot; PostgreSQL mode uses the
+normalized paired store, while local modes remain in memory.
 
 With `--state-file` or `--state-postgres` configured, the service loads that
 snapshot at startup — zone entities, links, calendar, and faction state —
 writes a baseline snapshot before the authority loop begins, rewrites it on
 the snapshot interval and once more at shutdown, and resumes the saved tick.
-Snapshots follow each entity's explicit persistence policy; sessions, resume
-tokens, and minigame replication stay in memory as before. Without a store,
-state is in memory and a restart logs everyone out and resets the zone.
+Snapshots follow each entity's explicit persistence policy. In PostgreSQL mode,
+resume-session metadata is durable (only token digests are stored); a detached
+session can resume within its configured window after restart, while sockets
+and interest state are rebuilt. File and memory modes retain process-local
+sessions. Without a durable store, a restart logs everyone out and resets the
+zone.
 
 With `--state-postgres`, the whole-world snapshot lives in
 `lynx.world_snapshots` (one row per world, written atomically by an upsert, so
@@ -171,11 +175,17 @@ limited to five seconds, and PostgreSQL statement, lock, and idle-transaction
 timeouts are configured to five, two, and five seconds respectively. Initial
 connection attempts use a bounded three-attempt backoff. Queries are not
 automatically retried because a lost response can make a write outcome
-ambiguous. Remote hosts are refused by default; set
-`LYNX_PG_ALLOW_INSECURE_REMOTE=true` only for a deliberately trusted network.
-This adapter currently uses plain TCP and does not provide TLS; use a local
-TLS-terminating tunnel/proxy for remote database access. This opt-in does not
-encrypt traffic.
+ambiguous. PostgreSQL connections use verified TLS by default, including remote
+hosts; certificates are checked against the platform's native trust store.
+For a private CA, set `LYNX_PG_TLS_CA_CERT` to a PEM certificate bundle. Hostname
+verification remains enabled. Remote plaintext connections are not supported.
+For isolated local development only, set
+`LYNX_PG_ALLOW_INSECURE_LOOPBACK=true` to permit plaintext when all configured
+hosts are loopback addresses/names; leave it unset in deployed environments.
+Without that opt-in, loopback connections also require verified TLS.
+The setup and migration scripts use libpq rather than the Rust connector; for
+remote script connections, configure libpq separately with `PGSSLMODE=verify-full`
+and `PGSSLROOTCERT` pointing to the trusted CA bundle.
 
 With `--state-postgres`, the service also takes a single-writer lease on the
 demo zone in `lynx.zone_leases` before it loads the snapshot. A second process

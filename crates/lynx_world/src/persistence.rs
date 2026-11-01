@@ -31,8 +31,10 @@ use engine_sim::link::{EntityLink, LinkEvent};
 use engine_sim::snapshot::{QuarantinedRecord, ZoneSnapshot};
 
 mod postgres;
+mod resume_sessions;
 
 pub use postgres::{PostgresSnapshotStore, PostgresZoneLeaseStore, postgres_config_from_env};
+pub use resume_sessions::PostgresResumeSessionStore;
 
 /// Point-in-time result of an operator's read-only checkpoint verification.
 #[derive(Debug, Clone, PartialEq, Eq)]

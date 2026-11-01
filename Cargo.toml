@@ -41,6 +41,9 @@ thiserror = "2.0.21"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }
+native-tls = "0.2"
+postgres-native-tls = "0.5"
+rustls-pemfile = "2"
 
 engine_core = { path = "crates/engine_core", version = "0.1.0" }
 engine_sim = { path = "crates/engine_sim", version = "0.1.0" }
