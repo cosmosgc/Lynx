@@ -2008,6 +2008,41 @@ fn durable_resume_restores_a_session_after_gateway_restart() {
 }
 
 #[test]
+fn durable_resume_rejects_a_still_connected_token_without_rotating_it() {
+    let store = Arc::new(MemoryResumeStore::default());
+    let mut f = fixture();
+    f.gateway.attach_resume_store(store);
+    let connected = connect(&mut f.gateway, "account-alice", f.alice_principal);
+
+    let error = f
+        .gateway
+        .resume(
+            &connected.token,
+            &handshake(),
+            Tick::ZERO,
+            Millis::new(1_100),
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), ErrorCode::Conflict);
+
+    // The rejected attempt must not consume or rotate the live credential.
+    f.gateway
+        .disconnect(&connected.session, Tick::ZERO, Millis::new(1_200))
+        .unwrap();
+    let resumed = f
+        .gateway
+        .resume(
+            &connected.token,
+            &handshake(),
+            Tick::ZERO,
+            Millis::new(1_300),
+        )
+        .unwrap();
+    assert!(resumed.resumed);
+    assert_eq!(resumed.session, connected.session);
+}
+
+#[test]
 fn durable_revocation_failure_keeps_the_session_fail_closed_in_memory() {
     let store = Arc::new(MemoryResumeStore::default());
     let mut fixture = fixture();
@@ -2039,7 +2074,7 @@ fn durable_revocation_failure_keeps_the_session_fail_closed_in_memory() {
             )
             .unwrap_err()
             .code(),
-        ErrorCode::SessionExpired,
+        ErrorCode::Conflict,
         "the still-connected durable record cannot be resumed"
     );
 }

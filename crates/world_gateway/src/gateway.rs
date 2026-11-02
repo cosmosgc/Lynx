@@ -641,6 +641,15 @@ impl WorldGateway {
         let negotiated = negotiate(client, &self.server)?;
         let last_ack = clamp_tick(last_ack_tick, self.zone.tick());
         let (session, next_token) = if let Some(store) = self.resume_store.clone() {
+            // The durable claim excludes connected rows, so check the local
+            // registry first to preserve the documented `Conflict` result
+            // instead of reporting the token as unknown or expired.
+            if self.sessions.token_is_connected(token) {
+                return Err(EngineError::new(
+                    ErrorCode::Conflict,
+                    "the session is still connected",
+                ));
+            }
             let next = self.sessions.issue_token()?;
             let record = store
                 .consume_and_rotate(

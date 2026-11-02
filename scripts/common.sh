@@ -80,11 +80,29 @@ lynx_require_pg() {
 
     # Match the native Rust connector for libpq-backed setup/migration scripts.
     # Remote hosts always use verified TLS; plaintext is an explicit loopback
-    # development-only opt-in.
+    # development-only opt-in. Resolve names and fail closed if resolution is
+    # unavailable or returns even one non-loopback address.
     local loopback=false
-    case "$LYNX_PG_HOST" in
-        localhost | LOCALHOST | 127.* | ::1 | '[::1]') loopback=true ;;
+    local host="${LYNX_PG_HOST#[}"
+    host="${host%]}"
+    local addresses=''
+    case "$host" in
+        127.* | ::1) addresses="$host" ;;
+        *)
+            if command -v getent >/dev/null 2>&1; then
+                addresses="$(getent ahosts "$host" 2>/dev/null | awk '{print $1}' | sort -u)"
+            fi
+            ;;
     esac
+    if [[ -n "$addresses" ]]; then
+        loopback=true
+        while IFS= read -r address; do
+            case "$address" in
+                127.* | ::1) ;;
+                *) loopback=false; break ;;
+            esac
+        done <<< "$addresses"
+    fi
     if [[ "$loopback" == true && "${LYNX_PG_ALLOW_INSECURE_LOOPBACK:-}" == true ]]; then
         export PGSSLMODE=disable
     else

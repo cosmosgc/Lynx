@@ -132,8 +132,19 @@ function Set-LynxLibpqTlsPolicy {
 
     $hostName = $Config.Host.Trim('[', ']')
     $address = [System.Net.IPAddress]::None
-    $isLoopback = $hostName -ieq 'localhost' -or
-        ([System.Net.IPAddress]::TryParse($hostName, [ref]$address) -and [System.Net.IPAddress]::IsLoopback($address))
+    if ([System.Net.IPAddress]::TryParse($hostName, [ref]$address)) {
+        $resolvedAddresses = @($address)
+    }
+    else {
+        try {
+            $resolvedAddresses = @([System.Net.Dns]::GetHostAddresses($hostName))
+        }
+        catch {
+            $resolvedAddresses = @()
+        }
+    }
+    $isLoopback = $resolvedAddresses.Count -gt 0 -and
+        @($resolvedAddresses | Where-Object { -not [System.Net.IPAddress]::IsLoopback($_) }).Count -eq 0
     if ($isLoopback -and (Get-LynxSetting 'LYNX_PG_ALLOW_INSECURE_LOOPBACK' '') -ceq 'true') {
         $env:PGSSLMODE = 'disable'
     } else {

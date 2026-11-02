@@ -5,7 +5,9 @@
 //! disconnects over one channel; this loop serializes them with the tick,
 //! dispatches per-connection output, and closes connections whose sessions
 //! ended. Keeping the simulation single-threaded preserves the gateway's
-//! ordering guarantees and makes backpressure explicit.
+//! ordering guarantees and makes backpressure explicit. Synchronous authority
+//! work runs in Tokio's blocking section on multi-thread runtimes so the
+//! PostgreSQL sync client can safely drive its connection runtime.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
@@ -21,6 +23,7 @@ use engine_net::protocol::{ErrorPayload, Handshake};
 use engine_net::replication::SessionId;
 use engine_sim::entity::EntityRecord;
 use serde::{Deserialize, Serialize};
+use tokio::runtime::{Handle, RuntimeFlavor};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::MissedTickBehavior;
 use world_gateway::{ERROR_KIND, ResumeToken, SessionClaims};
@@ -533,7 +536,7 @@ impl Service {
                         self.metrics.tick_deadline_misses.fetch_add(1, Ordering::Relaxed);
                     }
                     next_deadline += self.tick;
-                    self.advance();
+                    run_authority_work(|| self.advance());
                     if self.authority_write_failed {
                         break;
                     }
@@ -542,19 +545,21 @@ impl Service {
                         && ticks_since_save >= persistence.interval_ticks
                     {
                         ticks_since_save = 0;
-                        self.save_snapshot();
+                        run_authority_work(|| self.save_snapshot());
                     }
                 }
                 event = events.recv() => {
                     let Some(event) = event else { break };
-                    self.handle(event);
+                    run_authority_work(|| self.handle(event));
                 }
             }
         }
 
-        self.save_snapshot();
-        self.close_all();
-        self.stop_authority();
+        run_authority_work(|| {
+            self.save_snapshot();
+            self.close_all();
+            self.stop_authority();
+        });
         tracing::debug!("world service loop stopped");
     }
 
@@ -1279,6 +1284,20 @@ fn world_delta_events(previous: &WorldSnapshot, current: &WorldSnapshot) -> Vec<
     }
 
     pending
+}
+
+/// Run synchronous authority and persistence operations without blocking the
+/// Tokio scheduler. Current-thread test runtimes use this directly with
+/// in-memory stores; the production multi-thread runtime permits the sync
+/// PostgreSQL client to drive its connection runtime inside `block_in_place`.
+fn run_authority_work<T>(work: impl FnOnce() -> T) -> T {
+    if Handle::try_current()
+        .is_ok_and(|handle| handle.runtime_flavor() == RuntimeFlavor::MultiThread)
+    {
+        tokio::task::block_in_place(work)
+    } else {
+        work()
+    }
 }
 
 fn clock() -> Millis {

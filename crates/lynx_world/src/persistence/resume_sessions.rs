@@ -7,9 +7,9 @@ use world_gateway::{ResumeSessionRecord, ResumeSessionStore, TokenDigest};
 
 /// PostgreSQL-backed durable resume session store.
 ///
-/// It owns one synchronous connection, matching the existing persistence
-/// adapters. Each token rotation is one conditional SQL `UPDATE`, so competing
-/// uses serialize on the row and only one can consume the prior digest.
+/// It leases connections from a bounded pool. Each token rotation is one
+/// conditional SQL `UPDATE` executed in a transaction, so competing uses
+/// serialize on the row and only one can consume the prior digest.
 pub struct PostgresResumeSessionStore {
     pool: PostgresPool,
 }
@@ -120,14 +120,31 @@ impl ResumeSessionStore for PostgresResumeSessionStore {
         let mut client = self.pool.acquire().map_err(|_| store_poisoned())?;
         let mut tx = client.transaction().map_err(store_error)?;
         let row = tx.query_opt(
-            "SELECT session_id, account_id, principal_id, actor_id, token_digest, expires_at_ms, connected, generation, revoked, staff FROM lynx.resume_sessions WHERE token_digest = $1 AND NOT connected AND NOT revoked AND expires_at_ms > $2 FOR UPDATE",
-            &[&&current.as_bytes()[..], &now_ms],
+            "SELECT session_id, account_id, principal_id, actor_id, token_digest, expires_at_ms, connected, generation, revoked, staff FROM lynx.resume_sessions WHERE token_digest = $1 FOR UPDATE",
+            &[&&current.as_bytes()[..]],
         ).map_err(store_error)?;
         let Some(row) = row else {
             tx.commit().map_err(store_error)?;
             return Ok(None);
         };
         let mut record = decode_record(&row)?;
+        if record.revoked {
+            tx.commit().map_err(store_error)?;
+            return Ok(None);
+        }
+        if record.connected {
+            // The caller still has a live transport for this credential, or a
+            // peer process does. Report the documented conflict rather than
+            // treating the token as unknown and leaving the state ambiguous.
+            return Err(EngineError::new(
+                ErrorCode::Conflict,
+                "the session is still connected",
+            ));
+        }
+        if record.expires_at_ms.is_none_or(|expiry| expiry <= now_ms) {
+            tx.commit().map_err(store_error)?;
+            return Ok(None);
+        }
         let changed = tx.execute(
             "UPDATE lynx.resume_sessions SET token_digest = $2, expires_at_ms = NULL, connected = true, generation = generation + 1 WHERE session_id = $1 AND token_digest = $3 AND NOT connected AND NOT revoked",
             &[&record.session_id, &&next.as_bytes()[..], &&current.as_bytes()[..]],

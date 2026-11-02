@@ -143,6 +143,20 @@ impl MessageKind {
     pub fn namespace(&self) -> &str {
         self.0.split('.').next().unwrap_or(&self.0)
     }
+
+    /// Whether this kind carries a bearer credential in its body.
+    ///
+    /// Credential-bearing envelopes redact their body from [`Envelope`]'s
+    /// debug output so a stray log line cannot reveal a resume token or a
+    /// similar secret. The check matches the final kind segment, so
+    /// `world.token`, `auth.credential`, and `admin.secret` are covered.
+    #[must_use]
+    pub fn carries_credentials(&self) -> bool {
+        matches!(
+            self.0.rsplit('.').next().unwrap_or(&self.0),
+            "token" | "credential" | "credentials" | "secret"
+        )
+    }
 }
 
 impl fmt::Display for MessageKind {
@@ -174,7 +188,7 @@ impl From<MessageKind> for String {
 }
 
 /// The wire representation of one protocol message.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Envelope {
     /// Protocol version of the sender.
     #[serde(rename = "v")]
@@ -189,6 +203,22 @@ pub struct Envelope {
     /// Groups a reply or effect with the request that caused it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correlation: Option<MessageId>,
+}
+
+impl fmt::Debug for Envelope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = f.debug_struct("Envelope");
+        debug
+            .field("version", &self.version)
+            .field("id", &self.id)
+            .field("kind", &self.kind);
+        if self.kind.carries_credentials() {
+            debug.field("body", &"<redacted credential body>");
+        } else {
+            debug.field("body", &self.body);
+        }
+        debug.field("correlation", &self.correlation).finish()
+    }
 }
 
 impl Envelope {
@@ -374,6 +404,24 @@ mod tests {
 
         let decoded = Envelope::decode(&text).unwrap();
         assert_eq!(decoded, envelope);
+    }
+
+    #[test]
+    fn debug_redacts_credential_bearing_bodies() {
+        let envelope = Envelope::new(
+            id("tok-1"),
+            kind("world.token"),
+            json!({ "resume": "super-secret-resume-token" }),
+        );
+        let rendered = format!("{envelope:?}");
+        assert!(!rendered.contains("super-secret-resume-token"));
+        assert!(rendered.contains("<redacted credential body>"));
+        assert!(kind("world.token").carries_credentials());
+        assert!(kind("auth.credential").carries_credentials());
+        assert!(!kind("action.request").carries_credentials());
+
+        let ordinary = Envelope::new(id("evt-1"), kind("world.event"), json!({ "hp": 3 }));
+        assert!(format!("{ordinary:?}").contains("\"hp\": Number(3)"));
     }
 
     #[test]

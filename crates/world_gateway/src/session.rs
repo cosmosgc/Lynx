@@ -564,6 +564,14 @@ impl SessionRegistry {
         self.tokens.contains_key(token)
     }
 
+    /// Whether this process still has the token attached to a connected session.
+    pub(crate) fn token_is_connected(&self, token: &ResumeToken) -> bool {
+        self.tokens
+            .get(token)
+            .and_then(|id| self.sessions.get(id))
+            .is_some_and(|record| record.view.connected)
+    }
+
     pub(crate) fn restore_rotated(
         &mut self,
         view: GatewaySession,

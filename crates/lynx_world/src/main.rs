@@ -234,7 +234,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
 
     args.validate_snapshot_args()
         .context("invalid snapshot configuration")?;
-    let stores = durable_stores(&args)?;
+    let stores = tokio::task::block_in_place(|| durable_stores(&args))?;
     let store = stores.snapshot.clone();
     if args.auth_mode == AuthMode::Nakama && store.is_none() {
         bail!(
@@ -255,66 +255,73 @@ async fn serve(args: ServeArgs) -> Result<()> {
     // restores cannot be written by a superseded owner while it starts. The
     // demo zone ID is fixed, so it is known without loading anything.
     let authority = match (&stores.postgres, &stores.leases) {
-        (Some(postgres), Some(leases)) => Some(Arc::new(start_authority(
-            postgres,
-            leases,
-            &demo::zone_instance().to_string(),
-            args.lease_ttl()
-                .context("invalid zone lease configuration")?,
-        )?)),
+        (Some(postgres), Some(leases)) => Some(Arc::new(tokio::task::block_in_place(|| {
+            start_authority(
+                postgres,
+                leases,
+                &demo::zone_instance().to_string(),
+                args.lease_ttl()
+                    .context("invalid zone lease configuration")?,
+            )
+        })?)),
         _ => None,
     };
     if let (Some(resumes), Some(authority)) = (&stores.resume_sessions, &authority) {
         let expires = now_ms.saturating_add(gateway_config.resume_ttl.as_i64());
         let lease = authority.lease();
-        if let Err(error) = resumes.detach_stale_connected(
-            &lease.zone_id,
-            &lease.owner,
-            lease.fencing_token,
-            expires,
-        ) {
-            let _ = authority.release();
+        if let Err(error) = tokio::task::block_in_place(|| {
+            resumes.detach_stale_connected(
+                &lease.zone_id,
+                &lease.owner,
+                lease.fencing_token,
+                expires,
+            )
+        }) {
+            let _ = tokio::task::block_in_place(|| authority.release());
             return Err(error)
                 .context("failed to fence stale durable sessions after acquiring the zone lease");
         }
-        if let Err(error) = resumes.sweep_expired(now_ms) {
-            let _ = authority.release();
+        if let Err(error) = tokio::task::block_in_place(|| resumes.sweep_expired(now_ms)) {
+            let _ = tokio::task::block_in_place(|| authority.release());
             return Err(error).context("failed to sweep expired durable sessions at startup");
         }
     }
     if let (Some(faction_calendar), Some(authority)) = (&stores.faction_calendar, &authority) {
         let lease = authority.lease();
-        if let Err(error) =
+        if let Err(error) = tokio::task::block_in_place(|| {
             faction_calendar.bind_zone_lease(&lease.zone_id, &lease.owner, lease.fencing_token)
-        {
-            let _ = authority.release();
+        }) {
+            let _ = tokio::task::block_in_place(|| authority.release());
             return Err(error).context("failed to fence normalized faction/calendar writes");
         }
     }
     let recovery_started = std::time::Instant::now();
-    let startup_result = startup::load(
-        store
-            .as_ref()
-            .map(|store| store.as_ref() as &dyn SnapshotStore),
-        args.fresh,
-        &grants,
-        now_ms,
-    );
+    let startup_result = tokio::task::block_in_place(|| {
+        startup::load(
+            store
+                .as_ref()
+                .map(|store| store.as_ref() as &dyn SnapshotStore),
+            args.fresh,
+            &grants,
+            now_ms,
+        )
+    });
     let mut startup_world = match startup_result {
         Ok(world) => world,
         Err(error) => {
             if let Some(authority) = &authority {
-                let _ = authority.release();
+                let _ = tokio::task::block_in_place(|| authority.release());
             }
             return Err(error).context("failed to start the demo world");
         }
     };
     if let Some(faction_calendar) = &stores.faction_calendar
-        && let Err(error) =
+        && let Err(error) = tokio::task::block_in_place(|| {
             initialize_normalized_world(faction_calendar, &mut startup_world, args.fresh)
+        })
     {
         if let Some(authority) = &authority {
-            let _ = authority.release();
+            let _ = tokio::task::block_in_place(|| authority.release());
         }
         return Err(error).context("failed to initialize normalized faction/calendar state");
     }
@@ -342,8 +349,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
     if !quarantined.is_empty() {
         let zone_id = demo::zone_instance().to_string();
         if let Some(store) = &store {
-            store
-                .record_quarantine(&zone_id, &quarantined)
+            tokio::task::block_in_place(|| store.record_quarantine(&zone_id, &quarantined))
                 .context("failed to persist the recovery quarantine report")?;
         }
         tracing::warn!(
@@ -389,7 +395,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
     // first second instead of waiting for the first interval save. Under
     // --fresh a failed write aborts startup: serving would otherwise hide that
     // the played snapshot is still on disk.
-    let baseline = service.try_save_snapshot();
+    let baseline = tokio::task::block_in_place(|| service.try_save_snapshot());
     if args.fresh {
         baseline.context("--fresh could not overwrite the world snapshot")?;
     } else if let Err(error) = baseline {
@@ -399,7 +405,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
     let (events, receivers) = transport::event_channel();
     let (shutdown, shutdown_rx) = watch::channel(false);
     let metrics = service.metrics();
-    let state = match (authenticator, identity_backend) {
+    let state = match (authenticator, identity_backend.clone()) {
         (Some(authenticator), None) => AppState::new(events, authenticator),
         (None, Some(backend)) => {
             let telemetry = Arc::clone(&backend);
@@ -539,7 +545,8 @@ async fn serve(args: ServeArgs) -> Result<()> {
         let _ = signal_shutdown.send(true);
     };
 
-    let result = transport::serve_with_shutdown(listener, state, shutdown_signal).await;
+    let result =
+        transport::serve_with_shutdown(listener, Arc::clone(&state), shutdown_signal).await;
     let _ = shutdown.send(true);
     admin_task
         .await
@@ -555,7 +562,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         renewal.abort();
     }
     if let Some(authority) = &authority {
-        match authority.release() {
+        match tokio::task::block_in_place(|| authority.release()) {
             Ok(true) => tracing::info!(zone = authority.zone_id(), "zone lease released"),
             Ok(false) => tracing::warn!(
                 zone = authority.zone_id(),
@@ -568,7 +575,18 @@ async fn serve(args: ServeArgs) -> Result<()> {
             ),
         }
     }
-    result.context("the HTTP server stopped with an error")
+    let result = result.context("the HTTP server stopped with an error");
+    // The PostgreSQL sync client drives its own runtime when connections are
+    // dropped. Release final store references in Tokio's blocking section just
+    // as their synchronous operations were run above.
+    tokio::task::block_in_place(|| {
+        drop(state);
+        drop(identity_backend);
+        drop(store);
+        drop(authority);
+        drop(stores);
+    });
+    result
 }
 
 fn production_identity_backend() -> Result<Arc<NakamaIdentityBackend>> {

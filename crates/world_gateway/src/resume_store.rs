@@ -112,7 +112,9 @@ pub trait ResumeSessionStore: std::fmt::Debug + Send + Sync {
     /// Atomically consume `current` and replace it with `next` if eligible.
     /// Returns the consumed detached metadata with the new digest and fence,
     /// preserving its checked expiry for restoration validation, or `None`
-    /// when the token cannot be used.
+    /// when the token cannot be used. Returns
+    /// [`engine_core::error::ErrorCode::Conflict`] when the token still belongs
+    /// to a connected session.
     fn consume_and_rotate(
         &self,
         current: TokenDigest,

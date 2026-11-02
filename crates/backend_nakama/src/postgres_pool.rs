@@ -157,11 +157,17 @@ impl<T> ConnectionPool<T> {
     /// Stop accepting acquisitions and drop idle connections. Leased
     /// connections are dropped rather than returned when their guards finish.
     pub fn close(&self) {
-        if let Ok(mut state) = self.inner.state.lock() {
+        // Take the idle clients out while holding the lock, but drop them after
+        // releasing it: closing a socket may block, and no other caller should
+        // wait on the pool mutex for that.
+        let idle = if let Ok(mut state) = self.inner.state.lock() {
             state.closed = true;
             state.total = state.total.saturating_sub(state.idle.len());
-            state.idle.clear();
-        }
+            std::mem::take(&mut state.idle)
+        } else {
+            Vec::new()
+        };
+        drop(idle);
         self.inner.available.notify_all();
     }
 
@@ -216,9 +222,13 @@ impl<T> Drop for PooledConnection<T> {
 pub type PostgresPool = ConnectionPool<Client>;
 
 /// Construct a shared pool using the verified TLS policy in this module.
+///
+/// Each newly opened physical connection goes through the same bounded
+/// three-attempt initial-connect budget as [`super::postgres_connection::connect_with_retry`].
+/// Queries are still never retried.
 pub fn pool(config: Config, maximum: usize, acquisition_timeout: Duration) -> PostgresPool {
     ConnectionPool::new(maximum, acquisition_timeout, move || {
-        super::postgres_connection::connect(&config)
+        super::postgres_connection::connect_with_retry(&config)
     })
 }
 

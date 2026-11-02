@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::io::Cursor;
-use std::net::IpAddr;
+use std::net::{IpAddr, ToSocketAddrs};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -118,9 +118,24 @@ fn plaintext_is_allowed(hosts: &[Host], addresses: &[IpAddr], opt_in: bool) -> b
         && addresses.iter().all(IpAddr::is_loopback)
 }
 
+/// Accept an IP literal or hostname only when every address it resolves to is
+/// loopback.
+///
+/// Checking the hostname text is not enough: `localhost` and any other name can
+/// be redirected by hosts-file or DNS entries. Plaintext is a development-only
+/// opt-in, so an unresolvable name is rejected instead of deferring the check
+/// to the driver's own resolution.
 fn is_loopback_host(host: &str) -> bool {
-    host.eq_ignore_ascii_case("localhost")
-        || IpAddr::from_str(host).is_ok_and(|address| address.is_loopback())
+    if let Ok(address) = IpAddr::from_str(host) {
+        return address.is_loopback();
+    }
+    let Ok(mut addresses) = (host, 0_u16).to_socket_addrs() else {
+        return false;
+    };
+    let Some(first) = addresses.next() else {
+        return false;
+    };
+    first.ip().is_loopback() && addresses.all(|address| address.ip().is_loopback())
 }
 
 fn environment_or(name: &str, default: &str) -> String {
@@ -208,7 +223,12 @@ mod tests {
         for host in ["localhost", "LOCALHOST", "127.0.0.1", "::1"] {
             assert!(is_loopback_host(host), "{host}");
         }
-        for host in ["db.internal", "192.168.1.2", "0.0.0.0"] {
+        for host in [
+            "db.internal",
+            "192.168.1.2",
+            "0.0.0.0",
+            "lynx-postgres.invalid",
+        ] {
             assert!(!is_loopback_host(host), "{host}");
         }
     }
