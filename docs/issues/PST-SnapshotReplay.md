@@ -70,7 +70,8 @@ The persistence layer implements:
 ## Defect
 
 None for the replay and retention scope above. Durable session/resume state after
-a world restart remains open under `PST-006`.
+a world restart is covered by `PST-006` for PostgreSQL mode; file and memory
+modes intentionally remain process-local.
 
 ## Impact
 

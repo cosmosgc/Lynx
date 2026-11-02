@@ -518,14 +518,18 @@ See [ADR 0013](adr/0013-world-gateway-and-reconnect.md).
 - The reply is always a full owner snapshot (inventories and owner-scoped state)
   plus a fresh interest snapshot. Subsequent ticks send deltas. There is no
   client-chosen "since" cursor.
-- An unknown, expired, replayed, or already-connected token returns
-  `ErrorCode::SessionExpired` (or `Conflict` for the connected case) and no
-  session state is handed out. Expired windows are swept on connect, resume,
-  and every tick.
+- An unknown, expired, or replayed token returns `ErrorCode::SessionExpired`;
+  a still-connected token returns `Conflict` and does not rotate the credential.
+  No session state is handed out on either failure. Expired windows are swept on
+  connect, resume, and every tick.
 - Duplicate action IDs after a retry return the original result instead of
   applying the action twice. IDs are scoped to the session that sent them.
-- Sessions live in memory today. A zone restart invalidates resume windows;
-  durable session storage is future work.
+- With PostgreSQL world state enabled, hashed resume-token digests and session
+  metadata survive a zone restart under the current zone-lease fence; the actor
+  is restored from world persistence and interest state is rebuilt. File and
+  memory modes remain process-local. Nakama currently exposes no role-change
+  feed, so the integration receiving authoritative role changes must call the
+  trusted server-side revocation hook.
 
 ## Transport
 

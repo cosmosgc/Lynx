@@ -16,7 +16,7 @@ while its Nakama HTTP client is limited to health and authentication. Inventory
 storage is available through the trusted persistence seam but is not yet wired
 into live world-service routing. PostgreSQL faction/calendar runtime wiring is
 implemented under PST-003; durable resume sessions and PostgreSQL connection
-hardening are in progress under PST-006/PST-007. Social/chat and admin runtime
+hardening are complete under PST-006/PST-007. Social/chat and admin runtime
 integrations remain absent. Most normalized tables are not yet used by the
 runtime.
 
@@ -332,7 +332,8 @@ across a crash, then verifies replay after checkpoint pruning.
 ## PST-006 — Durable sessions and resume windows
 
 - **Priority:** P2
-- **Status:** In progress — durable lifecycle implemented; role-change source integration pending
+- **Status:** Done — durable lifecycle and trusted revocation control delivered;
+  upstream role source remains integration-specific
 - **Depends on:** `PST-001`, `NET-001`
 - **References:** [networking §Reconnect and recovery](../networking.md#reconnect-and-recovery),
   ADR 0013
@@ -351,12 +352,12 @@ every resume window even though the world and characters survive.
 
 **Acceptance criteria**
 
-- [ ] A reconnect after a service restart resumes within the configured window.
-- [ ] Replayed, expired, revoked, and already-connected tokens are rejected with
+- [x] A reconnect after a service restart resumes within the configured window.
+- [x] Replayed, expired, revoked, and already-connected tokens are rejected with
       the documented error codes.
-- [ ] Token rotation is atomic and survives a crash between validation and
+- [x] Token rotation is atomic and survives a crash between validation and
       rotation.
-- [ ] Expired windows are swept without unbounded table growth.
+- [x] Expired windows are swept without unbounded table growth.
 
 **Implementation state:** Migrations 0014/0015 and a durable store persist
 hashed token digests, verified account/character/actor metadata, expiry,
@@ -364,15 +365,33 @@ connected/revoked state, staff claim, and generation. Token consumption and
 rotation are atomic; startup detaches stale connected records only under the
 current zone lease. The gateway wires create/detach/rotate/revoke and restores
 eligible sessions from the replayed zone, rebuilding interest and sending a
-fresh snapshot. Nakama-mode admission routes resume credentials without
-trusting selection headers. Revocation is fail-closed: the in-memory session is
-not removed if its durable revoke fails, and the failure is surfaced to the
-service. A trusted principal-wide revocation hook invalidates retained durable
-claims and local sessions, closes active transports through the authority event
+fresh snapshot. `postgres_gateway_resumes_session_after_process_restart_with_lease_fencing`
+exercises this end to end against PostgreSQL, including takeover fencing,
+actor restoration, token rotation, and durable principal revocation. Nakama-mode
+admission routes resume credentials without trusting selection headers.
+`postgres_resume_token_rotation_is_single_use_and_generation_fenced` races two
+independent PostgreSQL connections and verifies exactly one atomic rotation
+wins, rejects a token while its session is connected, rejects replay, and checks
+the expiry sweep. `postgres_resume_rotation_survives_backend_loss_before_commit`
+terminates the PostgreSQL backend after row validation and verifies rollback
+leaves the prior digest claimable. Gateway tests assert `SessionExpired` for
+replayed, expired, and revoked credentials and `Conflict` for an
+already-connected session, and both the in-memory and PostgreSQL stores reject a
+connected token without rotating or revoking it. `postgres_principal_revocation_flows_through_app_state_and_service`
+drives an attached session through the trusted `AppState` event channel,
+checks that the service closes its transport, and verifies PostgreSQL persisted
+the revocation.
+Revocation is fail-closed: the in-memory session is not removed if its durable
+revoke fails, and the failure is surfaced to the service. A trusted
+principal-wide revocation hook invalidates retained durable claims and local
+sessions, closes active transports through the authority event
 channel, and is exposed as a server-side `AppState` control method (never an
 HTTP/client route). The production Nakama adapter does not currently expose a
 role-change feed, so the integration receiving authoritative role updates must
-invoke this method.
+invoke this method. Delivery loss after a committed rotation but before the
+client receives `world.token` remains tracked separately in
+[`NET-ClientReadinessReview`](../issues/NET-ClientReadinessReview.md); PST-006
+does not weaken immediate token invalidation to address it.
 
 ---
 
@@ -413,11 +432,16 @@ database and not acceptable for a remote one.
 **Implementation state:** `backend_nakama::postgres_connection` centralizes
 Rust PostgreSQL configuration, verified native TLS (including optional PEM
 trust roots), and bounded initial-connect retry. Remote plaintext is refused;
-loopback plaintext requires `LYNX_PG_ALLOW_INSECURE_LOOPBACK=true`. World,
-schema inspection, and normalized stores use this policy, and failures avoid
-exposing connection details. A bounded pool with a two-second acquisition
-deadline is shared by world-state stores and by identity/character stores;
-inventory adapters can also use the pool seam. The libpq setup and migration
+loopback plaintext requires `LYNX_PG_ALLOW_INSECURE_LOOPBACK=true` and is
+accepted only when every configured host resolves exclusively to loopback
+addresses, so a hosts-file or DNS alias cannot smuggle a remote endpoint past
+the text check. World, schema inspection, and normalized stores use this
+policy, and failures avoid exposing connection details. A bounded pool with a
+two-second acquisition deadline is shared by world-state stores and by
+identity/character stores; inventory adapters can also use the pool seam. New
+physical pool connections use the same three-attempt connect budget, and pool
+shutdown drains idle clients outside the pool mutex so a slow socket close
+cannot stall waiters. The libpq setup and migration
 scripts now apply the same verified-TLS-by-default policy, including the
 explicit loopback-only plaintext opt-in and private CA setting. Remaining scope
 is limited to operational monitoring of pool and TLS failures. TLS tests perform

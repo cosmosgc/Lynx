@@ -182,13 +182,19 @@ hosts; certificates are checked against the platform's native trust store.
 For a private CA, set `LYNX_PG_TLS_CA_CERT` to a PEM certificate bundle. Hostname
 verification remains enabled. Remote plaintext connections are not supported.
 For isolated local development only, set
-`LYNX_PG_ALLOW_INSECURE_LOOPBACK=true` to permit plaintext when all configured
-hosts are loopback addresses/names; leave it unset in deployed environments.
-Without that opt-in, loopback connections also require verified TLS.
+`LYNX_PG_ALLOW_INSECURE_LOOPBACK=true` to permit plaintext when every configured
+host resolves exclusively to loopback addresses; leave it unset in deployed
+environments. Without that opt-in, loopback connections also require verified
+TLS.
 World-state stores share a bounded eight-connection pool with a two-second
 acquisition deadline; identity and character stores share a separate pool with
-the same limits. Pool exhaustion returns a sanitized error rather than waiting
-indefinitely.
+the same limits. New physical pool connections use the bounded three-attempt
+connect budget, and pool shutdown closes idle sockets outside the pool lock.
+Pool exhaustion returns a sanitized error rather than waiting indefinitely.
+PostgreSQL work is synchronous and runs inside Tokio's blocking section, so a
+PostgreSQL-backed world service must use a multi-thread Tokio runtime; the
+binary's default `#[tokio::main]` runtime qualifies. A current-thread runtime is
+safe only for in-memory stores.
 The setup and migration scripts use libpq and apply the same TLS policy
 automatically: remote hosts use `verify-full`, with `LYNX_PG_TLS_CA_CERT` mapped
 to libpq's root-certificate setting. Plaintext is enabled for scripts only when

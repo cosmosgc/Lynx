@@ -88,10 +88,12 @@ servers.
   cap, so reconnect windows cannot bypass admission limits.
 - Resume tokens are opaque, server-issued, short-lived (default 30 s),
   single-use, and rotated on every resume. They are redacted from `Debug` and
-  must never be logged or embedded in error details. The transport delivers the
-  current token once in `world.token`; that message must not reach logs,
-  traces, or crash reports. Unknown, expired, or replayed tokens fail with
-  `SessionExpired`; a still-connected session fails with `Conflict`.
+  must never be logged or embedded in error details. Protocol envelopes whose
+  kind carries a credential (`world.token`) also redact their body from `Debug`.
+  The transport delivers the current token once in `world.token`; that message
+  must not reach logs, traces, or crash reports. Unknown, expired, or replayed
+  tokens fail with `SessionExpired`; a still-connected session fails with
+  `Conflict` and keeps its current token.
 - The client's acknowledged tick is clamped to the authoritative tick.
 - Admission is token-bucket limited per peer IP for upgrade handshakes, failed
   credentials, and connection churn. The limiter has a fixed maximum identity
