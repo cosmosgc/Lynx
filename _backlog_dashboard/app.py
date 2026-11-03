@@ -508,6 +508,28 @@ def load_backlog(todo_dir: Path) -> list[dict[str, Any]]:
     for item in items:
         item["dependent_ids"] = dependents[item["id"]]
 
+    items_by_id = {item["id"]: item for item in items}
+    for item in items:
+        resolved_dependencies = [
+            dependency_id
+            for dependency_id in item["dependency_ids"]
+            if items_by_id[dependency_id]["status"] == "done"
+        ]
+        item["stale_blocked"] = bool(
+            item["status"] == "blocked"
+            and item["dependency_ids"]
+            and len(resolved_dependencies) == len(item["dependency_ids"])
+            and not item["external_dependencies"]
+        )
+        item["stale_blocked_dependency_ids"] = resolved_dependencies if item["stale_blocked"] else []
+        item["stale_blocked_reason"] = (
+            "All tracked task dependencies are done: "
+            + ", ".join(resolved_dependencies)
+            + ". No unresolved external dependencies are recorded."
+            if item["stale_blocked"]
+            else ""
+        )
+
     return items
 
 
@@ -1028,7 +1050,14 @@ def create_app(
             for item in items
             for dependency_id in item["dependency_ids"]
         ]
-        return jsonify({"items": items, "nodes": items, "edges": edges})
+        return jsonify(
+            {
+                "items": items,
+                "nodes": items,
+                "edges": edges,
+                "stale_tasks": [item for item in items if item["stale_blocked"]],
+            }
+        )
 
     @app.get("/api/plan")
     def api_plan():

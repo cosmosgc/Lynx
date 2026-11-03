@@ -722,7 +722,7 @@ version.
 ## PST-014 — Economy and audit ledger
 
 - **Priority:** P2
-- **Status:** Blocked — `PST-002`
+- **Status:** Ready
 - **Depends on:** `PST-002`
 - **References:** migration `0004_factions.sql` treasury ledger,
   [security §Audit](../security.md)

@@ -43,6 +43,8 @@
     .details { position:sticky; top:12px; padding:16px; max-height:72vh; overflow:auto; }
     .details h2 { font-size:18px; margin-bottom:4px; }
     .badge { display:inline-block; border:1px solid var(--line); border-radius:99px; padding:2px 8px; margin:3px 4px 3px 0; white-space:nowrap; }
+    .badge.stale { color:var(--yellow); border-color:#806b3d; background:#302a1c; }
+    .stale-list { margin:0 0 14px; padding:12px 16px; }.stale-list h2 { margin:0 0 6px; font-size:17px; }.stale-list ul { margin:0; padding-left:22px; }.stale-list li { padding:3px 0; }
     .status { color:var(--muted); }.status.done { color:var(--green); }.status.in_progress { color:var(--blue); }.status.blocked { color:var(--red); }.status.proposed,.status.icebox { color:var(--yellow); }
     .detail-block { border-top:1px solid var(--line); margin-top:14px; padding-top:12px; }
     .detail-block h3 { font-size:13px; margin:0 0 7px; }
@@ -76,6 +78,12 @@
     <span><i class="swatch proposed"></i>Proposed</span><span><i class="swatch icebox"></i>Icebox</span>
     <span><i class="swatch unspecified"></i>Unspecified</span>
   </div>
+  {% set stale_tasks = items|selectattr('stale_blocked')|list %}
+  <section class="panel stale-list" aria-label="Stale blocked tasks">
+    <h2>Stale blocked tasks <span class="badge stale">{{ stale_tasks|length }}</span></h2>
+    {% if stale_tasks %}<ul>{% for task in stale_tasks %}<li><a href="/source?file={{ task.file|urlencode }}#L{{ task.line }}"><strong>{{ task.id }}</strong> — {{ task.title }}</a>: {{ task.stale_blocked_reason }}</li>{% endfor %}</ul>
+    {% else %}<p class="muted" style="margin:0">No blocked tasks have all tracked prerequisites completed.</p>{% endif %}
+  </section>
   <div class="layout">
     <section class="panel graph-wrap" id="graph-wrap" aria-label="Scrollable dependency graph">
       <svg id="graph" role="img" aria-label="Full task dependency graph"></svg>
@@ -220,7 +228,7 @@
     ];
     details.innerHTML = `<h2>${escapeHtml(item.id)} — ${escapeHtml(item.title)}</h2>
       <p class="source"><a href="/source?file=${encodeURIComponent(item.file)}#L${item.line}">${escapeHtml(item.file)}:${item.line}</a></p>
-      <span class="badge status ${item.status}">${escapeHtml(item.status_label)}</span><span class="badge">${escapeHtml(item.priority)}</span>
+      <span class="badge status ${item.status}">${escapeHtml(item.status_label)}</span><span class="badge">${escapeHtml(item.priority)}</span>${item.stale_blocked ? `<span class="badge stale">Stale blocked</span><p class="muted">${escapeHtml(item.stale_blocked_reason)}</p>` : ""}
       ${item.status_detail ? `<p class="muted">${escapeHtml(item.status_detail)}</p>` : ""}
       <div class="detail-block"><h3>Depends on</h3>${linkButtons(item.dependency_ids)}${item.external_dependencies.map(value => `<span class="badge">${escapeHtml(value)}</span>`).join("")}</div>
       <div class="detail-block"><h3>Dependents</h3>${linkButtons(item.dependent_ids)}</div>

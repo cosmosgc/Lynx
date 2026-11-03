@@ -194,6 +194,24 @@ Phase 1  Engine skeleton             [██████████████
         self.assertEqual(history.json, {"changes": [], "count": 0})
         self.assertEqual(client.get("/api/history?task=UNKNOWN-999").status_code, 404)
 
+    def test_dependency_api_and_view_identify_stale_blocked_tasks(self):
+        task_file = self.todo / "10-sample.md"
+        task_file.write_text(
+            task_file.read_text(encoding="utf-8").replace(
+                "- **Status:** In progress — basic slice", "- **Status:** Done"
+            ),
+            encoding="utf-8",
+        )
+        client = self.make_app().test_client()
+
+        response = client.get("/api/dependencies")
+        stale = response.json["stale_tasks"]
+        self.assertEqual([task["id"] for task in stale], ["SIM-002"])
+        self.assertTrue(stale[0]["stale_blocked"])
+        self.assertIn("SIM-001", stale[0]["stale_blocked_reason"])
+        self.assertIn(b"Stale blocked tasks", client.get("/dependencies").data)
+        self.assertIn(b"Stale blocked", client.get("/dependencies").data)
+
     def test_decisions_view_connects_roadmap_gates_adrs_and_tasks(self):
         adr_dir = self.root / "docs" / "adr"
         adr_dir.mkdir(parents=True)

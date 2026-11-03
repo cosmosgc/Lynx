@@ -251,7 +251,7 @@ prioritizing tanks). It is a design proposal, not an implementation contract.
 ## SIM-005 — Combat depth: status, mitigation, death, respawn
 
 - **Priority:** P2
-- **Status:** Blocked — `SIM-003`
+- **Status:** Ready
 - **Depends on:** `SIM-003`
 - **References:** `SIM-003`, `SIM-004`
 
@@ -571,7 +571,7 @@ moderation substitute.
 ## SIM-014 — Additional zones and travel
 
 - **Priority:** P2
-- **Status:** Blocked — `SIM-001`, `PST-005`
+- **Status:** Ready
 - **Depends on:** `SIM-001`, `PST-005`
 
 **Scope**
@@ -623,7 +623,7 @@ action rules are still design-only.
 ## SIM-016 — Faction and territory edge hardening
 
 - **Priority:** P2
-- **Status:** Blocked — `PST-003`
+- **Status:** Ready
 - **Depends on:** `PST-003`
 - **References:** ADR 0020, [world simulation](../world-simulation.md#factions-guilds-and-wealth)
 

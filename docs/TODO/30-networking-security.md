@@ -298,7 +298,7 @@ entity counts and movement grow, replication will become the first bottleneck.
 ## NET-008 — Admin and moderation actions
 
 - **Priority:** P2
-- **Status:** Blocked — `NET-001`
+- **Status:** Ready
 - **Depends on:** `NET-001`
 - **References:** [security §Moderation](../security.md), ADR 0002
 
@@ -379,7 +379,7 @@ entity counts and movement grow, replication will become the first bottleneck.
 ## NET-011 — Anti-cheat and anomaly detection
 
 - **Priority:** P2
-- **Status:** Blocked — `NET-002`, `SIM-001`, `SIM-003`
+- **Status:** Ready
 - **Depends on:** `NET-002`, `SIM-001`, `SIM-003`
 - **References:** [security §Authority invariants](../security.md#authority-invariants),
   `SIM-001`, `SIM-003`

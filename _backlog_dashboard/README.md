@@ -11,8 +11,11 @@ The `/decisions` view lists roadmap decision gates and ADRs, with links to their
 source documents and connected backlog tasks; task details link back to their
 gates and ADRs. JSON endpoints are available for integrations:
 `/api/backlog` returns parsed tasks and summaries, `/api/dependencies` returns
-graph nodes and prerequisite-to-dependent edges, `/api/plan` returns a
-prerequisite-first ordering and actionable suggestions, `/api/history` returns
+graph nodes and prerequisite-to-dependent edges, plus a `stale_tasks` list for
+blocked tasks whose tracked prerequisites are all done and have no external
+dependencies. These tasks include `stale_blocked` and `stale_blocked_reason`
+fields. `/api/plan` returns a prerequisite-first ordering and actionable
+suggestions, `/api/history` returns
 status changes, and `/api/decisions` returns decision gates and ADRs. The
 history endpoint accepts an optional `?task=TASK-ID` filter, and the plan
 endpoint accepts `?next=N` (1–100; default 5).

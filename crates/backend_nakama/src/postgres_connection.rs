@@ -157,22 +157,59 @@ fn is_true_flag(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rcgen::{
+        BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+        KeyUsagePurpose,
+    };
     use std::io::{Read, Write};
     use std::net::{IpAddr, Ipv4Addr, TcpListener};
     use std::sync::mpsc;
     use std::thread;
     use std::time::Instant;
+    use time::{Duration as CalendarDuration, OffsetDateTime};
 
-    // Keep the localhost server leaf separate from its test-only CA. In
-    // particular, do not use a self-signed CA certificate as the server leaf:
-    // Secure Transport on macOS rejects that chain. These files are only for
-    // the in-process TLS probes below.
+    // Generate a short-lived CA-issued leaf at runtime. Current Apple/browser TLS
+    // policies cap end-entity lifetimes below 400 days, so static test
+    // certificates eventually become either expired or platform-incompatible.
     fn tls_probe_server() -> (
         Config,
         u16,
         mpsc::Receiver<&'static str>,
         thread::JoinHandle<()>,
+        tempfile::NamedTempFile,
     ) {
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let ca_key =
+            KeyPair::from_pem(include_str!("../tests/fixtures/postgres-test-ca-key.pem")).unwrap();
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+        let issuer = Issuer::new(ca_params, ca_key);
+
+        let now = OffsetDateTime::now_utc();
+        let mut leaf_params = CertificateParams::new(vec!["localhost".to_owned()]).unwrap();
+        leaf_params.not_before = now - CalendarDuration::days(1);
+        leaf_params.not_after = now + CalendarDuration::days(300);
+        leaf_params.use_authority_key_identifier_extension = true;
+        leaf_params
+            .key_usages
+            .push(KeyUsagePurpose::DigitalSignature);
+        leaf_params
+            .key_usages
+            .push(KeyUsagePurpose::KeyEncipherment);
+        leaf_params
+            .extended_key_usages
+            .push(ExtendedKeyUsagePurpose::ServerAuth);
+        let leaf_key = KeyPair::from_pem(include_str!(
+            "../tests/fixtures/postgres-localhost-server-key.pem"
+        ))
+        .unwrap();
+        let leaf_cert = leaf_params.signed_by(&leaf_key, &issuer).unwrap();
+        let certificate = leaf_cert.pem().into_bytes();
+        let private_key = leaf_key.serialize_pem().into_bytes();
+        let ca_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(ca_file.path(), ca_cert.pem()).unwrap();
+
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         let (handshake_tx, handshake_rx) = mpsc::channel();
@@ -191,11 +228,7 @@ mod tests {
                 let _ = handshake_tx.send("ssl_request_invalid");
                 return;
             }
-            let identity = native_tls::Identity::from_pkcs8(
-                include_bytes!("../tests/fixtures/postgres-localhost-server-cert.pem"),
-                include_bytes!("../tests/fixtures/postgres-localhost-server-key.pem"),
-            )
-            .unwrap();
+            let identity = native_tls::Identity::from_pkcs8(&certificate, &private_key).unwrap();
             let acceptor = native_tls::TlsAcceptor::new(identity).unwrap();
             let Ok(mut tls) = acceptor.accept(socket) else {
                 let _ = handshake_tx.send("tls_accept_failed");
@@ -230,7 +263,7 @@ mod tests {
             .user("tls-test")
             .dbname("tls-test")
             .connect_timeout(Duration::from_secs(3));
-        (config, port, handshake_rx, server)
+        (config, port, handshake_rx, server, ca_file)
     }
 
     #[test]
@@ -285,10 +318,8 @@ mod tests {
 
     #[test]
     fn verified_tls_handshake_accepts_configured_ca_and_matching_hostname() {
-        let (config, _, handshake, server) = tls_probe_server();
-        let ca = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/postgres-test-ca-cert.pem")
-            .into_os_string();
+        let (config, _, handshake, server, ca_file) = tls_probe_server();
+        let ca = ca_file.path().as_os_str().to_os_string();
         assert!(connect_tls(&config, Some(ca)).is_err());
         assert_eq!(
             handshake.recv_timeout(Duration::from_secs(4)).unwrap(),
@@ -299,7 +330,7 @@ mod tests {
 
     #[test]
     fn verified_tls_handshake_rejects_hostname_mismatch() {
-        let (_, port, handshake, server) = tls_probe_server();
+        let (_, port, handshake, server, ca_file) = tls_probe_server();
         let mut config = Config::new();
         config
             .host("127.0.0.1")
@@ -307,9 +338,7 @@ mod tests {
             .user("tls-test")
             .dbname("tls-test")
             .connect_timeout(Duration::from_secs(3));
-        let ca = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/postgres-test-ca-cert.pem")
-            .into_os_string();
+        let ca = ca_file.path().as_os_str().to_os_string();
         assert!(connect_tls(&config, Some(ca)).is_err());
         let outcome = handshake.recv_timeout(Duration::from_secs(4)).unwrap();
         assert!(
@@ -321,7 +350,7 @@ mod tests {
 
     #[test]
     fn verified_tls_handshake_rejects_an_untrusted_certificate() {
-        let (config, _, handshake, server) = tls_probe_server();
+        let (config, _, handshake, server, _ca_file) = tls_probe_server();
         assert!(connect_tls(&config, None).is_err());
         let outcome = handshake.recv_timeout(Duration::from_secs(4)).unwrap();
         assert!(
