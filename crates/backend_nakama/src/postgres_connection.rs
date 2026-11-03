@@ -1,7 +1,6 @@
 //! Shared PostgreSQL configuration and connection policy.
 
 use std::fs;
-use std::io::Cursor;
 use std::net::{IpAddr, ToSocketAddrs};
 use std::str::FromStr;
 use std::time::Duration;
@@ -9,6 +8,7 @@ use std::time::Duration;
 use postgres::config::Host;
 use postgres::{Client, Config};
 use postgres_native_tls::MakeTlsConnector;
+use rustls_pki_types::{CertificateDer, pem::PemObject};
 use thiserror::Error;
 
 const LOOPBACK_OPT_IN: &str = "LYNX_PG_ALLOW_INSECURE_LOOPBACK";
@@ -67,7 +67,7 @@ fn connect_tls(
     let mut tls_builder = native_tls::TlsConnector::builder();
     if let Some(path) = ca_path {
         let pem = fs::read(path).map_err(|_| ConnectionError)?;
-        let certificates = rustls_pemfile::certs(&mut Cursor::new(pem))
+        let certificates = CertificateDer::pem_slice_iter(&pem)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| ConnectionError)?;
         if certificates.is_empty() {
