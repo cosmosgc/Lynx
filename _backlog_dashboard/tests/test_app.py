@@ -166,6 +166,34 @@ Phase 1  Engine skeleton             [██████████████
         self.assertEqual(client.get("/source?file=docs/TODO/10-sample.md").status_code, 200)
         self.assertEqual(client.get("/source?file=../../outside.md").status_code, 404)
 
+    def test_integrations_api_routes(self):
+        client = self.make_app().test_client()
+
+        backlog = client.get("/api/backlog")
+        self.assertEqual(backlog.status_code, 200)
+        self.assertEqual(backlog.json["summary"]["total"], 3)
+        self.assertEqual(len(backlog.json["items"]), 3)
+
+        dependencies = client.get("/api/dependencies")
+        self.assertEqual(dependencies.status_code, 200)
+        self.assertEqual(
+            dependencies.json["edges"],
+            [{"source": "SIM-001", "target": "SIM-002"}],
+        )
+        self.assertEqual(len(dependencies.json["nodes"]), 3)
+
+        plan = client.get("/api/plan?next=2")
+        self.assertEqual(plan.status_code, 200)
+        ordered_ids = [item["id"] for item in plan.json["items"]]
+        self.assertLess(ordered_ids.index("SIM-001"), ordered_ids.index("SIM-002"))
+        self.assertEqual(plan.json["suggestion_limit"], 2)
+        self.assertEqual(client.get("/api/plan?next=bad").status_code, 400)
+
+        history = client.get("/api/history")
+        self.assertEqual(history.status_code, 200)
+        self.assertEqual(history.json, {"changes": [], "count": 0})
+        self.assertEqual(client.get("/api/history?task=UNKNOWN-999").status_code, 404)
+
     def test_decisions_view_connects_roadmap_gates_adrs_and_tasks(self):
         adr_dir = self.root / "docs" / "adr"
         adr_dir.mkdir(parents=True)

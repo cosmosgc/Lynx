@@ -9,7 +9,13 @@ TODO/FIXME/XXX triage inbox and a manager report with active, blocked, and
 recommended next work.
 The `/decisions` view lists roadmap decision gates and ADRs, with links to their
 source documents and connected backlog tasks; task details link back to their
-gates and ADRs. `/api/decisions` exposes the same connections as JSON.
+gates and ADRs. JSON endpoints are available for integrations:
+`/api/backlog` returns parsed tasks and summaries, `/api/dependencies` returns
+graph nodes and prerequisite-to-dependent edges, `/api/plan` returns a
+prerequisite-first ordering and actionable suggestions, `/api/history` returns
+status changes, and `/api/decisions` returns decision gates and ADRs. The
+history endpoint accepts an optional `?task=TASK-ID` filter, and the plan
+endpoint accepts `?next=N` (1–100; default 5).
 The `/task-order` view gives a prerequisite-first route, multi-task selection,
 and an editable prompt builder with acceptance criteria and relevant files. Its
 next-N suggestions rank work actionable now by priority, in-progress

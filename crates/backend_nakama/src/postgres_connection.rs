@@ -163,15 +163,22 @@ mod tests {
     use std::thread;
     use std::time::Instant;
 
-    // This self-signed localhost key pair is test-only and must never be used
-    // outside the in-process TLS probe below.
-    fn tls_probe_server() -> (Config, u16, mpsc::Receiver<bool>, thread::JoinHandle<()>) {
+    // Keep the localhost server leaf separate from its test-only CA. In
+    // particular, do not use a self-signed CA certificate as the server leaf:
+    // Secure Transport on macOS rejects that chain. These files are only for
+    // the in-process TLS probes below.
+    fn tls_probe_server() -> (
+        Config,
+        u16,
+        mpsc::Receiver<&'static str>,
+        thread::JoinHandle<()>,
+    ) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         let (handshake_tx, handshake_rx) = mpsc::channel();
         let server = thread::spawn(move || {
             let Ok((mut socket, _)) = listener.accept() else {
-                let _ = handshake_tx.send(false);
+                let _ = handshake_tx.send("accept_failed");
                 return;
             };
             let _ = socket.set_read_timeout(Some(Duration::from_secs(3)));
@@ -181,17 +188,17 @@ mod tests {
                 || u32::from_be_bytes(request[4..8].try_into().unwrap()) != 80_877_103
                 || socket.write_all(b"S").is_err()
             {
-                let _ = handshake_tx.send(false);
+                let _ = handshake_tx.send("ssl_request_invalid");
                 return;
             }
             let identity = native_tls::Identity::from_pkcs8(
-                include_bytes!("../tests/fixtures/postgres-localhost-cert.pem"),
-                include_bytes!("../tests/fixtures/postgres-localhost-key.pem"),
+                include_bytes!("../tests/fixtures/postgres-localhost-server-cert.pem"),
+                include_bytes!("../tests/fixtures/postgres-localhost-server-key.pem"),
             )
             .unwrap();
             let acceptor = native_tls::TlsAcceptor::new(identity).unwrap();
             let Ok(mut tls) = acceptor.accept(socket) else {
-                let _ = handshake_tx.send(false);
+                let _ = handshake_tx.send("tls_accept_failed");
                 return;
             };
             // Read the PostgreSQL startup packet, then close without an
@@ -199,7 +206,11 @@ mod tests {
             // of this probe, not PostgreSQL authentication.
             let mut length = [0_u8; 4];
             let startup_received = tls.read_exact(&mut length).is_ok();
-            let _ = handshake_tx.send(startup_received);
+            let _ = handshake_tx.send(if startup_received {
+                "startup_received"
+            } else {
+                "startup_missing"
+            });
             if startup_received {
                 let packet_length = u32::from_be_bytes(length) as usize;
                 if (4..=16 * 1024).contains(&packet_length) {
@@ -276,10 +287,13 @@ mod tests {
     fn verified_tls_handshake_accepts_configured_ca_and_matching_hostname() {
         let (config, _, handshake, server) = tls_probe_server();
         let ca = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/postgres-localhost-cert.pem")
+            .join("tests/fixtures/postgres-test-ca-cert.pem")
             .into_os_string();
         assert!(connect_tls(&config, Some(ca)).is_err());
-        assert!(handshake.recv_timeout(Duration::from_secs(4)).unwrap());
+        assert_eq!(
+            handshake.recv_timeout(Duration::from_secs(4)).unwrap(),
+            "startup_received"
+        );
         server.join().unwrap();
     }
 
@@ -294,10 +308,13 @@ mod tests {
             .dbname("tls-test")
             .connect_timeout(Duration::from_secs(3));
         let ca = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/postgres-localhost-cert.pem")
+            .join("tests/fixtures/postgres-test-ca-cert.pem")
             .into_os_string();
         assert!(connect_tls(&config, Some(ca)).is_err());
-        assert!(!handshake.recv_timeout(Duration::from_secs(4)).unwrap());
+        assert_eq!(
+            handshake.recv_timeout(Duration::from_secs(4)).unwrap(),
+            "startup_missing"
+        );
         server.join().unwrap();
     }
 
@@ -305,7 +322,10 @@ mod tests {
     fn verified_tls_handshake_rejects_an_untrusted_certificate() {
         let (config, _, handshake, server) = tls_probe_server();
         assert!(connect_tls(&config, None).is_err());
-        assert!(!handshake.recv_timeout(Duration::from_secs(4)).unwrap());
+        assert_eq!(
+            handshake.recv_timeout(Duration::from_secs(4)).unwrap(),
+            "startup_missing"
+        );
         server.join().unwrap();
     }
 

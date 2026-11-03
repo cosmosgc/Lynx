@@ -189,8 +189,8 @@ a real tag before these acceptance criteria can be checked.
 
 **Why:** CI has Linux and Windows checks plus PostgreSQL migration and live
 snapshot coverage. The latest hosted run exposed an incomplete PostgreSQL test
-database setup on Ubuntu and an IPv4/IPv6 assumption in a macOS TLS test; both
-are fixed in the workflow/test and need a hosted rerun. The macOS matrix job and
+database setup on Ubuntu and a self-signed CA used as a server leaf in a macOS
+TLS test; both are fixed in the workflow/test and need a hosted rerun. The macOS matrix job and
 automated job duration/outcome reporting are configured; a real graphical client
 smoke remains absent. The migration check derives its head from migration files.
 

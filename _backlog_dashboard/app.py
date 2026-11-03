@@ -999,6 +999,72 @@ def create_app(
         except (OSError, sqlite3.Error, UnicodeError, ValueError) as error:
             return jsonify({"error": str(error)}), 500
 
+    @app.get("/api/backlog")
+    def api_backlog():
+        """Return the complete parsed backlog and its dashboard summaries."""
+        try:
+            items = get_items()
+            phases = load_phase_progress(get_readme_path())
+        except (OSError, sqlite3.Error, UnicodeError, ValueError) as error:
+            return jsonify({"error": str(error)}), 500
+        return jsonify(
+            {
+                "items": items,
+                "summary": backlog_summary(items),
+                "categories": backlog_categories(items),
+                "phases": phases,
+            }
+        )
+
+    @app.get("/api/dependencies")
+    def api_dependencies():
+        """Return tasks as graph nodes and task prerequisites as directed edges."""
+        try:
+            items = get_items()
+        except (OSError, sqlite3.Error, UnicodeError, ValueError) as error:
+            return jsonify({"error": str(error)}), 500
+        edges = [
+            {"source": dependency_id, "target": item["id"]}
+            for item in items
+            for dependency_id in item["dependency_ids"]
+        ]
+        return jsonify({"items": items, "nodes": items, "edges": edges})
+
+    @app.get("/api/plan")
+    def api_plan():
+        """Return prerequisite-first task ordering and actionable suggestions."""
+        try:
+            items = get_items()
+        except (OSError, sqlite3.Error, UnicodeError) as error:
+            return jsonify({"error": str(error)}), 500
+        try:
+            suggestion_limit = int(request.args.get("next", "5"))
+        except ValueError:
+            abort(400)
+        if not 1 <= suggestion_limit <= 100:
+            abort(400)
+        return jsonify(
+            {
+                "items": order_tasks(items),
+                "suggestions": suggest_next_tasks(items, suggestion_limit),
+                "suggestion_limit": suggestion_limit,
+            }
+        )
+
+    @app.get("/api/history")
+    def api_history():
+        try:
+            items = get_items()
+            changes = get_history(items)
+        except (OSError, sqlite3.Error, UnicodeError, ValueError) as error:
+            return jsonify({"error": str(error)}), 500
+        task_id = request.args.get("task", "").strip()
+        if task_id:
+            if not any(item["id"] == task_id for item in items):
+                abort(404)
+            changes = [change for change in changes if change["task_id"] == task_id]
+        return jsonify({"changes": changes, "count": len(changes)})
+
     @app.get("/source")
     def source():
         relative = request.args.get("file", "")
