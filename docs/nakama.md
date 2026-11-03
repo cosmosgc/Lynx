@@ -17,7 +17,9 @@ does not own authoritative zones or durable world state.
 | Device, email, social, custom, and platform authentication; sessions and refresh tokens | **Partially integrated** | `backend_nakama` validates a fresh bearer session at the world edge. The client has device and email CLI login with OS credential-store persistence and a `--logout` command. A login form and character-list UI remain pending. Static world tokens are development-only. |
 
 | Account metadata and user profiles | **Partially integrated** | The world edge reads the authenticated account identity. Profile management is not exposed by the Lynx client or `game_api` adapter. |
-| Friends, groups, chat, presence, status, notifications | **Planned, not integrated** | Nakama is the selected platform owner, but Lynx has no production adapter/client flow for these services yet. Do not use Nakama presence as authoritative zone presence. See [social and chat boundary](#social-and-chat-boundary). |
+| Character inventory | **Lynx PostgreSQL, authenticated read path integrated** | `GET /characters/{character}/inventory` validates the Nakama bearer session and character ownership before reading the Lynx inventory store. Nakama storage is not authoritative; mutations remain behind trusted world persistence. |
+| Factions, territories, and world-event calendar | **Lynx PostgreSQL, authenticated read views integrated** | `NakamaPostgresBackend` implements `FactionService` and `CalendarService` over the normalized faction/calendar store. Reads require a valid Nakama session; mutations remain authoritative world results. Draft events are not public. |
+| Friends, groups, chat, presence, status, notifications | **Deferred by contract and API constraints** | The current `FriendState` cannot represent incoming/outgoing invitations, and chat channel discovery/message sending require the realtime socket. Do not use Nakama presence as authoritative zone presence. See [social and chat boundary](#social-and-chat-boundary). |
 | Matchmaking and relayed multiplayer | **Planned, not integrated** | The Rust world service owns sessions, interest, replication, and authority. Nakama matchmaking may later form groups before a world admission. |
 | Authoritative matches and runtime modules (Go, TypeScript, Lua) | **Not used for world authority** | They may later host isolated, low-stakes activities. They must not become the source of truth for zones, inventory, faction state, or world events. |
 | Storage engine, leaderboards, and tournaments | **Not integrated for world state** | Lynx-owned PostgreSQL migrations and snapshots own durable simulation data. Any future Nakama storage use needs an explicit `game_api` seam, retention policy, and migration/export plan. |
@@ -114,7 +116,9 @@ cannot represent Nakama's outgoing and incoming friend-invitation states, and
 `game_api::ChatService::channels` requires generic channel discovery that
 Nakama's public REST API does not provide. A quick adapter would lose invitation
 state or invent channels, so it is not shipped. Evolve those contracts (and add
-socket delivery where required) before integrating social/chat.
+socket delivery where required) before integrating social/chat. Lynx
+administration is likewise separate: it uses dedicated admin authentication and
+the Lynx audit log rather than player Nakama sessions.
 
 ## References
 

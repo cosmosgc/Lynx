@@ -6,7 +6,7 @@ use std::time::Duration;
 use engine_core::inventory::TransferReceipt;
 use engine_core::{StableId, id::DefinitionId, inventory::ItemStack};
 use game_api::{
-    ApiError, CharacterId, InventoryReconciliation, InventorySlot, InventoryStore,
+    AccountId, ApiError, CharacterId, InventoryReconciliation, InventorySlot, InventoryStore,
     TransferInventoryUpdate, VersionedInventory, validate_slots,
 };
 use postgres::{Client, Error, error::SqlState};
@@ -44,6 +44,70 @@ impl PostgresInventoryStore {
 
     fn client(&self) -> Result<PooledConnection<Client>, ApiError> {
         self.pool.acquire().map_err(|_| unavailable())
+    }
+
+    /// Load an active character inventory only when it belongs to `account`.
+    /// This combines ownership and inventory reads in one SQL statement so a
+    /// status or ownership change cannot occur between separate checks.
+    pub fn load_inventory_for_account(
+        &self,
+        account: &AccountId,
+        character_id: CharacterId,
+    ) -> Result<Vec<InventorySlot>, ApiError> {
+        self.load_versioned_inventory_inner(character_id, Some(account.as_str()))
+            .map(|inventory| inventory.slots)
+    }
+
+    fn load_versioned_inventory_inner(
+        &self,
+        character_id: CharacterId,
+        account_id: Option<&str>,
+    ) -> Result<VersionedInventory, ApiError> {
+        let character_id = character_id.to_string();
+        let mut client = self.client()?;
+        let rows = client
+            .query(
+                "SELECT COALESCE(r.version, 0), s.slot, s.item_definition, s.quantity, s.instance_id \
+                 FROM lynx.characters c \
+                 LEFT JOIN lynx.inventory_revisions r ON r.owner_id = c.character_id \
+                 LEFT JOIN lynx.inventory_slots s ON s.owner_id = c.character_id \
+                 WHERE c.character_id = $1 AND c.status = 'active' AND c.deleted_at IS NULL \
+                   AND ($2::text IS NULL OR c.account_id = $2) \
+                 ORDER BY s.slot",
+                &[&character_id, &account_id],
+            )
+            .map_err(|_| unavailable())?;
+        if rows.is_empty() {
+            return Err(ApiError::NotFound("character not found".into()));
+        }
+        let version = rows[0].get(0);
+        let mut slots = Vec::new();
+        for row in rows {
+            let Some(slot) = row.get::<_, Option<i32>>(1) else {
+                continue;
+            };
+            let definition: String = row.get(2);
+            let quantity: i32 = row.get(3);
+            let instance: Option<String> = row.get(4);
+            let stack = ItemStack {
+                definition: DefinitionId::new(&definition)
+                    .map_err(|_| ApiError::Unavailable("stored inventory is invalid".into()))?,
+                quantity: u32::try_from(quantity)
+                    .map_err(|_| ApiError::Unavailable("stored inventory is invalid".into()))?,
+                instance: instance
+                    .map(|value| StableId::parse(&value))
+                    .transpose()
+                    .map_err(|_| ApiError::Unavailable("stored inventory is invalid".into()))?,
+            };
+            slots.push(InventorySlot {
+                slot: u16::try_from(slot)
+                    .map_err(|_| ApiError::Unavailable("stored inventory is invalid".into()))?,
+                stack,
+            });
+        }
+        validate_slots(&slots)
+            .map_err(|_| ApiError::Unavailable("stored inventory is invalid".into()))?;
+        Ok(VersionedInventory { version, slots })
     }
 
     fn replace(
@@ -151,50 +215,7 @@ impl InventoryStore for PostgresInventoryStore {
         &self,
         character_id: CharacterId,
     ) -> Result<VersionedInventory, ApiError> {
-        let character_id = character_id.to_string();
-        let mut client = self.client()?;
-        let rows = client
-            .query(
-                "SELECT COALESCE(r.version, 0), s.slot, s.item_definition, s.quantity, s.instance_id \
-                 FROM lynx.characters c \
-                 LEFT JOIN lynx.inventory_revisions r ON r.owner_id = c.character_id \
-                 LEFT JOIN lynx.inventory_slots s ON s.owner_id = c.character_id \
-                 WHERE c.character_id = $1 AND c.status = 'active' AND c.deleted_at IS NULL \
-                 ORDER BY s.slot",
-                &[&character_id],
-            )
-            .map_err(|_| unavailable())?;
-        if rows.is_empty() {
-            return Err(ApiError::NotFound("character not found".into()));
-        }
-        let version = rows[0].get(0);
-        let mut slots = Vec::new();
-        for row in rows {
-            let Some(slot) = row.get::<_, Option<i32>>(1) else {
-                continue;
-            };
-            let definition: String = row.get(2);
-            let quantity: i32 = row.get(3);
-            let instance: Option<String> = row.get(4);
-            let stack = ItemStack {
-                definition: DefinitionId::new(&definition)
-                    .map_err(|_| ApiError::Unavailable("stored inventory is invalid".into()))?,
-                quantity: u32::try_from(quantity)
-                    .map_err(|_| ApiError::Unavailable("stored inventory is invalid".into()))?,
-                instance: instance
-                    .map(|value| StableId::parse(&value))
-                    .transpose()
-                    .map_err(|_| ApiError::Unavailable("stored inventory is invalid".into()))?,
-            };
-            slots.push(InventorySlot {
-                slot: u16::try_from(slot)
-                    .map_err(|_| ApiError::Unavailable("stored inventory is invalid".into()))?,
-                stack,
-            });
-        }
-        validate_slots(&slots)
-            .map_err(|_| ApiError::Unavailable("stored inventory is invalid".into()))?;
-        Ok(VersionedInventory { version, slots })
+        self.load_versioned_inventory_inner(character_id, None)
     }
 
     fn replace_inventory(

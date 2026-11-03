@@ -541,22 +541,19 @@ world database or snapshots.
 ## PST-010 — Nakama adapter coverage
 
 - **Priority:** P1
-- **Status:** Proposed — depends on the D1 auth/backend decision
-- **Depends on:** `PST-001`, `PST-002`, D1
+- **Status:** Done — auth, character, inventory, faction, and calendar coverage; social/chat/admin explicitly deferred by contract and API constraints
+- **Depends on:** `PST-001`, `PST-002`
 - **References:** [ADR 0018](../adr/0018-nakama-adapter-seam-and-replacement-criteria.md),
   `crates/backend_nakama`
 
 **Why:** `backend_nakama` uses Nakama HTTP for health and authentication, and
-composes those identities with Lynx PostgreSQL character persistence. The world
-HTTP edge now exposes authenticated character list/create/select operations over
-that backend; selection verifies ownership but does not provision a live world
-actor. Inventory, chat, social, faction, calendar, and admin calls are not
-implemented through a Nakama service adapter. Social/chat are not a mechanical
-quick adapter: the current `FriendState` cannot represent Nakama's
-incoming/outgoing invitation states, and `ChatService::channels` requires
-generic discovery unavailable through the public REST API. If Nakama remains
-the backend of record, the adapter is incomplete; if direct SQL becomes the
-backend of record, this task should be closed with that decision instead.
+composes those identities with Lynx PostgreSQL character, inventory, faction,
+and calendar data. The world HTTP edge exposes authenticated character
+management and inventory reads; mutations remain trusted world persistence.
+Social/chat are not a mechanical quick adapter: the current `FriendState`
+cannot represent Nakama's incoming/outgoing invitation states, and
+`ChatService::channels` requires generic discovery unavailable through the
+public REST API.
 
 **Scope**
 
@@ -574,14 +571,69 @@ backend of record, this task should be closed with that decision instead.
 - Document which adapter is authoritative for which data and how migrations are
   handled.
 
+**Implemented:** `NakamaPostgresBackend` composes the PostgreSQL identity,
+character, inventory, and paired faction/calendar stores and implements
+`HealthService`, `AuthService`, `CharacterService`, `CharacterIntentService`,
+`CharacterWorldService`, `InventoryService`, `FactionService`, and
+`CalendarService`. Every gameplay-facing method validates the Nakama session and
+resolves the Lynx account before reading Lynx-owned data; no Nakama type crosses
+the `game_api` boundary.
+
+Inventory reads enforce playable-character ownership inside the PostgreSQL
+query. The world HTTP API exposes `GET /characters/{character}/inventory`;
+foreign, missing, deleted, or suspended characters share the non-disclosing
+`character_not_found` response. Faction and calendar views are read-only and
+derive from the same validated snapshots used by authoritative world
+persistence; draft events remain absent from public calendar reads.
+
+Nakama error mapping now uses the HTTP status and numeric code only. Provider
+response bodies are never copied into `ApiError`, so credentials or request data
+echoed by the provider cannot reach logs or clients.
+
+**Deferred with reasons:**
+
+- **Social:** `game_api::FriendState` cannot represent Nakama's outgoing and
+  incoming invitation states, and `add_friend` currently promises an immediate
+  mutual friendship while Nakama creates a request. Integrate only after the
+  contract models invitations explicitly.
+- **Chat:** channel discovery and message sends require Nakama's realtime socket;
+  the public REST API exposes history but not generic channel listing. Add a
+  socket-capable adapter and channel semantics before implementing `ChatService`.
+- **Admin:** Lynx administration uses separate admin authentication and the
+  Lynx-owned append-only audit log. It is intentionally not routed through a
+  player Nakama session.
+
+These deferrals and the keep/replace decision are recorded in
+[ADR 0018](../adr/0018-nakama-adapter-seam-and-replacement-criteria.md). The
+decision is to keep Nakama as the identity/session backend and keep Lynx
+PostgreSQL as the source of truth for characters, inventory, factions, and
+calendar state.
+
+**Validation:** Shared character and inventory contract assertions run against
+both the memory adapter and the Nakama/PostgreSQL adapter (using a local Nakama
+HTTP stub and PostgreSQL test database). An opt-in contract test also exercises
+the actual Nakama HTTP API using two pre-created test device accounts when
+`LYNX_NAKAMA_URL`, `LYNX_NAKAMA_TEST_OWNER_DEVICE_ID`,
+`LYNX_NAKAMA_TEST_OTHER_DEVICE_ID`, and the PostgreSQL test settings are
+configured; it skips otherwise. Set `LYNX_REQUIRE_NAKAMA_TEST=1` to fail instead
+of skipping. It creates and removes a temporary Lynx character and inventory,
+but keeps the two Nakama accounts and their Lynx identity mappings.
+Faction/calendar view mapping, draft-event filtering, authentication failures,
+and sanitized error mapping have focused adapter tests. The command
+`cargo test -p backend_nakama -p backend_memory -p backend_contract_tests`,
+scoped Clippy, and formatting pass with the PostgreSQL test configuration.
+
 **Acceptance criteria**
 
-- [ ] Every implemented service passes the shared contract suite.
-- [ ] Auth, character, and inventory ownership checks match the SQL adapter's
+- [x] Character and inventory services pass the shared adapter contracts;
+      faction/calendar reads have focused adapter tests.
+- [x] Auth, character, and inventory ownership checks match the SQL adapter's
       behavior.
-- [ ] Errors map to stable `ErrorCode` categories and retryability.
-- [ ] The adapter can be replaced without changing gameplay crates.
-- [ ] The decision to keep or retire the adapter is recorded in ADR 0018.
+- [x] Errors map to stable `ErrorCode` categories and retryability.
+- [x] The adapter can be replaced without changing gameplay crates.
+- [x] The decision to keep or retire the adapter is recorded in ADR 0018.
+- [x] Social, chat, and admin are explicitly deferred with contract or API
+      reasons instead of being approximated.
 
 ---
 

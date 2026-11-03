@@ -25,7 +25,7 @@ use anyhow::{Context, Result, bail};
 use backend_nakama::postgres_pool::pool as postgres_pool;
 use backend_nakama::{
     NakamaClient, NakamaConfig, NakamaPostgresBackend, PostgresCharacterStore,
-    PostgresFactionCalendarStore, PostgresIdentityStore,
+    PostgresFactionCalendarStore, PostgresIdentityStore, PostgresInventoryStore,
 };
 use clap::{Parser, Subcommand};
 use engine_core::time::Tick;
@@ -612,9 +612,17 @@ fn production_identity_backend() -> Result<Arc<NakamaIdentityBackend>> {
             .context("failed to connect the PostgreSQL identity backend")?,
     );
     let identities = PostgresIdentityStore::with_pool(pool.clone());
-    let characters = PostgresCharacterStore::with_pool(pool);
+    let characters = PostgresCharacterStore::with_pool(pool.clone());
+    let inventories = PostgresInventoryStore::with_pool(pool.clone());
+    let faction_calendar = PostgresFactionCalendarStore::with_pool(pool);
     Ok(Arc::new(NakamaIdentityBackend::new(
-        NakamaPostgresBackend::new(nakama, identities, characters),
+        NakamaPostgresBackend::new(
+            nakama,
+            identities,
+            characters,
+            inventories,
+            faction_calendar,
+        ),
     )))
 }
 

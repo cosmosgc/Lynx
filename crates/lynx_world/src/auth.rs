@@ -15,7 +15,8 @@ use backend_nakama::NakamaPostgresBackend;
 use engine_core::id::{IdKind, StableId};
 use game_api::{
     AccountId, ApiError, AuthService, Character, CharacterCreationKey, CharacterCreationReceipt,
-    CharacterId, CharacterIntentService, CharacterService, CreateCharacter, SessionToken,
+    CharacterId, CharacterIntentService, CharacterService, CreateCharacter, InventoryService,
+    InventorySlot, SessionToken,
 };
 use sha2::{Digest, Sha256};
 use world_gateway::SessionClaims;
@@ -84,6 +85,13 @@ pub trait CharacterManagementBackend {
         token: &SessionToken,
         character: CharacterId,
     ) -> Result<Character, ApiError>;
+
+    /// Read inventory for one character owned by the authenticated session.
+    fn inventory(
+        &self,
+        token: &SessionToken,
+        character: CharacterId,
+    ) -> Result<Vec<InventorySlot>, ApiError>;
 }
 
 /// Identity adapter for the selected Nakama/PostgreSQL production backend.
@@ -155,6 +163,14 @@ impl CharacterManagementBackend for NakamaIdentityBackend {
         character: CharacterId,
     ) -> Result<Character, ApiError> {
         self.backend.select_character(token, character)
+    }
+
+    fn inventory(
+        &self,
+        token: &SessionToken,
+        character: CharacterId,
+    ) -> Result<Vec<InventorySlot>, ApiError> {
+        self.backend.inventory(token, character)
     }
 }
 

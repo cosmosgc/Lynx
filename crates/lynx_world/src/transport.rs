@@ -432,6 +432,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/metrics", get(metrics))
         .route("/characters", get(list_characters).post(create_character))
         .route("/characters/{character}/select", post(select_character))
+        .route(
+            "/characters/{character}/inventory",
+            get(character_inventory),
+        )
         .route("/world", get(world))
         .with_state(state)
 }
@@ -621,6 +625,28 @@ async fn select_character(
     };
     match tokio::task::spawn_blocking(move || backend.select_character(&token, character)).await {
         Ok(Ok(character)) => (StatusCode::OK, Json(json!(character))).into_response(),
+        Ok(Err(error)) => character_api_error(&error),
+        Err(_) => character_unavailable(),
+    }
+}
+
+async fn character_inventory(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(character): Path<String>,
+) -> Response {
+    let character = match CharacterId::parse(&character) {
+        Ok(character) => character,
+        Err(error) => return character_api_error(&error),
+    };
+    let (backend, token) = match character_backend(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match tokio::task::spawn_blocking(move || backend.inventory(&token, character)).await {
+        Ok(Ok(inventory)) => {
+            (StatusCode::OK, Json(json!({"inventory": inventory}))).into_response()
+        }
         Ok(Err(error)) => character_api_error(&error),
         Err(_) => character_unavailable(),
     }
@@ -1339,6 +1365,20 @@ mod tests {
             }
             Ok(fake_character())
         }
+
+        fn inventory(
+            &self,
+            token: &SessionToken,
+            character: CharacterId,
+        ) -> Result<Vec<game_api::InventorySlot>, ApiError> {
+            if token.expose_secret() != CHARACTER_TOKEN {
+                return Err(ApiError::Unauthenticated);
+            }
+            if character != fake_character().id {
+                return Err(ApiError::NotFound("not disclosed".into()));
+            }
+            Ok(Vec::new())
+        }
     }
 
     fn fake_character() -> Character {
@@ -1436,6 +1476,38 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["status"], "active");
         assert!(body.get("spawn").is_none());
+    }
+
+    #[tokio::test]
+    async fn inventory_requires_authentication_and_hides_unowned_characters() {
+        let state = character_state();
+        let path = || Path(fake_character().id.to_string());
+        let (status, body) = response_json(
+            character_inventory(State(Arc::clone(&state)), HeaderMap::new(), path()).await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"], "unauthorized");
+
+        let other = StableId::from_parts(IdKind::Character, 1, 43).to_string();
+        let (status, body) = response_json(
+            character_inventory(
+                State(Arc::clone(&state)),
+                bearer_headers(CHARACTER_TOKEN),
+                Path(other),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"], "character_not_found");
+
+        let (status, body) = response_json(
+            character_inventory(State(state), bearer_headers(CHARACTER_TOKEN), path()).await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["inventory"], json!([]));
     }
 
     #[tokio::test]

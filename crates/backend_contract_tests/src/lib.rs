@@ -5,7 +5,7 @@
 
 use game_api::{
     ApiError, Character, CharacterCreationKey, CharacterCreationReceipt, CharacterId,
-    CreateCharacter,
+    CreateCharacter, InventoryService, InventorySlot, SessionToken,
 };
 
 /// Minimal test seam implemented by each adapter's test wrapper.
@@ -134,4 +134,56 @@ pub fn assert_character_contract<B: CharacterContract>(
             .expect("deletion preserves creation receipt"),
         receipt
     );
+}
+
+/// Minimal authenticated inventory service seam implemented by adapter tests.
+pub trait InventoryContract {
+    /// Adapter-specific authenticated session.
+    type Credential;
+
+    /// Read one character inventory under the supplied session.
+    fn inventory(
+        &self,
+        credential: &Self::Credential,
+        character: CharacterId,
+    ) -> Result<Vec<InventorySlot>, ApiError>;
+}
+
+/// Assert that inventory reads are account-scoped and preserve the snapshot.
+pub fn assert_inventory_contract<B: InventoryContract>(
+    backend: &B,
+    owner: &B::Credential,
+    other: &B::Credential,
+    character: CharacterId,
+    expected: &[InventorySlot],
+) {
+    assert_eq!(
+        backend
+            .inventory(owner, character)
+            .expect("owner reads their character inventory"),
+        expected
+    );
+    assert!(matches!(
+        backend.inventory(other, character),
+        Err(ApiError::NotFound(_))
+    ));
+}
+
+/// Test seam for directly implementing [`game_api::InventoryService`].
+#[derive(Debug)]
+pub struct SessionInventoryContract<'a, B: InventoryService> {
+    /// The adapter under test.
+    pub backend: &'a B,
+}
+
+impl<B: InventoryService> InventoryContract for SessionInventoryContract<'_, B> {
+    type Credential = SessionToken;
+
+    fn inventory(
+        &self,
+        credential: &Self::Credential,
+        character: CharacterId,
+    ) -> Result<Vec<InventorySlot>, ApiError> {
+        self.backend.inventory(credential, character)
+    }
 }

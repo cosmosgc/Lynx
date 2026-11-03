@@ -33,6 +33,28 @@ Nakama or PostgreSQL service.
   adapter boundary for character, inventory, social, chat, and administration
   operations.
 
+## Coverage status (2026-11-03)
+
+The production adapter is kept. `NakamaPostgresBackend` implements health,
+authentication, character, inventory, faction, and calendar contracts.
+Nakama validates sessions; Lynx PostgreSQL remains authoritative for
+characters, inventory, factions, and calendar state. Character and inventory
+contracts are shared with `backend_memory`, and an opt-in test exercises the
+real Nakama HTTP API.
+
+Social, chat, and administration are intentionally not implemented yet:
+
+- Social requires a contract that models Nakama's incoming and outgoing friend
+  invitations instead of flattening them into immediate mutual friendship.
+- Chat channel discovery and message sending require Nakama's realtime socket;
+  the public REST API does not provide generic channel listing.
+- Administration uses separate Lynx admin authentication and the Lynx-owned
+  audit log, not player Nakama sessions.
+
+These are follow-up capabilities, not evidence that Nakama must be replaced.
+The replacement criteria below still apply if the required contracts cannot be
+implemented against supported Nakama APIs.
+
 ## Replacement criteria
 
 Reconsider Nakama only when there is measured evidence that one or more

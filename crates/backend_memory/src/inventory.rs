@@ -273,6 +273,7 @@ fn replace_inventory_locked(
 
 #[cfg(test)]
 mod tests {
+    use backend_contract_tests::{SessionInventoryContract, assert_inventory_contract};
     use engine_core::IdKind;
     use engine_core::id::DefinitionId;
     use engine_core::inventory::ItemStack;
@@ -317,6 +318,16 @@ mod tests {
         assert_eq!(loaded[0].slot, 0);
         assert_eq!(loaded[1].slot, 1);
         assert_eq!(backend.load_inventory(character_id).unwrap(), loaded);
+        let other = backend
+            .authenticate_device(&login("device-2", true))
+            .unwrap();
+        assert_inventory_contract(
+            &SessionInventoryContract { backend: &backend },
+            &token,
+            &other.token,
+            character_id,
+            &loaded,
+        );
     }
 
     #[test]

@@ -7,7 +7,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use backend_nakama::PostgresInventoryStore;
 use engine_core::inventory::{ItemStack, TransferReceipt};
 use engine_core::{IdKind, StableId, id::DefinitionId};
-use game_api::{ApiError, CharacterId, InventorySlot, InventoryStore, TransferInventoryUpdate};
+use game_api::{
+    AccountId, ApiError, CharacterId, InventorySlot, InventoryStore, TransferInventoryUpdate,
+};
 use postgres::{Config, NoTls};
 
 #[test]
@@ -25,6 +27,7 @@ fn versioned_inventory_survives_reconnection_conflicts_and_rolls_back() {
         .expect("system clock")
         .as_nanos();
     let account = format!("pst-inventory-{nonce}");
+    let other_account = format!("pst-inventory-other-{nonce}");
     let first = CharacterId::new(StableId::from_parts(IdKind::Character, 0, nonce))
         .expect("valid character ID");
     let second = CharacterId::new(StableId::from_parts(IdKind::Character, 0, nonce + 1))
@@ -34,6 +37,11 @@ fn versioned_inventory_survives_reconnection_conflicts_and_rolls_back() {
         &[&account],
     )
     .expect("insert test account");
+    db.execute(
+        "INSERT INTO lynx.accounts (account_id, nakama_user_id) VALUES ($1, md5($1)::uuid)",
+        &[&other_account],
+    )
+    .expect("insert other test account");
     for (id, suffix) in [(first, "a"), (second, "b")] {
         db.execute(
             "INSERT INTO lynx.characters (character_id, account_id, name) VALUES ($1, $2, $3)",
@@ -49,6 +57,16 @@ fn versioned_inventory_survives_reconnection_conflicts_and_rolls_back() {
     let unique = StableId::from_parts(IdKind::Item, 0, nonce + 2);
     let first_slots = vec![slot(0, "item.ore", 3)];
     let store = PostgresInventoryStore::new(config.connect(NoTls).unwrap());
+    let owner = AccountId::new(account.clone()).unwrap();
+    let other_owner = AccountId::new(other_account.clone()).unwrap();
+    assert_eq!(
+        store.load_inventory_for_account(&owner, first).unwrap(),
+        Vec::<InventorySlot>::new()
+    );
+    assert!(matches!(
+        store.load_inventory_for_account(&other_owner, first),
+        Err(ApiError::NotFound(_))
+    ));
     let initial = store.load_versioned_inventory(first).unwrap();
     assert_eq!(initial.version, 0);
     assert_eq!(
@@ -300,8 +318,8 @@ fn versioned_inventory_survives_reconnection_conflicts_and_rolls_back() {
     )
     .unwrap();
     db.execute(
-        "DELETE FROM lynx.accounts WHERE account_id = $1",
-        &[&account],
+        "DELETE FROM lynx.accounts WHERE account_id IN ($1, $2)",
+        &[&account, &other_account],
     )
     .unwrap();
 }

@@ -306,24 +306,20 @@ struct NakamaUser {
 struct NakamaErrorResponse {
     #[serde(default)]
     code: Option<i64>,
-    #[serde(default)]
-    message: Option<String>,
 }
 
 fn status_error(status: StatusCode, body: &str) -> ApiError {
     let parsed: Option<NakamaErrorResponse> = serde_json::from_str(body).ok();
     let code = parsed.as_ref().and_then(|response| response.code);
-    let message = parsed
-        .and_then(|response| response.message)
-        .map(|message| {
-            message
-                .chars()
-                .filter(|character| !character.is_control())
-                .take(512)
-                .collect::<String>()
-        })
-        .filter(|message| !message.is_empty())
-        .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
+    // Never propagate Nakama's response text. Provider errors can echo request
+    // data, including bearer credentials; the HTTP status and numeric code are
+    // sufficient for stable categorization and bounded diagnostics.
+    let message = match status.as_u16() {
+        400 | 422 => "Nakama rejected the request".to_owned(),
+        404 => "Nakama resource not found".to_owned(),
+        409 => "Nakama reported a conflict".to_owned(),
+        _ => format!("Nakama returned HTTP {}", status.as_u16()),
+    };
     match status.as_u16() {
         401 => ApiError::Unauthenticated,
         403 => ApiError::PermissionDenied,
@@ -398,16 +394,17 @@ mod tests {
         ));
         let error = status_error(
             StatusCode::SERVICE_UNAVAILABLE,
-            r#"{"code":9,"message":"busy"}"#,
+            r#"{"code":9,"message":"busy secret-bearer-token"}"#,
         );
         assert!(matches!(
-            error,
+            &error,
             ApiError::Backend {
                 status: 503,
                 code: Some(9),
                 ..
             }
         ));
+        assert!(!error.to_string().contains("secret-bearer-token"));
         assert!(error.is_retryable());
     }
 }
