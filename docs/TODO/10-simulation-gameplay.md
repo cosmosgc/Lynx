@@ -328,44 +328,82 @@ and tick duration. Selection and perception inspect stable ID prefixes, so
 low limits can starve later entities; this is not yet a fair scheduler.
 
 This is opt-in: the running world must install the policy and restore it after
-snapshot reload; the existing demo does not configure it. `max_actions` caps AI
+snapshot reload; the demo installs a bounded GuardChase policy and training
+scenario. `max_actions` caps AI
 attempts here, **not** all player plus AI actions: player actions are currently
 applied immediately without a shared tick counter. The policy epoch must match
 the authoritative reputation timebase. Existing unbounded perception/helper
 APIs are unchanged. Content-defined behavior graphs, scheduling, group aggro,
 fair scheduling, persistent inspection, and a shared action budget remain. AI
 policy now accepts server-approved `AiBehaviorDefinition` bindings, allowing a
-content behavior ID to select the bounded Guard primitive and its perception
-range; a test verifies a custom ID and constrained range. `cargo test -p
-engine_sim policy_binds_content_behavior_ids_to_bounded_guard_semantics` passes.
+content behavior ID to select the bounded Guard or GuardChase primitive and its
+perception range; a test verifies a custom ID and constrained range. GuardChase
+uses the zone's cumulative path budget and per-agent retry state, then moves
+through the same server-side collision and dynamic-obstacle checks as other
+authoritative movement. `cargo test -p engine_sim
+policy_binds_content_behavior_ids_to_bounded_guard_semantics` passes.
 The content loader does not yet hydrate these definitions from authored bundles,
-and only the Guard primitive exists, so content-only behavior graphs/schedules
-remain open. `SIM-001` remains an unverified prerequisite.
+and only the Guard and GuardChase primitives exist, so content-only behavior
+graphs/schedules remain open. Movement authority is implemented in `SIM-001`;
+visual client reconciliation remains in `SIM-002`.
 
 ---
 
 ## SIM-007 — Navigation budgets and replan policy
 
 - **Priority:** P1
-- **Status:** Ready
+- **Status:** Done — cumulative budgets, path diagnostics, replan policy, expiring blockers, shared nav bake, and an opt-in GuardChase consumer
 - **Depends on:** `SIM-001`
 - **References:** ADR 0010, `crates/engine_sim/src/nav.rs`
 
 **Scope**
 
-- Formalize expansion budgets, replan cadence, partial-path behavior, and
-  failure codes.
-- Handle moving obstacles, doors, and dynamic blockers without unbounded
-  replanning.
-- Expose a nav preview/bake format for the editor (`CNT-006`).
-- Add metrics for expansions, budget exhaustion, and path failures (`OPS-001`).
+- Enforce cumulative per-zone/per-tick expansion and request limits; refuse
+  excess requests without searching and reset allowances at the next tick.
+- Define deterministic failure codes, nearest-reachable partial paths, and
+  bounded exponential retry state; connect them to NPC navigation.
+- Make dynamic obstacles use the same nav grid, with expiry/replan scheduling
+  bounded by the tick budget.
+- Expose a validated nav bake format shared by editor preview and runtime
+  (`CNT-006`).
+- Export bounded diagnostics for expansions, partial paths, failures, and
+  budget exhaustion to `OPS-001`.
+
+**Implemented:** `Zone::find_path` uses a cumulative `PathTickBudget` derived
+from `TickBudget`; exhausted allowances reject requests without running A*.
+`NavGrid::find_path_with_policy` can return the deterministic nearest reached
+cell as an explicitly incomplete path, and `ReplanState`/`ReplanPolicy` provide
+bounded exponential backoff and a consecutive-failure cap. Fixed-size
+`PathDiagnostics` classify errors, count expansions and deferred work, and can
+be sampled by the world metrics endpoint. `NavBake` round-trips the exact
+versioned grid used for runtime path queries. Unit tests verify cumulative
+accounting, reset and deferred semantics, deterministic partial paths, retry
+limits, blocker expiry and extension, malformed bake rejection, and identical
+paths before/after baking. Temporary blockers are stored separately from the
+static nav bake, are active until their exclusive expiry tick, and affect both
+endpoints and diagonal corner checks. Authoritative movement revalidates against
+the same active blockers and resumes once they expire.
+
+The opt-in `GuardChase` behavior requests one bounded path when needed, caches
+and follows it using server-validated NPC movement, and uses per-agent
+`ReplanState` backoff after unreachable/blocked routes. Expiring blockers reset
+stale cached routes so the next AI tick can request a fresh one. The demo installs
+the policy on fresh and restored zones and includes a persistent guard/raider
+scenario; authored content activation remains in `SIM-006`.
+Use `Zone::add_dynamic_obstacle` for tick-expiring temporary blockers and
+`Zone::nav_mut` for authored/static cell changes.
 
 **Acceptance criteria**
 
-- [ ] Budget exhaustion is deterministic, diagnosable, and never overruns the
-      tick budget.
-- [ ] A blocked path degrades to a documented behavior rather than a freeze.
-- [ ] Path preview and runtime use the same nav data.
+- [x] Budget exhaustion is deterministic, diagnosable, and never overruns the
+      cumulative tick expansion/request limits.
+- [x] A blocked path can degrade to an explicitly incomplete nearest-reachable
+      path; callers can also choose fail-closed errors.
+- [x] Path preview and runtime use the same validated, versioned `NavBake` data.
+- [x] NPC path consumers honor bounded retry state and request replans after
+      dynamic blockers expire without exceeding the tick budget.
+- [x] Fixed-label pathfinding diagnostics are exported by the world metrics
+      endpoint (the demo reports zero until its AI policy is enabled).
 
 ---
 

@@ -63,6 +63,65 @@ fn authorized(entity: &EntityRecord, intent: &MovementIntent) -> bool {
 }
 
 impl Zone {
+    /// Move a server-controlled NPC toward one already validated path
+    /// waypoint. Movement remains bounded by the normal nav/collision rules.
+    pub(crate) fn move_ai_toward(
+        &mut self,
+        actor: StableId,
+        destination: Vec3,
+        speed_m_per_s: f32,
+        elapsed_ms: u32,
+    ) -> bool {
+        let Some(entity) = self.entities.get(&actor) else {
+            return false;
+        };
+        let Some(profile) = entity.movement_profile() else {
+            return false;
+        };
+        if !profile.can_move() || !speed_m_per_s.is_finite() || speed_m_per_s < 0.0 {
+            return false;
+        }
+        let from = entity.position();
+        let dx = f64::from(destination.x) - f64::from(from.x);
+        let dz = f64::from(destination.z) - f64::from(from.z);
+        let distance = (dx * dx + dz * dz).sqrt();
+        if distance == 0.0 {
+            return true;
+        }
+        // Leave a small deterministic margin so converting the proposed point
+        // back to f32 cannot exceed the server's exact speed budget.
+        let step =
+            f64::from(speed_m_per_s) * f64::from(profile.speed_multiplier) * f64::from(elapsed_ms)
+                / 1_000.0
+                * 0.999;
+        if step <= 0.0 || !step.is_finite() {
+            return false;
+        }
+        let ratio = (step / distance).min(1.0);
+        #[allow(clippy::cast_possible_truncation)]
+        let proposed = Vec3::new(
+            (f64::from(from.x) + dx * ratio) as f32,
+            from.y,
+            (f64::from(from.z) + dz * ratio) as f32,
+        );
+        if !self.nav.allows_displacement_with_blockers(
+            from,
+            proposed,
+            speed_m_per_s * profile.speed_multiplier,
+            elapsed_ms,
+            &self.dynamic_blockers,
+        ) || !self.destination_is_clear(actor, from, proposed, profile.radius_m)
+        {
+            return false;
+        }
+        if let Some(entity) = self.entities.get_mut(&actor) {
+            entity.transform.position = proposed;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Last queue-accepted sequence for exactly this control session.
     #[must_use]
     pub fn last_movement_sequence(
@@ -156,11 +215,12 @@ impl Zone {
                 };
                 authorized(entity, &intent)
                     && self.config.contains(intent.destination)
-                    && self.nav.allows_displacement(
+                    && self.nav.allows_displacement_with_blockers(
                         entity.position(),
                         intent.destination,
                         speed_m_per_s * profile.speed_multiplier,
                         elapsed_ms,
+                        &self.dynamic_blockers,
                     )
                     && self.destination_is_clear(
                         actor,
@@ -210,6 +270,9 @@ impl Zone {
         let Some(destination_cell) = self.nav.cell_of(destination) else {
             return false;
         };
+        if self.dynamic_blockers.contains_key(&destination_cell) {
+            return false;
+        }
         self.entities
             .values()
             .filter(|entity| entity.id != actor)

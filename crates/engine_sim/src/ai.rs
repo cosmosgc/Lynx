@@ -7,10 +7,12 @@ use engine_core::id::{DefinitionId, StableId};
 use engine_core::math::Vec3;
 use engine_core::time::{Millis, Tick};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 use crate::action::{ActionRequest, ActionResult, Verb};
 use crate::entity::EntityRecord;
 use crate::mind::Controller;
+use crate::nav::{PartialPathPolicy, Path, ReplanPolicy, ReplanState};
 use crate::zone::Zone;
 
 /// Server-owned, opt-in policy for the built-in guard behavior.
@@ -34,6 +36,10 @@ pub struct AiTickPolicy {
     /// Declarative behavior bindings. Content may assign stable behavior IDs
     /// to these bounded built-in semantics without changing the engine.
     pub behaviors: Vec<AiBehaviorDefinition>,
+    /// Base NPC navigation speed; entity movement profiles apply multipliers.
+    pub navigation_speed_m_per_s: f32,
+    /// Retry cadence after a path fails or is blocked.
+    pub navigation_replan: ReplanPolicy,
 }
 
 /// A server-approved behavior definition that can be populated from content.
@@ -50,6 +56,8 @@ pub struct AiBehaviorDefinition {
 #[serde(rename_all = "snake_case")]
 pub enum AiBehaviorKind {
     Guard,
+    /// Guard that follows visible hostile targets using bounded zone paths.
+    GuardChase,
 }
 
 /// Last tick's bounded AI decisions, retained for server inspection.
@@ -99,8 +107,35 @@ pub struct AiDecision {
     pub target: Option<StableId>,
     /// Action pipeline result, if dispatched.
     pub action: Option<ActionResult>,
+    /// Navigation outcome, if this decision requested or followed a path.
+    pub navigation: Option<AiNavigationReport>,
     /// Stable decision diagnostic.
     pub reason: &'static str,
+}
+
+/// Bounded, inspectable navigation outcome for one AI decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AiNavigationReport {
+    /// Current hostile target.
+    pub target: StableId,
+    /// Requested target position's navigation cell.
+    pub goal_cell: (usize, usize),
+    /// Short state code; no map or private entity information is included.
+    pub status: &'static str,
+    /// Whether the retained route reaches the requested goal cell.
+    pub complete: bool,
+    /// Expansions used to produce the current retained route.
+    pub expansions: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AiNavigationState {
+    target: Option<StableId>,
+    goal_cell: Option<(usize, usize)>,
+    path: Option<Path>,
+    next_waypoint: usize,
+    replan: ReplanState,
+    abandoned: bool,
 }
 
 impl Zone {
@@ -171,6 +206,19 @@ impl Zone {
                     .saturating_add(1);
             }
         }
+        let chase_behaviors: BTreeSet<_> = policy
+            .behaviors
+            .iter()
+            .filter(|definition| definition.kind == AiBehaviorKind::GuardChase)
+            .map(|definition| definition.id.clone())
+            .collect();
+        let active_chasers: BTreeSet<_> = controllers
+            .iter()
+            .filter(|(_, behavior)| chase_behaviors.contains(behavior))
+            .map(|(actor, _)| *actor)
+            .collect();
+        self.ai_navigation
+            .retain(|actor, _| active_chasers.contains(actor));
         let elapsed = self.tick.0.saturating_mul(u64::from(policy.tick_ms));
         let now = Millis::new(
             policy
@@ -185,6 +233,7 @@ impl Zone {
                 perception: None,
                 target: None,
                 action: None,
+                navigation: None,
                 reason: "unknown_behavior",
             };
             // The built-in behavior is deliberately explicit: unknown content does not attack.
@@ -192,7 +241,12 @@ impl Zone {
                 .behaviors
                 .iter()
                 .find(|definition| definition.id == decision.behavior)
-                .filter(|definition| definition.kind == AiBehaviorKind::Guard)
+                .filter(|definition| {
+                    matches!(
+                        definition.kind,
+                        AiBehaviorKind::Guard | AiBehaviorKind::GuardChase
+                    )
+                })
             {
                 let perception = self
                     .perceive_hostiles_bounded(
@@ -227,7 +281,38 @@ impl Zone {
                     _ => "action_budget_reached",
                 };
                 decision.perception = Some(perception);
-                if let Some(target) = decision.target
+                let chasing = policy
+                    .behaviors
+                    .iter()
+                    .find(|definition| definition.id == decision.behavior)
+                    .is_some_and(|definition| definition.kind == AiBehaviorKind::GuardChase);
+                if !chasing {
+                    self.ai_navigation.remove(&actor);
+                }
+                if chasing && decision.target.is_none() {
+                    self.ai_navigation.remove(&actor);
+                }
+                if chasing
+                    && decision
+                        .target
+                        .is_some_and(|target| self.ai_target_in_range(actor, target))
+                {
+                    self.ai_navigation.remove(&actor);
+                }
+                if chasing
+                    && let Some(target) = decision.target
+                    && !self.ai_target_in_range(actor, target)
+                {
+                    let navigation = self.navigate_ai_toward(
+                        actor,
+                        target,
+                        policy.navigation_speed_m_per_s,
+                        policy.tick_ms,
+                        policy.navigation_replan,
+                    );
+                    decision.reason = navigation.status;
+                    decision.navigation = Some(navigation);
+                } else if let Some(target) = decision.target
                     && report.action_attempts < self.config.budget.max_actions
                 {
                     let request_id =
@@ -260,6 +345,190 @@ impl Zone {
             report.decisions.push(decision);
         }
         self.ai_report = report;
+    }
+
+    fn ai_target_in_range(&self, actor: StableId, target: StableId) -> bool {
+        let Some(actor) = self.entities.get(&actor) else {
+            return false;
+        };
+        let Some(target) = self.entities.get(&target) else {
+            return false;
+        };
+        target.interactable.as_ref().is_some_and(|interaction| {
+            actor.position().distance_xz(target.position()) <= interaction.range_m
+        })
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one AI navigation decision keeps cache, retry, and movement accounting ordered"
+    )]
+    fn navigate_ai_toward(
+        &mut self,
+        actor: StableId,
+        target: StableId,
+        speed_m_per_s: f32,
+        tick_ms: u32,
+        replan_policy: ReplanPolicy,
+    ) -> AiNavigationReport {
+        let Some(actor_entity) = self.entities.get(&actor) else {
+            return AiNavigationReport {
+                target,
+                goal_cell: (0, 0),
+                status: "actor_missing",
+                complete: false,
+                expansions: 0,
+            };
+        };
+        let Some(target_entity) = self.entities.get(&target) else {
+            self.ai_navigation.remove(&actor);
+            return AiNavigationReport {
+                target,
+                goal_cell: (0, 0),
+                status: "target_missing",
+                complete: false,
+                expansions: 0,
+            };
+        };
+        let actor_position = actor_entity.position();
+        let target_position = target_entity.position();
+        let interaction_range = target_entity
+            .interactable
+            .as_ref()
+            .map_or(0.0, |interactable| interactable.range_m);
+        let actor_radius = actor_entity
+            .movement_profile()
+            .map_or(0.0, |profile| profile.radius_m);
+        let target_radius = target_entity
+            .movement_profile()
+            .map_or(0.0, |profile| profile.radius_m);
+        let goal_distance = (interaction_range - self.nav.cell_size() * 0.75)
+            .max(actor_radius + target_radius + 0.05);
+        let direction_x = target_position.x - actor_position.x;
+        let direction_z = target_position.z - actor_position.z;
+        let length = (direction_x * direction_x + direction_z * direction_z).sqrt();
+        if !length.is_finite() || length == 0.0 {
+            return AiNavigationReport {
+                target,
+                goal_cell: self.nav.cell_of(target_position).unwrap_or((0, 0)),
+                status: "invalid_geometry",
+                complete: false,
+                expansions: 0,
+            };
+        }
+        let goal = Vec3::new(
+            target_position.x - direction_x / length * goal_distance,
+            actor_position.y,
+            target_position.z - direction_z / length * goal_distance,
+        );
+        let Some(goal_cell) = self.nav.cell_of(goal) else {
+            return AiNavigationReport {
+                target,
+                goal_cell: (0, 0),
+                status: "goal_out_of_bounds",
+                complete: false,
+                expansions: 0,
+            };
+        };
+
+        let mut state = self.ai_navigation.remove(&actor).unwrap_or_default();
+        if state.target != Some(target) || state.goal_cell != Some(goal_cell) {
+            state = AiNavigationState {
+                target: Some(target),
+                goal_cell: Some(goal_cell),
+                ..AiNavigationState::default()
+            };
+        }
+        let mut status = "navigating";
+        if state.abandoned {
+            status = "navigation_abandoned";
+        } else if state.path.is_none() {
+            if state.replan.ready(self.tick) {
+                match self.find_path(actor_position, goal, PartialPathPolicy::Fail) {
+                    Ok(path) => {
+                        state.replan.on_success();
+                        state.next_waypoint = 0;
+                        state.path = Some(path);
+                    }
+                    Err(error) => {
+                        if state.replan.on_failure(self.tick, replan_policy).is_none() {
+                            state.abandoned = true;
+                        }
+                        status = match error {
+                            crate::nav::PathError::BudgetExhausted => "navigation_budget_exhausted",
+                            crate::nav::PathError::NoPath => "navigation_no_path",
+                            crate::nav::PathError::Blocked => "navigation_blocked",
+                            crate::nav::PathError::OutOfBounds => "navigation_out_of_bounds",
+                        };
+                    }
+                }
+            } else {
+                status = "navigation_backoff";
+            }
+        }
+
+        let (complete, expansions) = state
+            .path
+            .as_ref()
+            .map_or((false, 0), |path| (path.complete, path.expansions));
+        if let Some(path) = state.path.as_ref() {
+            if state.next_waypoint < path.waypoints.len() {
+                let waypoint = path.waypoints[state.next_waypoint];
+                let current = self
+                    .entities
+                    .get(&actor)
+                    .map_or(actor_position, EntityRecord::position);
+                let dx = f64::from(waypoint.x) - f64::from(current.x);
+                let dz = f64::from(waypoint.z) - f64::from(current.z);
+                let distance = (dx * dx + dz * dz).sqrt();
+                if distance < 0.001 {
+                    state.next_waypoint += 1;
+                }
+            }
+            if let Some(waypoint) = state
+                .path
+                .as_ref()
+                .and_then(|path| path.waypoints.get(state.next_waypoint))
+                .copied()
+            {
+                if self.move_ai_toward(actor, waypoint, speed_m_per_s, tick_ms) {
+                    status = if complete {
+                        "navigating"
+                    } else {
+                        "following_partial_path"
+                    };
+                } else {
+                    state.path = None;
+                    if state.replan.on_failure(self.tick, replan_policy).is_none() {
+                        state.abandoned = true;
+                    }
+                    status = "navigation_blocked";
+                }
+            } else {
+                state.path = None;
+                if self.ai_target_in_range(actor, target) {
+                    status = "arrived";
+                    state.replan.on_success();
+                } else {
+                    if state.replan.on_failure(self.tick, replan_policy).is_none() {
+                        state.abandoned = true;
+                    }
+                    status = if complete {
+                        "goal_reached_out_of_range"
+                    } else {
+                        "partial_path_exhausted"
+                    };
+                }
+            }
+        }
+        self.ai_navigation.insert(actor, state);
+        AiNavigationReport {
+            target,
+            goal_cell,
+            status,
+            complete,
+            expansions,
+        }
     }
 }
 
@@ -731,6 +1000,7 @@ mod tests {
             max_actions,
             max_ai_updates: max_updates,
             max_path_expansions: 0,
+            max_path_requests: 0,
         });
         let nav = NavGrid::new(10, 10, 1.0, Vec3::ZERO).unwrap();
         let mut zone = Zone::new(config, nav, Arc::new(UniformItemRules::new(10))).unwrap();
@@ -746,6 +1016,8 @@ mod tests {
             max_controller_candidates: 10,
             epoch: Millis::new(0),
             tick_ms: 50,
+            navigation_speed_m_per_s: 2.0,
+            navigation_replan: ReplanPolicy::default(),
             behaviors: vec![AiBehaviorDefinition {
                 id: DefinitionId::new("behavior.guard").unwrap(),
                 kind: AiBehaviorKind::Guard,
@@ -790,6 +1062,96 @@ mod tests {
         assert_eq!(a.take_ai_diagnostics().decisions, 2);
         assert_eq!(a.ai_diagnostics(), AiDiagnostics::default());
         assert_eq!(a.entity(id(3)), b.entity(id(3)));
+    }
+
+    #[test]
+    fn guard_chase_uses_bounded_paths_and_moves_under_server_authority() {
+        let mut zone = tick_zone(1, 1);
+        zone.config.budget.max_path_expansions = 512;
+        zone.config.budget.max_path_requests = 2;
+        zone.path_budget = zone.config.budget.path_tick_budget();
+        let mut policy = zone.ai_policy.as_ref().unwrap().as_ref().clone();
+        policy.behaviors[0].kind = AiBehaviorKind::GuardChase;
+        zone.set_ai_tick_policy(Some(policy));
+        zone.spawn(ai_at(1, "faction.guards", 1.5, 1.5)).unwrap();
+        let mut target = ai_at(2, "faction.bandits", 6.5, 1.5);
+        target.mind = Some(Mind::player(id(99), "session"));
+        target.interactable = Some(Interactable::new(2.0, [Verb::Attack]));
+        zone.spawn(target).unwrap();
+
+        zone.advance_tick();
+        let first = &zone.ai_tick_report().decisions[0];
+        assert_eq!(first.reason, "navigating");
+        let navigation = first.navigation.unwrap();
+        assert!(navigation.expansions > 0);
+        assert!(navigation.complete);
+        assert!(zone.entity(id(1)).unwrap().position().x > 1.5);
+        assert_eq!(zone.path_diagnostics().requests, 1);
+
+        for _ in 0..64 {
+            if zone.ai_tick_report().decisions[0].action.is_some() {
+                break;
+            }
+            zone.advance_tick();
+        }
+        let decision = &zone.ai_tick_report().decisions[0];
+        assert_eq!(decision.reason, "applied");
+        assert_eq!(
+            zone.entity(id(2)).unwrap().health.as_ref().unwrap().current,
+            99
+        );
+        assert!(
+            zone.entity(id(1))
+                .unwrap()
+                .position()
+                .distance_xz(Vec3::new(6.5, 0.0, 1.5))
+                <= 2.0
+        );
+        assert_eq!(zone.path_diagnostics().requests, 1);
+    }
+
+    #[test]
+    fn guard_chase_backs_off_on_no_path_and_retries_after_blocker_expiry() {
+        let mut zone = tick_zone(1, 1);
+        zone.config.budget.max_path_expansions = 512;
+        zone.config.budget.max_path_requests = 2;
+        zone.path_budget = zone.config.budget.path_tick_budget();
+        let mut policy = zone.ai_policy.as_ref().unwrap().as_ref().clone();
+        policy.behaviors[0].kind = AiBehaviorKind::GuardChase;
+        zone.set_ai_tick_policy(Some(policy));
+        zone.spawn(ai_at(1, "faction.guards", 1.5, 1.5)).unwrap();
+        let mut target = ai_at(2, "faction.bandits", 1.5, 7.5);
+        target.mind = Some(Mind::player(id(99), "session"));
+        target.interactable = Some(Interactable::new(2.0, [Verb::Attack]));
+        zone.spawn(target).unwrap();
+        for x in 0..10 {
+            assert!(zone.add_dynamic_obstacle(x, 4, Tick(5)));
+        }
+
+        zone.advance_tick();
+        assert_eq!(
+            zone.ai_tick_report().decisions[0].reason,
+            "navigation_no_path"
+        );
+        zone.advance_tick();
+        assert_eq!(
+            zone.ai_tick_report().decisions[0].reason,
+            "navigation_no_path"
+        );
+        zone.advance_tick();
+        assert_eq!(
+            zone.ai_tick_report().decisions[0].reason,
+            "navigation_backoff"
+        );
+        zone.advance_tick();
+        assert_eq!(
+            zone.ai_tick_report().decisions[0].reason,
+            "navigation_no_path"
+        );
+        zone.advance_tick();
+        assert_eq!(zone.ai_tick_report().decisions[0].reason, "navigating");
+        assert_eq!(zone.path_diagnostics().requests, 4);
+        assert!(zone.entity(id(1)).unwrap().position().z > 1.5);
     }
 
     #[test]

@@ -5,13 +5,17 @@
 //! `docs/adr/0010-navigation-and-pathfinding.md`.
 
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::{BTreeMap, BinaryHeap};
 
 use engine_core::math::Vec3;
+use engine_core::time::Tick;
 use serde::{Deserialize, Serialize};
 
 /// The largest accepted grid dimension.
 pub const MAX_GRID_SIDE: usize = 4096;
+
+/// Schema version for the editor/runtime navigation bake format.
+pub const NAV_BAKE_SCHEMA_VERSION: u32 = 1;
 
 /// Convert a cell coordinate into a float. Grid dimensions are capped at
 /// [`MAX_GRID_SIDE`], which is far below `f32`'s exact-integer range.
@@ -45,6 +49,177 @@ impl Default for PathBudget {
     }
 }
 
+/// How a failed or budget-limited search degrades.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PartialPathPolicy {
+    /// Return the original [`PathError`] when the goal cannot be reached.
+    #[default]
+    Fail,
+    /// Return the best reachable path to the open cell closest to the goal,
+    /// marked with [`Path::complete`] equal to `false`. If no cell beyond the
+    /// start was reached, the original error is still returned.
+    Nearest,
+}
+
+/// Cumulative per-tick pathfinding limits.
+///
+/// One instance is owned by a zone and reset at the start of every tick. A
+/// request may consume at most the remaining tick expansions, with its path
+/// length capped per request, so the sum over all requests can never overrun
+/// the tick budget. Requests made after either allowance reaches zero are
+/// refused without searching and are counted as deferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathTickBudget {
+    max_expansions: usize,
+    max_waypoints: usize,
+    max_requests: usize,
+    remaining_expansions: usize,
+    remaining_requests: usize,
+}
+
+impl PathTickBudget {
+    /// Create a tick budget with fixed per-tick limits.
+    #[must_use]
+    pub const fn new(max_expansions: usize, max_waypoints: usize, max_requests: usize) -> Self {
+        Self {
+            max_expansions,
+            max_waypoints,
+            max_requests,
+            remaining_expansions: max_expansions,
+            remaining_requests: max_requests,
+        }
+    }
+
+    /// Expansions still available in this tick.
+    #[must_use]
+    pub const fn remaining_expansions(&self) -> usize {
+        self.remaining_expansions
+    }
+
+    /// Requests still available in this tick.
+    #[must_use]
+    pub const fn remaining_requests(&self) -> usize {
+        self.remaining_requests
+    }
+
+    /// Maximum waypoints for any request in this tick.
+    #[must_use]
+    pub const fn max_waypoints(&self) -> usize {
+        self.max_waypoints
+    }
+
+    /// Whether no further request can search this tick.
+    #[must_use]
+    pub const fn is_exhausted(&self) -> bool {
+        self.remaining_expansions == 0 || self.remaining_requests == 0
+    }
+
+    /// Restore every allowance for a new tick.
+    pub fn reset(&mut self) {
+        self.remaining_expansions = self.max_expansions;
+        self.remaining_requests = self.max_requests;
+    }
+}
+
+impl Default for PathTickBudget {
+    fn default() -> Self {
+        Self::new(16_384, 512, 32)
+    }
+}
+
+/// Deterministic exponential backoff for repeated failed path requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplanPolicy {
+    /// Delay in ticks before the first retry.
+    pub initial_delay_ticks: u64,
+    /// Largest delay between retries.
+    pub max_delay_ticks: u64,
+    /// Replans allowed before the request is abandoned for this goal.
+    pub max_consecutive_failures: u32,
+}
+
+impl Default for ReplanPolicy {
+    fn default() -> Self {
+        Self {
+            initial_delay_ticks: 1,
+            max_delay_ticks: 32,
+            max_consecutive_failures: 5,
+        }
+    }
+}
+
+impl ReplanPolicy {
+    /// Delay before retry number `failures` (one-based), or `None` when the
+    /// failure limit is exhausted. Delays double from the initial value and
+    /// saturate at [`Self::max_delay_ticks`].
+    #[must_use]
+    pub fn delay_after_failures(self, failures: u32) -> Option<u64> {
+        if failures == 0 || failures > self.max_consecutive_failures {
+            return None;
+        }
+        let shift = failures.saturating_sub(1).min(63);
+        let factor = 1_u64 << shift;
+        let delay = self
+            .initial_delay_ticks
+            .max(1)
+            .saturating_mul(factor)
+            .min(self.max_delay_ticks.max(1));
+        Some(delay)
+    }
+}
+
+/// Per-agent bounded replan state.
+///
+/// Callers record a failure when a path attempt is blocked or budget-limited,
+/// then retry only when [`Self::ready`] returns true. The state never allows
+/// more than [`ReplanPolicy::max_consecutive_failures`] consecutive attempts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplanState {
+    failures: u32,
+    retry_at: Tick,
+}
+
+impl ReplanState {
+    /// Consecutive failures recorded since the last success.
+    #[must_use]
+    pub const fn failures(&self) -> u32 {
+        self.failures
+    }
+
+    /// Tick at or after which a retry is allowed.
+    #[must_use]
+    pub const fn retry_at(&self) -> Tick {
+        self.retry_at
+    }
+
+    /// Whether a retry is allowed at `now`.
+    #[must_use]
+    pub const fn ready(&self, now: Tick) -> bool {
+        now.0 >= self.retry_at.0
+    }
+
+    /// Clear the failure count after a successful path.
+    pub fn on_success(&mut self) {
+        self.failures = 0;
+        self.retry_at = Tick::ZERO;
+    }
+
+    /// Record a failed attempt and schedule the next retry.
+    ///
+    /// Returns the retry tick, or `None` when the failure limit is exhausted
+    /// and the caller should abandon or escalate this goal.
+    pub fn on_failure(&mut self, now: Tick, policy: ReplanPolicy) -> Option<Tick> {
+        if self.failures >= policy.max_consecutive_failures {
+            return None;
+        }
+        self.failures = self.failures.saturating_add(1);
+        let delay = policy.delay_after_failures(self.failures)?;
+        self.retry_at = Tick(now.0.saturating_add(delay));
+        Some(self.retry_at)
+    }
+}
+
 /// Why a path request failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -72,22 +247,29 @@ impl std::fmt::Display for PathError {
 
 impl std::error::Error for PathError {}
 
-/// A successful path.
+/// A path, possibly partial under [`PartialPathPolicy::Nearest`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Path {
-    /// Cell centers from start to goal, inclusive.
+    /// Cell centers from start to the goal or the nearest reached cell.
     pub waypoints: Vec<Vec3>,
     /// Number of nodes expanded.
     pub expansions: usize,
     /// Weighted movement cost.
     pub cost: u64,
+    /// Whether the path reaches the requested goal.
+    #[serde(default = "complete_by_default")]
+    pub complete: bool,
+}
+
+fn complete_by_default() -> bool {
+    true
 }
 
 /// Fixed-size, caller-owned cumulative pathfinding diagnostics. Counters saturate.
-/// Only calls to [`NavGrid::find_path_observed`] are recorded.
+/// Calls to observed or tick-budgeted path APIs are recorded.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PathDiagnostics {
-    /// Completed requests, including failures.
+    /// Completed requests, including failures and deferred requests.
     pub requests: u64,
     /// Nodes whose neighbours were expanded, including on failed requests.
     pub expansions: u64,
@@ -95,6 +277,16 @@ pub struct PathDiagnostics {
     pub budget_exhaustions: u64,
     /// Failed requests, including budget exhaustion.
     pub failures: u64,
+    /// Requests returning a best-effort partial path.
+    pub partial_paths: u64,
+    /// Requests refused without searching because the tick allowance was spent.
+    pub deferred_requests: u64,
+    /// Failures because an endpoint was outside the grid.
+    pub out_of_bounds: u64,
+    /// Failures because an endpoint cell was blocked.
+    pub blocked_endpoints: u64,
+    /// Failures because no route exists.
+    pub no_paths: u64,
 }
 
 impl PathDiagnostics {
@@ -124,7 +316,63 @@ pub struct NavGrid {
     cost: Vec<u16>,
 }
 
+/// Versioned, validated navigation data exchanged between the editor preview
+/// and the runtime. Loading a bake reconstructs exactly the grid the runtime
+/// uses, so preview paths and authoritative paths share one representation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NavBake {
+    /// Bake format version; must equal [`NAV_BAKE_SCHEMA_VERSION`].
+    pub schema_version: u32,
+    /// Grid width in cells.
+    pub width: usize,
+    /// Grid height in cells.
+    pub height: usize,
+    /// Edge length of one cell in world meters.
+    pub cell_size: f32,
+    /// World position of the grid's minimum corner.
+    pub origin: Vec3,
+    /// Row-major blocked-cell flags, `width * height` entries.
+    pub blocked: Vec<bool>,
+    /// Row-major movement cost multipliers, `width * height` entries.
+    pub cost: Vec<u16>,
+}
+
 impl NavGrid {
+    /// Export the exact runtime grid as a validated editor/runtime bake.
+    #[must_use]
+    pub fn bake(&self) -> NavBake {
+        NavBake {
+            schema_version: NAV_BAKE_SCHEMA_VERSION,
+            width: self.width,
+            height: self.height,
+            cell_size: self.cell_size,
+            origin: self.origin,
+            blocked: self.blocked.clone(),
+            cost: self.cost.clone(),
+        }
+    }
+
+    /// Reconstruct a runtime grid from a bake.
+    ///
+    /// # Errors
+    ///
+    /// Returns `None` when the schema version, dimensions, cell size, origin,
+    /// or row-major array lengths are invalid.
+    #[must_use]
+    pub fn from_bake(bake: &NavBake) -> Option<Self> {
+        if bake.schema_version != NAV_BAKE_SCHEMA_VERSION {
+            return None;
+        }
+        let cells = bake.width.checked_mul(bake.height)?;
+        if bake.blocked.len() != cells || bake.cost.len() != cells || bake.cost.contains(&0) {
+            return None;
+        }
+        let mut grid = Self::new(bake.width, bake.height, bake.cell_size, bake.origin)?;
+        grid.blocked.clone_from(&bake.blocked);
+        grid.cost.clone_from(&bake.cost);
+        Some(grid)
+    }
+
     /// Create an empty, fully walkable grid.
     ///
     /// # Errors
@@ -216,6 +464,15 @@ impl NavGrid {
     /// not a continuous collision or entity-occupancy check.
     #[must_use]
     pub fn can_step(&self, from: (usize, usize), to: (usize, usize)) -> bool {
+        self.can_step_with_blockers(from, to, &BTreeMap::new())
+    }
+
+    fn can_step_with_blockers(
+        &self,
+        from: (usize, usize),
+        to: (usize, usize),
+        dynamic_blockers: &BTreeMap<(usize, usize), Tick>,
+    ) -> bool {
         let (x, y) = from;
         let (next_x, next_y) = to;
         let dx = x.abs_diff(next_x);
@@ -224,11 +481,18 @@ impl NavGrid {
             || dy > 1
             || (dx == 0 && dy == 0)
             || self.is_blocked(x, y)
+            || dynamic_blockers.contains_key(&(x, y))
             || self.is_blocked(next_x, next_y)
+            || dynamic_blockers.contains_key(&(next_x, next_y))
         {
             return false;
         }
-        dx == 0 || dy == 0 || (!self.is_blocked(next_x, y) && !self.is_blocked(x, next_y))
+        dx == 0
+            || dy == 0
+            || (!self.is_blocked(next_x, y)
+                && !dynamic_blockers.contains_key(&(next_x, y))
+                && !self.is_blocked(x, next_y)
+                && !dynamic_blockers.contains_key(&(x, next_y)))
     }
 
     /// Validate one proposed horizontal displacement against a server-owned budget.
@@ -252,6 +516,26 @@ impl NavGrid {
         speed_m_per_s: f32,
         elapsed_ms: u32,
     ) -> bool {
+        self.allows_displacement_with_blockers(
+            from,
+            to,
+            speed_m_per_s,
+            elapsed_ms,
+            &BTreeMap::new(),
+        )
+    }
+
+    /// Validate displacement against static and active dynamic obstacles.
+    #[must_use]
+    #[allow(clippy::float_cmp)] // Any vertical change must be rejected, not approximated.
+    pub fn allows_displacement_with_blockers(
+        &self,
+        from: Vec3,
+        to: Vec3,
+        speed_m_per_s: f32,
+        elapsed_ms: u32,
+        dynamic_blockers: &BTreeMap<(usize, usize), Tick>,
+    ) -> bool {
         if !from.x.is_finite()
             || !from.y.is_finite()
             || !from.z.is_finite()
@@ -274,9 +558,9 @@ impl NavGrid {
             return false;
         };
         if start == end {
-            !self.is_blocked(start.0, start.1)
+            !self.is_blocked(start.0, start.1) && !dynamic_blockers.contains_key(&start)
         } else {
-            self.can_step(start, end)
+            self.can_step_with_blockers(start, end, dynamic_blockers)
         }
     }
 
@@ -434,7 +718,31 @@ impl NavGrid {
     ///
     /// Returns the most specific [`PathError`] for the failure.
     pub fn find_path(&self, from: Vec3, to: Vec3, budget: PathBudget) -> Result<Path, PathError> {
-        self.find_path_inner(from, to, budget, &mut 0)
+        self.find_path_inner(
+            from,
+            to,
+            budget,
+            PartialPathPolicy::Fail,
+            &BTreeMap::new(),
+            &mut 0,
+        )
+    }
+
+    /// Find a path with an explicit degradation policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns the most specific [`PathError`] when the policy is
+    /// [`PartialPathPolicy::Fail`], or when no cell beyond the start was
+    /// reached under [`PartialPathPolicy::Nearest`].
+    pub fn find_path_with_policy(
+        &self,
+        from: Vec3,
+        to: Vec3,
+        budget: PathBudget,
+        policy: PartialPathPolicy,
+    ) -> Result<Path, PathError> {
+        self.find_path_inner(from, to, budget, policy, &BTreeMap::new(), &mut 0)
     }
 
     /// Find a path and accumulate fixed-size diagnostics, including failed work.
@@ -450,25 +758,102 @@ impl NavGrid {
         diagnostics: &mut PathDiagnostics,
     ) -> Result<Path, PathError> {
         let mut expansions = 0;
-        let result = self.find_path_inner(from, to, budget, &mut expansions);
-        diagnostics.requests = diagnostics.requests.saturating_add(1);
-        diagnostics.expansions = diagnostics
-            .expansions
-            .saturating_add(u64::try_from(expansions).unwrap_or(u64::MAX));
-        if result.is_err() {
-            diagnostics.failures = diagnostics.failures.saturating_add(1);
-        }
-        if matches!(result, Err(PathError::BudgetExhausted)) {
-            diagnostics.budget_exhaustions = diagnostics.budget_exhaustions.saturating_add(1);
-        }
+        let result = self.find_path_inner(
+            from,
+            to,
+            budget,
+            PartialPathPolicy::Fail,
+            &BTreeMap::new(),
+            &mut expansions,
+        );
+        record_outcome(diagnostics, &result, expansions);
         result
     }
 
+    /// Find a path under a cumulative per-tick budget.
+    ///
+    /// Expansion allowance is consumed by every search, including failed and
+    /// partial searches. Once either the expansion or request allowance is
+    /// gone, further requests are refused without searching. This makes the
+    /// worst-case work for a tick deterministic and bounded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PathError::BudgetExhausted`] when the tick allowance is spent
+    /// or the request cannot finish within it, and otherwise the same errors as
+    /// [`Self::find_path_with_policy`].
+    pub fn find_path_in_tick(
+        &self,
+        from: Vec3,
+        to: Vec3,
+        policy: PartialPathPolicy,
+        budget: &mut PathTickBudget,
+        diagnostics: &mut PathDiagnostics,
+    ) -> Result<Path, PathError> {
+        self.find_path_in_tick_with_blockers(
+            from,
+            to,
+            policy,
+            &BTreeMap::new(),
+            budget,
+            diagnostics,
+        )
+    }
+
+    /// Find a path under a cumulative tick budget while treating the supplied
+    /// cells as temporary dynamic obstacles. Static bake data remains
+    /// unchanged; callers own blocker expiry and pass only currently active
+    /// blockers.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::find_path_in_tick`].
+    pub fn find_path_in_tick_with_blockers(
+        &self,
+        from: Vec3,
+        to: Vec3,
+        policy: PartialPathPolicy,
+        dynamic_blockers: &BTreeMap<(usize, usize), Tick>,
+        budget: &mut PathTickBudget,
+        diagnostics: &mut PathDiagnostics,
+    ) -> Result<Path, PathError> {
+        if budget.is_exhausted() {
+            diagnostics.requests = diagnostics.requests.saturating_add(1);
+            diagnostics.failures = diagnostics.failures.saturating_add(1);
+            diagnostics.budget_exhaustions = diagnostics.budget_exhaustions.saturating_add(1);
+            diagnostics.deferred_requests = diagnostics.deferred_requests.saturating_add(1);
+            return Err(PathError::BudgetExhausted);
+        }
+        budget.remaining_requests -= 1;
+        let request_budget = PathBudget {
+            max_expansions: budget.remaining_expansions,
+            max_waypoints: budget.max_waypoints,
+        };
+        let mut expansions = 0;
+        let result = self.find_path_inner(
+            from,
+            to,
+            request_budget,
+            policy,
+            dynamic_blockers,
+            &mut expansions,
+        );
+        budget.remaining_expansions = budget.remaining_expansions.saturating_sub(expansions);
+        record_outcome(diagnostics, &result, expansions);
+        result
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one A* loop keeps deterministic expansion and predecessor updates together"
+    )]
     fn find_path_inner(
         &self,
         from: Vec3,
         to: Vec3,
         budget: PathBudget,
+        policy: PartialPathPolicy,
+        dynamic_blockers: &BTreeMap<(usize, usize), Tick>,
         observed: &mut usize,
     ) -> Result<Path, PathError> {
         let Some((start_x, start_y)) = self.cell_of(from) else {
@@ -477,7 +862,11 @@ impl NavGrid {
         let Some((goal_x, goal_y)) = self.cell_of(to) else {
             return Err(PathError::OutOfBounds);
         };
-        if self.is_blocked(start_x, start_y) || self.is_blocked(goal_x, goal_y) {
+        if self.is_blocked(start_x, start_y)
+            || dynamic_blockers.contains_key(&(start_x, start_y))
+            || self.is_blocked(goal_x, goal_y)
+            || dynamic_blockers.contains_key(&(goal_x, goal_y))
+        {
             return Err(PathError::Blocked);
         }
         if (start_x, start_y) == (goal_x, goal_y) {
@@ -485,6 +874,7 @@ impl NavGrid {
                 waypoints: vec![self.cell_center(goal_x, goal_y)],
                 expansions: 0,
                 cost: 0,
+                complete: true,
             });
         }
 
@@ -495,11 +885,15 @@ impl NavGrid {
         let mut came_from = vec![usize::MAX; cells];
         let mut open = BinaryHeap::new();
         let mut expansions = 0;
+        let start_h = heuristic(start_x, start_y, goal_x, goal_y);
+        let mut best_index = start;
+        let mut best_h = start_h;
+        let mut best_g = 0;
 
         g_scores[start] = 0;
         open.push(QueueNode {
-            f: heuristic(start_x, start_y, goal_x, goal_y),
-            h: heuristic(start_x, start_y, goal_x, goal_y),
+            f: start_h,
+            h: start_h,
             g: 0,
             index: start,
         });
@@ -513,10 +907,29 @@ impl NavGrid {
             }
             expansions += 1;
             if expansions > budget.max_expansions {
-                return Err(PathError::BudgetExhausted);
+                return self.partial_or_error(
+                    best_index,
+                    start,
+                    &came_from,
+                    &g_scores,
+                    budget,
+                    expansions,
+                    policy,
+                    PathError::BudgetExhausted,
+                );
             }
 
             *observed = expansions;
+
+            // Keep the open cell closest to the goal as the best-effort target.
+            if current.h < best_h
+                || (current.h == best_h
+                    && (current.g < best_g || (current.g == best_g && current.index < best_index)))
+            {
+                best_index = current.index;
+                best_h = current.h;
+                best_g = current.g;
+            }
 
             let cx = current.index % self.width;
             let cy = current.index / self.width;
@@ -536,7 +949,7 @@ impl NavGrid {
                 let Some(ny) = cy.checked_add_signed(dy as isize) else {
                     continue;
                 };
-                if !self.can_step((cx, cy), (nx, ny)) {
+                if !self.can_step_with_blockers((cx, cy), (nx, ny), dynamic_blockers) {
                     continue;
                 }
                 let diagonal = dx != 0 && dy != 0;
@@ -558,7 +971,37 @@ impl NavGrid {
             }
         }
 
-        Err(PathError::NoPath)
+        self.partial_or_error(
+            best_index,
+            start,
+            &came_from,
+            &g_scores,
+            budget,
+            expansions,
+            policy,
+            PathError::NoPath,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn partial_or_error(
+        &self,
+        best: usize,
+        start: usize,
+        came_from: &[usize],
+        g_scores: &[u64],
+        budget: PathBudget,
+        expansions: usize,
+        policy: PartialPathPolicy,
+        error: PathError,
+    ) -> Result<Path, PathError> {
+        if policy == PartialPathPolicy::Nearest && best != start {
+            let mut path =
+                self.reconstruct(best, start, came_from, g_scores, budget, expansions)?;
+            path.complete = false;
+            return Ok(path);
+        }
+        Err(error)
     }
 
     fn reconstruct(
@@ -592,7 +1035,44 @@ impl NavGrid {
             waypoints,
             expansions,
             cost: g_scores[goal],
+            complete: true,
         })
+    }
+}
+
+fn record_outcome(
+    diagnostics: &mut PathDiagnostics,
+    result: &Result<Path, PathError>,
+    expansions: usize,
+) {
+    diagnostics.requests = diagnostics.requests.saturating_add(1);
+    diagnostics.expansions = diagnostics
+        .expansions
+        .saturating_add(u64::try_from(expansions).unwrap_or(u64::MAX));
+    match result {
+        Ok(path) => {
+            if !path.complete {
+                diagnostics.partial_paths = diagnostics.partial_paths.saturating_add(1);
+            }
+        }
+        Err(error) => {
+            diagnostics.failures = diagnostics.failures.saturating_add(1);
+            match error {
+                PathError::OutOfBounds => {
+                    diagnostics.out_of_bounds = diagnostics.out_of_bounds.saturating_add(1);
+                }
+                PathError::Blocked => {
+                    diagnostics.blocked_endpoints = diagnostics.blocked_endpoints.saturating_add(1);
+                }
+                PathError::NoPath => {
+                    diagnostics.no_paths = diagnostics.no_paths.saturating_add(1);
+                }
+                PathError::BudgetExhausted => {
+                    diagnostics.budget_exhaustions =
+                        diagnostics.budget_exhaustions.saturating_add(1);
+                }
+            }
+        }
     }
 }
 
@@ -851,5 +1331,198 @@ mod tests {
             .unwrap();
         // The direct route pays the weighted cell; a short diagonal detour wins.
         assert_eq!(path.cost, 38);
+    }
+
+    #[test]
+    fn tick_budget_bounds_cumulative_work_and_defers_requests() {
+        let room = grid(64, 64);
+        let start = at(0.5, 0.5);
+        let goal = at(63.5, 63.5);
+        let mut budget = PathTickBudget::new(8, 512, 2);
+        let mut stats = PathDiagnostics::default();
+
+        assert_eq!(
+            room.find_path_in_tick(
+                start,
+                goal,
+                PartialPathPolicy::Fail,
+                &mut budget,
+                &mut stats
+            ),
+            Err(PathError::BudgetExhausted)
+        );
+        assert_eq!(budget.remaining_expansions(), 0);
+        assert_eq!(budget.remaining_requests(), 1);
+
+        // The tick allowance is gone, so the second request is refused without
+        // expanding anything, even though a request slot remains.
+        assert_eq!(
+            room.find_path_in_tick(
+                start,
+                goal,
+                PartialPathPolicy::Fail,
+                &mut budget,
+                &mut stats
+            ),
+            Err(PathError::BudgetExhausted)
+        );
+        assert_eq!(stats.requests, 2);
+        assert_eq!(stats.expansions, 8);
+        assert_eq!(stats.failures, 2);
+        assert_eq!(stats.budget_exhaustions, 2);
+        assert_eq!(stats.deferred_requests, 1);
+
+        budget.reset();
+        assert!(!budget.is_exhausted());
+        assert_eq!(budget.remaining_expansions(), 8);
+        assert_eq!(budget.remaining_requests(), 2);
+        assert!(
+            room.find_path_in_tick(
+                start,
+                at(1.5, 0.5),
+                PartialPathPolicy::Fail,
+                &mut budget,
+                &mut stats
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn nearest_policy_degrades_a_blocked_goal_to_a_partial_path() {
+        let mut room = grid(7, 5);
+        for y in 0..5 {
+            room.set_blocked(3, y, true);
+        }
+        let start = at(0.5, 2.5);
+        let goal = at(6.5, 2.5);
+        assert_eq!(
+            room.find_path(start, goal, PathBudget::default()),
+            Err(PathError::NoPath)
+        );
+
+        let partial = room
+            .find_path_with_policy(
+                start,
+                goal,
+                PathBudget::default(),
+                PartialPathPolicy::Nearest,
+            )
+            .unwrap();
+        assert!(!partial.complete);
+        assert_eq!(partial.goal(), Some(at(2.5, 2.5)));
+
+        let mut budget = PathTickBudget::new(4_096, 512, 1);
+        let mut stats = PathDiagnostics::default();
+        let partial = room
+            .find_path_in_tick(
+                start,
+                goal,
+                PartialPathPolicy::Nearest,
+                &mut budget,
+                &mut stats,
+            )
+            .unwrap();
+        assert!(!partial.complete);
+        assert_eq!(stats.partial_paths, 1);
+        assert_eq!(stats.failures, 0);
+    }
+
+    #[test]
+    fn diagnostics_distinguish_failure_reasons() {
+        let mut room = grid(5, 5);
+        let mut stats = PathDiagnostics::default();
+        let normal = PathBudget::default();
+
+        let _ = room.find_path_observed(at(-1.0, 0.5), at(1.5, 1.5), normal, &mut stats);
+        room.set_blocked(1, 1, true);
+        let _ = room.find_path_observed(at(1.5, 1.5), at(2.5, 2.5), normal, &mut stats);
+        for x in 0..5 {
+            room.set_blocked(x, 2, true);
+        }
+        let _ = room.find_path_observed(at(2.5, 0.5), at(2.5, 4.5), normal, &mut stats);
+
+        assert_eq!(stats.requests, 3);
+        assert_eq!(stats.failures, 3);
+        assert_eq!(stats.out_of_bounds, 1);
+        assert_eq!(stats.blocked_endpoints, 1);
+        assert_eq!(stats.no_paths, 1);
+        assert_eq!(stats.budget_exhaustions, 0);
+        assert_eq!(stats.partial_paths, 0);
+    }
+
+    #[test]
+    fn replan_policy_backs_off_and_stops_at_the_failure_limit() {
+        let policy = ReplanPolicy {
+            initial_delay_ticks: 2,
+            max_delay_ticks: 5,
+            max_consecutive_failures: 3,
+        };
+        assert_eq!(policy.delay_after_failures(0), None);
+        assert_eq!(policy.delay_after_failures(1), Some(2));
+        assert_eq!(policy.delay_after_failures(2), Some(4));
+        assert_eq!(policy.delay_after_failures(3), Some(5));
+        assert_eq!(policy.delay_after_failures(4), None);
+
+        let mut state = ReplanState::default();
+        assert!(state.ready(Tick::ZERO));
+        assert_eq!(state.on_failure(Tick(10), policy), Some(Tick(12)));
+        assert!(!state.ready(Tick(11)));
+        assert!(state.ready(Tick(12)));
+        assert_eq!(state.on_failure(Tick(12), policy), Some(Tick(16)));
+        assert_eq!(state.on_failure(Tick(16), policy), Some(Tick(21)));
+        assert_eq!(state.on_failure(Tick(21), policy), None);
+        assert_eq!(state.failures(), 3);
+        assert_eq!(state.retry_at(), Tick(21));
+
+        state.on_success();
+        assert_eq!(state.failures(), 0);
+        assert!(state.ready(Tick::ZERO));
+    }
+
+    #[test]
+    fn bake_round_trips_and_keeps_runtime_paths_identical() {
+        let mut room = grid(8, 6);
+        room.set_blocked(3, 0, true);
+        room.set_blocked(3, 1, true);
+        room.set_cost(4, 4, 7);
+        let bake = room.bake();
+        assert_eq!(bake.schema_version, NAV_BAKE_SCHEMA_VERSION);
+
+        let text = serde_json::to_string(&bake).unwrap();
+        let decoded: NavBake = serde_json::from_str(&text).unwrap();
+        let restored = NavGrid::from_bake(&decoded).unwrap();
+        assert_eq!(restored, room);
+        assert_eq!(restored.bake(), bake);
+
+        let start = at(0.5, 0.5);
+        let goal = at(7.5, 5.5);
+        assert_eq!(
+            restored
+                .find_path(start, goal, PathBudget::default())
+                .unwrap(),
+            room.find_path(start, goal, PathBudget::default()).unwrap()
+        );
+    }
+
+    #[test]
+    fn bake_rejects_unknown_or_malformed_data() {
+        let room = grid(2, 2);
+
+        let mut unknown = room.bake();
+        unknown.schema_version += 1;
+        assert!(NavGrid::from_bake(&unknown).is_none());
+
+        let mut malformed = room.bake();
+        malformed.blocked.pop();
+        assert!(NavGrid::from_bake(&malformed).is_none());
+
+        let mut malformed = room.bake();
+        malformed.cost.push(1);
+        assert!(NavGrid::from_bake(&malformed).is_none());
+
+        let mut malformed = room.bake();
+        malformed.cost[0] = 0;
+        assert!(NavGrid::from_bake(&malformed).is_none());
     }
 }

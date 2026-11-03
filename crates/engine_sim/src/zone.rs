@@ -12,12 +12,14 @@ use engine_core::time::Tick;
 use serde::{Deserialize, Serialize};
 
 use crate::action::{ActionEffect, ActionKey, ActionResult};
-use crate::ai::{AiDiagnostics, AiTickPolicy, AiTickReport};
+use crate::ai::{AiDiagnostics, AiNavigationState, AiTickPolicy, AiTickReport};
 use crate::combat::CombatRules;
 use crate::entity::EntityRecord;
 use crate::link::{EntityLink, LinkEvent, LinkGraph};
 use crate::movement::{MovementIntent, MovementSequence};
-use crate::nav::{NavGrid, PathBudget};
+use crate::nav::{
+    NavGrid, PartialPathPolicy, Path, PathBudget, PathDiagnostics, PathError, PathTickBudget,
+};
 
 /// Maximum remembered action results for idempotent retries.
 pub const ACTION_CACHE_LIMIT: usize = 2_048;
@@ -37,6 +39,13 @@ pub struct TickBudget {
     pub max_ai_updates: usize,
     /// Maximum pathfinding expansions across the tick.
     pub max_path_expansions: usize,
+    /// Maximum pathfinding requests across the tick.
+    #[serde(default = "default_path_requests")]
+    pub max_path_requests: usize,
+}
+
+fn default_path_requests() -> usize {
+    32
 }
 
 impl Default for TickBudget {
@@ -45,18 +54,27 @@ impl Default for TickBudget {
             max_actions: 256,
             max_ai_updates: 128,
             max_path_expansions: 16_384,
+            max_path_requests: 32,
         }
     }
 }
 
 impl TickBudget {
-    /// Path budget derived from this tick budget.
+    /// Path budget for one request, capped by the tick expansion allowance.
+    ///
+    /// Prefer [`Zone::find_path`], which enforces the cumulative tick budget.
     #[must_use]
     pub const fn path_budget(self) -> PathBudget {
         PathBudget {
             max_expansions: self.max_path_expansions,
             max_waypoints: 512,
         }
+    }
+
+    /// Cumulative per-tick pathfinding budget derived from this tick budget.
+    #[must_use]
+    pub const fn path_tick_budget(self) -> PathTickBudget {
+        PathTickBudget::new(self.max_path_expansions, 512, self.max_path_requests)
     }
 }
 
@@ -189,9 +207,13 @@ pub struct Zone {
     pub(crate) movement_pending: BTreeMap<StableId, MovementIntent>,
     pub(crate) movement_sequences: BTreeMap<StableId, MovementSequence>,
     pub(crate) movement_diagnostics: VecDeque<Diagnostic>,
+    pub(crate) path_budget: PathTickBudget,
+    pub(crate) path_diagnostics: PathDiagnostics,
+    pub(crate) dynamic_blockers: BTreeMap<(usize, usize), Tick>,
     pub(crate) ai_policy: Option<Arc<AiTickPolicy>>,
     pub(crate) ai_report: AiTickReport,
     pub(crate) ai_diagnostics: AiDiagnostics,
+    pub(crate) ai_navigation: BTreeMap<StableId, AiNavigationState>,
 }
 
 impl fmt::Debug for Zone {
@@ -237,6 +259,7 @@ impl Zone {
             )
             .with_detail("zone", config.definition.to_string()));
         }
+        let path_budget = config.budget.path_tick_budget();
         Ok(Self {
             config,
             entities: BTreeMap::new(),
@@ -255,9 +278,13 @@ impl Zone {
             movement_pending: BTreeMap::new(),
             movement_sequences: BTreeMap::new(),
             movement_diagnostics: VecDeque::new(),
+            path_budget,
+            path_diagnostics: PathDiagnostics::default(),
+            dynamic_blockers: BTreeMap::new(),
             ai_policy: None,
             ai_report: AiTickReport::default(),
             ai_diagnostics: AiDiagnostics::default(),
+            ai_navigation: BTreeMap::new(),
         })
     }
 
@@ -282,6 +309,71 @@ impl Zone {
     /// Mutable navigation grid, for dynamic obstacles and authoring tools.
     pub fn nav_mut(&mut self) -> &mut NavGrid {
         &mut self.nav
+    }
+
+    /// Temporarily block one navigation cell until `expires_at`.
+    ///
+    /// The expiry tick is exclusive: the obstacle is active while
+    /// `self.tick < expires_at` and is removed when that tick is reached.
+    /// Re-adding a cell extends its lifetime but never shortens it. Static
+    /// blocked cells cannot be registered as dynamic obstacles.
+    ///
+    /// Returns `false` for an out-of-bounds or statically blocked cell, or an
+    /// expiry tick that is not in the future.
+    pub fn add_dynamic_obstacle(&mut self, x: usize, y: usize, expires_at: Tick) -> bool {
+        if !self.nav.in_bounds(x, y) || self.nav.is_blocked(x, y) || expires_at <= self.tick {
+            return false;
+        }
+        self.dynamic_blockers
+            .entry((x, y))
+            .and_modify(|current| *current = (*current).max(expires_at))
+            .or_insert(expires_at);
+        true
+    }
+
+    /// Whether a cell currently has a temporary dynamic obstacle.
+    #[must_use]
+    pub fn has_dynamic_obstacle(&self, x: usize, y: usize) -> bool {
+        self.dynamic_blockers.contains_key(&(x, y))
+    }
+
+    /// Find a path using the zone's cumulative per-tick expansion and request
+    /// allowances. Callers should preserve `ReplanState` on failure and honor
+    /// its backoff before requesting another path.
+    pub fn find_path(
+        &mut self,
+        from: Vec3,
+        to: Vec3,
+        policy: PartialPathPolicy,
+    ) -> Result<Path, PathError> {
+        self.nav.find_path_in_tick_with_blockers(
+            from,
+            to,
+            policy,
+            &self.dynamic_blockers,
+            &mut self.path_budget,
+            &mut self.path_diagnostics,
+        )
+    }
+
+    /// Cumulative navigation diagnostics since creation or the last take.
+    #[must_use]
+    pub const fn path_diagnostics(&self) -> PathDiagnostics {
+        self.path_diagnostics
+    }
+
+    /// Take and reset cumulative navigation diagnostics.
+    pub fn take_path_diagnostics(&mut self) -> PathDiagnostics {
+        self.path_diagnostics.take()
+    }
+
+    /// Remaining pathfinding work for the current tick.
+    #[must_use]
+    pub const fn path_budget_remaining(&self) -> (usize, usize) {
+        (
+            self.path_budget.remaining_expansions(),
+            self.path_budget.remaining_requests(),
+        )
     }
 
     /// All entities in stable-ID order.
@@ -363,6 +455,7 @@ impl Zone {
         self.links.remove_for(id);
         self.movement_pending.remove(&id);
         self.movement_sequences.remove(&id);
+        self.ai_navigation.remove(&id);
         Ok(removed)
     }
 
@@ -391,6 +484,15 @@ impl Zone {
     /// Advance the tick and refresh statistics.
     pub fn advance_tick(&mut self) -> TickStats {
         self.tick = self.tick.next();
+        let blocker_count = self.dynamic_blockers.len();
+        self.dynamic_blockers
+            .retain(|_, expires_at| *expires_at > self.tick);
+        if self.dynamic_blockers.len() != blocker_count {
+            for state in self.ai_navigation.values_mut() {
+                *state = AiNavigationState::default();
+            }
+        }
+        self.path_budget.reset();
         self.run_ai_tick();
         self.stats.tick = self.tick;
         self.stats.entity_count = self.entities.len();

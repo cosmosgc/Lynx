@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use engine_core::error::{EngineError, ErrorCode};
+use engine_core::faction::{Alignment, FactionCatalog, Thresholds};
 use engine_core::faction::{
     Faction, FactionDefinition, FactionWorld, GovernancePolicy, PowerRules, TerritoryRules,
 };
@@ -29,11 +30,12 @@ use engine_core::world_event::{
 };
 use engine_net::protocol::Handshake;
 use engine_sim::action::Verb;
+use engine_sim::ai::{AiBehaviorDefinition, AiBehaviorKind, AiTickPolicy, PerceptionBudget};
 use engine_sim::combat::CombatStats;
-use engine_sim::entity::{Door, EntityRecord, Interactable, UiProvider};
+use engine_sim::entity::{Door, EntityRecord, FactionMembership, Interactable, UiProvider};
 use engine_sim::mind::Mind;
 use engine_sim::minigame::Minigame;
-use engine_sim::nav::NavGrid;
+use engine_sim::nav::{NavGrid, ReplanPolicy};
 use engine_sim::snapshot::{ZoneRestoreReport, ZoneSnapshot};
 use engine_sim::zone::{Zone, ZoneConfig};
 use world_gateway::VISIBILITY_OWNER_ONLY_TAG;
@@ -61,6 +63,10 @@ const MAX_CHARACTERS: usize = 32;
 const DEMO_CONFLICT_WINDOW_MS: i64 = 60_000;
 /// Navigation cell size in meters, shared by the demo and its restored zones.
 const DEMO_CELL_SIZE_M: f32 = 2.0;
+const DEMO_GUARD_ID: u128 = 0xD3_0001;
+const DEMO_TARGET_ID: u128 = 0xD3_0002;
+const DEMO_GUARD_START: Vec3 = Vec3::new(12.0, 0.0, 12.0);
+const DEMO_TARGET_START: Vec3 = Vec3::new(24.0, 0.0, 12.0);
 
 /// The authoritative world-clock timestamp, in epoch milliseconds.
 ///
@@ -124,6 +130,8 @@ pub fn build_zone(grants: &[Grant]) -> Result<Zone, EngineError> {
         );
         spawn_grant(&mut zone, grant, position, &definitions)?;
     }
+    spawn_navigation_scenario(&mut zone)?;
+    install_demo_ai_policy(&mut zone)?;
 
     Ok(zone)
 }
@@ -163,7 +171,9 @@ fn demo_nav(config: &ZoneConfig) -> Result<NavGrid, EngineError> {
 /// or invalid bounds, and every error [`Zone::restore`] can produce.
 pub fn restore_zone(snapshot: &ZoneSnapshot) -> Result<Zone, EngineError> {
     let nav = demo_nav(&snapshot.config)?;
-    Zone::restore(snapshot, nav, demo_rules())
+    let mut zone = Zone::restore(snapshot, nav, demo_rules())?;
+    install_demo_ai_policy(&mut zone)?;
+    Ok(zone)
 }
 
 /// Rebuild the demo zone, isolating individually impossible saved entries.
@@ -179,7 +189,66 @@ pub fn restore_zone_quarantining(
     snapshot: &ZoneSnapshot,
 ) -> Result<ZoneRestoreReport, EngineError> {
     let nav = demo_nav(&snapshot.config)?;
-    Zone::restore_quarantining(snapshot, nav, demo_rules())
+    let mut report = Zone::restore_quarantining(snapshot, nav, demo_rules())?;
+    install_demo_ai_policy(&mut report.zone)?;
+    Ok(report)
+}
+
+fn spawn_navigation_scenario(zone: &mut Zone) -> Result<(), EngineError> {
+    let guard_faction = definition(DEMO_DEFENDERS)?;
+    let raider_faction = definition(DEMO_ATTACKERS)?;
+    zone.spawn(
+        EntityRecord::new(
+            StableId::from_parts(IdKind::Entity, 1, DEMO_GUARD_ID),
+            definition("character.demo_guard")?,
+            DEMO_GUARD_START,
+        )
+        .with_health(100)
+        .with_combat(CombatStats::default())
+        .with_faction(FactionMembership::new(guard_faction))
+        .with_mind(Mind::ai(definition("behavior.demo_guard_chase")?))
+        .with_persistence(PersistencePolicy::PersistentEntity),
+    )?;
+    zone.spawn(
+        EntityRecord::new(
+            StableId::from_parts(IdKind::Entity, 1, DEMO_TARGET_ID),
+            definition("character.demo_raider")?,
+            DEMO_TARGET_START,
+        )
+        .with_health(100)
+        .with_faction(FactionMembership::new(raider_faction))
+        .with_interactable(Interactable::new(2.0, [Verb::Attack]))
+        .with_persistence(PersistencePolicy::PersistentEntity),
+    )?;
+    Ok(())
+}
+
+fn install_demo_ai_policy(zone: &mut Zone) -> Result<(), EngineError> {
+    let guard_faction = definition(DEMO_DEFENDERS)?;
+    let raider_faction = definition(DEMO_ATTACKERS)?;
+    let mut factions = FactionCatalog::new();
+    factions.set_bidirectional(guard_faction, raider_faction, Alignment::new(-100));
+    zone.set_ai_tick_policy(Some(AiTickPolicy {
+        factions,
+        thresholds: Thresholds::default(),
+        range_m: 32.0,
+        perception: PerceptionBudget {
+            max_candidates: 128,
+            max_line_of_sight: 32,
+            max_targets: 1,
+        },
+        max_controller_candidates: 128,
+        epoch: Millis::new(now_ms()),
+        tick_ms: 50,
+        behaviors: vec![AiBehaviorDefinition {
+            id: definition("behavior.demo_guard_chase")?,
+            kind: AiBehaviorKind::GuardChase,
+            range_m: 32.0,
+        }],
+        navigation_speed_m_per_s: 3.0,
+        navigation_replan: ReplanPolicy::default(),
+    }));
+    Ok(())
 }
 
 fn demo_rules() -> Arc<dyn ItemRules + Send + Sync> {
@@ -470,8 +539,9 @@ mod tests {
     fn every_grant_gets_a_character_and_nearby_props() {
         let grants = grants(2);
         let zone = build_zone(&grants).unwrap();
-        // Per grant: character, door, barrel, owner-only crate, locked vault.
-        assert_eq!(zone.entity_count(), grants.len() * 5);
+        // Per grant: character, door, barrel, owner-only crate, locked vault,
+        // plus the persistent GuardChase training scenario.
+        assert_eq!(zone.entity_count(), grants.len() * 5 + 2);
         for grant in &grants {
             let seed = grant.principal.random_bits();
             let actor = StableId::from_parts(IdKind::Entity, 1, seed);
@@ -526,6 +596,69 @@ mod tests {
         assert!(
             zone.entities()
                 .all(|entity| entity.persistence == PersistencePolicy::PersistentEntity)
+        );
+    }
+
+    #[test]
+    fn demo_guard_chase_uses_paths_and_is_enabled_after_restore() {
+        let mut zone = build_zone(&grants(1)).unwrap();
+        let guard_id = StableId::from_parts(IdKind::Entity, 1, DEMO_GUARD_ID);
+        let target_id = StableId::from_parts(IdKind::Entity, 1, DEMO_TARGET_ID);
+        let guard = zone.entity(guard_id).expect("demo guard is spawned");
+        assert!(matches!(
+            guard.mind.as_ref().unwrap().controller,
+            engine_sim::mind::Controller::Ai { .. }
+        ));
+        assert_eq!(
+            guard.faction.as_ref().unwrap().faction.as_str(),
+            DEMO_DEFENDERS
+        );
+        let snapshot = zone.snapshot();
+
+        zone.advance_tick();
+        let decision = zone
+            .ai_tick_report()
+            .decisions
+            .iter()
+            .find(|decision| decision.actor == guard_id)
+            .expect("guard makes an AI decision");
+        assert_eq!(decision.target, Some(target_id));
+        assert_eq!(decision.reason, "navigating");
+        assert!(zone.entity(guard_id).unwrap().position().x > DEMO_GUARD_START.x);
+        assert_eq!(zone.path_diagnostics().requests, 1);
+
+        let restored = restore_zone(&snapshot).unwrap();
+        assert!(restored.entity(guard_id).is_some());
+        assert_eq!(
+            restored
+                .entity(target_id)
+                .and_then(|target| target.faction.as_ref())
+                .map(|membership| membership.faction.as_str()),
+            Some(DEMO_ATTACKERS)
+        );
+        assert_eq!(restored.ai_tick_report().decisions.len(), 0);
+
+        let mut restored = restored;
+        restored.advance_tick();
+        assert!(
+            restored.ai_tick_report().decisions.iter().any(|decision| {
+                decision.actor == guard_id && decision.target == Some(target_id)
+            }),
+            "restored AI decisions: {:?}",
+            restored.ai_tick_report().decisions
+        );
+        assert!(restored.path_diagnostics().requests > 0);
+
+        let restored_quarantining = restore_zone_quarantining(&snapshot).unwrap();
+        assert!(restored_quarantining.zone.entity(guard_id).is_some());
+        let mut quarantined_zone = restored_quarantining.zone;
+        quarantined_zone.advance_tick();
+        assert!(
+            quarantined_zone
+                .ai_tick_report()
+                .decisions
+                .iter()
+                .any(|decision| decision.actor == guard_id)
         );
     }
 

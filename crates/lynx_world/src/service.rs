@@ -179,6 +179,12 @@ pub struct Metrics {
     ai_perception_candidate_limit: AtomicU64,
     ai_perception_los_limit: AtomicU64,
     ai_action_budget_exhaustions: AtomicU64,
+    path_requests: AtomicU64,
+    path_expansions: AtomicU64,
+    path_failures: AtomicU64,
+    path_budget_exhaustions: AtomicU64,
+    path_partial_results: AtomicU64,
+    path_deferred_requests: AtomicU64,
     outbound_full: AtomicU64,
     snapshot_success: AtomicU64,
     snapshot_failure: AtomicU64,
@@ -296,6 +302,16 @@ impl Metrics {
             get(&self.ai_perception_candidate_limit),
             get(&self.ai_perception_los_limit),
             get(&self.ai_action_budget_exhaustions),
+        );
+        let _ = writeln!(
+            text,
+            "# HELP lynx_world_path_requests_total Navigation requests observed by the zone.\n# TYPE lynx_world_path_requests_total counter\nlynx_world_path_requests_total {}\n# HELP lynx_world_path_expansions_total Navigation nodes expanded by the zone.\n# TYPE lynx_world_path_expansions_total counter\nlynx_world_path_expansions_total {}\n# HELP lynx_world_path_failures_total Navigation requests that returned a path error.\n# TYPE lynx_world_path_failures_total counter\nlynx_world_path_failures_total {}\n# HELP lynx_world_path_budget_exhaustions_total Navigation requests refused or stopped by an expansion/request/waypoint budget.\n# TYPE lynx_world_path_budget_exhaustions_total counter\nlynx_world_path_budget_exhaustions_total {}\n# HELP lynx_world_path_partial_results_total Best-effort partial paths returned.\n# TYPE lynx_world_path_partial_results_total counter\nlynx_world_path_partial_results_total {}\n# HELP lynx_world_path_deferred_requests_total Requests refused without searching because the tick budget was spent.\n# TYPE lynx_world_path_deferred_requests_total counter\nlynx_world_path_deferred_requests_total {}",
+            get(&self.path_requests),
+            get(&self.path_expansions),
+            get(&self.path_failures),
+            get(&self.path_budget_exhaustions),
+            get(&self.path_partial_results),
+            get(&self.path_deferred_requests),
         );
         let duration = self.action_duration.lock().unwrap();
         text.push_str("# HELP lynx_world_action_authority_duration_seconds Time in authority receive for action requests.\n# TYPE lynx_world_action_authority_duration_seconds histogram\n");
@@ -466,6 +482,25 @@ impl Service {
         self.metrics
             .ai_action_budget_exhaustions
             .store(ai.action_budget_exhaustions, Ordering::Relaxed);
+        let path = self.server.gateway().zone().path_diagnostics();
+        self.metrics
+            .path_requests
+            .store(path.requests, Ordering::Relaxed);
+        self.metrics
+            .path_expansions
+            .store(path.expansions, Ordering::Relaxed);
+        self.metrics
+            .path_failures
+            .store(path.failures, Ordering::Relaxed);
+        self.metrics
+            .path_budget_exhaustions
+            .store(path.budget_exhaustions, Ordering::Relaxed);
+        self.metrics
+            .path_partial_results
+            .store(path.partial_paths, Ordering::Relaxed);
+        self.metrics
+            .path_deferred_requests
+            .store(path.deferred_requests, Ordering::Relaxed);
     }
 
     /// Write world snapshots on a fixed interval and at shutdown.
@@ -1328,7 +1363,12 @@ mod tests {
     fn metrics_follow_real_session_input_and_tick() {
         let (mut service, grant, _) = service();
         let metrics = service.metrics();
-        assert!(metrics.render().contains("lynx_world_entities 5\n"));
+        assert!(metrics.render().contains("lynx_world_entities 7\n"));
+        assert!(
+            metrics
+                .render()
+                .contains("lynx_world_path_requests_total 0\n")
+        );
         let (outbound, mut receiver) = mpsc::channel(16);
         let (reply, mut result) = oneshot::channel();
         service.handle(ServerEvent::Admit {
@@ -1376,9 +1416,10 @@ mod tests {
         let text = metrics.render();
         assert!(text.contains("lynx_world_ticks_total 1\n"));
         assert!(text.contains("lynx_world_tick_failures_total 0\n"));
-        assert!(text.contains("lynx_world_entities 5\n"));
+        assert!(text.contains("lynx_world_entities 7\n"));
         assert!(text.contains("lynx_world_connections 1\n"));
         assert!(text.contains("lynx_world_inputs_total 1\n"));
+        assert!(!text.contains("lynx_world_path_expansions_total 0\n"));
         assert!(text.contains("lynx_world_replication_enqueued_frames_total{kind=\"delta\"} 0\n"));
         assert!(!text.contains(TOKEN));
         assert!(!text.contains("private-message"));
@@ -1906,7 +1947,7 @@ mod tests {
             Authenticator::new(&[digest("one"), digest("two"), digest("three")]).unwrap();
         let grants: Vec<Grant> = authenticator.grants().cloned().collect();
         let zone: Zone = demo::build_zone(&grants).unwrap();
-        assert_eq!(zone.entity_count(), grants.len() * 5);
+        assert_eq!(zone.entity_count(), grants.len() * 5 + 2);
         assert_eq!(zone.tick(), Tick::ZERO);
     }
 

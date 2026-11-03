@@ -415,6 +415,7 @@ scrape_configs:
 | `lynx_world_replication_enqueued_bytes_total` | encoded snapshot/delta bytes accepted by the outbound queue; not confirmed socket delivery bytes |
 | `lynx_world_ai_ticks_total` / `lynx_world_ai_decisions_total` | enabled AI ticks and evaluated controller decisions |
 | `lynx_world_ai_budget_exhaustions_total{budget}` | AI controller-scan, update, perception and action limits using fixed budget labels |
+| `lynx_world_path_requests_total`, `lynx_world_path_expansions_total`, `lynx_world_path_failures_total`, `lynx_world_path_budget_exhaustions_total`, `lynx_world_path_partial_results_total`, `lynx_world_path_deferred_requests_total` | cumulative path diagnostics sampled from the zone; the demo GuardChase scenario generates path requests and expansions during normal ticks. |
 | `lynx_world_content_version_info{state,version}` | content integration state (`absent`, `configured`, or `loaded`) and version when available. The current world service reports `state="absent"`; it does not load a content bundle |
 | `lynx_backend_operations_total{adapter}` / `lynx_backend_operation_errors_total{adapter}` | Nakama and PostgreSQL adapter operation counts/errors; emitted in Nakama auth mode with fixed adapter labels. Errors include validation/domain failures |
 | `lynx_backend_operation_duration_seconds{adapter}` | backend operation duration including PostgreSQL lock waits and failures; adapter snapshots are individually coherent, not atomic as a group |
@@ -431,7 +432,7 @@ Unsupported or incomplete requested families (do not interpret their absence as 
 - A separate count of disconnected reconnect windows and resume-window expiry sweeps.
 - End-to-end action latency and action rejections before authority delivery (authority latency, applied actions, and transport rate limits are measured separately).
 - Per-session replication delivery counts, queue high-water marks, and bytes confirmed written to sockets.
-- Pathfinding expansion/budget metrics are not wired into the world runtime. `NavGrid::find_path_observed` is opt-in; the current service has no pathfinding call site to observe.
+- Pathfinding expansion, failure, partial-result, and budget counters are exposed from zone diagnostics. The current world runtime has no NPC/pathfinding call site, so these remain zero until AI or another runtime consumer calls `Zone::find_path`; this is not evidence of zero pathfinding pressure in a future integration.
 - AI error counters; current AI diagnostics cover decisions and bounded-work limits only.
 - Backend metrics are emitted only in Nakama auth mode and combine database domain/validation errors with infrastructure errors. There are no per-query or pool metrics.
 - Snapshot load failures; write metrics above do not identify the store or error cause and do not include snapshot capture time.

@@ -3,11 +3,12 @@ use std::sync::Arc;
 use engine_core::id::{DefinitionId, IdKind, StableId};
 use engine_core::inventory::UniformItemRules;
 use engine_core::math::Vec3;
+use engine_core::time::Tick;
 use engine_sim::entity::{EntityRecord, MovementProfile, MovementStatus};
 use engine_sim::mind::{ControlCapability, Mind};
 use engine_sim::movement::MovementIntent;
-use engine_sim::nav::NavGrid;
-use engine_sim::zone::{MOVEMENT_DIAGNOSTIC_LIMIT, Zone, ZoneConfig};
+use engine_sim::nav::{NavGrid, PartialPathPolicy, PathError};
+use engine_sim::zone::{MOVEMENT_DIAGNOSTIC_LIMIT, TickBudget, Zone, ZoneConfig};
 
 fn id(kind: IdKind, n: u128) -> StableId {
     StableId::from_parts(kind, 1, n)
@@ -67,6 +68,109 @@ fn clear_setup() -> Zone {
         MovementProfile::default(),
     );
     zone
+}
+
+#[test]
+fn zone_path_budget_is_cumulative_and_resets_each_tick() {
+    let config = ZoneConfig::new(
+        DefinitionId::new("zone.path_budget_test").unwrap(),
+        id(IdKind::Zone, 2),
+        pos(0.0, 0.0),
+        Vec3::new(8.0, 1.0, 8.0),
+    )
+    .unwrap()
+    .with_budget(TickBudget {
+        max_path_expansions: 1,
+        max_path_requests: 1,
+        ..TickBudget::default()
+    });
+    let nav = NavGrid::new(8, 8, 1.0, Vec3::ZERO).unwrap();
+    let mut zone = Zone::new(config, nav, Arc::new(UniformItemRules::new(10))).unwrap();
+
+    assert_eq!(
+        zone.find_path(pos(0.5, 0.5), pos(7.5, 7.5), PartialPathPolicy::Fail),
+        Err(PathError::BudgetExhausted)
+    );
+    assert_eq!(zone.path_budget_remaining(), (0, 0));
+    assert_eq!(
+        zone.find_path(pos(0.5, 0.5), pos(1.5, 0.5), PartialPathPolicy::Fail),
+        Err(PathError::BudgetExhausted)
+    );
+    let diagnostics = zone.path_diagnostics();
+    assert_eq!(diagnostics.requests, 2);
+    assert_eq!(diagnostics.expansions, 1);
+    assert_eq!(diagnostics.budget_exhaustions, 2);
+    assert_eq!(diagnostics.deferred_requests, 1);
+
+    zone.advance_tick();
+    assert_eq!(zone.path_budget_remaining(), (1, 1));
+    assert!(
+        zone.find_path(pos(0.5, 0.5), pos(1.5, 0.5), PartialPathPolicy::Fail)
+            .is_ok()
+    );
+    assert_eq!(zone.path_diagnostics().requests, 3);
+}
+
+#[test]
+fn old_tick_budget_config_defaults_to_the_path_request_limit() {
+    let old_config = r#"{"max_actions":256,"max_ai_updates":128,"max_path_expansions":16384}"#;
+    let budget: TickBudget = serde_json::from_str(old_config).unwrap();
+    assert_eq!(budget.max_path_requests, 32);
+}
+
+#[test]
+fn dynamic_obstacles_expire_at_their_tick_without_mutating_the_static_grid() {
+    let config = ZoneConfig::new(
+        DefinitionId::new("zone.dynamic_obstacle_test").unwrap(),
+        id(IdKind::Zone, 3),
+        pos(0.0, 0.0),
+        Vec3::new(5.0, 1.0, 5.0),
+    )
+    .unwrap();
+    let nav = NavGrid::new(5, 5, 1.0, Vec3::ZERO).unwrap();
+    let mut zone = Zone::new(config, nav, Arc::new(UniformItemRules::new(10))).unwrap();
+    for x in 0..5 {
+        assert!(zone.add_dynamic_obstacle(x, 2, Tick(2)));
+    }
+    // Re-adding an obstacle extends its expiry, but never shortens it.
+    assert!(zone.add_dynamic_obstacle(2, 2, Tick(3)));
+    assert!(!zone.add_dynamic_obstacle(8, 8, Tick(3)));
+    assert!(!zone.add_dynamic_obstacle(2, 2, Tick(0)));
+
+    let start = pos(2.5, 0.5);
+    let goal = pos(2.5, 4.5);
+    assert_eq!(
+        zone.find_path(start, goal, PartialPathPolicy::Fail),
+        Err(PathError::NoPath)
+    );
+    assert!(!zone.nav().is_blocked(2, 2));
+
+    zone.advance_tick();
+    assert!(zone.has_dynamic_obstacle(2, 2));
+    zone.advance_tick();
+    assert!(zone.has_dynamic_obstacle(2, 2));
+    zone.advance_tick();
+    assert!(!zone.has_dynamic_obstacle(2, 2));
+    assert!(zone.find_path(start, goal, PartialPathPolicy::Fail).is_ok());
+    assert!(!zone.nav().is_blocked(2, 2));
+}
+
+#[test]
+fn dynamic_obstacles_are_enforced_by_authoritative_movement_until_expiry() {
+    let mut zone = clear_setup();
+    let actor = id(IdKind::Entity, 1);
+    assert!(zone.add_dynamic_obstacle(1, 0, Tick(1)));
+    zone.queue_movement(intent(1, pos(1.5, 0.5))).unwrap();
+
+    let (_, outcomes) = zone.advance_movement_tick(1000, 10.0);
+    assert!(!outcomes[0].applied);
+    assert_eq!(zone.entity(actor).unwrap().position(), pos(0.5, 0.5));
+    assert!(!zone.has_dynamic_obstacle(1, 0));
+
+    zone.queue_movement(intent(2, pos(1.5, 0.5))).unwrap();
+    let (_, outcomes) = zone.advance_movement_tick(1000, 10.0);
+    assert!(outcomes[0].applied);
+    assert_eq!(zone.entity(actor).unwrap().position(), pos(1.5, 0.5));
 }
 
 fn spawn_player(

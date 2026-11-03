@@ -37,3 +37,20 @@ AI agents cannot starve simulation ticks.
 - Very large or multi-level zones will need a navmesh variant; the interface is
   designed for that replacement.
 - Budget exhaustion is a normal, observable outcome rather than a tick stall.
+
+## Implementation status
+
+The runtime implements deterministic A* with per-request limits and a
+cumulative `PathTickBudget` for `Zone::find_path`. Budget-exhausted callers may
+fail closed or request an explicitly incomplete path to the nearest reached
+cell. `ReplanState` provides deterministic capped exponential backoff, and
+`NavBake` is the versioned row-major representation consumed by both preview
+and runtime. Zone-owned dynamic blockers are applied as a separate overlay,
+expire on their exclusive tick, do not mutate static baked data, and are checked
+by both path planning and authoritative movement validation. Fixed-size path
+counters are exported from the world metrics endpoint.
+
+The opt-in `GuardChase` AI behavior requests and follows paths with per-agent
+replan state. The demo installs this behavior for a persistent guard/raider
+scenario in fresh and restored zones. Authored behavior/content activation is
+tracked by `SIM-006`.
