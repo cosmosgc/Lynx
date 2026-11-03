@@ -174,7 +174,7 @@ mod tests {
     fn tls_probe_server() -> (
         Config,
         u16,
-        mpsc::Receiver<&'static str>,
+        mpsc::Receiver<String>,
         thread::JoinHandle<()>,
         tempfile::NamedTempFile,
     ) {
@@ -215,7 +215,7 @@ mod tests {
         let (handshake_tx, handshake_rx) = mpsc::channel();
         let server = thread::spawn(move || {
             let Ok((mut socket, _)) = listener.accept() else {
-                let _ = handshake_tx.send("accept_failed");
+                let _ = handshake_tx.send("accept_failed".to_owned());
                 return;
             };
             let _ = socket.set_read_timeout(Some(Duration::from_secs(3)));
@@ -225,14 +225,17 @@ mod tests {
                 || u32::from_be_bytes(request[4..8].try_into().unwrap()) != 80_877_103
                 || socket.write_all(b"S").is_err()
             {
-                let _ = handshake_tx.send("ssl_request_invalid");
+                let _ = handshake_tx.send("ssl_request_invalid".to_owned());
                 return;
             }
             let identity = native_tls::Identity::from_pkcs8(&certificate, &private_key).unwrap();
             let acceptor = native_tls::TlsAcceptor::new(identity).unwrap();
-            let Ok(mut tls) = acceptor.accept(socket) else {
-                let _ = handshake_tx.send("tls_accept_failed");
-                return;
+            let mut tls = match acceptor.accept(socket) {
+                Ok(tls) => tls,
+                Err(error) => {
+                    let _ = handshake_tx.send(format!("tls_accept_failed: {error}"));
+                    return;
+                }
             };
             // Read the PostgreSQL startup packet, then close without an
             // authentication response. The TLS handshake itself is the subject
@@ -240,9 +243,9 @@ mod tests {
             let mut length = [0_u8; 4];
             let startup_received = tls.read_exact(&mut length).is_ok();
             let _ = handshake_tx.send(if startup_received {
-                "startup_received"
+                "startup_received".to_owned()
             } else {
-                "startup_missing"
+                "startup_missing".to_owned()
             });
             if startup_received {
                 let packet_length = u32::from_be_bytes(length) as usize;
@@ -321,10 +324,8 @@ mod tests {
         let (config, _, handshake, server, ca_file) = tls_probe_server();
         let ca = ca_file.path().as_os_str().to_os_string();
         assert!(connect_tls(&config, Some(ca)).is_err());
-        assert_eq!(
-            handshake.recv_timeout(Duration::from_secs(4)).unwrap(),
-            "startup_received"
-        );
+        let outcome = handshake.recv_timeout(Duration::from_secs(4)).unwrap();
+        assert_eq!(outcome, "startup_received", "TLS probe server: {outcome}");
         server.join().unwrap();
     }
 
@@ -342,7 +343,7 @@ mod tests {
         assert!(connect_tls(&config, Some(ca)).is_err());
         let outcome = handshake.recv_timeout(Duration::from_secs(4)).unwrap();
         assert!(
-            matches!(outcome, "tls_accept_failed" | "startup_missing"),
+            outcome.starts_with("tls_accept_failed:") || outcome == "startup_missing",
             "a hostname mismatch must stop TLS before PostgreSQL startup, got {outcome}"
         );
         server.join().unwrap();
@@ -354,7 +355,7 @@ mod tests {
         assert!(connect_tls(&config, None).is_err());
         let outcome = handshake.recv_timeout(Duration::from_secs(4)).unwrap();
         assert!(
-            matches!(outcome, "tls_accept_failed" | "startup_missing"),
+            outcome.starts_with("tls_accept_failed:") || outcome == "startup_missing",
             "an untrusted certificate must stop TLS before PostgreSQL startup, got {outcome}"
         );
         server.join().unwrap();
