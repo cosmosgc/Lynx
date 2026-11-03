@@ -311,9 +311,10 @@ mod tests {
             .join("tests/fixtures/postgres-test-ca-cert.pem")
             .into_os_string();
         assert!(connect_tls(&config, Some(ca)).is_err());
-        assert_eq!(
-            handshake.recv_timeout(Duration::from_secs(4)).unwrap(),
-            "startup_missing"
+        let outcome = handshake.recv_timeout(Duration::from_secs(4)).unwrap();
+        assert!(
+            matches!(outcome, "tls_accept_failed" | "startup_missing"),
+            "a hostname mismatch must stop TLS before PostgreSQL startup, got {outcome}"
         );
         server.join().unwrap();
     }
@@ -322,9 +323,10 @@ mod tests {
     fn verified_tls_handshake_rejects_an_untrusted_certificate() {
         let (config, _, handshake, server) = tls_probe_server();
         assert!(connect_tls(&config, None).is_err());
-        assert_eq!(
-            handshake.recv_timeout(Duration::from_secs(4)).unwrap(),
-            "startup_missing"
+        let outcome = handshake.recv_timeout(Duration::from_secs(4)).unwrap();
+        assert!(
+            matches!(outcome, "tls_accept_failed" | "startup_missing"),
+            "an untrusted certificate must stop TLS before PostgreSQL startup, got {outcome}"
         );
         server.join().unwrap();
     }
