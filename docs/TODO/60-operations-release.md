@@ -182,15 +182,15 @@ a real tag before these acceptance criteria can be checked.
 ## OPS-006 — CI matrix and live-integration coverage
 
 - **Priority:** P1
-- **Status:** Ready
+- **Status:** In progress — headless online client smoke, macOS Rust checks, per-platform Cargo caching, and Rust/PostgreSQL job duration/outcome reporting are enabled; graphical smoke remains open
 - **Depends on:** —
 - **References:** [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml),
   [platforms](../platforms.md)
 
-**Why:** CI now confirms Linux and Windows checks plus PostgreSQL migration and
-live snapshot coverage. macOS, a true client connect/render/move smoke, and
-automated duration/flakiness tracking are still absent. The migration check
-derives its head from the migration files.
+**Why:** CI confirms Linux and Windows checks plus PostgreSQL migration and live
+snapshot coverage. The hosted macOS matrix job and automated Rust-job duration
+and outcome reporting are now configured; a real graphical client smoke remains
+absent. The migration check derives its head from migration files.
 
 **Scope**
 
@@ -209,25 +209,35 @@ derives its head from the migration files.
 - [x] The live PostgreSQL integration test runs and passes in CI.
 - [x] Migration head is derived, not hardcoded; adding `0007` does not break CI
       by itself.
-- [x] Linux and Windows pass fmt/Clippy/tests in hosted CI; macOS is not enabled.
-- [ ] Client smoke coverage runs on at least one platform.
-- [ ] CI duration and flakiness are tracked.
+- [x] Linux and Windows pass fmt/Clippy/tests in hosted CI.
+- [ ] The macOS fmt/Clippy/test/build job completes a green hosted run.
+- [ ] The explicit headless client smoke connects, presents the received world
+      as Bevy entities, moves, and disconnects in hosted Linux CI.
+- [x] CI Rust and PostgreSQL migration job duration and outcome trends are
+      reported; test-level flakes follow the no-retry tracking policy in `QUA-016`.
 
 **Observed hosted baseline (2026-10-29):** the green run took just under ten
 minutes overall; Ubuntu workspace tests took about three minutes and Clippy
 about 90 seconds. Windows workspace tests exceeded ten minutes. This is a
-historical baseline. The Ubuntu and Windows Rust jobs now publish their elapsed
-time in the Actions run summary and have a 30-minute hard timeout. A separate
-read-only CI history job compares those jobs' current durations with the median
+historical baseline. The Ubuntu, Windows, and macOS Rust jobs publish elapsed
+time in the Actions run summary and have a 30-minute hard timeout. The PostgreSQL
+migration job has a 20-minute timeout and also reports its duration. A separate
+read-only CI history job compares these jobs' current durations with the median
 of up to 20 prior completed runs on the same branch, and reports prior job
 failure rates in the run summary. This is observational (no growth threshold,
 retries, or change to pass/fail outcomes); the failure rate is a workflow-job
 reliability signal, not test-level flakiness. Test-level flakiness still follows
-the manual QUA-016 tracking policy. A connected client smoke remains open
-because the current client checks are GPU-free headless tests, not a
-connect/render/move integration flow. macOS remains unsupported in CI. Local
-setup and tests remain native and do not require Docker; the PostgreSQL service
-is confined to hosted CI.
+the manual QUA-016 tracking policy. Cargo dependencies and build artifacts are
+cached per runner OS and lockfile. Linux has
+an explicit online client smoke that starts an in-process Bevy app and local
+server, checks presentation entities, sends movement, and disconnects without
+a display or GPU. It does not validate a real window/swapchain render. macOS runs
+the same formatting, headless client, Clippy, workspace test, and build checks;
+the PostgreSQL live integration remains on Ubuntu. The real graphical smoke
+remains open because this smoke does not launch a window or verify GPU output;
+that release gate remains tracked in `docs/platforms.md`.
+Local setup and tests remain native and do not require Docker; PostgreSQL
+services are confined to hosted CI.
 
 ---
 

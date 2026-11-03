@@ -87,7 +87,12 @@ def main() -> int:
                 break
         current_jobs = jobs_for_run(args.api_url, args.token, args.repository, args.run_id)
 
-        tracked = ("Rust checks (Ubuntu)", "Rust checks (Windows)")
+        tracked = (
+            "Rust checks (Ubuntu)",
+            "Rust checks (Windows)",
+            "Rust checks (macOS)",
+            "PostgreSQL 17 migrations",
+        )
         lines = [
             "### CI duration and job outcome trend",
             "",

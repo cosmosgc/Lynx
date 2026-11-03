@@ -86,6 +86,17 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
+      - name: Cache Rust dependencies and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-rust-1.99.0-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-rust-1.99.0-
+
       - name: Start CI duration measurement
         run: python3 scripts/ci-job-duration.py start rust-ubuntu
 
@@ -110,6 +121,9 @@ jobs:
 
       - name: Build headless client (no default features)
         run: cargo build -p lynx_client --no-default-features
+
+      - name: Smoke-test headless online client
+        run: cargo test -p lynx_client --features window --test online headless_schedule_connects_moves_and_disconnects -- --exact
 
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -153,6 +167,17 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
+      - name: Cache Rust dependencies and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-rust-1.99.0-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-rust-1.99.0-
+
       - name: Start CI duration measurement
         run: python scripts/ci-job-duration.py start rust-windows
 
@@ -180,9 +205,54 @@ jobs:
         if: always()
         run: python scripts/ci-job-duration.py finish rust-windows
 
+  macos:
+    name: Rust checks (macOS)
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Cache Rust dependencies and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-rust-1.99.0-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-rust-1.99.0-
+
+      - name: Start CI duration measurement
+        run: python3 scripts/ci-job-duration.py start rust-macos
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Test headless client (no default features)
+        run: cargo test -p lynx_client --no-default-features
+
+      - name: Build headless client (no default features)
+        run: cargo build -p lynx_client --no-default-features
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run workspace tests
+        run: cargo test --workspace
+
+      - name: Build workspace
+        run: cargo build --workspace
+
+      - name: Report CI duration
+        if: always()
+        run: python3 scripts/ci-job-duration.py finish rust-macos
+
   migrations:
     name: PostgreSQL 17 migrations
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:17
@@ -210,6 +280,20 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Cache Rust dependencies and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-rust-1.99.0-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-rust-1.99.0-
+
+      - name: Start CI duration measurement
+        run: python3 scripts/ci-job-duration.py start migrations-postgres
 
       - name: Install PostgreSQL client
         run: |
@@ -288,11 +372,15 @@ jobs:
           test "$before" = "$(psql "${psql_args[@]}" -c "$history_query")"
           psql "${psql_args[@]}" -c "UPDATE lynx.schema_migrations SET checksum = '$original' WHERE version = '0001_core'"
 
+      - name: Report CI duration
+        if: always()
+        run: python3 scripts/ci-job-duration.py finish migrations-postgres
+
   ci-history:
     name: CI duration and outcome trend
     runs-on: ubuntu-24.04
     continue-on-error: true
-    needs: [rust, windows, migrations]
+    needs: [rust, windows, macos, migrations]
     if: always()
     permissions:
       actions: read

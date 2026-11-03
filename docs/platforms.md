@@ -7,7 +7,8 @@ after its build, tests, and smoke test run in CI.
 |---|---|---|
 | Windows 10/11 x86-64 | **Development supported** | Primary developer platform; native Nakama and PostgreSQL releases available |
 | Linux x86-64 | Build supported | Tests run headlessly; Nakama release available |
-| macOS x86-64 / arm64 | Build supported | Nakama release available; not yet smoke-tested in CI |
+| macOS x86-64 | Experimental | Workspace CI job configured; first hosted green run and graphical client smoke are pending |
+| macOS arm64 | Experimental | No dedicated CI runner or graphical client smoke yet |
 | WebAssembly / browser | Not supported | Needs storage, threading, and asset-loading design |
 | Mobile / handheld | Not supported | Needs input, memory, and UI work |
 | Consoles | Not supported | No plan before desktop is stable |
