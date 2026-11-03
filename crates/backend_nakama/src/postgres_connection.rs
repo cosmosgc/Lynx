@@ -158,7 +158,7 @@ fn is_true_flag(value: &str) -> bool {
 mod tests {
     use super::*;
     use std::io::{Read, Write};
-    use std::net::TcpListener;
+    use std::net::{IpAddr, Ipv4Addr, TcpListener};
     use std::sync::mpsc;
     use std::thread;
     use std::time::Instant;
@@ -211,6 +211,10 @@ mod tests {
         let mut config = Config::new();
         config
             .host("localhost")
+            // The probe listener is deliberately IPv4-only. Pin the socket
+            // address while retaining `localhost` for certificate verification;
+            // macOS may otherwise resolve localhost to ::1 first.
+            .hostaddr(IpAddr::V4(Ipv4Addr::LOCALHOST))
             .port(port)
             .user("tls-test")
             .dbname("tls-test")

@@ -187,10 +187,12 @@ a real tag before these acceptance criteria can be checked.
 - **References:** [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml),
   [platforms](../platforms.md)
 
-**Why:** CI confirms Linux and Windows checks plus PostgreSQL migration and live
-snapshot coverage. The hosted macOS matrix job and automated Rust-job duration
-and outcome reporting are now configured; a real graphical client smoke remains
-absent. The migration check derives its head from migration files.
+**Why:** CI has Linux and Windows checks plus PostgreSQL migration and live
+snapshot coverage. The latest hosted run exposed an incomplete PostgreSQL test
+database setup on Ubuntu and an IPv4/IPv6 assumption in a macOS TLS test; both
+are fixed in the workflow/test and need a hosted rerun. The macOS matrix job and
+automated job duration/outcome reporting are configured; a real graphical client
+smoke remains absent. The migration check derives its head from migration files.
 
 **Scope**
 
@@ -209,7 +211,8 @@ absent. The migration check derives its head from migration files.
 - [x] The live PostgreSQL integration test runs and passes in CI.
 - [x] Migration head is derived, not hardcoded; adding `0007` does not break CI
       by itself.
-- [x] Linux and Windows pass fmt/Clippy/tests in hosted CI.
+- [ ] Linux and Windows pass fmt/Clippy/tests in hosted CI after the PostgreSQL
+      scratch-database setup fix.
 - [ ] The macOS fmt/Clippy/test/build job completes a green hosted run.
 - [ ] The explicit headless client smoke connects, presents the received world
       as Bevy entities, moves, and disconnects in hosted Linux CI.
@@ -228,7 +231,9 @@ failure rates in the run summary. This is observational (no growth threshold,
 retries, or change to pass/fail outcomes); the failure rate is a workflow-job
 reliability signal, not test-level flakiness. Test-level flakiness still follows
 the manual QUA-016 tracking policy. Cargo dependencies and build artifacts are
-cached per runner OS and lockfile. Linux has
+cached per runner OS and lockfile. Ubuntu provisions both the service database
+and a separately migrated scratch database required by all live integration
+tests. Linux has
 an explicit online client smoke that starts an in-process Bevy app and local
 server, checks presentation entities, sends movement, and disconnects without
 a display or GPU. It does not validate a real window/swapchain render. macOS runs

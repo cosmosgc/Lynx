@@ -75,6 +75,7 @@ jobs:
       LYNX_PG_HOST: 127.0.0.1
       LYNX_PG_PORT: 5432
       LYNX_PG_DATABASE: lynx_ci
+      LYNX_PG_TEST_DATABASE: lynx_ci_test
       LYNX_PG_USER: lynx_ci
       LYNX_PG_PASSWORD: ci-application-password
       LYNX_PG_ALLOW_INSECURE_LOOPBACK: 'true'
@@ -110,6 +111,12 @@ jobs:
 
       - name: Apply migrations
         run: ./scripts/db-migrate.sh
+
+      - name: Create and migrate isolated PostgreSQL integration database
+        shell: bash
+        run: |
+          LYNX_PG_DATABASE="$LYNX_PG_TEST_DATABASE" ./scripts/setup-postgres.sh
+          LYNX_PG_DATABASE="$LYNX_PG_TEST_DATABASE" ./scripts/db-migrate.sh
 
       - name: Check formatting
         run: cargo fmt --all --check
