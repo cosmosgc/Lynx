@@ -42,7 +42,6 @@ copied from the task entries; a dash means none are declared.
 | [CLT-002](40-bevy-client.md#clt-002--login-and-session-bootstrap) | Login and session bootstrap | P0 | In progress | `NET-001`, `CLT-001` | Finish server profiles and world-session lifecycle. |
 | [CLT-003](40-bevy-client.md#clt-003--character-selection-and-creation) | Character selection and creation | P0 | In progress | `PST-001`, `CLT-002` | Verify full Bevy onboarding and restart flow against a live server. |
 | [SIM-007](10-simulation-gameplay.md#sim-007--navigation-budgets-and-replan-policy) | Navigation budgets and replan policy | P1 | Done | `SIM-001` | GuardChase uses bounded paths, server movement validation, and retry/expiry handling. |
-| [OPS-006](60-operations-release.md#ops-006--ci-matrix-and-live-integration-coverage) | CI matrix and live-integration coverage | P1 | In progress | — | Scratch DB and macOS TLS fixes need hosted rerun; headless smoke, macOS checks, Cargo caches, and job trends configured. |
 | [SIM-006](10-simulation-gameplay.md#sim-006--ai-behaviors-schedules-and-perception-budgets) | AI behaviors, schedules, and perception budgets | P1 | In progress | `SIM-001` | Continue bounded behavior/content hydration; prerequisite of SIM-015. |
 | [SIM-008](10-simulation-gameplay.md#sim-008--world-chat-and-presence) | World chat and presence | P1 | In progress | — | Complete authorized routing/moderation path; enables social/client tasks. |
 | [NET-003](30-networking-security.md#net-003--tls-and-reverse-proxy-boundary) | TLS and reverse-proxy boundary | P1 | In progress | — | Validate proxy configuration and deployed certificate boundary. |
@@ -57,6 +56,12 @@ copied from the task entries; a dash means none are declared.
 | [PST-003](20-persistence-backend.md#pst-003--normalized-faction-and-calendar-persistence) | Normalized faction and calendar persistence | P1 | Done | `PST-001`, `PST-005` | Implement paired normalized stores, snapshot backfill, and restart/reconciliation checks. |
 | [PST-005](20-persistence-backend.md#pst-005--snapshot-and-event-replay) | Snapshot and event replay | P1 | Done | `PST-004` | Full aggregate delta replay, durable quarantine, checkpoint retention, multi-tick restart coverage, and a measured 60-second target are implemented. |
 | [QUA-016](70-testing-quality.md#qua-016--flaky-test-and-ci-duration-control) | Flaky-test and CI-duration control | P2 | In progress | — | Automate duration/flakiness reporting and audit timing-sensitive tests. |
+
+## Future — Icebox
+
+| ID | Task | Priority | Status | Dependencies | Sequencing note |
+| --- | --- | --- | --- | --- | --- |
+| [OPS-016](60-operations-release.md#ops-016--linux-graphical-client-smoke) | Linux graphical client smoke | P2 | Icebox | `OPS-006` | Defer Xvfb/software-render CI until a hosted Linux run can validate and review the screenshot artifact. |
 
 ## Blocked
 

@@ -19,7 +19,14 @@ fn main() {
         }
         let mut account_app = App::new();
         account_app
-            .add_plugins(DefaultPlugins)
+            .add_plugins(DefaultPlugins.set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: "Lynx Account & Characters".into(),
+                    resolution: (960, 600).into(),
+                    ..default()
+                }),
+                ..default()
+            }))
             .insert_resource(lynx_client::account_ui::AccountWorldLaunch::default())
             .add_plugins(lynx_client::account_ui::AccountUiPlugin);
         let exit = account_app.run();

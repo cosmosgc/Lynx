@@ -182,17 +182,17 @@ a real tag before these acceptance criteria can be checked.
 ## OPS-006 — CI matrix and live-integration coverage
 
 - **Priority:** P1
-- **Status:** In progress — headless online client smoke, macOS Rust checks, per-platform Cargo caching, and Rust/PostgreSQL job duration/outcome reporting are enabled; graphical smoke remains open
+- **Status:** Done — hosted Linux, Windows, and macOS checks are green; completion record: [`completed/ops-006-ci-matrix.md`](completed/ops-006-ci-matrix.md). Linux graphical CI coverage is deferred to `OPS-016`.
 - **Depends on:** —
 - **References:** [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml),
   [platforms](../platforms.md)
 
-**Why:** CI has Linux and Windows checks plus PostgreSQL migration and live
-snapshot coverage. The latest hosted run exposed an incomplete PostgreSQL test
-database setup on Ubuntu and provider-specific TLS/certificate assumptions in a
-macOS test; both are fixed in the workflow/test and need a hosted rerun. The macOS matrix job and
-automated job duration/outcome reporting are configured; a real graphical client
-smoke remains absent. The migration check derives its head from migration files.
+**Why:** CI has Linux, Windows, and macOS checks plus PostgreSQL migration and
+live snapshot coverage. The Ubuntu scratch-database and cross-platform TLS test
+fixes have passed hosted CI. CI also reports job duration/outcome trends. A
+Windows-local account-screen smoke is available; Linux graphical CI validation
+is deliberately separated into future work (`OPS-016`). The migration check
+derives its head from migration files.
 
 **Scope**
 
@@ -201,8 +201,7 @@ smoke remains absent. The migration check derives its head from migration files.
 - Replace the hardcoded migration count with a head-version check derived from
   `server/migrations`.
 - Add a macOS build/test job once a runner and dependencies are available.
-- Add a client smoke job once the client exists (launch headless, connect,
-  render, move, quit).
+- Run the headless online connect/presentation/movement/disconnect smoke.
 - Cache dependencies and keep the pipeline within a documented duration.
 - Ensure the "no Docker required" local path stays separate from CI services.
 
@@ -211,10 +210,10 @@ smoke remains absent. The migration check derives its head from migration files.
 - [x] The live PostgreSQL integration test runs and passes in CI.
 - [x] Migration head is derived, not hardcoded; adding `0007` does not break CI
       by itself.
-- [ ] Linux and Windows pass fmt/Clippy/tests in hosted CI after the PostgreSQL
+- [x] Linux and Windows pass fmt/Clippy/tests in hosted CI after the PostgreSQL
       scratch-database setup fix.
-- [ ] The macOS fmt/Clippy/test/build job completes a green hosted run.
-- [ ] The explicit headless client smoke connects, presents the received world
+- [x] The macOS fmt/Clippy/test/build job completes a green hosted run.
+- [x] The explicit headless client smoke connects, presents the received world
       as Bevy entities, moves, and disconnects in hosted Linux CI.
 - [x] CI Rust and PostgreSQL migration job duration and outcome trends are
       reported; test-level flakes follow the no-retry tracking policy in `QUA-016`.
@@ -236,11 +235,16 @@ and a separately migrated scratch database required by all live integration
 tests. Linux has
 an explicit online client smoke that starts an in-process Bevy app and local
 server, checks presentation entities, sends movement, and disconnects without
-a display or GPU. It does not validate a real window/swapchain render. macOS runs
-the same formatting, headless client, Clippy, workspace test, and build checks;
-the PostgreSQL live integration remains on Ubuntu. The real graphical smoke
-remains open because this smoke does not launch a window or verify GPU output;
-that release gate remains tracked in `docs/platforms.md`.
+a display or GPU. Windows developers can run
+`scripts/client-graphical-smoke.bat` to open the current login/account window
+and verify a screenshot locally; it does not use live credentials, exercise
+authenticated character creation or selection, or validate a world/gameplay
+render. Linux graphical CI validation is deferred to `OPS-016`. macOS runs
+formatting, headless client, Clippy, workspace test, and build checks; the
+PostgreSQL live integration remains on Ubuntu. Broader graphical account-flow
+and world-render validation remain release gates tracked in `docs/platforms.md`.
+The Windows smoke builds the windowed client and saves a screenshot under
+`%TEMP%`.
 Local setup and tests remain native and do not require Docker; PostgreSQL
 services are confined to hosted CI.
 
@@ -493,3 +497,35 @@ Release SBOM generation/attachment is still missing.
 - [ ] Thresholds for adding zones/processes are documented.
 - [ ] The plan is reviewed when content or protocol changes materially.
 - [ ] Assumptions and hardware are recorded with the numbers.
+
+---
+
+## OPS-016 — Linux graphical client smoke
+
+- **Priority:** P2
+- **Status:** Icebox — deferred; the current local graphical smoke is Windows-only
+- **Depends on:** `OPS-006`
+- **References:** [platforms](../platforms.md), [CI workflow](../../.github/workflows/ci.yml)
+
+**Why:** The existing CI matrix is green and the Windows account-screen smoke
+can be run locally. Adding an Ubuntu Xvfb/software-rendering job requires a
+hosted Linux run to validate the graphics stack and screenshot check; that
+validation is not part of the current work.
+
+**Scope**
+
+- Launch the current Bevy account/login screen in an Ubuntu virtual display with
+  software rendering.
+- Capture and retain a screenshot as a CI artifact, and fail if the window or
+  rendered UI is absent.
+- Keep the smoke honest about coverage: no live sign-in, character
+  creation/selection, or world/gameplay rendering unless those flows are added
+  with a suitable test backend.
+
+**Acceptance criteria**
+
+- [ ] A hosted Ubuntu run opens the graphical account window and captures a
+      nonblank login-screen frame.
+- [ ] The captured frame is available as a workflow artifact for review.
+- [ ] The job passes without a physical display/GPU and does not alter the
+      existing headless smoke or local no-Docker workflow.

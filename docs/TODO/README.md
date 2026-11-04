@@ -53,9 +53,8 @@ recommendation, not a commitment; re-order when a dependency or risk changes.
 
 | Order | Task | Why now |
 | --- | --- | --- |
-| 0 | [OPS-006](60-operations-release.md#ops-006--ci-matrix-and-live-integration-coverage) — CI integration coverage | The migration head check and live PostgreSQL test are configured; confirm them in CI and complete the remaining platform coverage. |
-| 1 | [CLT-004](40-bevy-client.md#clt-004--scene-camera-and-input-abstraction) — scene, camera, and input | The client workspace exists, but the scene is still an offline placeholder; the vertical slice needs an integrated client. |
-| 2 | [SIM-002](10-simulation-gameplay.md#sim-002--client-prediction-and-reconciliation-contract) — movement reconciliation | Server movement authority is done; client reconciliation still needs networking, rendering, and reset integration. |
+| 0 | [CLT-004](40-bevy-client.md#clt-004--scene-camera-and-input-abstraction) — scene, camera, and input | The client workspace exists, but the scene is still an offline placeholder; the vertical slice needs an integrated client. |
+| 1 | [SIM-002](10-simulation-gameplay.md#sim-002--client-prediction-and-reconciliation-contract) — movement reconciliation | Server movement authority is done; client reconciliation still needs networking, rendering, and reset integration. |
 
 Chat wiring ([SIM-008](10-simulation-gameplay.md#sim-008--world-chat-and-presence))
 is the cheapest Phase 3 completion and can run in parallel.
@@ -100,7 +99,7 @@ the quick audit; update it when a gap is found or closed.
 | User content has schemas/moderation requirements but no implementation | [security](../security.md#content-and-user-generated-content) | `CNT-008`, `NET-009` |
 | No staging publish, rollout, rollback, or upgrade workflow | [operations](../operations.md) | `OPS-004`, `OPS-010` |
 | No backup/restore drills | [security](../security.md#abuse-prevention) | `OPS-003` |
-| macOS, client connect/render/move smoke, and automated CI duration/flakiness tracking are missing | [platforms](../platforms.md), [CI](../../.github/workflows/ci.yml) | `OPS-006` |
+| Linux graphical CI smoke is deferred; Windows has a local account-screen screenshot helper; authenticated character-flow and gameplay rendering are not covered by either smoke | [platforms](../platforms.md), [CI](../../.github/workflows/ci.yml) | `OPS-016` |
 | ADR 0022 (dynamic classes and Treat targeting) is Proposed | [ADR 0022](../adr/0022-dynamic-character-classes-and-combat-targeting.md) | `SIM-004` |
 | Guilds, quests, progression, economy, trading, parties | [README](../../README.md#phase-8--expand-and-stabilize--selected-systems-delivered-early) | `SIM-009`–`SIM-013` |
 | Zone-specific mechanics, shared utilities, player work, demand-based markets, and local-to-faction wealth transfers | [world simulation](../world-simulation.md#zone-systems-work-and-local-economy) | `SIM-019`, `SIM-020`, `CNT-018` |
@@ -137,4 +136,5 @@ is rejected by default.
 
 | Record | Summary |
 | --- | --- |
+| [`completed/ops-006-ci-matrix.md`](completed/ops-006-ci-matrix.md) | Hosted OS matrix, live PostgreSQL coverage, headless client smoke, and CI duration/outcome reporting. |
 | [`completed/world-persistence-fresh-start.md`](completed/world-persistence-fresh-start.md) | Durable whole-world snapshots and the `--fresh` authored-world reset. |

@@ -6,8 +6,8 @@ after its build, tests, and smoke test run in CI.
 | Target | Status | Notes |
 |---|---|---|
 | Windows 10/11 x86-64 | **Development supported** | Primary developer platform; native Nakama and PostgreSQL releases available |
-| Linux x86-64 | Build supported | Tests run headlessly; Nakama release available |
-| macOS x86-64 | Experimental | Workspace CI job configured; first hosted green run and graphical client smoke are pending |
+| Linux x86-64 | Build supported | Headless tests and online-client smoke run in CI; graphical client smoke deferred to `OPS-016`; Nakama release available |
+| macOS x86-64 | Experimental | Workspace CI checks have a hosted green run; graphical client smoke is not yet covered |
 | macOS arm64 | Experimental | No dedicated CI runner or graphical client smoke yet |
 | WebAssembly / browser | Not supported | Needs storage, threading, and asset-loading design |
 | Mobile / handheld | Not supported | Needs input, memory, and UI work |
@@ -52,3 +52,9 @@ Every supported platform must pass:
 5. Package, install, and uninstall without leftovers.
 
 Until then, the platform is experimental and the README must say so.
+
+Windows developers can run `scripts/client-graphical-smoke.bat` to open the
+account window and capture its login screen. This local smoke does not sign in,
+create or select a character, connect to the world, or verify gameplay
+rendering. The existing headless online smoke is not a GPU-render test. Linux
+graphical CI coverage is intentionally deferred to `OPS-016`.
