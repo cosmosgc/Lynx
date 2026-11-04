@@ -504,6 +504,40 @@ Phase 1  Engine skeleton             [██████████████
         self.assertIn(b"Jan 2, 2025", response.data)
         self.assertIn("03:05 AM GMT−3".encode(), response.data)
 
+    def test_history_logs_new_tasks_and_repository_files_after_baseline(self):
+        client = self.make_app().test_client()
+        baseline = client.get("/history")
+        self.assertNotIn(b"New task", baseline.data)
+        self.assertNotIn(b"New file", baseline.data)
+
+        (self.todo / "20-new.md").write_text(
+            "## SIM-004 — New task\n\n- **Status:** Proposed\n",
+            encoding="utf-8",
+        )
+        new_source = self.root / "crates" / "engine_sim" / "src" / "new_system.rs"
+        new_source.write_text("pub fn new_system() {}\n", encoding="utf-8")
+
+        response = client.get("/history")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"SIM-004", response.data)
+        self.assertIn(b"New task", response.data)
+        self.assertIn(b"crates/engine_sim/src/new_system.rs", response.data)
+        self.assertIn(b"New file", response.data)
+        self.assertEqual(response.data.count(b"New backlog task added"), 1)
+
+        task_path = self.todo / "20-new.md"
+        task_path.write_text(
+            "## SIM-004 — New task\n\n- **Status:** Proposed\n\n"
+            "**Acceptance criteria**\n\n- [ ] Updated criterion\n",
+            encoding="utf-8",
+        )
+        new_source.write_text("pub fn new_system() { /* updated docs */ }\n", encoding="utf-8")
+        updated = client.get("/history")
+        self.assertIn(b"Task updated", updated.data)
+        self.assertIn(b"File updated", updated.data)
+        self.assertIn(b"Task details or acceptance criteria updated", updated.data)
+        self.assertIn(b"Repository file updated", updated.data)
+
     def test_flask_app_does_not_expose_a_status_update_endpoint(self):
         client = self.make_app().test_client()
         response = client.post(

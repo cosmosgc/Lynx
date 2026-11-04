@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import sqlite3
 import os
+import hashlib
 from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -238,8 +239,30 @@ def _initialize_state_store(database_path: Path) -> None:
                 text TEXT NOT NULL,
                 PRIMARY KEY (file, line, kind)
             );
+            CREATE TABLE IF NOT EXISTS observed_history_entities (
+                entity_type TEXT NOT NULL,
+                entity_key TEXT NOT NULL,
+                title TEXT NOT NULL,
+                fingerprint TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (entity_type, entity_key)
+            );
+            CREATE TABLE IF NOT EXISTS observed_history_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL,
+                changed_at TEXT NOT NULL
+            );
             """
         )
+        columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(observed_history_entities)")
+        }
+        if "fingerprint" not in columns:
+            connection.execute(
+                "ALTER TABLE observed_history_entities ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''"
+            )
         connection.commit()
 
 
@@ -446,6 +469,9 @@ def load_backlog(todo_dir: Path) -> list[dict[str, Any]]:
                 {
                     "id": item_id,
                     "title": heading.group(2),
+                    "history_fingerprint": hashlib.sha256(
+                        re.sub(r"^- \*\*Status:\*\*.*(?:\n|$)", "", section, flags=re.MULTILINE).encode("utf-8")
+                    ).hexdigest(),
                     "category": source.stem.split("-", 1)[-1].replace("-", " ").title(),
                     "priority": fields.get("priority", "").strip() or "Unspecified",
                     "status": status,
@@ -881,7 +907,64 @@ def create_app(
     def get_history(items: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
         task_items = items if items is not None else get_items()
         items_by_id = {item["id"]: item for item in task_items}
+        timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
         with _state_connection(database_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = {
+                (row["entity_type"], row["entity_key"]): (row["title"], row["fingerprint"])
+                for row in connection.execute(
+                    "SELECT entity_type, entity_key, title, fingerprint FROM observed_history_entities"
+                )
+            }
+            entities = {
+                ("task", item["id"]): (
+                    item["title"], item.get("history_fingerprint", "")
+                ) for item in task_items
+            }
+            repository_root = get_repository_root()
+            files = {
+                source.relative_to(repository_root).as_posix(): (
+                    source.relative_to(repository_root).as_posix(),
+                    f"{source.stat().st_mtime_ns}:{source.stat().st_size}",
+                )
+                for source in _todo_source_files(repository_root)
+            }
+            todo_root = repository_root / "docs" / "TODO"
+            if todo_root.is_dir():
+                for source in todo_root.rglob("*.md"):
+                    if source.name.lower() == "readme.md":
+                        continue
+                    file = source.relative_to(repository_root).as_posix()
+                    stat = source.stat()
+                    files[file] = (file, f"{stat.st_mtime_ns}:{stat.st_size}")
+            entities.update({("file", file): value for file, value in files.items()})
+            for (entity_type, entity_key), (title, fingerprint) in entities.items():
+                previous = existing.get((entity_type, entity_key))
+                if previous is None:
+                    if not existing:
+                        continue
+                    description = "New backlog task added" if entity_type == "task" else "New repository file added"
+                elif not previous[1] or previous[1] == fingerprint:
+                    continue
+                else:
+                    description = (
+                        "Task details or acceptance criteria updated"
+                        if entity_type == "task"
+                        else "Repository file updated"
+                    )
+                if previous is None or previous[1] != fingerprint:
+                    connection.execute(
+                        "INSERT INTO observed_history_events (kind, subject, title, description, changed_at) VALUES (?, ?, ?, ?, ?)",
+                        (f"{entity_type}_updated" if previous else entity_type, entity_key, title, description, timestamp),
+                    )
+            connection.executemany(
+                "INSERT INTO observed_history_entities (entity_type, entity_key, title, fingerprint) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(entity_type, entity_key) DO UPDATE SET title = excluded.title, fingerprint = excluded.fingerprint",
+                [(entity_type, entity_key, title, fingerprint) for (entity_type, entity_key), (title, fingerprint) in entities.items()],
+            )
+            event_rows = connection.execute(
+                "SELECT kind, subject, title, description, changed_at FROM observed_history_events ORDER BY id DESC LIMIT 500"
+            ).fetchall()
             rows = connection.execute(
                 """
                 SELECT task_id, old_status, new_status, description, changed_at
@@ -891,19 +974,28 @@ def create_app(
                 """
             )
             changes = [dict(row) for row in rows]
+            changes.extend(
+                {
+                    "kind": row["kind"], "task_id": row["subject"], "title": row["title"],
+                    "description": row["description"], "changed_at": row["changed_at"],
+                    "old_status_label": "", "new_status_label": "", "task_exists": row["kind"].startswith("task"),
+                }
+                for row in event_rows
+            )
+            connection.commit()
+        changes.sort(key=lambda change: change["changed_at"], reverse=True)
+        changes = changes[:500]
         for change in changes:
+            change.setdefault("kind", "status")
             change["changed_at_date"], change["changed_at_time"] = _history_timestamp(
                 change["changed_at"]
             )
             task = items_by_id.get(change["task_id"])
-            change["task_exists"] = task is not None
-            change["title"] = task["title"] if task else "Task no longer in backlog"
-            change["old_status_label"] = STATUS_LABELS.get(
-                change["old_status"], change["old_status"]
-            )
-            change["new_status_label"] = STATUS_LABELS.get(
-                change["new_status"], change["new_status"]
-            )
+            if change["kind"] == "status":
+                change["task_exists"] = task is not None
+                change["title"] = task["title"] if task else "Task no longer in backlog"
+                change["old_status_label"] = STATUS_LABELS.get(change["old_status"], change["old_status"])
+                change["new_status_label"] = STATUS_LABELS.get(change["new_status"], change["new_status"])
         return changes
 
     @app.get("/")

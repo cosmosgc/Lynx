@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Task state history · Lynx backlog</title>
+    <title>Project history · Lynx backlog</title>
   <style>
     :root { color-scheme:dark; --bg:#11151b; --panel:#1a2029; --line:#303a47; --muted:#a3afbd; --text:#edf2f7; --blue:#76b7ff; --green:#66d19e; }
     * { box-sizing:border-box; }
@@ -39,8 +39,8 @@
 <body>
 <main>
   <header>
-    <h1>Task state change history</h1>
-    <p class="muted">The latest 500 status changes observed in the backlog Markdown. This app does not edit task status.</p>
+    <h1>Project history</h1>
+    <p class="muted">The latest 500 observed events: task status changes, new backlog tasks, and new repository files. This app does not edit task status.</p>
     <nav class="nav" aria-label="Backlog navigation"><a href="/">Backlog</a><a href="/task-order">Plan</a><a href="/dependencies">Dependencies</a><a href="/decisions">Decisions</a><a href="/reports">Reports</a><a href="/todos">Source TODOs</a><a href="/history" aria-current="page">History</a></nav>
   </header>
   {% if selected_task %}
@@ -105,17 +105,17 @@
     {% if changes %}
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Changed</th><th>Task</th><th>Status change</th><th>What changed</th></tr></thead>
+        <thead><tr><th>Changed</th><th>Item</th><th>Event</th><th>What changed</th></tr></thead>
         <tbody>
           {% for change in changes %}
           <tr>
             <td><time class="timestamp" datetime="{{ change.changed_at }}" title="{{ change.changed_at }} UTC"><span class="timestamp-date">{{ change.changed_at_date }}</span><span class="timestamp-time">{{ change.changed_at_time }}</span></time></td>
             <td>
-              {% if change.task_exists %}<a href="/history?task={{ change.task_id|urlencode }}#task-detail">{% endif %}
-              <strong>{{ change.task_id }}</strong><br>{{ change.title }}
-              {% if change.task_exists %}</a>{% endif %}
+              {% if change.kind.startswith("file") %}<code>{{ change.task_id }}</code>
+              {% elif change.task_exists %}<a href="/history?task={{ change.task_id|urlencode }}#task-detail"><strong>{{ change.task_id }}</strong><br>{{ change.title }}</a>
+              {% else %}<strong>{{ change.task_id }}</strong><br>{{ change.title }}{% endif %}
             </td>
-            <td class="change">{{ change.old_status_label }}<span class="arrow">→</span>{{ change.new_status_label }}</td>
+            <td class="change">{% if change.kind == "status" %}{{ change.old_status_label }}<span class="arrow">→</span>{{ change.new_status_label }}{% elif change.kind == "task" %}New task{% elif change.kind == "task_updated" %}Task updated{% elif change.kind == "file_updated" %}File updated{% else %}New file{% endif %}</td>
             <td>{{ change.description }}</td>
           </tr>
           {% endfor %}
@@ -123,7 +123,7 @@
       </table>
     </div>
     {% else %}
-    <p class="muted">No task status changes have been saved yet.</p>
+    <p class="muted">No history events have been saved yet.</p>
     {% endif %}
   </section>
 </main>

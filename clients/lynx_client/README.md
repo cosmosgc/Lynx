@@ -167,11 +167,15 @@ WASD sends normalized endpoints at at most 20 requests per second, with one
 request in flight. Movement pauses during chat or focus loss. The avatar and
 camera follow bounded prediction and server corrections. Remote entities smooth
 toward server positions without extrapolation and snap over eight metres.
-Interaction/inventory remain future work. The handshake uses this workspace's
-package version for engine and content, matching the built-in demo server.
+FFXIV-like MMORPG entity cues are planned for CLT-006: ground rings and facing
+indicators, nameplates, health/status display, and contextual interaction
+affordances, all backed by server-approved public data. They are not in the
+current blue-square demo. Interaction execution and inventory remain future work
+in CLT-008. The handshake uses this workspace's package version for engine and
+content, matching the built-in demo server.
 The Windows online demo was visually confirmed with movement, chat, presence,
-and live diagnostics, but the motion currently feels less smooth than intended;
-interpolation tuning is still in progress.
+and live diagnostics; the user considers current localhost movement smooth
+enough. Simulated-latency validation remains open.
 
 Transient failures retry with 250 ms exponential backoff capped at eight seconds
 and six consecutive retries, using rotated resume tokens. Press R after a

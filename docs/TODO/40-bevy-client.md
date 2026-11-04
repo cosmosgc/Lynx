@@ -282,7 +282,7 @@ remain open.
 ## CLT-006 — Entity presentation and interpolation
 
 - **Priority:** P0
-- **Status:** In progress — Windows online rendering visually confirmed; motion quality and interpolation remain open
+- **Status:** In progress — Windows online rendering visually confirmed and the user considers current movement smooth enough; remaining presentation scope is open
 - **Depends on:** `CLT-004`, `CLT-005`
 - **References:** ADR 0012, `SIM-002`
 
@@ -291,25 +291,46 @@ remain open.
 - Spawn/despawn/update visuals from authoritative snapshots and deltas.
 - Interpolate remote entities between server ticks; never extrapolate beyond a
   documented bound.
-- Present facing, animation state, nameplates, health/status, and interaction
-  affordances from server data only.
+- Give visible entities a grounded marker/ring and a facing-direction indicator
+  oriented from authoritative facing data. Use clear, distinct styling for the
+  local player, other entities, selected targets, and interactable targets.
+- Show nameplates, health bars, and status-effect indicators using only
+  server-authoritative public presentation data.
+- Show a contextual interaction prompt/affordance only for actions exposed by
+  the server for that entity. Executing interactions and panels remain in
+  `CLT-008`.
 - Handle visibility enter/leave and entity caps without popping or leaking.
 - Provide a debug view of authoritative vs. rendered position.
 
+**Presentation direction:** Use familiar tab-target MMORPG conventions (the
+user cited FFXIV): a ground ring/marker under entities, a ground-facing cue,
+readable nameplates, health/status display, and a contextual interaction
+indicator. Create Lynx's own visual language rather than copying game assets.
+The current `PublicEntity` projection contains prototype, position, and yaw but
+does not yet provide all public name, health/status, or interaction fields;
+those must be added to the server-approved presentation contract before the UI
+can display them. Never infer hidden/private state client-side.
+
 **Acceptance criteria**
 
-- [ ] Remote movement looks smooth at the target tick rate.
+- [x] Remote movement looks smooth at the target tick rate for the current local demo.
 - [x] A teleport/correction does not cause unbounded extrapolation.
 - [x] Despawned entities disappear immediately and do not linger in UI.
 - [x] Rendered state never feeds back into authoritative decisions.
+- [ ] Visible entities have a ground marker and facing indicator matching
+      authoritative position and yaw.
+- [ ] Nameplates, health bars, and status indicators display server-authoritative
+      public data and disappear/update with the entity.
+- [ ] Interaction affordances reflect only server-exposed actions; invoking
+      them is handled separately by `CLT-008`.
 
 **Visual validation (2026-11-04):** The Windows local demo rendered the active
 online world, six blue entity markers, and the authoritative/rendered position
-overlay. The user confirmed movement and packet exchange work, but motion is less
-smooth than expected. Therefore this verifies the online graphical path only;
-the remote-smoothness acceptance criterion stays open for measured tuning and
-another visual check. Screenshot was supplied in chat and is not stored in the
-repository.
+overlay. The user confirmed movement and packet exchange, then clarified that
+the movement feels smooth enough and approved this criterion. This is qualitative
+Windows localhost validation, not a simulated-latency/jitter benchmark; such
+network-condition validation remains tracked by CLT-016. Screenshot was supplied
+in chat and is not stored in the repository.
 
 ---
 
@@ -334,7 +355,9 @@ repository.
 
 - [x] The client converges to the server position after corrections.
 
-Remaining validation-only criteria are tracked in dependent follow-up tasks:
+The following validation cannot be established by the current local tests/demo;
+they are tracked as dependent follow-up tasks that require a suitable impairment
+harness or controlled authoritative rejection fixture:
 [CLT-016](#clt-016--movement-latency-validation) covers 100–200 ms simulated
 latency, and [CLT-017](#clt-017--rejected-movement-and-desync-evidence) covers
 server-rejected movement and sequence/tick desync evidence. Both depend on this
@@ -609,7 +632,8 @@ for validated behavior and deferred follow-up work.
 **Why:** Localhost movement is responsive, but does not establish the feel of
 movement under representative network delay. Keep this separate from the basic
 movement implementation so the validation can use deterministic latency
-injection and record an actual result.
+injection and record an actual result. The current local test/demo setup does not
+provide that latency injection; these criteria are not claimed as locally proven.
 
 **Scope**
 
@@ -640,7 +664,9 @@ injection and record an actual result.
 **Why:** The normal localhost demo currently exercises accepted movement and
 cannot prove how the client handles a deliberate server rejection or a desync.
 Test those paths with a controlled authoritative fixture instead of inferring
-them from successful movement.
+them from successful movement. The current local test/demo setup does not force
+this server-side rejection or produce a desync report, so these criteria require
+the future fixture and diagnostic work in this task.
 
 **Scope**
 
