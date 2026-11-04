@@ -164,6 +164,14 @@ impl Client {
         self.incoming.try_recv()
     }
 
+    /// Current incoming and outgoing queue depths (each bounded to 64).
+    pub fn queue_depths(&self) -> (usize, usize) {
+        (
+            self.incoming.len(),
+            self.outgoing.max_capacity() - self.outgoing.capacity(),
+        )
+    }
+
     /// Abort the task immediately; queued messages are not flushed.
     pub fn close(&mut self) {
         self.task.abort();

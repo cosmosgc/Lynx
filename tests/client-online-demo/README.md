@@ -23,6 +23,8 @@ PowerShell process that sets the token. It uses
 `ws://127.0.0.1:8090/world`. Stop either process with Ctrl+C. Delete the token
 file after stopping both processes if you no longer need this demo setup.
 
-This is a development-only demo; the online client currently displays the world
-without sending movement input. If connection fails, copy the detailed reason
+This is a development-only demo. Use WASD to move, T to compose chat, Enter to
+send and Escape to cancel chat. Movement pauses while composing or unfocused.
+Transient disconnects retry automatically; R retries a terminal failure.
+If connection fails, copy the detailed reason
 from the window title when reporting the problem.

@@ -4,8 +4,9 @@ Scope: the graphical client that turns the headless world service into a playabl
 game — workspace layout, login, character selection, scene, input/camera,
 rendering, prediction, UI, localization, packaging, and client-side tests.
 
-**What exists today:** `clients/lynx_client` is a minimal Bevy 0.20.0 window
-and headless application foundation, not yet a scene or playable client.
+**What exists today:** `clients/lynx_client` provides offline scenes and an online
+WASD/chat loop with prediction, remote smoothing, resume and diagnostics.
+Graphical gameplay validation and interaction/inventory remain open.
 [ADR 0001](../adr/0001-rust-and-bevy-version-policy.md) restricts Bevy to
 client/editor crates. Phases 1, 2, 4, and 7 still require further client work.
 
@@ -176,7 +177,7 @@ The server derives actor IDs deterministically from character IDs and commits th
 actor to the world snapshot before admission. If persistence fails, admission is
 denied; retries reuse the actor already present in memory, or recreate the same
 ID after a crash. The Bevy screen now hands the verified account session and
-selected character to the online window. The online view is still read-only, and
+selected character to the online window. The online view supports movement, and
 live Nakama/PostgreSQL plus process-restart onboarding remains to be exercised.
 
 ---
@@ -241,7 +242,7 @@ unversioned until a manifest is built.
 ## CLT-005 — Network client loop
 
 - **Priority:** P0
-- **Status:** Blocked — `CLT-001`, `CLT-002`
+- **Status:** In progress — background loop, rotated-token resume and diagnostics implemented; account lifecycle and failure UX remain
 - **Depends on:** `CLT-001`, `CLT-002`
 - **References:** [networking](../networking.md), `engine_net`
 
@@ -257,18 +258,31 @@ unversioned until a manifest is built.
 
 **Acceptance criteria**
 
-- [ ] The client applies a full snapshot and subsequent deltas correctly.
-- [ ] A dropped connection reconnects and resumes within the server window.
+- [x] The client applies a full snapshot and subsequent deltas correctly.
+- [x] A dropped connection reconnects and resumes within the server window.
 - [ ] Terminal errors (expired/revoked/conflict) show a clear path forward.
-- [ ] A stalled server does not freeze the client.
-- [ ] Debug telemetry exposes tick, RTT, and queue depth.
+- [x] A stalled server does not freeze the client.
+- [x] Debug telemetry exposes tick, movement round-trip time, and queue depth.
+
+**Progress:** The online loop stores rotated resume tokens in memory, retries
+transient failures with bounded exponential backoff, and captures the Tokio
+runtime handle for retries from Bevy systems. Two consecutive resumes and
+post-resume movement pass against an in-process server. The HUD reports queue
+depths and movement round-trip time (including authority processing), not a
+network-only RTT or measured packet loss. An in-process integration test verifies
+rotated-token resume and movement after resume. A Windows local demo session was
+also visually confirmed active, with tick 807, six entities,
+accepted movement, zero reconnects, and empty transport queues (developer-provided
+screenshot, 2026-11-04). This is static-token demo coverage, not Nakama account
+login. Automatic-drop injection, account refresh, and richer terminal-error UX
+remain open.
 
 ---
 
 ## CLT-006 — Entity presentation and interpolation
 
 - **Priority:** P0
-- **Status:** Blocked — `CLT-004`, `CLT-005`
+- **Status:** In progress — Windows online rendering visually confirmed; motion quality and interpolation remain open
 - **Depends on:** `CLT-004`, `CLT-005`
 - **References:** ADR 0012, `SIM-002`
 
@@ -285,18 +299,26 @@ unversioned until a manifest is built.
 **Acceptance criteria**
 
 - [ ] Remote movement looks smooth at the target tick rate.
-- [ ] A teleport/correction does not cause unbounded extrapolation.
-- [ ] Despawned entities disappear immediately and do not linger in UI.
-- [ ] Rendered state never feeds back into authoritative decisions.
+- [x] A teleport/correction does not cause unbounded extrapolation.
+- [x] Despawned entities disappear immediately and do not linger in UI.
+- [x] Rendered state never feeds back into authoritative decisions.
+
+**Visual validation (2026-11-04):** The Windows local demo rendered the active
+online world, six blue entity markers, and the authoritative/rendered position
+overlay. The user confirmed movement and packet exchange work, but motion is less
+smooth than expected. Therefore this verifies the online graphical path only;
+the remote-smoothness acceptance criterion stays open for measured tuning and
+another visual check. Screenshot was supplied in chat and is not stored in the
+repository.
 
 ---
 
 ## CLT-007 — Local movement and prediction
 
 - **Priority:** P0
-- **Status:** Blocked — `SIM-001`, `SIM-002`, `CLT-005`
+- **Status:** In progress — WASD movement visually confirmed; latency tuning and rejection evidence remain
 - **Depends on:** `SIM-001`, `SIM-002`, `CLT-005`
-- **References:** `SIM-001`, `SIM-002`
+- **References:** `SIM-001`, `SIM-002`, [CLT-016](#clt-016--movement-latency-validation), [CLT-017](#clt-017--rejected-movement-and-desync-evidence)
 
 **Scope**
 
@@ -310,10 +332,27 @@ unversioned until a manifest is built.
 
 **Acceptance criteria**
 
-- [ ] Local movement feels responsive at 100–200 ms simulated latency.
-- [ ] The client converges to the server position after corrections.
-- [ ] Invalid movement is rejected and visibly corrected, not accepted locally.
-- [ ] A desync report includes input sequence and server tick evidence.
+- [x] The client converges to the server position after corrections.
+
+Remaining validation-only criteria are tracked in dependent follow-up tasks:
+[CLT-016](#clt-016--movement-latency-validation) covers 100–200 ms simulated
+latency, and [CLT-017](#clt-017--rejected-movement-and-desync-evidence) covers
+server-rejected movement and sequence/tick desync evidence. Both depend on this
+movement foundation (`CLT-007`); neither is a prerequisite for the current local
+movement implementation.
+
+**Progress:** WASD issues normalized, height-preserving requests at at most 20 Hz,
+with one request in flight and no ambiguous-delivery replay. Chat composition
+and focus loss suppress input. Server corrections drive the avatar and camera.
+Default-feature tests verify held-key movement against the real server; tests
+also cover correction/reset and bounded remote interpolation with teleport snap.
+Verified locally: 60 default-feature client tests and 44 no-default-feature
+tests. Windows visual confirmation additionally showed `last move accepted`,
+server tick progression, a 66 ms movement round trip, and equal authoritative
+and rendered coordinates while idle. This is a live local demo with a static
+development token; it does not validate Nakama account admission. The localhost
+demo does not inject latency or cause a server-side rejection, so those cases are
+deferred to CLT-016/017 rather than claimed as visually verified here.
 
 ---
 
@@ -511,7 +550,9 @@ for validated behavior and deferred follow-up work.
 - Headless client harness that connects, authenticates, selects a character,
   moves, chats, and reconnects against a real or in-process server.
 - Replay fixtures for snapshots/deltas and protocol errors.
-- Simulated latency/loss and correction tests for `CLT-007`.
+- Simulated latency/loss and authoritative rejection fixtures that support
+  [CLT-016](#clt-016--movement-latency-validation) and
+  [CLT-017](#clt-017--rejected-movement-and-desync-evidence).
 - UI smoke tests that do not require a GPU where possible.
 - A small multi-client test proving consistent observation.
 - Two independent online clients exchange zone chat and observe presence joins
@@ -555,3 +596,68 @@ for validated behavior and deferred follow-up work.
 
 **Implementation note:** Chat moderation APIs and policy remain owned by
 `NET-009`; this client task consumes those server-confirmed outcomes.
+
+---
+
+## CLT-016 — Movement latency validation
+
+- **Priority:** P1
+- **Status:** Blocked — `CLT-007`
+- **Depends on:** `CLT-007`, `CLT-014`
+- **References:** [CLT-007](#clt-007--local-movement-and-prediction), [CLT-014](#clt-014--client-integration-and-protocol-tests), `SIM-002`
+
+**Why:** Localhost movement is responsive, but does not establish the feel of
+movement under representative network delay. Keep this separate from the basic
+movement implementation so the validation can use deterministic latency
+injection and record an actual result.
+
+**Scope**
+
+- Exercise online movement with deterministic 100 ms and 200 ms transport
+  latency in a headless/in-process harness.
+- Record input-to-authoritative-result timing, prediction error, correction
+  magnitude, and user-visible responsiveness observations.
+- Tune prediction/smoothing only from those measurements; do not weaken server
+  movement authority to improve client feel.
+
+**Acceptance criteria**
+
+- [ ] Repeatable automated runs cover both 100 ms and 200 ms simulated latency.
+- [ ] The client remains responsive without exceeding the bounded prediction
+      contract, and converges to server state after each result.
+- [ ] A Windows graphical run confirms the tuned behavior is acceptably smooth;
+      record the environment and evidence location.
+
+---
+
+## CLT-017 — Rejected movement and desync evidence
+
+- **Priority:** P1
+- **Status:** Blocked — `CLT-007`
+- **Depends on:** `CLT-007`, `CLT-014`
+- **References:** [CLT-007](#clt-007--local-movement-and-prediction), [CLT-014](#clt-014--client-integration-and-protocol-tests), `SIM-001`, `SIM-002`
+
+**Why:** The normal localhost demo currently exercises accepted movement and
+cannot prove how the client handles a deliberate server rejection or a desync.
+Test those paths with a controlled authoritative fixture instead of inferring
+them from successful movement.
+
+**Scope**
+
+- Add a deterministic server/test fixture that accepts a movement request into
+  the queue but rejects it during authoritative processing (for example, a
+  blocked destination or an over-budget endpoint).
+- Verify the local prediction visibly returns to the authoritative position;
+  server rejection must never be presented as accepted movement.
+- Capture bounded desync evidence containing movement sequence, server tick,
+  predicted position, and authoritative correction, with no credentials or
+  private state.
+
+**Acceptance criteria**
+
+- [ ] A test drives a queued movement through server-side rejection and proves
+      the authoritative position is unchanged.
+- [ ] A graphical or deterministic presentation test proves the correction is
+      visible and the final rendered position converges to authority.
+- [ ] A desync diagnostic includes the input sequence and server tick (plus
+      predicted/corrected positions) and is verified to redact credentials.

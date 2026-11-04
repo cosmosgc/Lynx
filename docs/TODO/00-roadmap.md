@@ -91,6 +91,8 @@ Phase 3.
 | `CLT-012` | Client | `OPS-005` |
 | `CLT-013` | Client | `CLT-006` |
 | `CLT-014` | Client | `CLT-005`, `QUA-014` |
+| `CLT-016` | Client | `CLT-007`, `CLT-014` |
+| `CLT-017` | Client | `CLT-007`, `CLT-014` |
 | `SIM-014` | Simulation | `SIM-001`, `PST-005` |
 | `PST-002` | Persistence | `PST-001` |
 | `PST-006` | Persistence | `PST-001`, `NET-001` |

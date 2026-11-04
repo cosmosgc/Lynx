@@ -234,7 +234,7 @@ async fn headless_schedule_connects_moves_and_disconnects() {
     let (events, receiver) = transport::event_channel();
     let (shutdown, shutdown_rx) = watch::channel(false);
     let service = tokio::spawn(
-        Service::new(WorldServer::new(gateway), Duration::from_millis(20))
+        Service::new(WorldServer::new(gateway), Duration::from_millis(50))
             .run(receiver, shutdown_rx),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -263,11 +263,10 @@ async fn headless_schedule_connects_moves_and_disconnects() {
     #[cfg(feature = "window")]
     {
         use bevy::prelude::*;
+        use bevy::window::PrimaryWindow;
         app.init_resource::<ButtonInput<KeyCode>>()
             .add_plugins(lynx_client::windowed::OnlineWindowPlugin);
-        app.world_mut()
-            .resource_mut::<ButtonInput<KeyCode>>()
-            .press(KeyCode::KeyW);
+        app.world_mut().spawn((Window::default(), PrimaryWindow));
     }
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -302,15 +301,61 @@ async fn headless_schedule_connects_moves_and_disconnects() {
             .map(|(_, t)| (t.translation.x, t.translation.y))
             .collect();
         assert_eq!(displayed.len(), expected.len());
-        for position in expected {
-            assert!(displayed.contains(&position));
-        }
+        // Remote actors may already be interpolating toward a newer tick.
+        assert!(
+            displayed
+                .iter()
+                .all(|(x, y)| x.is_finite() && y.is_finite())
+        );
         assert_eq!(
             world
                 .resource::<lynx_client::offline::OfflineScene>()
                 .avatar_position,
             Vec3::ZERO
         );
+
+        // Held WASD input issues bounded movement intents through the online
+        // client; the server remains authoritative and reports the outcome.
+        let start = app
+            .world()
+            .resource::<OnlineClient>()
+            .world()
+            .reconciliation()
+            .authoritative_position()
+            .unwrap();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyW);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                app.update();
+                let client = app.world().resource::<OnlineClient>();
+                assert!(!matches!(client.status(), OnlineStatus::Failed(_)));
+                if let Some(position) = client.world().reconciliation().authoritative_position()
+                    && position.z < start.z
+                    && client.last_movement_applied() == Some(true)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(KeyCode::KeyW);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                app.update();
+                if !app.world().resource::<OnlineClient>().pending_movement() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
     }
     let position = app
         .world()
@@ -322,7 +367,7 @@ async fn headless_schedule_connects_moves_and_disconnects() {
     app.world_mut()
         .resource_mut::<OnlineClient>()
         .move_to(Position {
-            x: position.x + 0.1,
+            x: position.x + 0.09,
             ..position
         })
         .unwrap();
@@ -331,8 +376,9 @@ async fn headless_schedule_connects_moves_and_disconnects() {
             app.update();
             let client = app.world().resource::<OnlineClient>();
             assert!(!matches!(client.status(), OnlineStatus::Failed(_)));
-            if client.world().reconciliation().predicted_position()
-                == client.world().reconciliation().authoritative_position()
+            if client.last_movement_applied() == Some(true)
+                && client.world().reconciliation().predicted_position()
+                    == client.world().reconciliation().authoritative_position()
             {
                 break;
             }
@@ -341,6 +387,16 @@ async fn headless_schedule_connects_moves_and_disconnects() {
     })
     .await
     .unwrap();
+    assert!(
+        app.world()
+            .resource::<OnlineClient>()
+            .world()
+            .reconciliation()
+            .authoritative_position()
+            .unwrap()
+            .x
+            > position.x
+    );
     assert!(!format!("{:?}", app.world().resource::<OnlineClient>()).contains(TOKEN));
     {
         let mut client = app.world_mut().resource_mut::<OnlineClient>();
@@ -355,6 +411,148 @@ async fn headless_schedule_connects_moves_and_disconnects() {
         let world = app.world_mut();
         assert_eq!(world.query::<&Sprite>().iter(world).count(), 0);
     }
+    let _ = shutdown.send(true);
+    let _ = stop.send(());
+    service.await.unwrap();
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // The reconnect flow needs a real in-process server.
+async fn reconnects_with_rotated_resume_token_and_keeps_moving() {
+    const TOKEN: &str = "resume-test-secret";
+    let auth = Authenticator::new(&[digest(TOKEN)]).unwrap();
+    let grants: Vec<_> = auth.grants().cloned().collect();
+    let gateway = WorldGateway::new(
+        demo::build_zone(&grants).unwrap(),
+        demo::handshake().unwrap(),
+        GatewayConfig::default(),
+        SystemResumeTokens::new(),
+    )
+    .unwrap();
+    let (events, receiver) = transport::event_channel();
+    let (shutdown, shutdown_rx) = watch::channel(false);
+    let service = tokio::spawn(
+        Service::new(WorldServer::new(gateway), Duration::from_millis(50))
+            .run(receiver, shutdown_rx),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/world", listener.local_addr().unwrap());
+    let (stop, stop_rx) = oneshot::channel();
+    let server = tokio::spawn(transport::serve_with_shutdown(
+        listener,
+        Arc::new(AppState::new(events, auth)),
+        async {
+            let _ = stop_rx.await;
+        },
+    ));
+
+    let mut client = OnlineClient::new(1.0).unwrap();
+    client
+        .connect(Config {
+            url,
+            bearer: TOKEN.into(),
+            character: None,
+            handshake: demo::handshake().unwrap(),
+            last_ack_tick: Tick::ZERO,
+        })
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            client.poll();
+            assert!(!matches!(client.status(), OnlineStatus::Failed(_)));
+            if client.status() == OnlineStatus::Active && client.resume_available() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!client.resumed());
+    let before = client
+        .world()
+        .reconciliation()
+        .authoritative_position()
+        .unwrap();
+    assert!(client.world().tick().is_some());
+    assert_eq!(client.last_ack_tick(), client.world().tick().unwrap());
+
+    // Reopening the transport races the server's detach notification; the
+    // client must treat a conflict as retryable and then resume the session.
+    client.reconnect().unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            client.poll();
+            assert!(!matches!(client.status(), OnlineStatus::Failed(_)));
+            if client.status() == OnlineStatus::Active
+                && client.resumed()
+                && client.resume_available()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(client.resumed());
+    let resumed = client
+        .world()
+        .reconciliation()
+        .authoritative_position()
+        .unwrap();
+    assert_eq!(resumed, before);
+
+    let position = resumed;
+    client
+        .move_to(Position {
+            x: position.x + 0.09,
+            ..position
+        })
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            client.poll();
+            assert!(!matches!(client.status(), OnlineStatus::Failed(_)));
+            if client.last_movement_applied() == Some(true) && !client.pending_movement() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        client
+            .world()
+            .reconciliation()
+            .authoritative_position()
+            .unwrap()
+            .x
+            > position.x
+    );
+    assert!(!format!("{client:?}").contains(TOKEN));
+
+    // A second successful resume proves that the rotated credential replaced
+    // the now-consumed token from the first admission.
+    client.reconnect().unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            client.poll();
+            assert!(!matches!(client.status(), OnlineStatus::Failed(_)));
+            if client.status() == OnlineStatus::Active
+                && client.resumed()
+                && client.resume_available()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+
     let _ = shutdown.send(true);
     let _ = stop.send(());
     service.await.unwrap();

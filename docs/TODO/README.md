@@ -86,7 +86,7 @@ the quick audit; update it when a gap is found or closed.
 
 | Documented gap | Source | Task |
 | --- | --- | --- |
-| Client scene, input, and camera have an offline foundation and early online presentation; full integration is outstanding | [client backlog](40-bevy-client.md#clt-004--scene-camera-and-input-abstraction) | `CLT-004`–`CLT-015` |
+| Client scene, input, and camera have an offline foundation and early online presentation; latency/rejection validation is tracked separately | [client backlog](40-bevy-client.md#clt-004--scene-camera-and-input-abstraction) | `CLT-004`–`CLT-017` |
 | One-zone gateway and Nakama chat paths are integrated; cross-client validation, social channels, and moderation remain | [client backlog](40-bevy-client.md#clt-014--client-integration-and-protocol-tests), [SIM-008](10-simulation-gameplay.md#sim-008--world-chat-and-presence) | `CLT-014`, `SIM-008`, `SIM-009`, `NET-009` |
 | Durable inventory and transfer-ledger storage exists behind the trusted persistence seam but is not yet routed by the live world service | [persistence backlog](20-persistence-backend.md#pst-002--inventory-and-transfer-ledger-persistence) | `PST-002` |
 | Production admission requires an already-live actor; authoritative character population is incomplete, and social/chat adapters remain deliberately deferred | [persistence backlog](20-persistence-backend.md#pst-001--account-and-character-persistence), [networking](../networking.md#world-edge-identity-admission) | `SIM-014` |

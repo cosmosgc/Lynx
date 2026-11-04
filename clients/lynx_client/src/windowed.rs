@@ -6,6 +6,7 @@ use bevy::{input::ButtonState, input::keyboard::KeyboardInput};
 
 use crate::offline::{CameraPose, Control, OfflineScene, OfflineSet, PressedControls};
 use crate::online::{OnlineClient, OnlineStatus};
+use crate::reconciliation::Position;
 use crate::replay::ReplayInput;
 use crate::zone_scene::{SceneObjectKind, ZoneScene};
 use engine_core::id::StableId;
@@ -13,6 +14,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 const SCALE: f32 = 32.0;
+const INTERPOLATION_RATE: f32 = 14.0;
+const SNAP_DISTANCE: f32 = 8.0 * SCALE;
 
 /// Read-only presentation of the current server-owned public interest set.
 #[derive(Debug)]
@@ -21,14 +24,26 @@ pub struct OnlineWindowPlugin;
 impl Plugin for OnlineWindowPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ChatComposer>()
+            // InputPlugin provides this in the windowed app; headless tests add
+            // the same resource so the shared keyboard system can run.
+            .init_resource::<bevy::ecs::message::Messages<KeyboardInput>>()
             .add_systems(Startup, setup_online)
-            .add_systems(Update, present_online)
             .add_systems(Update, chat_keyboard.after(crate::online::poll_online))
+            .add_systems(
+                Update,
+                online_movement.after(chat_keyboard).after(crate::online::smooth_online).before(present_online),
+            )
+            .add_systems(Update, present_online.after(crate::online::poll_online))
+            .add_systems(Update, interpolate_online.after(present_online))
             .add_systems(
                 Update,
                 refresh_chat_presence.after(crate::online::poll_online),
             )
-            .add_systems(Update, present_chat.after(crate::online::poll_online));
+            .add_systems(Update, present_chat.after(crate::online::poll_online))
+            .add_systems(
+                Update,
+                present_telemetry.after(crate::online::poll_online),
+            );
     }
 }
 
@@ -55,7 +70,17 @@ impl Default for ChatComposer {
 struct ChatHud;
 
 #[derive(Component)]
+struct TelemetryHud;
+
+#[derive(Component)]
 struct OnlineEntity(StableId);
+
+/// Presentation-only interpolation between the previous and current
+/// authoritative screen positions. This never writes back into world state.
+#[derive(Component)]
+struct OnlineMotion {
+    to: Vec3,
+}
 
 fn setup_online(mut commands: Commands) {
     commands.spawn((Camera2d, SceneCamera));
@@ -67,6 +92,18 @@ fn setup_online(mut commands: Commands) {
             left: px(16),
             bottom: px(16),
             max_width: percent(60),
+            padding: UiRect::all(px(10)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.03, 0.04, 0.06, 0.82)),
+    ));
+    commands.spawn((
+        TelemetryHud,
+        Text::new("online: connecting"),
+        Node {
+            position_type: PositionType::Absolute,
+            left: px(16),
+            top: px(16),
             padding: UiRect::all(px(10)),
             ..default()
         },
@@ -126,6 +163,77 @@ fn chat_keyboard(
             }
         }
     }
+}
+
+/// Read held movement keys and issue one bounded intent at a time. The server
+/// remains authoritative: every endpoint is a local prediction until the
+/// correlation result arrives. Movement is suppressed while composing chat.
+#[allow(clippy::needless_pass_by_value)] // Bevy systems take resources by value.
+fn online_movement(
+    keys: Res<ButtonInput<KeyCode>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    composer: Res<ChatComposer>,
+    mut client: ResMut<OnlineClient>,
+    time: Res<Time>,
+    mut cooldown: Local<f32>,
+) {
+    *cooldown = (*cooldown - time.delta_secs()).max(0.0);
+    if !composer.active
+        && windows.single().is_ok_and(|window| window.focused)
+        && keys.just_pressed(KeyCode::KeyR)
+        && matches!(client.status(), OnlineStatus::Failed(_))
+    {
+        let _ = client.reconnect();
+        return;
+    }
+    if composer.active
+        || !windows.single().is_ok_and(|window| window.focused)
+        || client.status() != OnlineStatus::Active
+        || client.pending_movement()
+        || *cooldown > 0.0
+    {
+        return;
+    }
+    let Some(authority) = client.world().reconciliation().authoritative_position() else {
+        return;
+    };
+    let Some(destination) = movement_destination(authority, &keys, client.movement_step()) else {
+        return;
+    };
+    if client.move_to(destination).is_ok() {
+        *cooldown = 0.05;
+    }
+}
+
+/// Pure direction sampler, kept separate so it can be tested without a client.
+fn movement_destination(
+    position: Position,
+    keys: &ButtonInput<KeyCode>,
+    step: f32,
+) -> Option<Position> {
+    let mut x = 0.0_f32;
+    let mut z = 0.0_f32;
+    if keys.pressed(KeyCode::KeyW) {
+        z -= 1.0;
+    }
+    if keys.pressed(KeyCode::KeyS) {
+        z += 1.0;
+    }
+    if keys.pressed(KeyCode::KeyA) {
+        x -= 1.0;
+    }
+    if keys.pressed(KeyCode::KeyD) {
+        x += 1.0;
+    }
+    if x == 0.0 && z == 0.0 {
+        return None;
+    }
+    let length = x.hypot(z);
+    Some(Position {
+        x: position.x + x / length * step,
+        y: position.y,
+        z: position.z + z / length * step,
+    })
 }
 
 #[allow(clippy::needless_pass_by_value)] // Bevy systems take resources by value.
@@ -194,10 +302,75 @@ fn screen_position(x: f32, z: f32) -> Vec3 {
     )
 }
 
+fn status_label(status: OnlineStatus) -> String {
+    match status {
+        OnlineStatus::Disconnected => "disconnected".to_owned(),
+        OnlineStatus::Connecting => "connecting".to_owned(),
+        OnlineStatus::AwaitingSnapshot => "awaiting snapshot".to_owned(),
+        OnlineStatus::Active => "active".to_owned(),
+        OnlineStatus::Reconnecting { attempt } => format!("reconnecting (attempt {attempt})"),
+        OnlineStatus::Failed(error) => format!("connection failed ({error:?})"),
+    }
+}
+
+fn position_label(position: Position) -> String {
+    format!("{:.2}, {:.2}, {:.2}", position.x, position.y, position.z)
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy systems take resources by value.
+fn present_telemetry(client: Res<OnlineClient>, mut hud: Query<&mut Text, With<TelemetryHud>>) {
+    let state = client.world();
+    let reconciliation = state.reconciliation();
+    let tick = state
+        .tick()
+        .map_or_else(|| "-".to_owned(), |tick| tick.to_string());
+    let rtt = client.last_round_trip().map_or_else(
+        || "-".to_owned(),
+        |duration| format!("{} ms", duration.as_millis()),
+    );
+    let movement = match client.last_movement_applied() {
+        Some(true) => "accepted",
+        Some(false) => "corrected",
+        None => "-",
+    };
+    let authority = reconciliation
+        .authoritative_position()
+        .map_or_else(|| "-".to_owned(), position_label);
+    let rendered = reconciliation
+        .presentation_position()
+        .map_or_else(|| "-".to_owned(), position_label);
+    let display = format!(
+        "WASD: move · T: chat\nonline: {}\ntick {tick} · entities {} · move pending {}\nmove round trip {rtt} · step {:.3} m · last move {movement}\nresume {} · reconnects {} · resumed {}\nauthority {authority}\nrendered {rendered}\nqueues (in, out): {:?} · packet loss: unavailable (WebSocket)",
+        status_label(client.status()),
+        state.entities().count(),
+        if client.pending_movement() {
+            "yes"
+        } else {
+            "no"
+        },
+        client.movement_step(),
+        if client.resume_available() {
+            "ready"
+        } else {
+            "none"
+        },
+        client.reconnect_attempts(),
+        if client.resumed() { "yes" } else { "no" },
+        client.queue_depths(),
+    );
+    for mut text in &mut hud {
+        text.0.clone_from(&display);
+    }
+}
+
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)] // Bevy system parameters must be passed by value.
 fn present_online(
     mut commands: Commands,
     client: Res<OnlineClient>,
-    mut entities: Query<(Entity, &OnlineEntity, &mut Transform), Without<SceneCamera>>,
+    mut entities: Query<
+        (Entity, &OnlineEntity, &mut Transform, &mut OnlineMotion),
+        Without<SceneCamera>,
+    >,
     mut cameras: Query<&mut Transform, (With<SceneCamera>, Without<OnlineEntity>)>,
     mut windows: Query<&mut Window>,
 ) {
@@ -207,38 +380,85 @@ fn present_online(
         .entities()
         .map(|entity| (entity.entity, entity))
         .collect();
+    let actor = state.actor();
+    let predicted = state.reconciliation().presentation_position();
     let mut missing: BTreeSet<_> = public.keys().copied().collect();
-    for (entity, id, mut transform) in &mut entities {
-        if let Some(public) = public.get(&id.0) {
-            transform.translation = screen_position(public.position.x, public.position.z);
-            missing.remove(&id.0);
-        } else {
+    for (entity, id, mut transform, mut motion) in &mut entities {
+        if !public.contains_key(&id.0) {
             commands.entity(entity).despawn();
+            continue;
+        }
+        missing.remove(&id.0);
+        let target = if Some(id.0) == actor {
+            // Local prediction is already smoothed by reconciliation; keep the
+            // avatar and camera locked instead of interpolating it twice.
+            predicted.map(|position| screen_position(position.x, position.z))
+        } else {
+            public
+                .get(&id.0)
+                .map(|public| screen_position(public.position.x, public.position.z))
+        };
+        let Some(target) = target else { continue };
+        if Some(id.0) == actor {
+            transform.translation = target;
+            motion.to = target;
+        } else if motion.to.distance_squared(target) > 1e-4 {
+            // Interpolate from what is currently rendered, never from an
+            // extrapolated future position.
+            motion.to = target;
         }
     }
     for public in missing.iter().filter_map(|id| public.get(id)) {
+        let target = if Some(public.entity) == actor {
+            predicted.map_or_else(
+                || screen_position(public.position.x, public.position.z),
+                |position| screen_position(position.x, position.z),
+            )
+        } else {
+            screen_position(public.position.x, public.position.z)
+        };
         commands.spawn((
             Sprite::from_color(Color::srgb(0.3, 0.7, 1.0), Vec2::splat(24.0)),
-            Transform::from_translation(screen_position(public.position.x, public.position.z)),
+            Transform::from_translation(target),
             OnlineEntity(public.entity),
+            OnlineMotion { to: target },
         ));
     }
-    if let Some(position) = state.reconciliation().presentation_position() {
+    if let Some(position) = predicted {
         for mut camera in &mut cameras {
             let position = screen_position(position.x, position.z);
             camera.translation.x = position.x;
             camera.translation.y = position.y;
         }
     }
-    let status = match client.status() {
-        OnlineStatus::Disconnected => "disconnected".to_owned(),
-        OnlineStatus::Connecting => "connecting".to_owned(),
-        OnlineStatus::AwaitingSnapshot => "awaiting snapshot".to_owned(),
-        OnlineStatus::Active => "active".to_owned(),
-        OnlineStatus::Failed(error) => format!("connection failed ({error:?})"),
-    };
+    let title = format!(
+        "Lynx demo online - {} - tick {}",
+        status_label(client.status()),
+        state
+            .tick()
+            .map_or_else(|| "-".to_owned(), |tick| tick.to_string())
+    );
     for mut window in &mut windows {
-        window.title = format!("Lynx demo online - {status}");
+        window.title.clone_from(&title);
+    }
+}
+
+/// Advance remote visuals toward the latest authoritative target. Interpolation
+/// never extrapolates past that target, and large discontinuities snap.
+#[allow(clippy::needless_pass_by_value)] // Bevy systems take resources by value.
+fn interpolate_online(
+    time: Res<Time>,
+    mut entities: Query<(&mut Transform, &OnlineMotion), Without<SceneCamera>>,
+) {
+    let fraction = (time.delta_secs() * INTERPOLATION_RATE).clamp(0.0, 1.0);
+    for (mut transform, motion) in &mut entities {
+        if fraction >= 1.0
+            || transform.translation.distance_squared(motion.to) > SNAP_DISTANCE * SNAP_DISTANCE
+        {
+            transform.translation = motion.to;
+        } else {
+            transform.translation = transform.translation.lerp(motion.to, fraction);
+        }
     }
 }
 
@@ -579,6 +799,61 @@ mod tests {
         assert_eq!(
             project(Vec3::X, &billboard),
             Vec3::new(SCALE * 0.75, 0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn movement_destination_is_normalized_bounded_and_height_preserving() {
+        let origin = Position {
+            x: 1.0,
+            y: 2.0,
+            z: 3.0,
+        };
+        let mut keys = ButtonInput::<KeyCode>::default();
+        assert_eq!(movement_destination(origin, &keys, 0.09), None);
+        keys.press(KeyCode::KeyW);
+        let up = movement_destination(origin, &keys, 0.09).unwrap();
+        assert_eq!(up.y, origin.y);
+        assert!((up.z - (origin.z - 0.09)).abs() < 1e-6);
+        keys.press(KeyCode::KeyD);
+        let diagonal = movement_destination(origin, &keys, 0.09).unwrap();
+        let dx = diagonal.x - origin.x;
+        let dz = diagonal.z - origin.z;
+        assert!((dx.hypot(dz) - 0.09).abs() < 1e-6);
+        assert!((dx - 0.09 / 2.0_f32.sqrt()).abs() < 1e-6);
+        assert!((dz + 0.09 / 2.0_f32.sqrt()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn interpolation_never_extrapolates_past_the_authoritative_target() {
+        let mut app = headless_app();
+        app.insert_resource(OnlineClient::new(1.0).unwrap())
+            .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+                std::time::Duration::from_millis(20),
+            ))
+            .init_resource::<ButtonInput<KeyCode>>()
+            .add_plugins(OnlineWindowPlugin);
+        let entity = app
+            .world_mut()
+            .spawn((
+                Transform::from_translation(Vec3::ZERO),
+                OnlineMotion {
+                    to: Vec3::new(10.0, 0.0, 0.0),
+                },
+            ))
+            .id();
+        app.update();
+        let transform = app.world().get::<Transform>(entity).unwrap();
+        assert!(transform.translation.x >= 0.0);
+        assert!(transform.translation.x <= 10.0);
+        app.update();
+        let transform = app.world().get::<Transform>(entity).unwrap();
+        assert!(transform.translation.x > 0.0 && transform.translation.x < 10.0);
+        app.world_mut().get_mut::<OnlineMotion>(entity).unwrap().to = Vec3::X * 1000.0;
+        app.update();
+        assert_eq!(
+            app.world().get::<Transform>(entity).unwrap().translation,
+            Vec3::X * 1000.0
         );
     }
 }

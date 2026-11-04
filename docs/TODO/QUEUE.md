@@ -38,6 +38,9 @@ copied from the task entries; a dash means none are declared.
 
 | ID | Task | Priority | Status | Dependencies | Sequencing note |
 | --- | --- | --- | --- | --- | --- |
+| [CLT-005](40-bevy-client.md#clt-005--network-client-loop) | Network client loop | P0 | In progress | `CLT-001`, `CLT-002` | Resume and telemetry verified in tests and Windows demo; complete failure UX and automatic-drop testing. |
+| [CLT-006](40-bevy-client.md#clt-006--entity-presentation-and-interpolation) | Entity presentation and interpolation | P0 | In progress | `CLT-004`, `CLT-005` | Windows online rendering confirmed; user reports motion is not yet smooth enough. |
+| [CLT-007](40-bevy-client.md#clt-007--local-movement-and-prediction) | Local movement and prediction | P0 | In progress | `SIM-001`, `SIM-002`, `CLT-005` | WASD works visually; 100–200 ms and rejected-movement validation are separately tracked in dependent `CLT-016`/`CLT-017`. |
 | [SIM-002](10-simulation-gameplay.md#sim-002--client-prediction-and-reconciliation-contract) | Client prediction and reconciliation contract | P0 | In progress | `SIM-001`, `CLT-005` | Resume visual validation when client/network environment is available. |
 | [CLT-002](40-bevy-client.md#clt-002--login-and-session-bootstrap) | Login and session bootstrap | P0 | In progress | `NET-001`, `CLT-001` | Finish server profiles and world-session lifecycle. |
 | [CLT-003](40-bevy-client.md#clt-003--character-selection-and-creation) | Character selection and creation | P0 | In progress | `PST-001`, `CLT-002` | Verify full Bevy onboarding and restart flow against a live server. |
@@ -100,9 +103,6 @@ permission to start or to alter task status.
 | [CNT-010](50-content-editor-tooling.md#cnt-010--mcp-server-write-and-publish-tools) | MCP server: write and publish tools | P3 | Blocked | `CNT-009`, `OPS-004` | Requires read-only MCP and staging publish workflow. |
 | [CNT-012](50-content-editor-tooling.md#cnt-012--playable-mmorpg-template) | Playable MMORPG template | P1 | Blocked | `CLT-009`, `SIM-008`, `CNT-011` | Requires chat and CLI foundations. |
 | [CNT-016](50-content-editor-tooling.md#cnt-016--calendar-and-faction-editor-overlays) | Calendar and faction editor overlays | P2 | Blocked | `CNT-002`, `SIM-015` | Requires atlas editor and calendar objectives. |
-| [CLT-005](40-bevy-client.md#clt-005--network-client-loop) | Network client loop | P0 | Blocked | `CLT-001`, `CLT-002` | Unblocks client presentation and harness work. |
-| [CLT-006](40-bevy-client.md#clt-006--entity-presentation-and-interpolation) | Entity presentation and interpolation | P0 | Blocked | `CLT-004`, `CLT-005` | Requires online client loop. |
-| [CLT-007](40-bevy-client.md#clt-007--local-movement-and-prediction) | Local movement and prediction | P0 | Blocked | `SIM-001`, `SIM-002`, `CLT-005` | Requires client transport and reconciliation. |
 | [CLT-008](40-bevy-client.md#clt-008--interaction-inventory-and-ui-panels) | Interaction, inventory, and UI panels | P1 | Blocked | `CLT-006`, `SIM-008` | Requires entity presentation and chat/presence foundation. |
 | [CLT-010](40-bevy-client.md#clt-010--localization-and-accessibility) | Localization and accessibility | P1 | Blocked | `CLT-008`, `CLT-009` | Follows core client UI and chat surface. |
 | [CLT-011](40-bevy-client.md#clt-011--settings-diagnostics-and-recovery-ux) | Settings, diagnostics, and recovery UX | P2 | Blocked | `CLT-005`, `CLT-007` | Requires networking and movement UX. |
@@ -110,6 +110,8 @@ permission to start or to alter task status.
 | [CLT-013](40-bevy-client.md#clt-013--client-performance-profiling) | Client performance profiling | P2 | Blocked | `CLT-006`, `SIM-018` | Requires online presentation and simulation budget. |
 | [CLT-014](40-bevy-client.md#clt-014--client-integration-and-protocol-tests) | Client integration and protocol tests | P1 | Blocked | `CLT-005`, `QUA-014`, `CLT-009` | Adds multi-client chat/presence and history-page integration coverage. |
 | [CLT-015](40-bevy-client.md#clt-015--expanded-chat-channels-and-moderation-ui) | Expanded chat channels and moderation UI | P2 | Blocked | `SIM-009`, `NET-009`, `CLT-010`, `CLT-009` | Builds on the chat MVP, social channels, moderation services, and localization. |
+| [CLT-016](40-bevy-client.md#clt-016--movement-latency-validation) | Movement latency validation | P1 | Blocked | `CLT-007`, `CLT-014` | Validate responsiveness at 100–200 ms using deterministic latency injection; keep separate from basic movement. |
+| [CLT-017](40-bevy-client.md#clt-017--rejected-movement-and-desync-evidence) | Rejected movement and desync evidence | P1 | Blocked | `CLT-007`, `CLT-014` | Exercise authoritative rejection, visible correction, and sequence/tick diagnostics with a controlled fixture. |
 | [OPS-007](60-operations-release.md#ops-007--load-and-soak-harness) | Load and soak harness | P2 | Blocked | `QUA-005` | Follows benchmark harness. |
 | [OPS-009](60-operations-release.md#ops-009--incident-runbooks) | Incident runbooks | P2 | Blocked | `OPS-003` | Use verified restore procedures. |
 | [OPS-010](60-operations-release.md#ops-010--engine-and-content-upgrade-workflow) | Engine and content upgrade workflow | P2 | Blocked | `OPS-004` | Requires staging rollout/rollback. |

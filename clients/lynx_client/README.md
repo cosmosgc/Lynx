@@ -84,7 +84,7 @@ not saved. Refresh the list after creating a character, then click a character
 to verify ownership, then click **Enter world**. The Nakama world server creates
 the character's deterministic player actor and persists it to the configured
 world snapshot before admitting the session. The online presentation remains
-read-only; movement and interactions are not implemented yet. Creation retries
+enabled for WASD movement; interactions remain future work. Creation retries
 keep the same idempotency key while this screen remains open; do not close it
 while the result is uncertain. The default command still launches the offline
 demo.
@@ -163,11 +163,23 @@ characters across multiple client instances.
 
 The window title shows connection status. Blue squares represent the server's
 bounded public interest set; the camera follows the authoritative player position.
-Online mode is **read-only**: WASD and other offline controls do not send movement
-or affect the displayed world. There is no reconnect, resume, prediction display,
-interaction, or gameplay UI. Disconnects and errors clear displayed entities;
-restart to reconnect. The handshake uses this workspace's package version for
-engine and content, matching the built-in demo server.
+WASD sends normalized endpoints at at most 20 requests per second, with one
+request in flight. Movement pauses during chat or focus loss. The avatar and
+camera follow bounded prediction and server corrections. Remote entities smooth
+toward server positions without extrapolation and snap over eight metres.
+Interaction/inventory remain future work. The handshake uses this workspace's
+package version for engine and content, matching the built-in demo server.
+The Windows online demo was visually confirmed with movement, chat, presence,
+and live diagnostics, but the motion currently feels less smooth than intended;
+interpolation tuning is still in progress.
+
+Transient failures retry with 250 ms exponential backoff capped at eight seconds
+and six consecutive retries, using rotated resume tokens. Press R after a
+terminal failure to retry; expired account credentials require signing in again.
+The overlay shows tick, movement round-trip time (including server processing),
+queue depths and authoritative/rendered positions. WebSocket packet loss is
+unavailable. Movement starts at 0.09 m per request for the default 50 ms server
+tick and shrinks on rejection; custom tick rates need further tuning.
 
 ## Headless networking
 
@@ -195,8 +207,8 @@ acquires a Nakama device session, but the reusable transport API remains a seam
 rather than a login UI or account manager. The HTTP auth client supports refresh
 and per-session logout, but the application does not yet expose those operations
 in its UI. The command-line device flow uses the OS credential store, with no
-plaintext substitute. The application does not yet
-retain or rotate world resume tokens. Closing the transport detaches the session,
+plaintext substitute. World resume tokens are rotated and retained only in memory,
+with redacted debug output. Closing the transport detaches the session,
 which may remain resumable.
 
 The demo server's static bearer tokens are development authentication, not a

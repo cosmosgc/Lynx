@@ -93,6 +93,7 @@ pub struct WorldState {
     tick: Option<u64>,
     entities: BTreeMap<StableId, (u64, u64, PublicEntity)>,
     pending: Option<(MessageId, u64)>,
+    last_movement_applied: Option<bool>,
     reconciliation: Reconciliation,
 }
 
@@ -107,6 +108,7 @@ impl WorldState {
             tick: None,
             entities: BTreeMap::new(),
             pending: None,
+            last_movement_applied: None,
             reconciliation: Reconciliation::new(max_prediction_distance)?,
         })
     }
@@ -133,6 +135,7 @@ impl WorldState {
         self.tick = None;
         self.entities.clear();
         self.pending = None;
+        self.last_movement_applied = None;
         self.reconciliation.disconnect();
     }
 
@@ -149,6 +152,23 @@ impl WorldState {
     }
     pub fn tick(&self) -> Option<u64> {
         self.tick
+    }
+    /// Whether this connection resumed an existing control session.
+    pub fn resumed(&self) -> bool {
+        self.ready.as_ref().is_some_and(|ready| ready.resumed)
+    }
+    /// The authenticated actor for this session, once `world.ready` arrived.
+    pub fn actor(&self) -> Option<StableId> {
+        self.ready.as_ref().map(|ready| ready.actor)
+    }
+    /// True while a movement request is awaiting its authoritative result.
+    pub fn has_pending_movement(&self) -> bool {
+        self.pending.is_some()
+    }
+    /// Consume the last processed movement outcome, if any. `false` means the
+    /// server rejected the endpoint and the local position was corrected.
+    pub(crate) fn take_movement_applied(&mut self) -> Option<bool> {
+        self.last_movement_applied.take()
     }
     pub fn reconciliation(&self) -> &Reconciliation {
         &self.reconciliation
@@ -323,6 +343,7 @@ impl WorldState {
                     m.position.into(),
                     m.applied.unwrap(),
                 )?;
+                self.last_movement_applied = m.applied;
                 self.pending = None;
             }
             (false, None) => {}
