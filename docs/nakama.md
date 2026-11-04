@@ -19,7 +19,7 @@ does not own authoritative zones or durable world state.
 | Account metadata and user profiles | **Partially integrated** | The world edge reads the authenticated account identity. Profile management is not exposed by the Lynx client or `game_api` adapter. |
 | Character inventory | **Lynx PostgreSQL, authenticated read path integrated** | `GET /characters/{character}/inventory` validates the Nakama bearer session and character ownership before reading the Lynx inventory store. Nakama storage is not authoritative; mutations remain behind trusted world persistence. |
 | Factions, territories, and world-event calendar | **Lynx PostgreSQL, authenticated read views integrated** | `NakamaPostgresBackend` implements `FactionService` and `CalendarService` over the normalized faction/calendar store. Reads require a valid Nakama session; mutations remain authoritative world results. Draft events are not public. |
-| Friends, groups, chat, presence, status, notifications | **Deferred by contract and API constraints** | The current `FriendState` cannot represent incoming/outgoing invitations, and chat channel discovery/message sending require the realtime socket. Do not use Nakama presence as authoritative zone presence. See [social and chat boundary](#social-and-chat-boundary). |
+| Friends, groups, chat, presence, status, notifications | **Partially integrated** | Account sessions with a verified character use Nakama's authenticated realtime socket for a persistent room, live messages, room presence, and paginated history. Static `--demo-online` tokens use the world gateway fallback and are never sent to Nakama. Configure the room with `LYNX_CHAT_ROOM` (default `lynx-zone`). Do not treat Nakama room presence as authoritative world-zone membership. Friends, groups, direct messages, and moderation remain deferred. |
 | Matchmaking and relayed multiplayer | **Planned, not integrated** | The Rust world service owns sessions, interest, replication, and authority. Nakama matchmaking may later form groups before a world admission. |
 | Authoritative matches and runtime modules (Go, TypeScript, Lua) | **Not used for world authority** | They may later host isolated, low-stakes activities. They must not become the source of truth for zones, inventory, faction state, or world events. |
 | Storage engine, leaderboards, and tournaments | **Not integrated for world state** | Lynx-owned PostgreSQL migrations and snapshots own durable simulation data. Any future Nakama storage use needs an explicit `game_api` seam, retention policy, and migration/export plan. |
@@ -109,19 +109,24 @@ by a host firewall or private scrape network. See
 
 ## Social and chat boundary
 
-Nakama supports friends, groups, direct/group/room chat, presence, and
-notifications, but Lynx does not yet expose them through `backend_nakama`.
-This is intentional rather than an omitted HTTP call: `game_api::FriendState`
-cannot represent Nakama's outgoing and incoming friend-invitation states, and
-`game_api::ChatService::channels` requires generic channel discovery that
-Nakama's public REST API does not provide. A quick adapter would lose invitation
-state or invent channels, so it is not shipped. Evolve those contracts (and add
-socket delivery where required) before integrating social/chat. Lynx
-administration is likewise separate: it uses dedicated admin authentication and
-the Lynx audit log rather than player Nakama sessions.
+The client joins a configured Nakama room over the authenticated realtime
+socket. Nakama derives sender identity, persists room messages, serves cursor
+history, and reports room presence. Set `LYNX_NAKAMA_URL` and optionally
+`LYNX_CHAT_ROOM`; the default room name is `lynx-zone`. This room is a configured
+chat room, not proof that a user is currently admitted to the matching Lynx
+world zone. World admission, movement, and authoritative presence remain owned
+by the Lynx world service. A later zone-membership policy can bind room access
+to trusted world admission.
+
+Friends, groups, direct messages, and moderation remain deferred. The current
+`FriendState` cannot represent incoming/outgoing invitations, so those states
+must not be flattened into immediate mutual friendship. Lynx administration is
+separate: it uses dedicated admin authentication and the Lynx audit log rather
+than player Nakama sessions.
 
 ## References
 
+- [Nakama real-time chat](https://heroiclabs.com/docs/nakama/concepts/chat/)
 - [Nakama commands](https://heroiclabs.com/docs/nakama/getting-started/commands/)
 - [Nakama configuration](https://heroiclabs.com/docs/nakama/getting-started/configuration/)
 - [Nakama Console](https://heroiclabs.com/docs/nakama/getting-started/console/)

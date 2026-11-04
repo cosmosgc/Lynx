@@ -410,15 +410,16 @@ Use `Zone::add_dynamic_obstacle` for tick-expiring temporary blockers and
 ## SIM-008 — World chat and presence
 
 - **Priority:** P1
-- **Status:** In progress — fail-closed gateway discovery; moderation and routing pending
+- **Status:** In progress — Nakama persistent-room chat is integrated; world-zone authorization and moderation pending
 - **Depends on:** —
 - **References:** `crates/game_api/src/chat.rs`, `social.rs`,
   [README Phase 3](../../README.md#phase-3--interaction-and-mind-system--in-progress),
   [security §Abuse prevention](../security.md#abuse-prevention)
 
-**Why:** `ChatService` and `SocialService` exist in `game_api` and the in-memory
-backend, but `world_gateway` does not route chat. Phase 3 cannot close without
-it, and the client needs a real channel to render.
+**Why:** Players need persisted chat history, live delivery, and room presence
+without moving world simulation authority into Nakama. Nakama's realtime room
+provides those platform capabilities, while world admission and movement remain
+owned by Lynx.
 
 **Scope**
 
@@ -439,16 +440,29 @@ it, and the client needs a real channel to render.
 - [ ] Chat survives reconnect for the retained window where policy allows.
 - [ ] Integration tests cover two sessions in one zone.
 
-**Increment:** Authenticated sessions can request `chat.channels` with an empty
-body and receive an empty channel list. Unknown fields are rejected; `chat.send`
-and `chat.history` fail closed without storing, broadcasting, or echoing content.
-This is not player chat or presence. The memory adapter's shared room has no
-world membership, mute, moderation, or delivery policy and is not connected to
-the gateway. `NET-009` moderation/reporting and `CNT-008` user-content policy
-remain unavailable; zone/party/whisper/system routing, presence, social policy,
-history pagination, reconnect retention, and player chat rate enforcement remain
-open. The transport's existing chat-family limiter is not an authorization or
-moderation substitute.
+**Increment:** For account sessions with a verified character, the client joins
+the persistent room named by `LYNX_CHAT_ROOM` (default `lynx-zone`) using the
+authenticated Nakama token. Static `--demo-online` tokens stay on the gateway
+fallback and are never sent to Nakama. The account client sends JSON content
+through the realtime socket and reads persisted history from Nakama's
+channel-history API. Recent-first Nakama pages are
+reversed into display order and older pages are prepended with ID deduplication.
+Nakama supplies sender identity, live message delivery, persistent history
+with cursor pagination, and room-presence changes. This configured room is not
+currently bound to Lynx world-zone admission. Without Nakama configuration, the
+gateway fallback exposes one server-scoped `zone` channel, resolves
+sender account and character from authenticated session claims, validates text,
+retains the latest 500 messages in memory, and serves bounded cursor pages.
+Accepted messages fan out only to currently connected sessions on that
+gateway; `chat.presence` returns the connected account/character roster. Unknown
+fields and unsupported channels fail closed. The runtime drains a bounded
+per-session outbox and routes messages only to attached connections. History is
+volatile across process restarts, and disconnected clients must request it
+again. The gateway fallback caps sends at five messages per session per second
+and presence at 100 entries. `NET-009` moderation/reporting and `CNT-008`
+user-content policy remain unavailable; party/whisper/system routing,
+mute/ignore, and durable retention remain open. The transport's existing
+chat-family limiter is not an authorization or moderation substitute.
 
 ---
 

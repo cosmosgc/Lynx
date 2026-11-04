@@ -229,8 +229,11 @@ capacity claim.
 | `session.hello` | client → server | client handshake and last acknowledged tick |
 | `world.ready` | server → client | session ID, actor, resumed flag, negotiated protocol |
 | `world.snapshot` | server → client | tick, full interest view delta, filtered replication |
-| `chat.channels` | client → server | empty object; authenticated discovery currently returns `chat.channels.result` with an empty `channels` array |
-| `chat.send`, `chat.history` | client → server | unavailable; rejected without storing or echoing player content |
+| `chat.channels` | client → server | empty object; returns the gateway's server-scoped `zone` channel |
+| `chat.send` | client → server | `{ channel_id: "zone", content }`; sender identity comes from session claims; live messages arrive as `chat.message` |
+| `chat.message` | server → connected zone sessions | server-resolved message ID, account/character identity, content, and creation time |
+| `chat.history` | client → server | `{ channel_id: "zone", limit, before? }`; returns bounded `chat.history.result` pages from the gateway's in-memory history |
+| `chat.presence` | client → server | empty object; returns up to 100 connected account and character IDs plus a truncation flag |
 | `world.delta` | server → client | tick, interest delta, filtered replication |
 | `movement.request` / `movement.queued` | client → server / server → client | endpoint intent and queue admission (not processing) |
 | `world.token` | server → client | the session's current resume secret |
@@ -242,9 +245,21 @@ capacity claim.
 | `ui.state` | server → client | authoritative tick plus the open panel (or `null`) |
 | `protocol.error` | server → client | stable code, parameters, correlation ID |
 
+For account sessions carrying a verified character, `LYNX_NAKAMA_URL` enables
+Nakama's authenticated realtime socket for a persistent chat room instead of
+the gateway `chat.*` messages. `LYNX_CHAT_ROOM` chooses the room (default
+`lynx-zone`); the client gets history through Nakama's authenticated
+channel-history endpoint and receives membership changes from the room socket.
+Static `--demo-online` tokens are world-only and use the gateway fallback. A
+configured Nakama room is not bound to Lynx world-zone admission. The table
+below documents the gateway chat fallback.
+
 `world.snapshot` and `world.delta` share the `WorldUpdate` body: authoritative
 tick, `InterestUpdate`, and an audience-filtered `ReplicationBatch`. The
 recipient is implied by the connection, so the body never repeats a session ID.
+Zone chat retains 500 messages in memory, returns at most 100 per history page,
+and limits each session to five sends per second. These limits are gateway
+defaults; history is not durable across process restarts.
 
 `world.token` is a control message, not replication. It is sent once after a
 successful open or resume and carries the rotated single-use secret. Transports

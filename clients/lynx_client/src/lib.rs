@@ -4,6 +4,7 @@ use bevy::prelude::*;
 
 #[cfg(feature = "window")]
 pub mod account_ui;
+pub mod chat;
 pub mod cli;
 #[cfg(feature = "window")]
 pub mod nakama_credentials;

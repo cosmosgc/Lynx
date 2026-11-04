@@ -33,21 +33,23 @@ Nakama or PostgreSQL service.
   adapter boundary for character, inventory, social, chat, and administration
   operations.
 
-## Coverage status (2026-11-03)
+## Coverage status (2026-11-04)
 
 The production adapter is kept. `NakamaPostgresBackend` implements health,
 authentication, character, inventory, faction, and calendar contracts.
 Nakama validates sessions; Lynx PostgreSQL remains authoritative for
 characters, inventory, factions, and calendar state. Character and inventory
 contracts are shared with `backend_memory`, and an opt-in test exercises the
-real Nakama HTTP API.
+real Nakama HTTP API. The Bevy client now uses Nakama's authenticated realtime
+socket for persistent room chat, history, and room presence; the configured
+room is not an authoritative Lynx zone-membership check.
 
 Social, chat, and administration are intentionally not implemented yet:
 
 - Social requires a contract that models Nakama's incoming and outgoing friend
   invitations instead of flattening them into immediate mutual friendship.
-- Chat channel discovery and message sending require Nakama's realtime socket;
-  the public REST API does not provide generic channel listing.
+- Chat rooms use an explicit configured name because the public REST API does
+  not provide generic channel listing. Room membership is not world admission.
 - Administration uses separate Lynx admin authentication and the Lynx-owned
   audit log, not player Nakama sessions.
 

@@ -2,6 +2,7 @@
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
+use bevy::{input::ButtonState, input::keyboard::KeyboardInput};
 
 use crate::offline::{CameraPose, Control, OfflineScene, OfflineSet, PressedControls};
 use crate::online::{OnlineClient, OnlineStatus};
@@ -9,6 +10,7 @@ use crate::replay::ReplayInput;
 use crate::zone_scene::{SceneObjectKind, ZoneScene};
 use engine_core::id::StableId;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 
 const SCALE: f32 = 32.0;
 
@@ -18,16 +20,168 @@ pub struct OnlineWindowPlugin;
 
 impl Plugin for OnlineWindowPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_online)
-            .add_systems(Update, present_online);
+        app.init_resource::<ChatComposer>()
+            .add_systems(Startup, setup_online)
+            .add_systems(Update, present_online)
+            .add_systems(Update, chat_keyboard.after(crate::online::poll_online))
+            .add_systems(
+                Update,
+                refresh_chat_presence.after(crate::online::poll_online),
+            )
+            .add_systems(Update, present_chat.after(crate::online::poll_online));
     }
 }
+
+#[derive(Debug, Resource)]
+struct ChatComposer {
+    active: bool,
+    text: String,
+    history_offset: usize,
+    presence_refresh: Timer,
+}
+
+impl Default for ChatComposer {
+    fn default() -> Self {
+        Self {
+            active: false,
+            text: String::new(),
+            history_offset: 0,
+            presence_refresh: Timer::from_seconds(5.0, TimerMode::Repeating),
+        }
+    }
+}
+
+#[derive(Component)]
+struct ChatHud;
 
 #[derive(Component)]
 struct OnlineEntity(StableId);
 
 fn setup_online(mut commands: Commands) {
     commands.spawn((Camera2d, SceneCamera));
+    commands.spawn((
+        ChatHud,
+        Text::new("Chat da zona · T para escrever · Enter para enviar\nCarregando chat…"),
+        Node {
+            position_type: PositionType::Absolute,
+            left: px(16),
+            bottom: px(16),
+            max_width: percent(60),
+            padding: UiRect::all(px(10)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.03, 0.04, 0.06, 0.82)),
+    ));
+}
+
+fn chat_keyboard(
+    mut events: MessageReader<KeyboardInput>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut composer: ResMut<ChatComposer>,
+    mut client: ResMut<OnlineClient>,
+) {
+    if !windows.single().is_ok_and(|window| window.focused) {
+        composer.active = false;
+        return;
+    }
+    for event in events.read() {
+        if event.state != ButtonState::Pressed {
+            continue;
+        }
+        if !composer.active && event.key_code == KeyCode::PageUp {
+            let before = client.chat().next_before();
+            if let Some(before) = before {
+                let _ = client.request_chat_history(50, Some(before));
+                composer.history_offset = composer.history_offset.saturating_add(50);
+            }
+            continue;
+        }
+        if !composer.active && event.key_code == KeyCode::PageDown {
+            composer.history_offset = composer.history_offset.saturating_sub(50);
+            continue;
+        }
+        if !composer.active && event.key_code == KeyCode::KeyT {
+            composer.active = true;
+            continue;
+        }
+        if !composer.active {
+            continue;
+        }
+        if event.key_code == KeyCode::Escape {
+            composer.active = false;
+            composer.text.clear();
+        } else if event.key_code == KeyCode::Enter {
+            if !composer.text.trim().is_empty() {
+                let _ = client.send_chat(&composer.text);
+                composer.text.clear();
+            }
+            composer.active = false;
+        } else if event.key_code == KeyCode::Backspace {
+            composer.text.pop();
+        } else if let Some(text) = &event.text {
+            for character in text.chars().filter(|character| !character.is_control()) {
+                if composer.text.chars().count() < game_api::MAX_MESSAGE_CHARS {
+                    composer.text.push(character);
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy systems take resources by value.
+fn refresh_chat_presence(
+    time: Res<Time>,
+    mut composer: ResMut<ChatComposer>,
+    mut client: ResMut<OnlineClient>,
+) {
+    composer.presence_refresh.tick(time.delta());
+    if composer.presence_refresh.just_finished() {
+        let _ = client.request_chat_presence();
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy systems take resources by value.
+fn present_chat(
+    client: Res<OnlineClient>,
+    composer: Res<ChatComposer>,
+    mut hud: Query<&mut Text, With<ChatHud>>,
+) {
+    let client = client.into_inner();
+    let messages: Vec<_> = client.chat().messages().collect();
+    let end = messages.len().saturating_sub(composer.history_offset);
+    let start = end.saturating_sub(5);
+    let lines: Vec<String> = messages[start..end]
+        .iter()
+        .map(|message| format!("{}: {}", message.sender_name, message.content))
+        .collect();
+    let mut display = if lines.is_empty() {
+        "Sem mensagens recentes".to_owned()
+    } else {
+        lines.join("\n")
+    };
+    let members = client.chat().members();
+    let roster = members
+        .iter()
+        .take(6)
+        .map(|member| member.character_id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if client.chat().presence_truncated() || members.len() > 6 {
+        let _ = write!(display, "\nOnline: {roster}, …");
+    } else {
+        let _ = write!(display, "\nOnline: {roster}");
+    }
+    if let Some(notice) = client.chat().notice() {
+        let _ = write!(display, "\n{notice}");
+    }
+    if composer.active {
+        let _ = write!(display, "\n> {}▏", composer.text);
+    } else {
+        display.push_str("\nT para conversar · PageUp para mensagens anteriores");
+    }
+    for mut text in &mut hud {
+        text.0.clone_from(&display);
+    }
 }
 
 // Clamp before scaling so even a finite but extreme server coordinate cannot
@@ -77,11 +231,11 @@ fn present_online(
         }
     }
     let status = match client.status() {
-        OnlineStatus::Disconnected => "disconnected",
-        OnlineStatus::Connecting => "connecting",
-        OnlineStatus::AwaitingSnapshot => "awaiting snapshot",
-        OnlineStatus::Active => "active (read-only)",
-        OnlineStatus::Failed(_) => "connection failed",
+        OnlineStatus::Disconnected => "disconnected".to_owned(),
+        OnlineStatus::Connecting => "connecting".to_owned(),
+        OnlineStatus::AwaitingSnapshot => "awaiting snapshot".to_owned(),
+        OnlineStatus::Active => "active".to_owned(),
+        OnlineStatus::Failed(error) => format!("connection failed ({error:?})"),
     };
     for mut window in &mut windows {
         window.title = format!("Lynx demo online - {status}");

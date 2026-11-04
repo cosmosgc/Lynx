@@ -419,7 +419,7 @@ fn connect(gateway: &mut WorldGateway, account: &str, principal: StableId) -> Co
 }
 
 #[test]
-fn world_chat_discovery_is_empty_and_player_content_fails_closed() {
+fn zone_chat_discovery_and_spoofed_or_invalid_requests() {
     let mut f = fixture();
     let alice = connect(&mut f.gateway, "alice", f.alice_principal);
     let bob = connect(&mut f.gateway, "bob", f.bob_principal);
@@ -430,7 +430,10 @@ fn world_chat_discovery_is_empty_and_player_content_fails_closed() {
             .handle(session, &query, Millis::new(1001))
             .unwrap();
         assert_eq!(replies[0].kind.as_str(), "chat.channels.result");
-        assert_eq!(replies[0].body, json!({"channels": []}));
+        assert_eq!(
+            replies[0].body,
+            json!({"channels": [{"id": "zone", "name": "Zone", "kind": "room", "member_count": 2}]})
+        );
         for (kind, body) in [
             ("chat.channels", json!({"zone": "other"})),
             (
@@ -461,7 +464,7 @@ fn world_chat_discovery_is_empty_and_player_content_fails_closed() {
             .handle(&resumed.session, &query, Millis::new(1201))
             .unwrap()[0]
             .body,
-        json!({"channels": []})
+        json!({"channels": [{"id": "zone", "name": "Zone", "kind": "room", "member_count": 2}]})
     );
 }
 

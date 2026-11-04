@@ -104,12 +104,12 @@ permission to start or to alter task status.
 | [CLT-006](40-bevy-client.md#clt-006--entity-presentation-and-interpolation) | Entity presentation and interpolation | P0 | Blocked | `CLT-004`, `CLT-005` | Requires online client loop. |
 | [CLT-007](40-bevy-client.md#clt-007--local-movement-and-prediction) | Local movement and prediction | P0 | Blocked | `SIM-001`, `SIM-002`, `CLT-005` | Requires client transport and reconciliation. |
 | [CLT-008](40-bevy-client.md#clt-008--interaction-inventory-and-ui-panels) | Interaction, inventory, and UI panels | P1 | Blocked | `CLT-006`, `SIM-008` | Requires entity presentation and chat/presence foundation. |
-| [CLT-009](40-bevy-client.md#clt-009--chat-and-presence-ui) | Chat and presence UI | P1 | Blocked | `SIM-008`, `CLT-008` | Requires server chat and panel foundation. |
-| [CLT-010](40-bevy-client.md#clt-010--localization-and-accessibility) | Localization and accessibility | P1 | Blocked | `CLT-008` | Follows core client UI. |
+| [CLT-010](40-bevy-client.md#clt-010--localization-and-accessibility) | Localization and accessibility | P1 | Blocked | `CLT-008`, `CLT-009` | Follows core client UI and chat surface. |
 | [CLT-011](40-bevy-client.md#clt-011--settings-diagnostics-and-recovery-ux) | Settings, diagnostics, and recovery UX | P2 | Blocked | `CLT-005`, `CLT-007` | Requires networking and movement UX. |
 | [CLT-012](40-bevy-client.md#clt-012--packaging-and-platform-builds) | Packaging and platform builds | P2 | Blocked | `OPS-005`, `CLT-004` | Requires release-artifact workflow. |
 | [CLT-013](40-bevy-client.md#clt-013--client-performance-profiling) | Client performance profiling | P2 | Blocked | `CLT-006`, `SIM-018` | Requires online presentation and simulation budget. |
-| [CLT-014](40-bevy-client.md#clt-014--client-integration-and-protocol-tests) | Client integration and protocol tests | P1 | Blocked | `CLT-005`, `QUA-014` | Requires network loop and reusable harness. |
+| [CLT-014](40-bevy-client.md#clt-014--client-integration-and-protocol-tests) | Client integration and protocol tests | P1 | Blocked | `CLT-005`, `QUA-014`, `CLT-009` | Adds multi-client chat/presence and history-page integration coverage. |
+| [CLT-015](40-bevy-client.md#clt-015--expanded-chat-channels-and-moderation-ui) | Expanded chat channels and moderation UI | P2 | Blocked | `SIM-009`, `NET-009`, `CLT-010`, `CLT-009` | Builds on the chat MVP, social channels, moderation services, and localization. |
 | [OPS-007](60-operations-release.md#ops-007--load-and-soak-harness) | Load and soak harness | P2 | Blocked | `QUA-005` | Follows benchmark harness. |
 | [OPS-009](60-operations-release.md#ops-009--incident-runbooks) | Incident runbooks | P2 | Blocked | `OPS-003` | Use verified restore procedures. |
 | [OPS-010](60-operations-release.md#ops-010--engine-and-content-upgrade-workflow) | Engine and content upgrade workflow | P2 | Blocked | `OPS-004` | Requires staging rollout/rollback. |

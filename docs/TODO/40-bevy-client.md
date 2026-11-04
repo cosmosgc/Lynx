@@ -121,9 +121,12 @@ reuses the secure refresh token; new accounts use `account_portal/`. The server 
 errors, and world resume-token lifecycle remain open. The new `server_browser`
 module provides validated IP/DNS profiles, stable per-server keys, pin ordering,
 and a bounded recent list, with strict JSON serialization containing no
-credential fields. It is not yet wired to a UI or OS-backed profile file; remote
-transport still requires WSS. Focused model tests pass (3/3). `NET-001` and
-`CLT-001` remain prerequisites and are not assumed complete.
+credential fields. It now loads and saves a bounded profile file through a
+sibling temporary file, rejecting malformed and oversized documents. The
+persistence API is not yet wired to a UI or OS-specific config path; remote
+transport still requires WSS. Focused model tests pass (3/3), but the new file
+I/O path has not been tested. `NET-001` and `CLT-001` remain prerequisites and
+are not assumed complete.
 
 ---
 
@@ -344,24 +347,54 @@ unversioned until a manifest is built.
 ## CLT-009 — Chat and presence UI
 
 - **Priority:** P1
-- **Status:** Blocked — `SIM-008`
-- **Depends on:** `SIM-008`, `CLT-008`
+- **Status:** Done
+- **Depends on:** —
 - **References:** `SIM-008`, [security §Abuse prevention](../security.md#abuse-prevention)
+
+This increment delivers the first one-zone chat and presence surface. It is
+independent of the entity-panel and inventory work in `CLT-008`. Multi-client
+exchange and history-page integration coverage live in `CLT-014`; additional
+channels, unread indicators, localized chat metadata, and moderation controls
+are deferred to `CLT-015`.
 
 **Scope**
 
-- Channel tabs/list, history pagination, unread indicators, and presence roster.
-- Send/receive with server-resolved identity; show system messages and errors.
-- Mute/ignore/report controls wired to the moderation backend.
-- Localized timestamps and channel names; no embedded English strings.
-- Bounded history/scrollback and sane behavior on reconnect.
+- One zone-channel feed and composer in the online client.
+- Send/receive with server-resolved identity and safe errors.
+- Connected-member presence roster.
+- Bounded history scrollback and cursor-based previous-page loading.
+- Static demo credentials stay on the world gateway path; Nakama chat uses
+  Nakama account sessions only.
 
 **Acceptance criteria**
 
-- [ ] Two clients in one zone exchange messages in real time.
-- [ ] History pagination works and does not duplicate messages.
-- [ ] Mute/ignore/report actions have visible, server-confirmed effects.
-- [ ] Chat cannot spoof another sender or channel.
+- [x] The online client sends and displays messages with server-resolved identity.
+- [x] Presence displays connected members for the selected zone room.
+- [x] History is bounded, cursor-paged, ordered for display, and deduplicated.
+- [x] The gateway rejects spoofed sender/channel identity; Nakama supplies the
+      authenticated sender identity for account chat.
+
+**Progress:** The online window shows recent room messages and connected
+members, accepts `T` to compose and Enter to send, and uses PageUp/PageDown for
+bounded history pages. Account sessions with a verified character use the
+configured Nakama room, authenticated realtime socket, and persisted history
+API. Static `--demo-online` sessions use the world gateway's in-memory zone
+channel and never send their world token to Nakama. Nakama history pages merge
+in chronological order with message-ID deduplication. The client keeps a
+bounded 500-message scrollback and displays safe Portuguese errors without
+rendering server diagnostics. The online demo now visibly echoes sent messages
+and shows the connected demo character in presence. See the completion record
+for validated behavior and deferred follow-up work.
+
+**Visual validation (2026-11-04):**
+- Screen: `lynx_client --demo-online`, active session at desktop size.
+- Journey: sent two messages and confirmed both appeared with server-resolved
+  character identity; the connected character appeared in the presence roster.
+- Evidence: user-provided screenshot, not stored in the repository.
+- Automated checks: `cargo check -p lynx_client` and
+  `cargo clippy -p lynx_client --all-targets -- -D warnings` passed.
+- Result: single-client gateway chat and self-presence passed. Multi-client and
+  history-page integration checks moved to `CLT-014`.
 
 ---
 
@@ -369,7 +402,7 @@ unversioned until a manifest is built.
 
 - **Priority:** P1
 - **Status:** Blocked — `CLT-008`
-- **Depends on:** `CLT-008`
+- **Depends on:** `CLT-008`, `CLT-009`
 - **References:** [internationalization](../internationalization.md), ADR 0011
 
 **Scope**
@@ -470,7 +503,7 @@ unversioned until a manifest is built.
 
 - **Priority:** P1
 - **Status:** Blocked — `CLT-005`, `QUA-014`
-- **Depends on:** `CLT-005`, `QUA-014`
+- **Depends on:** `CLT-005`, `QUA-014`, `CLT-009`
 - **References:** `QUA-014`, `NET-004`
 
 **Scope**
@@ -481,6 +514,10 @@ unversioned until a manifest is built.
 - Simulated latency/loss and correction tests for `CLT-007`.
 - UI smoke tests that do not require a GPU where possible.
 - A small multi-client test proving consistent observation.
+- Two independent online clients exchange zone chat and observe presence joins
+  and leaves through the gateway path; Nakama room fan-out is an optional
+  service-backed smoke.
+- Exercise history-page cursor ordering and deduplication across reconnect.
 
 **Acceptance criteria**
 
@@ -488,3 +525,33 @@ unversioned until a manifest is built.
 - [ ] Protocol fixtures catch accidental wire changes.
 - [ ] Prediction/reconciliation tests run under simulated latency/loss.
 - [ ] Two clients observe the same authoritative state in one test.
+- [ ] Two clients exchange zone chat and observe presence changes without
+      duplicate history entries after reconnect.
+
+---
+
+## CLT-015 — Expanded chat channels and moderation UI
+
+- **Priority:** P2
+- **Status:** Blocked — `SIM-009`, `NET-009`, `CLT-010`
+- **Depends on:** `SIM-009`, `NET-009`, `CLT-010`, `CLT-009`
+- **References:** `CLT-009`, [internationalization](../internationalization.md),
+  `NET-009`
+
+**Scope**
+
+- Add channel navigation for the social channels supported by the server.
+- Show unread counts for inactive channels.
+- Localize channel labels and message timestamps.
+- Add mute, ignore/block, and report controls with server-confirmed outcomes.
+
+**Acceptance criteria**
+
+- [ ] Only channels authorized for the selected character appear in navigation.
+- [ ] Unread counts update on incoming messages and clear when read.
+- [ ] Channel labels and timestamps follow the selected locale.
+- [ ] Moderation controls display the server-confirmed state and cannot be
+      bypassed by switching clients.
+
+**Implementation note:** Chat moderation APIs and policy remain owned by
+`NET-009`; this client task consumes those server-confirmed outcomes.

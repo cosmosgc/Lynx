@@ -1,10 +1,18 @@
 //! Validated, secret-free server profiles and bounded connection history.
 
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, net::IpAddr};
+use std::{
+    collections::BTreeSet,
+    fs::{self, OpenOptions},
+    io::{self, Read, Write},
+    net::IpAddr,
+    path::Path,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 pub const MAX_PROFILES: usize = 64;
 pub const MAX_RECENT: usize = 20;
+const MAX_PROFILE_FILE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -65,6 +73,69 @@ pub enum Error {
 }
 
 impl ServerBrowser {
+    /// Load the bounded, secret-free profile document. A missing file starts
+    /// with an empty browser; malformed or oversized files fail closed.
+    pub fn load(path: &Path) -> io::Result<Self> {
+        let file = match OpenOptions::new().read(true).open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(error) => return Err(error),
+        };
+        let mut bytes = Vec::with_capacity(MAX_PROFILE_FILE_BYTES.min(4096));
+        file.take((MAX_PROFILE_FILE_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > MAX_PROFILE_FILE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "server profile document exceeds the size limit",
+            ));
+        }
+        let json = std::str::from_utf8(&bytes)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid profile encoding"))?;
+        Self::from_json(json).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid server profile document",
+            )
+        })
+    }
+
+    /// Persist validated profiles through a sibling temporary file so an
+    /// interrupted write does not leave a partial JSON document behind.
+    pub fn save(&self, path: &Path) -> io::Result<()> {
+        let json = self.to_json().map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "invalid server profile state")
+        })?;
+        if json.len() > MAX_PROFILE_FILE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "server profile document exceeds the size limit",
+            ));
+        }
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let mut temporary = path.as_os_str().to_owned();
+        temporary.push(format!(".{}.{}.tmp", std::process::id(), stamp));
+        let temporary = std::path::PathBuf::from(temporary);
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)?;
+            file.write_all(json.as_bytes())?;
+            file.sync_all()?;
+            fs::rename(&temporary, path)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
+    }
+
     pub fn profiles(&self) -> &[ServerProfile] {
         &self.profiles
     }

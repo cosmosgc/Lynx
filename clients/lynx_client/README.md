@@ -106,6 +106,14 @@ only to loopback; remote Nakama and world endpoints require HTTPS/WSS. The
 Nakama server key is public client configuration, but must not be confused with
 the private runtime HTTP key.
 
+For an account session, set `LYNX_NAKAMA_URL` to the Nakama HTTP origin and
+optionally set `LYNX_CHAT_ROOM` (default `lynx-zone`). The client uses that
+Nakama access token to join the persistent room, send messages, receive
+presence, and request history. `--demo-online` uses a static world-only token,
+so it keeps chat on the world gateway fallback even when Nakama is configured.
+A configured Nakama room is not currently authorized against the player's
+admitted Lynx world zone.
+
 Onboarding uses the default-feature executable. To sign into the email/password
 account created in `account_portal/`, use:
 

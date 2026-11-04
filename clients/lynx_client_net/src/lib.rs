@@ -11,9 +11,11 @@
 
 mod character_api;
 mod nakama_auth;
+mod nakama_chat;
 
 pub use character_api::{CharacterApiClient, CharacterApiFailure};
 pub use nakama_auth::{NakamaAuthClient, NakamaAuthConfig, NakamaAuthFailure, NakamaSession};
+pub use nakama_chat::{NakamaChatClient, NakamaChatFailure};
 
 use std::fmt;
 use std::net::IpAddr;
@@ -52,6 +54,11 @@ pub enum Status {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Failure {
     InvalidConfiguration,
+    InvalidUrl,
+    EmptyBearer,
+    BearerWhitespace,
+    InvalidBearerHeader,
+    InvalidCharacter,
     Timeout,
     Transport,
     /// The world edge rejected the bearer credential.
@@ -198,20 +205,22 @@ async fn pump(
     status: &watch::Sender<Status>,
 ) -> Result<(), Failure> {
     let mut request = validate_url(&config.url)?;
-    if config.bearer.is_empty() || config.bearer.chars().any(char::is_whitespace) {
-        return Err(Failure::InvalidConfiguration);
+    if config.bearer.is_empty() {
+        return Err(Failure::EmptyBearer);
+    }
+    if config.bearer.chars().any(char::is_whitespace) {
+        return Err(Failure::BearerWhitespace);
     }
     if let Some(character) = &config.character {
         if character.is_empty() || character.chars().any(char::is_whitespace) {
-            return Err(Failure::InvalidConfiguration);
+            return Err(Failure::InvalidCharacter);
         }
-        let mut value =
-            HeaderValue::from_str(character).map_err(|_| Failure::InvalidConfiguration)?;
+        let mut value = HeaderValue::from_str(character).map_err(|_| Failure::InvalidCharacter)?;
         value.set_sensitive(true);
         request.headers_mut().insert("x-lynx-character", value);
     }
     let mut authorization = HeaderValue::from_str(&format!("Bearer {}", config.bearer))
-        .map_err(|_| Failure::InvalidConfiguration)?;
+        .map_err(|_| Failure::InvalidBearerHeader)?;
     authorization.set_sensitive(true);
     request
         .headers_mut()
@@ -296,9 +305,7 @@ pub fn validate_server_url(url: &str) -> Result<(), Failure> {
 fn validate_url(
     url: &str,
 ) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, Failure> {
-    let request = url
-        .into_client_request()
-        .map_err(|_| Failure::InvalidConfiguration)?;
+    let request = url.into_client_request().map_err(|_| Failure::InvalidUrl)?;
     let uri = request.uri();
     if !matches!(uri.scheme_str(), Some("ws" | "wss"))
         || uri.authority().is_none_or(|a| a.as_str().contains('@'))
@@ -311,7 +318,7 @@ fn validate_url(
                     .is_ok_and(|ip| ip.is_loopback())
             }))
     {
-        return Err(Failure::InvalidConfiguration);
+        return Err(Failure::InvalidUrl);
     }
     Ok(request)
 }

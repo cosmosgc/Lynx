@@ -21,7 +21,7 @@
 //! - Whole-zone broadcasts do not exist. A session receives one delivery per
 //!   tick containing only its interest delta and audience-filtered updates.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 
 use engine_core::error::{EngineError, ErrorCode};
@@ -62,9 +62,31 @@ use crate::session::{
 };
 use crate::{ResumeSessionRecord, ResumeSessionStore, TokenDigest};
 
+const CHAT_HISTORY_CAPACITY: usize = 500;
+const CHAT_HISTORY_PAGE: u16 = 100;
+const CHAT_OUTBOX_CAPACITY: usize = 65_536;
+const CHAT_MESSAGES_PER_SECOND: usize = 5;
+const CHAT_PRESENCE_LIMIT: usize = 100;
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EmptyChatQuery {}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChatSendBody {
+    channel_id: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChatHistoryBody {
+    channel_id: String,
+    limit: u16,
+    #[serde(default)]
+    before: Option<u64>,
+}
 
 /// The message kind used for protocol-level failures.
 pub const ERROR_KIND: &str = "protocol.error";
@@ -263,6 +285,10 @@ pub struct WorldGateway {
     resume_store: Option<std::sync::Arc<dyn ResumeSessionStore>>,
     resume_generations: BTreeMap<SessionId, i64>,
     reply_sequence: u64,
+    chat_sequence: u64,
+    chat_history: VecDeque<serde_json::Value>,
+    chat_outbox: Vec<(SessionId, Envelope)>,
+    chat_send_times: BTreeMap<SessionId, VecDeque<i64>>,
 }
 
 impl fmt::Debug for WorldGateway {
@@ -311,6 +337,10 @@ impl WorldGateway {
             resume_store: None,
             resume_generations: BTreeMap::new(),
             reply_sequence: 0,
+            chat_sequence: 0,
+            chat_history: VecDeque::new(),
+            chat_outbox: Vec::new(),
+            chat_send_times: BTreeMap::new(),
         };
         let _ = gateway.sync_world();
         Ok(gateway)
@@ -526,6 +556,7 @@ impl WorldGateway {
 
     fn remove_session_local(&mut self, session: &SessionId) -> Option<GatewaySession> {
         let _ = self.resume_generations.remove(session);
+        let _ = self.chat_send_times.remove(session);
         let removed = self.sessions.remove(session);
         if let Some(removed) = &removed {
             self.cancel_session_movement(removed);
@@ -753,9 +784,9 @@ impl WorldGateway {
         now: Millis,
     ) -> Result<Vec<Envelope>, EngineError> {
         envelope.validate()?;
-        let (principal, actor) = {
+        let (principal, actor, account) = {
             let active = self.sessions.active(session)?;
-            (active.principal, active.actor)
+            (active.principal, active.actor, active.account.clone())
         };
         match envelope.kind.as_str() {
             "chat.channels" => {
@@ -766,14 +797,38 @@ impl WorldGateway {
                 Ok(vec![envelope.reply(
                     self.reply_id(),
                     message_kind("chat.channels.result"),
-                    json!({ "channels": [] }),
+                    json!({ "channels": [{
+                        "id": "zone",
+                        "name": "Zone",
+                        "kind": "room",
+                        "member_count": self.sessions.connected_count()
+                    }] }),
                 )])
             }
-            "chat.send" | "chat.history" => {
-                // No player content is admitted until server-side membership,
-                // moderation and social policy can all be enforced.
-                let error = EngineError::new(ErrorCode::Unsupported, "world chat unavailable");
-                Ok(vec![self.error_reply(envelope, &error)])
+            "chat.send" => Ok(self.handle_chat_send(envelope, session, &account, principal, now)),
+            "chat.history" => Ok(self.handle_chat_history(envelope)),
+            "chat.presence" => {
+                if serde_json::from_value::<EmptyChatQuery>(envelope.body.clone()).is_err() {
+                    let error = EngineError::new(ErrorCode::InvalidRequest, "chat query rejected");
+                    return Ok(vec![self.error_reply(envelope, &error)]);
+                }
+                let members: Vec<_> = self
+                    .sessions
+                    .connected()
+                    .take(CHAT_PRESENCE_LIMIT)
+                    .map(|member| {
+                        json!({
+                            "account_id": member.account,
+                            "character_id": member.principal,
+                        })
+                    })
+                    .collect();
+                let truncated = self.sessions.connected_count() > CHAT_PRESENCE_LIMIT;
+                Ok(vec![envelope.reply(
+                    self.reply_id(),
+                    message_kind("chat.presence.result"),
+                    json!({ "members": members, "truncated": truncated }),
+                )])
             }
             "action.request" => self.handle_action(session, principal, actor, envelope, now),
             "movement.request" => Ok(self.handle_movement(session, principal, actor, envelope)),
@@ -790,6 +845,123 @@ impl WorldGateway {
                 Ok(vec![self.error_reply(envelope, &error)])
             }
         }
+    }
+
+    /// Drain live zone-chat messages queued by [`WorldGateway::handle`]. The
+    /// transport maps each session to its attached connection before sending.
+    pub fn take_chat_outbox(&mut self) -> Vec<(SessionId, Envelope)> {
+        std::mem::take(&mut self.chat_outbox)
+    }
+
+    fn handle_chat_send(
+        &mut self,
+        envelope: &Envelope,
+        session: &SessionId,
+        account: &game_api::AccountId,
+        principal: StableId,
+        now: Millis,
+    ) -> Vec<Envelope> {
+        let body = match serde_json::from_value::<ChatSendBody>(envelope.body.clone()) {
+            Ok(body) if body.channel_id == "zone" => body,
+            _ => {
+                let error = EngineError::new(ErrorCode::InvalidRequest, "chat message rejected");
+                return vec![self.error_reply(envelope, &error)];
+            }
+        };
+        let request = game_api::SendChatMessage {
+            channel_id: body.channel_id,
+            content: body.content,
+        };
+        if request.validate().is_err() {
+            let error = EngineError::new(ErrorCode::InvalidRequest, "chat message rejected");
+            return vec![self.error_reply(envelope, &error)];
+        }
+        let oldest = now.value().saturating_sub(1_000);
+        let sent = self.chat_send_times.entry(session.clone()).or_default();
+        while sent.front().is_some_and(|timestamp| *timestamp <= oldest) {
+            sent.pop_front();
+        }
+        if sent.len() >= CHAT_MESSAGES_PER_SECOND {
+            let error = EngineError::new(ErrorCode::RateLimited, "chat send rate exceeded");
+            return vec![self.error_reply(envelope, &error)];
+        }
+        if self.chat_outbox.len() + self.sessions.connected_count() > CHAT_OUTBOX_CAPACITY {
+            let error = EngineError::new(ErrorCode::CapacityExceeded, "chat delivery queue full");
+            return vec![self.error_reply(envelope, &error)];
+        }
+        let Some(sequence) = self.chat_sequence.checked_add(1) else {
+            let error =
+                EngineError::new(ErrorCode::CapacityExceeded, "chat message capacity reached");
+            return vec![self.error_reply(envelope, &error)];
+        };
+        self.chat_sequence = sequence;
+        sent.push_back(now.value());
+        let message = json!({
+            "id": sequence.to_string(),
+            "channel_id": "zone",
+            "sender_id": account,
+            "sender_name": principal.to_string(),
+            "content": request.content.trim(),
+            "created_at_ms": now.value(),
+        });
+        if self.chat_history.len() == CHAT_HISTORY_CAPACITY {
+            self.chat_history.pop_front();
+        }
+        self.chat_history.push_back(message.clone());
+
+        let broadcast = Envelope::new(self.reply_id(), message_kind("chat.message"), message);
+        for recipient in self.sessions.connected().map(|member| member.id.clone()) {
+            self.chat_outbox.push((recipient, broadcast.clone()));
+        }
+        vec![envelope.reply(
+            self.reply_id(),
+            message_kind("chat.send.result"),
+            json!({ "id": sequence.to_string() }),
+        )]
+    }
+
+    fn handle_chat_history(&mut self, envelope: &Envelope) -> Vec<Envelope> {
+        let body = match serde_json::from_value::<ChatHistoryBody>(envelope.body.clone()) {
+            Ok(body)
+                if body.channel_id == "zone"
+                    && body.limit <= CHAT_HISTORY_PAGE
+                    && game_api::validate_page(body.limit).is_ok() =>
+            {
+                body
+            }
+            _ => {
+                let error = EngineError::new(ErrorCode::InvalidRequest, "chat history rejected");
+                return vec![self.error_reply(envelope, &error)];
+            }
+        };
+        let older: Vec<_> = self
+            .chat_history
+            .iter()
+            .filter(|message| {
+                body.before.is_none_or(|cursor| {
+                    message["id"]
+                        .as_str()
+                        .and_then(|id| id.parse::<u64>().ok())
+                        .is_some_and(|id| id < cursor)
+                })
+            })
+            .cloned()
+            .collect();
+        let start = older.len().saturating_sub(usize::from(body.limit));
+        let messages = &older[start..];
+        let next_before = (start > 0)
+            .then(|| {
+                messages
+                    .first()
+                    .and_then(|message| message["id"].as_str())
+                    .and_then(|id| id.parse::<u64>().ok())
+            })
+            .flatten();
+        vec![envelope.reply(
+            self.reply_id(),
+            message_kind("chat.history.result"),
+            json!({ "messages": messages, "next_before": next_before }),
+        )]
     }
 
     /// Advance the zone one tick and produce one delivery per session.
@@ -836,6 +1008,7 @@ impl WorldGateway {
     ) -> Result<Vec<SessionDelivery>, EngineError> {
         for id in self.sessions.sweep(now) {
             let _ = self.interest.remove_session(&id);
+            let _ = self.chat_send_times.remove(&id);
         }
 
         // Provisional server-owned movement speed; no client controls this budget.

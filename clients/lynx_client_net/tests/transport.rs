@@ -66,10 +66,7 @@ async fn plaintext_policy_and_redaction() {
         assert!(!debug.contains(url));
         assert!(!debug.contains(TOKEN));
         let client = Client::connect(settings);
-        assert_eq!(
-            finished(&client).await,
-            Status::Failed(Failure::InvalidConfiguration)
-        );
+        assert_eq!(finished(&client).await, Status::Failed(Failure::InvalidUrl));
         assert!(!format!("{client:?}").contains(TOKEN));
     }
     // A closed local port demonstrates that the URLs pass configuration validation;
@@ -271,10 +268,7 @@ async fn invalid_url_is_redacted_and_outgoing_queue_is_bounded() {
     })
     .await
     .unwrap();
-    assert_eq!(
-        client.status(),
-        Status::Failed(Failure::InvalidConfiguration)
-    );
+    assert_eq!(client.status(), Status::Failed(Failure::InvalidUrl));
     assert!(!format!("{client:?}").contains(TOKEN));
     client.close();
 }

@@ -320,13 +320,24 @@ impl WorldServer {
             .cloned()
             .ok_or_else(|| unknown_connection(connection))?;
         match self.gateway.handle(&session, envelope, now) {
-            Ok(replies) => Ok(replies
-                .into_iter()
-                .map(|envelope| Outbound::Message {
-                    connection,
-                    envelope,
-                })
-                .collect()),
+            Ok(replies) => {
+                let mut outbound: Vec<_> = replies
+                    .into_iter()
+                    .map(|envelope| Outbound::Message {
+                        connection,
+                        envelope,
+                    })
+                    .collect();
+                for (recipient, envelope) in self.gateway.take_chat_outbox() {
+                    if let Some(connection) = self.connection_for(&recipient) {
+                        outbound.push(Outbound::Message {
+                            connection,
+                            envelope,
+                        });
+                    }
+                }
+                Ok(outbound)
+            }
             Err(error) if error.code() == ErrorCode::SessionExpired => {
                 let _ = self.connections.remove(&connection);
                 Ok(vec![Outbound::Closed {

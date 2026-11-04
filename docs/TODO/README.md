@@ -56,8 +56,10 @@ recommendation, not a commitment; re-order when a dependency or risk changes.
 | 0 | [CLT-004](40-bevy-client.md#clt-004--scene-camera-and-input-abstraction) — scene, camera, and input | The client workspace exists, but the scene is still an offline placeholder; the vertical slice needs an integrated client. |
 | 1 | [SIM-002](10-simulation-gameplay.md#sim-002--client-prediction-and-reconciliation-contract) — movement reconciliation | Server movement authority is done; client reconciliation still needs networking, rendering, and reset integration. |
 
-Chat wiring ([SIM-008](10-simulation-gameplay.md#sim-008--world-chat-and-presence))
-is the cheapest Phase 3 completion and can run in parallel.
+The one-zone chat client is delivered by
+[CLT-009](40-bevy-client.md#clt-009--chat-and-presence-ui). Cross-client chat
+validation remains in `CLT-014`; social channels and moderation remain in
+`SIM-008`, `SIM-009`, and `NET-009`.
 Server-authoritative movement, server-derived combat, and account/character
 persistence are complete under `SIM-001`, `SIM-003`, and `PST-001` respectively.
 The latest workspace-wide Clippy check passed.
@@ -84,8 +86,8 @@ the quick audit; update it when a gap is found or closed.
 
 | Documented gap | Source | Task |
 | --- | --- | --- |
-| Client scene, input, and camera have an offline foundation and early online presentation; full integration is outstanding | [client backlog](40-bevy-client.md#clt-004--scene-camera-and-input-abstraction) | `CLT-004`–`CLT-014` |
-| World chat exists in `game_api` but is not routed by the gateway | [README](../../README.md#phase-3--interaction-and-mind-system--in-progress) | `SIM-008` |
+| Client scene, input, and camera have an offline foundation and early online presentation; full integration is outstanding | [client backlog](40-bevy-client.md#clt-004--scene-camera-and-input-abstraction) | `CLT-004`–`CLT-015` |
+| One-zone gateway and Nakama chat paths are integrated; cross-client validation, social channels, and moderation remain | [client backlog](40-bevy-client.md#clt-014--client-integration-and-protocol-tests), [SIM-008](10-simulation-gameplay.md#sim-008--world-chat-and-presence) | `CLT-014`, `SIM-008`, `SIM-009`, `NET-009` |
 | Durable inventory and transfer-ledger storage exists behind the trusted persistence seam but is not yet routed by the live world service | [persistence backlog](20-persistence-backend.md#pst-002--inventory-and-transfer-ledger-persistence) | `PST-002` |
 | Production admission requires an already-live actor; authoritative character population is incomplete, and social/chat adapters remain deliberately deferred | [persistence backlog](20-persistence-backend.md#pst-001--account-and-character-persistence), [networking](../networking.md#world-edge-identity-admission) | `SIM-014` |
 | `zone_leases` and `zone_events` fence PostgreSQL authority; checkpoints bound retained history, and entity plus aggregate deltas replay after the checkpoint | [persistence backlog](20-persistence-backend.md#pst-004--zone-leases-fencing-and-event-log) | `PST-004`, `PST-005` |
@@ -137,4 +139,5 @@ is rejected by default.
 | Record | Summary |
 | --- | --- |
 | [`completed/ops-006-ci-matrix.md`](completed/ops-006-ci-matrix.md) | Hosted OS matrix, live PostgreSQL coverage, headless client smoke, and CI duration/outcome reporting. |
+| [`completed/clt-009-chat-presence-ui.md`](completed/clt-009-chat-presence-ui.md) | One-zone chat feed, composer, bounded history, and connected-member presence. |
 | [`completed/world-persistence-fresh-start.md`](completed/world-persistence-fresh-start.md) | Durable whole-world snapshots and the `--fresh` authored-world reset. |

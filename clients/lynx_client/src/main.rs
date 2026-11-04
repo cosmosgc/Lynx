@@ -82,6 +82,7 @@ fn main() {
         } else {
             let Some(bearer) = std::env::var_os("LYNX_DEMO_TOKEN")
                 .and_then(|s| s.into_string().ok())
+                .map(|token| token.trim().to_owned())
                 .filter(|s| !s.is_empty())
             else {
                 eprintln!("Set LYNX_DEMO_TOKEN for development-only online mode.");
