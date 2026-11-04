@@ -157,10 +157,7 @@ fn is_true_flag(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rcgen::{
-        BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
-        KeyUsagePurpose,
-    };
+    use rcgen::{CertificateParams, ExtendedKeyUsagePurpose, Issuer, KeyPair, KeyUsagePurpose};
     use std::io::{Read, Write};
     use std::net::{IpAddr, Ipv4Addr, TcpListener};
     use std::sync::mpsc;
@@ -178,13 +175,13 @@ mod tests {
         thread::JoinHandle<()>,
         tempfile::NamedTempFile,
     ) {
-        let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
-        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         let ca_key =
             KeyPair::from_pem(include_str!("../tests/fixtures/postgres-test-ca-key.pem")).unwrap();
-        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
-        let issuer = Issuer::new(ca_params, ca_key);
+        let issuer = Issuer::from_ca_cert_pem(
+            include_str!("../tests/fixtures/postgres-test-ca-cert.pem"),
+            ca_key,
+        )
+        .unwrap();
 
         let now = OffsetDateTime::now_utc();
         let mut leaf_params = CertificateParams::new(vec!["localhost".to_owned()]).unwrap();
@@ -208,7 +205,11 @@ mod tests {
         let certificate = leaf_cert.pem().into_bytes();
         let private_key = leaf_key.serialize_pem().into_bytes();
         let ca_file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(ca_file.path(), ca_cert.pem()).unwrap();
+        std::fs::write(
+            ca_file.path(),
+            include_bytes!("../tests/fixtures/postgres-test-ca-cert.pem"),
+        )
+        .unwrap();
 
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
