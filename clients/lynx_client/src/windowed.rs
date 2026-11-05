@@ -24,10 +24,12 @@ pub struct OnlineWindowPlugin;
 impl Plugin for OnlineWindowPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ChatComposer>()
+            .init_resource::<SelectedTarget>()
             // InputPlugin provides this in the windowed app; headless tests add
             // the same resource so the shared keyboard system can run.
             .init_resource::<bevy::ecs::message::Messages<KeyboardInput>>()
             .add_systems(Startup, setup_online)
+            .add_systems(Update, select_target.after(crate::online::poll_online).before(chat_keyboard))
             .add_systems(Update, chat_keyboard.after(crate::online::poll_online))
             .add_systems(
                 Update,
@@ -35,6 +37,10 @@ impl Plugin for OnlineWindowPlugin {
             )
             .add_systems(Update, present_online.after(crate::online::poll_online))
             .add_systems(Update, interpolate_online.after(present_online))
+            .add_systems(Update, present_health.after(present_online))
+            .add_systems(Update, present_interactions.after(present_online))
+            .add_systems(Update, present_status.after(present_online))
+            .add_systems(Update, present_target.after(present_online).after(select_target))
             .add_systems(
                 Update,
                 refresh_chat_presence.after(crate::online::poll_online),
@@ -74,6 +80,205 @@ struct TelemetryHud;
 
 #[derive(Component)]
 struct OnlineEntity(StableId);
+
+#[derive(Component)]
+struct FacingIndicator(StableId);
+
+/// Local UI selection only; does not grant permission to act on an entity.
+#[derive(Resource, Default)]
+struct SelectedTarget(Option<StableId>);
+
+#[derive(Component)]
+struct TargetRing(StableId);
+
+#[derive(Component)]
+struct HealthBar {
+    entity: StableId,
+    fill: bool,
+}
+
+#[derive(Component)]
+struct InteractionMarker(StableId);
+
+#[derive(Component)]
+struct StatusMarker(StableId);
+
+#[allow(clippy::needless_pass_by_value)]
+fn present_interactions(
+    client: Res<OnlineClient>,
+    mut markers: Query<(&InteractionMarker, &mut Visibility)>,
+) {
+    let available: BTreeSet<_> = client
+        .world()
+        .entities()
+        .filter(|entity| {
+            entity
+                .interaction
+                .as_ref()
+                .is_some_and(crate::world_state::PublicInteraction::is_available)
+        })
+        .map(|entity| entity.entity)
+        .collect();
+    for (marker, mut visibility) in &mut markers {
+        *visibility = if available.contains(&marker.0) {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn present_status(client: Res<OnlineClient>, mut markers: Query<(&StatusMarker, &mut Visibility)>) {
+    let stunned: BTreeSet<_> = client
+        .world()
+        .entities()
+        .filter(|entity| entity.stunned)
+        .map(|entity| entity.entity)
+        .collect();
+    for (marker, mut visibility) in &mut markers {
+        *visibility = if stunned.contains(&marker.0) {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+    }
+}
+
+#[allow(clippy::cast_precision_loss)] // Pixel-scale ratio only; authoritative integers stay intact.
+fn health_fraction(health: Option<crate::world_state::PublicHealth>) -> Option<f32> {
+    health
+        .filter(|health| health.max > 0)
+        .map(|health| (health.current as f32 / health.max as f32).clamp(0.0, 1.0))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn present_health(
+    client: Res<OnlineClient>,
+    mut bars: Query<(&HealthBar, &mut Sprite, &mut Transform, &mut Visibility)>,
+) {
+    let health: BTreeMap<_, _> = client
+        .world()
+        .entities()
+        .map(|entity| (entity.entity, health_fraction(entity.health)))
+        .collect();
+    for (bar, mut sprite, mut transform, mut visibility) in &mut bars {
+        let fraction = health.get(&bar.entity).copied().flatten();
+        *visibility = if fraction.is_some() {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if bar.fill {
+            let width = 40.0 * fraction.unwrap_or(0.0);
+            sprite.custom_size = Some(Vec2::new(width, 4.0));
+            transform.translation.x = (width - 40.0) / 2.0;
+        }
+    }
+}
+
+fn health_bar_bundle(entity: StableId, fill: bool) -> impl Bundle {
+    (
+        HealthBar { entity, fill },
+        Sprite::from_color(
+            if fill {
+                Color::srgb(0.2, 0.85, 0.35)
+            } else {
+                Color::srgb(0.08, 0.08, 0.1)
+            },
+            if fill {
+                Vec2::new(40.0, 4.0)
+            } else {
+                Vec2::new(44.0, 8.0)
+            },
+        ),
+        Transform::from_xyz(0.0, 42.0, if fill { 0.4 } else { 0.3 }),
+        Visibility::Hidden,
+    )
+}
+
+fn prototype_name(prototype: &engine_core::id::DefinitionId) -> String {
+    let leaf = prototype
+        .as_str()
+        .rsplit('.')
+        .next()
+        .unwrap_or(prototype.as_str());
+    leaf.split(['_', '-'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            chars.next().map_or_else(String::new, |first| {
+                first.to_uppercase().chain(chars).collect()
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn cycle_target(
+    current: Option<StableId>,
+    candidates: &[StableId],
+    reverse: bool,
+) -> Option<StableId> {
+    if candidates.is_empty() {
+        return None;
+    }
+    let index = current.and_then(|id| candidates.iter().position(|candidate| *candidate == id));
+    let next = match (index, reverse) {
+        (Some(index), false) => (index + 1) % candidates.len(),
+        (Some(index), true) => (index + candidates.len() - 1) % candidates.len(),
+        (None, false) => 0,
+        (None, true) => candidates.len() - 1,
+    };
+    Some(candidates[next])
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn select_target(
+    client: Res<OnlineClient>,
+    keys: Res<ButtonInput<KeyCode>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    composer: Res<ChatComposer>,
+    mut selected: ResMut<SelectedTarget>,
+) {
+    let mut candidates: Vec<_> = client
+        .world()
+        .entities()
+        .map(|entity| entity.entity)
+        .filter(|id| Some(*id) != client.world().actor())
+        .collect();
+    candidates.sort_unstable();
+    if client.status() != OnlineStatus::Active {
+        selected.0 = None;
+        return;
+    }
+    if selected.0.is_some_and(|id| !candidates.contains(&id)) {
+        selected.0 = None;
+    }
+    if composer.active || !windows.single().is_ok_and(|window| window.focused) {
+        return;
+    }
+    if keys.just_pressed(KeyCode::Escape) {
+        selected.0 = None;
+    } else if keys.just_pressed(KeyCode::Tab) {
+        selected.0 = cycle_target(
+            selected.0,
+            &candidates,
+            keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight),
+        );
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn present_target(selected: Res<SelectedTarget>, mut rings: Query<(&TargetRing, &mut Visibility)>) {
+    for (ring, mut visibility) in &mut rings {
+        *visibility = if selected.0 == Some(ring.0) {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+    }
+}
 
 /// Presentation-only interpolation between the previous and current
 /// authoritative screen positions. This never writes back into world state.
@@ -309,7 +514,46 @@ fn status_label(status: OnlineStatus) -> String {
         OnlineStatus::AwaitingSnapshot => "awaiting snapshot".to_owned(),
         OnlineStatus::Active => "active".to_owned(),
         OnlineStatus::Reconnecting { attempt } => format!("reconnecting (attempt {attempt})"),
-        OnlineStatus::Failed(error) => format!("connection failed ({error:?})"),
+        OnlineStatus::Failed(error) => format!("connection failed: {}", failure_label(error)),
+    }
+}
+
+fn failure_label(error: crate::online::OnlineError) -> &'static str {
+    use crate::online::OnlineError;
+    match error {
+        OnlineError::SessionExpired
+        | OnlineError::Transport(lynx_client_net::Failure::Authentication) => {
+            "credentials expired or revoked"
+        }
+        OnlineError::Conflict => "another session is still attached",
+        OnlineError::Transport(lynx_client_net::Failure::CharacterForbidden) => {
+            "selected character is unavailable"
+        }
+        OnlineError::Transport(lynx_client_net::Failure::Unavailable) => {
+            "world service unavailable"
+        }
+        OnlineError::Transport(lynx_client_net::Failure::Timeout) => "connection timed out",
+        OnlineError::Protocol | OnlineError::State(_) => "server/client protocol state error",
+        OnlineError::Transport(_) | OnlineError::Closed | OnlineError::Send(_) => {
+            "connection could not be established"
+        }
+    }
+}
+
+fn recovery_hint(status: OnlineStatus) -> Option<&'static str> {
+    match status {
+        OnlineStatus::Failed(
+            crate::online::OnlineError::SessionExpired
+            | crate::online::OnlineError::Transport(lynx_client_net::Failure::Authentication),
+        ) => Some("Restart Lynx and sign in again. Press R to retry current credentials."),
+        OnlineStatus::Failed(crate::online::OnlineError::Conflict) => {
+            Some("Wait for the other session to close, then press R to retry.")
+        }
+        OnlineStatus::Failed(crate::online::OnlineError::Transport(
+            lynx_client_net::Failure::CharacterForbidden,
+        )) => Some("Return to character selection, choose an available character, and reconnect."),
+        OnlineStatus::Failed(_) => Some("Check the server connection, then press R to retry."),
+        _ => None,
     }
 }
 
@@ -339,9 +583,17 @@ fn present_telemetry(client: Res<OnlineClient>, mut hud: Query<&mut Text, With<T
     let rendered = reconciliation
         .presentation_position()
         .map_or_else(|| "-".to_owned(), position_label);
+    let status = client.status();
+    let recovery =
+        recovery_hint(status).map_or_else(String::new, |hint| format!("\nRecovery: {hint}"));
+    let retry_control = if matches!(status, OnlineStatus::Failed(_)) {
+        " · R: retry"
+    } else {
+        ""
+    };
     let display = format!(
-        "WASD: move · T: chat\nonline: {}\ntick {tick} · entities {} · move pending {}\nmove round trip {rtt} · step {:.3} m · last move {movement}\nresume {} · reconnects {} · resumed {}\nauthority {authority}\nrendered {rendered}\nqueues (in, out): {:?} · packet loss: unavailable (WebSocket)",
-        status_label(client.status()),
+        "WASD: move · T: chat{retry_control}\nonline: {}{recovery}\ntick {tick} · entities {} · move pending {}\nmove round trip {rtt} · step {:.3} m · last move {movement}\nresume {} · reconnects {} · resumed {}\nauthority {authority}\nrendered {rendered}\nqueues (in, out): {:?} · packet loss: unavailable (WebSocket)",
+        status_label(status),
         state.entities().count(),
         if client.pending_movement() {
             "yes"
@@ -364,6 +616,7 @@ fn present_telemetry(client: Res<OnlineClient>, mut hud: Query<&mut Text, With<T
 }
 
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)] // Bevy system parameters must be passed by value.
+#[allow(clippy::too_many_lines)] // Spawn bundles stay beside entity synchronization logic.
 fn present_online(
     mut commands: Commands,
     client: Res<OnlineClient>,
@@ -373,6 +626,10 @@ fn present_online(
     >,
     mut cameras: Query<&mut Transform, (With<SceneCamera>, Without<OnlineEntity>)>,
     mut windows: Query<&mut Window>,
+    mut indicators: Query<
+        (&FacingIndicator, &mut Transform),
+        (Without<SceneCamera>, Without<OnlineEntity>),
+    >,
 ) {
     let client = client.into_inner();
     let state = client.world();
@@ -382,6 +639,11 @@ fn present_online(
         .collect();
     let actor = state.actor();
     let predicted = state.reconciliation().presentation_position();
+    for (indicator, mut transform) in &mut indicators {
+        if let Some(public) = public.get(&indicator.0) {
+            *transform = facing_transform(public.yaw_degrees);
+        }
+    }
     let mut missing: BTreeSet<_> = public.keys().copied().collect();
     for (entity, id, mut transform, mut motion) in &mut entities {
         if !public.contains_key(&id.0) {
@@ -417,12 +679,69 @@ fn present_online(
         } else {
             screen_position(public.position.x, public.position.z)
         };
-        commands.spawn((
-            Sprite::from_color(Color::srgb(0.3, 0.7, 1.0), Vec2::splat(24.0)),
-            Transform::from_translation(target),
-            OnlineEntity(public.entity),
-            OnlineMotion { to: target },
-        ));
+        let local = Some(public.entity) == actor;
+        let colour = if local {
+            Color::srgb(0.3, 0.85, 1.0)
+        } else {
+            Color::srgb(0.95, 0.75, 0.3)
+        };
+        commands
+            .spawn((
+                Sprite::from_color(colour, Vec2::splat(16.0)),
+                Transform::from_translation(target),
+                OnlineEntity(public.entity),
+                OnlineMotion { to: target },
+            ))
+            .with_children(|parent| {
+                parent.spawn(health_bar_bundle(public.entity, false));
+                parent.spawn(health_bar_bundle(public.entity, true));
+                parent.spawn((
+                    Text2d::new(prototype_name(&public.prototype)),
+                    TextFont {
+                        font_size: bevy::text::FontSize::Px(14.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.95, 0.95, 0.9)),
+                    Transform::from_xyz(0.0, 64.0, 0.6),
+                ));
+                parent.spawn((
+                    InteractionMarker(public.entity),
+                    Sprite::from_color(Color::srgb(1.0, 0.82, 0.25), Vec2::splat(8.0)),
+                    Transform::from_xyz(0.0, 54.0, 0.5),
+                    Visibility::Hidden,
+                ));
+                parent.spawn((
+                    StatusMarker(public.entity),
+                    Text2d::new("STUN"),
+                    TextFont {
+                        font_size: bevy::text::FontSize::Px(10.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(1.0, 0.35, 0.2)),
+                    Transform::from_xyz(30.0, 52.0, 0.6),
+                    Visibility::Hidden,
+                ));
+                // Segmented ground ring works with the existing sprite renderer.
+                // It is presentation only, not a collision/range boundary.
+                for segment in 0..32_u16 {
+                    let angle = f32::from(segment) * std::f32::consts::TAU / 32.0;
+                    parent.spawn((
+                        TargetRing(public.entity),
+                        Sprite::from_color(Color::srgb(1.0, 0.35, 0.2), Vec2::new(6.0, 3.0)),
+                        ground_ring_transform(angle, 33.0, 0.2),
+                        Visibility::Hidden,
+                    ));
+                    parent.spawn((
+                        Sprite::from_color(colour, Vec2::new(4.0, 2.0)),
+                        ground_ring_transform(angle, 21.0, -0.1),
+                    ));
+                }
+                parent.spawn((
+                    FacingIndicator(public.entity),
+                    Sprite::from_color(colour, Vec2::new(5.0, 12.0)),
+                    facing_transform(public.yaw_degrees),
+                ));
+            });
     }
     if let Some(position) = predicted {
         for mut camera in &mut cameras {
@@ -441,6 +760,18 @@ fn present_online(
     for mut window in &mut windows {
         window.title.clone_from(&title);
     }
+}
+
+/// World yaw is clockwise from +Z toward +X; screen Y is negative world Z.
+fn facing_transform(yaw_degrees: f32) -> Transform {
+    let angle = yaw_degrees.rem_euclid(360.0).to_radians();
+    Transform::from_xyz(angle.sin() * 26.0, -angle.cos() * 26.0, 0.1)
+        .with_rotation(Quat::from_rotation_z(angle))
+}
+
+fn ground_ring_transform(angle: f32, radius: f32, depth: f32) -> Transform {
+    Transform::from_xyz(angle.cos() * radius, angle.sin() * radius, depth)
+        .with_rotation(Quat::from_rotation_z(angle + std::f32::consts::FRAC_PI_2))
 }
 
 /// Advance remote visuals toward the latest authoritative target. Interpolation
@@ -626,6 +957,166 @@ fn present_scene(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_failure_text_points_to_specific_recovery_action() {
+        use crate::online::OnlineError;
+        assert!(
+            recovery_hint(OnlineStatus::Failed(OnlineError::SessionExpired))
+                .unwrap()
+                .contains("sign in again")
+        );
+        assert!(
+            recovery_hint(OnlineStatus::Failed(OnlineError::Conflict))
+                .unwrap()
+                .contains("other session")
+        );
+        assert!(
+            recovery_hint(OnlineStatus::Failed(OnlineError::Transport(
+                lynx_client_net::Failure::CharacterForbidden,
+            )))
+            .unwrap()
+            .contains("character selection")
+        );
+        assert!(recovery_hint(OnlineStatus::Active).is_none());
+    }
+
+    #[test]
+    fn public_health_is_optional_and_bar_fraction_is_bounded() {
+        use crate::world_state::PublicHealth;
+        assert_eq!(health_fraction(None), None);
+        assert_eq!(
+            health_fraction(Some(PublicHealth { current: 5, max: 0 })),
+            None
+        );
+        assert_eq!(
+            health_fraction(Some(PublicHealth {
+                current: 5,
+                max: 10
+            })),
+            Some(0.5)
+        );
+        assert_eq!(
+            health_fraction(Some(PublicHealth {
+                current: -1,
+                max: 10
+            })),
+            Some(0.0)
+        );
+        assert_eq!(
+            health_fraction(Some(PublicHealth {
+                current: 20,
+                max: 10
+            })),
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn prototype_nameplate_fallback_is_readable() {
+        use std::str::FromStr;
+        assert_eq!(
+            prototype_name(
+                &engine_core::id::DefinitionId::from_str("character.demo_guard").unwrap()
+            ),
+            "Demo Guard"
+        );
+        assert_eq!(
+            prototype_name(&engine_core::id::DefinitionId::from_str("npc.wood-worker").unwrap()),
+            "Wood Worker"
+        );
+    }
+
+    #[test]
+    fn interaction_marker_visibility_tracks_advertised_availability() {
+        use crate::world_state::PublicInteraction;
+        assert!(
+            PublicInteraction {
+                verbs: vec![serde_json::json!("talk")],
+                enabled: true
+            }
+            .is_available()
+        );
+        assert!(
+            !PublicInteraction {
+                verbs: vec![serde_json::json!("talk")],
+                enabled: false
+            }
+            .is_available()
+        );
+        assert!(
+            !PublicInteraction {
+                verbs: vec![],
+                enabled: true
+            }
+            .is_available()
+        );
+    }
+
+    #[test]
+    fn only_selected_ring_is_visible_and_clearing_hides_it() {
+        use engine_core::id::IdKind;
+        let id = StableId::from_parts(IdKind::Entity, 1, 1);
+        let other = StableId::from_parts(IdKind::Entity, 1, 2);
+        let mut app = App::new();
+        app.insert_resource(SelectedTarget(Some(id)))
+            .add_systems(Update, present_target);
+        let selected = app
+            .world_mut()
+            .spawn((TargetRing(id), Visibility::Hidden))
+            .id();
+        let unselected = app
+            .world_mut()
+            .spawn((TargetRing(other), Visibility::Inherited))
+            .id();
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(selected),
+            Some(&Visibility::Inherited)
+        );
+        assert_eq!(
+            app.world().get::<Visibility>(unselected),
+            Some(&Visibility::Hidden)
+        );
+        app.world_mut().resource_mut::<SelectedTarget>().0 = None;
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(selected),
+            Some(&Visibility::Hidden)
+        );
+    }
+
+    #[test]
+    fn target_cycle_wraps_in_both_directions_and_handles_stale_selection() {
+        use engine_core::id::IdKind;
+        let ids = [1, 2, 3].map(|id| StableId::from_parts(IdKind::Entity, 1, id));
+        assert_eq!(cycle_target(None, &ids, false), Some(ids[0]));
+        assert_eq!(cycle_target(None, &ids, true), Some(ids[2]));
+        assert_eq!(cycle_target(Some(ids[2]), &ids, false), Some(ids[0]));
+        assert_eq!(cycle_target(Some(ids[0]), &ids, true), Some(ids[2]));
+        assert_eq!(cycle_target(Some(ids[0]), &ids[1..], false), Some(ids[1]));
+        assert_eq!(cycle_target(Some(ids[0]), &[], false), None);
+        assert_eq!(cycle_target(Some(ids[0]), &ids[..1], false), Some(ids[0]));
+    }
+
+    #[test]
+    fn facing_projects_server_yaw_into_ground_plane() {
+        for (yaw, expected) in [
+            (0.0, Vec2::new(0.0, -26.0)),
+            (90.0, Vec2::new(26.0, 0.0)),
+            (180.0, Vec2::new(0.0, 26.0)),
+            (270.0, Vec2::new(-26.0, 0.0)),
+            (450.0, Vec2::new(26.0, 0.0)),
+        ] {
+            assert!(
+                facing_transform(yaw)
+                    .translation
+                    .truncate()
+                    .distance(expected)
+                    < 0.001
+            );
+        }
+    }
     use crate::{
         headless_app,
         offline::{Action, ActiveActions, OfflineInputEnabled},

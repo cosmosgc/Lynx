@@ -115,6 +115,7 @@ impl Zone {
             return false;
         }
         if let Some(entity) = self.entities.get_mut(&actor) {
+            update_facing(entity, proposed);
             entity.transform.position = proposed;
             true
         } else {
@@ -230,6 +231,7 @@ impl Zone {
                     )
             });
             if applied && let Some(entity) = self.entities.get_mut(&actor) {
+                update_facing(entity, intent.destination);
                 entity.transform.position = intent.destination;
             } else {
                 self.record_movement_rejection(actor);
@@ -304,6 +306,17 @@ impl Zone {
             entity: Some(actor),
             message: "a queued movement intent was rejected by server validation".into(),
         });
+    }
+}
+
+/// Authoritative horizontal facing: zero along +Z, 90 degrees along +X.
+/// Rejected or stationary movement must preserve the previous facing.
+fn update_facing(entity: &mut EntityRecord, destination: Vec3) {
+    let from = entity.position();
+    let dx = destination.x - from.x;
+    let dz = destination.z - from.z;
+    if dx != 0.0 || dz != 0.0 {
+        entity.transform.yaw_degrees = dx.atan2(dz).to_degrees().rem_euclid(360.0);
     }
 }
 

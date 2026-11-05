@@ -13,7 +13,7 @@ use engine_core::math::Vec3;
 use engine_net::interest::{InterestEntity, InterestUpdate, Visibility};
 use engine_net::replication::{ReplicationBatch, SessionId};
 use engine_sim::action::Verb;
-use engine_sim::entity::EntityRecord;
+use engine_sim::entity::{EntityRecord, MovementStatus};
 use engine_sim::mind::Controller;
 use serde::{Deserialize, Serialize};
 
@@ -66,6 +66,9 @@ pub struct EntitySnapshot {
     pub position: Vec3,
     /// Facing angle in degrees.
     pub yaw_degrees: f32,
+    /// Publicly visible immobilized status. Speed modifiers remain private.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stunned: bool,
     /// Hit points, when damageable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health: Option<HealthSnapshot>,
@@ -89,6 +92,9 @@ impl EntitySnapshot {
             prototype: entity.prototype.clone(),
             position: entity.transform.position,
             yaw_degrees: entity.transform.yaw_degrees,
+            stunned: entity
+                .movement
+                .is_some_and(|movement| movement.status == MovementStatus::Stunned),
             health: entity.health.map(|health| HealthSnapshot {
                 current: health.current,
                 max: health.max,
@@ -231,6 +237,25 @@ mod tests {
         assert!(json.get("inventory").is_none());
         assert!(json.get("mind").is_none());
         assert!(json.get("tags").is_none());
+        assert_eq!(
+            json.get("stunned"),
+            None,
+            "false status is omitted on the wire"
+        );
+    }
+
+    #[test]
+    fn snapshots_expose_stunned_but_not_movement_modifiers() {
+        use engine_sim::entity::{MovementProfile, MovementStatus};
+        let mut record = record(2);
+        record.movement = Some(MovementProfile {
+            status: MovementStatus::Stunned,
+            speed_multiplier: 0.25,
+            ..MovementProfile::default()
+        });
+        let json = serde_json::to_value(EntitySnapshot::capture(&record)).unwrap();
+        assert_eq!(json["stunned"], true);
+        assert!(json.get("speed_multiplier").is_none());
     }
 
     #[test]

@@ -242,7 +242,7 @@ unversioned until a manifest is built.
 ## CLT-005 — Network client loop
 
 - **Priority:** P0
-- **Status:** In progress — background loop, rotated-token resume and diagnostics implemented; account lifecycle and failure UX remain
+- **Status:** In progress — background loop, rotated-token resume and terminal recovery guidance implemented; account refresh and injected-drop validation remain
 - **Depends on:** `CLT-001`, `CLT-002`
 - **References:** [networking](../networking.md), `engine_net`
 
@@ -260,7 +260,7 @@ unversioned until a manifest is built.
 
 - [x] The client applies a full snapshot and subsequent deltas correctly.
 - [x] A dropped connection reconnects and resumes within the server window.
-- [ ] Terminal errors (expired/revoked/conflict) show a clear path forward.
+- [x] Terminal errors (expired/revoked/conflict) show a clear path forward.
 - [x] A stalled server does not freeze the client.
 - [x] Debug telemetry exposes tick, movement round-trip time, and queue depth.
 
@@ -274,15 +274,20 @@ rotated-token resume and movement after resume. A Windows local demo session was
 also visually confirmed active, with tick 807, six entities,
 accepted movement, zero reconnects, and empty transport queues (developer-provided
 screenshot, 2026-11-04). This is static-token demo coverage, not Nakama account
-login. Automatic-drop injection, account refresh, and richer terminal-error UX
-remain open.
+login. Terminal failures now show a category-specific explanation and recovery
+step in the online HUD: expired/revoked credentials direct the user to restart
+and sign in again (`R` retries current credentials), a session conflict advises
+waiting for the other session before retry, and a forbidden character directs the
+user back to character selection. Other failures advise checking connectivity
+and pressing `R`. Unit tests cover the recovery guidance. Automatic-drop
+injection and account refresh remain open.
 
 ---
 
 ## CLT-006 — Entity presentation and interpolation
 
 - **Priority:** P0
-- **Status:** In progress — Windows online rendering visually confirmed and the user considers current movement smooth enough; remaining presentation scope is open
+- **Status:** Done — client entity presentation delivered and visually reviewed; network-impairment tuning remains in `CLT-016`
 - **Depends on:** `CLT-004`, `CLT-005`
 - **References:** ADR 0012, `SIM-002`
 
@@ -294,8 +299,9 @@ remain open.
 - Give visible entities a grounded marker/ring and a facing-direction indicator
   oriented from authoritative facing data. Use clear, distinct styling for the
   local player, other entities, selected targets, and interactable targets.
-- Show nameplates, health bars, and status-effect indicators using only
-  server-authoritative public presentation data.
+- Show nameplates and health bars using only server-authoritative public
+  presentation data. Further status-effect indicators are tracked in
+  [CLT-018](#clt-018--public-status-indicators).
 - Show a contextual interaction prompt/affordance only for actions exposed by
   the server for that entity. Executing interactions and panels remain in
   `CLT-008`.
@@ -304,12 +310,12 @@ remain open.
 
 **Presentation direction:** Use familiar tab-target MMORPG conventions (the
 user cited FFXIV): a ground ring/marker under entities, a ground-facing cue,
-readable nameplates, health/status display, and a contextual interaction
+readable nameplates, health display, and a contextual interaction
 indicator. Create Lynx's own visual language rather than copying game assets.
-The current `PublicEntity` projection contains prototype, position, and yaw but
-does not yet provide all public name, health/status, or interaction fields;
-those must be added to the server-approved presentation contract before the UI
-can display them. Never infer hidden/private state client-side.
+The client `PublicEntity` projection contains prototype, position, yaw, optional
+public health, interaction availability, and the initial stunned flag. Names
+currently derive from prototype IDs; localized identity and broader status
+effects have separate follow-up work. Never infer hidden/private state client-side.
 
 **Acceptance criteria**
 
@@ -317,12 +323,69 @@ can display them. Never infer hidden/private state client-side.
 - [x] A teleport/correction does not cause unbounded extrapolation.
 - [x] Despawned entities disappear immediately and do not linger in UI.
 - [x] Rendered state never feeds back into authoritative decisions.
-- [ ] Visible entities have a ground marker and facing indicator matching
+- [x] Visible entities have a ground marker and facing indicator matching
       authoritative position and yaw.
-- [ ] Nameplates, health bars, and status indicators display server-authoritative
-      public data and disappear/update with the entity.
-- [ ] Interaction affordances reflect only server-exposed actions; invoking
+- [x] Nameplates display server-authoritative public identity and disappear or
+      update with the entity.
+- [x] Health bars display server-authoritative public health and disappear or
+      update with the entity.
+- [x] Interaction affordances reflect only server-exposed actions; invoking
       them is handled separately by `CLT-008`.
+- [x] Target selection has distinct styling, supports cycling/clearing, and
+      clears when the target leaves the public interest set or connection fails.
+
+**Implementation progress:** The online sprite renderer now adds ground rings
+and facing ticks to entities, with cyan for the local actor and gold for other
+visible entities. Child visuals follow the rendered entity position and are
+removed with their parent. Facing uses replicated yaw (0 degrees = +Z, 90 = +X).
+Accepted player/NPC movement updates yaw on the authority; stationary and
+rejected movement preserve it. Client tests cover projection and replicated
+facing after movement, plus entity cleanup. The user visually approved the
+Windows demo markers: the local actor is cyan, five remote entities are gold,
+and each marker has a ground ring/facing tick (2026-11-04). Screenshot was
+supplied in chat and is not stored in the repository.
+
+**Health display progress:** Client snapshots/deltas now retain the gateway's
+optional public hit points. Green health bars above entity markers update from
+that data and follow/despawn with the entity. Missing health or a nonpositive
+maximum hides the bar; the displayed fraction is clamped without altering
+authority. Replication update/removal and fraction bounds have test coverage.
+The user visually confirmed bars on the player and one entity in the Windows
+demo (2026-11-04). Nameplates and status effects remain separate unfinished
+work.
+
+**Interaction affordance progress:** A small gold marker now appears above an
+entity only when its server-projected interaction surface is enabled and
+advertises at least one verb. It follows and despawns with the entity; removal,
+empty verbs, or disabled state hides it. Automated projection/availability tests
+cover the gate. The user visually confirmed the gold square above interactable
+entities in the Windows demo (2026-11-04). The marker is informational only and
+grants no authority; interaction execution remains in `CLT-008`. Richer
+verb-specific prompts remain future polish.
+
+**Nameplate progress:** Online entities now show a small text label above their
+marker, derived from the server-replicated prototype ID (for example,
+`character.demo_guard` renders as “Demo Guard”). This provides a readable
+fallback without accepting arbitrary display text. It is not yet the authored,
+localized display name: the public entity contract currently lacks that field
+and the client does not resolve localization keys here. The user visually
+confirmed readable labels in the Windows demo (“player” and entity names
+including crate, owner crate, door, vault, and barrel) (2026-11-04). The current
+prototype-based nameplate criterion is complete; localized authored display
+names remain future polish, not a blocker for this criterion.
+
+Initial stunned-state replication and a `STUN` client tag are groundwork for
+the separately scoped [CLT-018](#clt-018--public-status-indicators). They are
+not a CLT-006 acceptance criterion; the current demo lacks a visual fixture.
+
+**Target selection progress:** Tab cycles visible non-local entities in stable
+ID order; Shift+Tab cycles backwards and Escape clears selection. An orange-red
+outer ring follows the selected entity. Selection clears on loss of active
+connection or target visibility and is suppressed during chat entry/focus loss.
+This is local UI selection, not interaction authorization. Cycle/wrap and ring
+visibility have automated coverage; the user confirmed the Windows demo target
+selection works as intended (2026-11-04). Screenshot was supplied in chat and is
+not stored in the repository.
 
 **Visual validation (2026-11-04):** The Windows local demo rendered the active
 online world, six blue entity markers, and the authoritative/rendered position
@@ -331,6 +394,41 @@ the movement feels smooth enough and approved this criterion. This is qualitativ
 Windows localhost validation, not a simulated-latency/jitter benchmark; such
 network-condition validation remains tracked by CLT-016. Screenshot was supplied
 in chat and is not stored in the repository.
+
+---
+
+## CLT-018 — Public status indicators
+
+- **Priority:** P2
+- **Status:** Icebox — initial stunned-state projection/tag exists; needs a
+  complete presentation contract, fixture, and visual validation
+- **Depends on:** `CLT-006`
+- **References:** [CLT-006](#clt-006--entity-presentation-and-interpolation), `SIM-002`
+
+**Why:** Status effects need an explicit public-data and visual treatment. Keep
+them separate from the delivered base entity presentation so hidden/private
+simulation state is not exposed implicitly.
+
+**Scope**
+
+- Define which statuses are safe and useful to replicate to nearby observers;
+  expose only approved public status identifiers, never internal modifiers.
+- Complete the current stunned-state `STUN` indicator, including reliable
+  clearing/update behavior and a deterministic fixture that makes it visible.
+- Add icon/label treatments for additional modeled public effects only when the
+  simulation has authoritative semantics and content mappings for them.
+- Validate visibility enter/leave, despawn, overlap/readability, and visual
+  behavior in the Windows demo.
+
+**Acceptance criteria**
+
+- [ ] Public status contract is explicit, bounded, and covered by privacy tests.
+- [ ] Status indicators appear/update/clear with authoritative state and entity
+      visibility; no private movement/combat internals leak.
+- [ ] A deterministic visual fixture demonstrates at least one status in the
+      graphical client and is reviewed.
+- [ ] Additional effects are displayed only when modeled by authoritative
+      simulation data; unsupported statuses fail closed.
 
 ---
 

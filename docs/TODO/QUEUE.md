@@ -38,8 +38,8 @@ copied from the task entries; a dash means none are declared.
 
 | ID | Task | Priority | Status | Dependencies | Sequencing note |
 | --- | --- | --- | --- | --- | --- |
-| [CLT-005](40-bevy-client.md#clt-005--network-client-loop) | Network client loop | P0 | In progress | `CLT-001`, `CLT-002` | Resume and telemetry verified in tests and Windows demo; complete failure UX and automatic-drop testing. |
-| [CLT-006](40-bevy-client.md#clt-006--entity-presentation-and-interpolation) | Entity presentation and interpolation | P0 | In progress | `CLT-004`, `CLT-005` | Smoothness confirmed for localhost; ground indicators, nameplates, health/status, and interaction affordances remain. |
+| [CLT-005](40-bevy-client.md#clt-005--network-client-loop) | Network client loop | P0 | In progress | `CLT-001`, `CLT-002` | Terminal recovery guidance is in place; automatic-drop injection and account refresh remain. |
+| [CLT-006](40-bevy-client.md#clt-006--entity-presentation-and-interpolation) | Entity presentation and interpolation | P0 | Done | `CLT-004`, `CLT-005` | Base entity visuals are implemented and user-reviewed; network impairment remains in CLT-016 and public status effects are separated into CLT-018. |
 | [CLT-007](40-bevy-client.md#clt-007--local-movement-and-prediction) | Local movement and prediction | P0 | In progress | `SIM-001`, `SIM-002`, `CLT-005` | WASD works visually; current local tests cannot validate latency/rejection; future harness and fixture are tracked in dependent `CLT-016`/`CLT-017`. |
 | [SIM-002](10-simulation-gameplay.md#sim-002--client-prediction-and-reconciliation-contract) | Client prediction and reconciliation contract | P0 | In progress | `SIM-001`, `CLT-005` | Resume visual validation when client/network environment is available. |
 | [CLT-002](40-bevy-client.md#clt-002--login-and-session-bootstrap) | Login and session bootstrap | P0 | In progress | `NET-001`, `CLT-001` | Finish server profiles and world-session lifecycle. |
@@ -65,6 +65,7 @@ copied from the task entries; a dash means none are declared.
 | ID | Task | Priority | Status | Dependencies | Sequencing note |
 | --- | --- | --- | --- | --- | --- |
 | [OPS-016](60-operations-release.md#ops-016--linux-graphical-client-smoke) | Linux graphical client smoke | P2 | Icebox | `OPS-006` | Defer Xvfb/software-render CI until a hosted Linux run can validate and review the screenshot artifact. |
+| [CLT-018](40-bevy-client.md#clt-018--public-status-indicators) | Public status indicators | P2 | Icebox | `CLT-006` | Complete the safe public-status contract and validate the stunned tag with a deterministic visual fixture. |
 
 ## Blocked
 

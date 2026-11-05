@@ -161,16 +161,30 @@ The static-token demo maps each configured token to one fixed demo character.
 It does not yet support logging in to an account and selecting different
 characters across multiple client instances.
 
-The window title shows connection status. Blue squares represent the server's
+The window title shows connection status. Entity markers represent the server's
 bounded public interest set; the camera follows the authoritative player position.
 WASD sends normalized endpoints at at most 20 requests per second, with one
 request in flight. Movement pauses during chat or focus loss. The avatar and
 camera follow bounded prediction and server corrections. Remote entities smooth
 toward server positions without extrapolation and snap over eight metres.
-FFXIV-like MMORPG entity cues are planned for CLT-006: ground rings and facing
-indicators, nameplates, health/status display, and contextual interaction
-affordances, all backed by server-approved public data. They are not in the
-current blue-square demo. Interaction execution and inventory remain future work
+CLT-006 now adds ground rings and facing ticks around online entity markers:
+cyan for your actor, gold for other entities. Facing comes from the server and
+updates on accepted movement; the ring is decorative, not a collision boundary.
+Tab selects the next visible non-local entity; Shift+Tab selects the previous
+one, and Escape clears selection. An orange-red outer ring marks the target.
+Selection clears when the target leaves visibility or the connection is lost;
+targeting keys are suppressed during chat entry and focus loss.
+Entities with server-provided health now show a green health bar above their
+marker. Missing health hides the bar; updates follow authoritative replication.
+Online entities also show a readable name derived from their replicated
+prototype ID; localized authored display names are not yet wired.
+Server-replicated stunned entities display a `STUN` tag; the demo does not spawn
+a stunned entity by default.
+Entities with an enabled server-advertised interaction show a small gold marker;
+it is an availability cue only, not authorization or an interaction action.
+Nameplates, status displays, and contextual interaction
+affordances remain planned, backed by server-approved public data.
+Interaction execution and inventory remain future work
 in CLT-008. The handshake uses this workspace's package version for engine and
 content, matching the built-in demo server.
 The Windows online demo was visually confirmed with movement, chat, presence,
@@ -178,8 +192,10 @@ and live diagnostics; the user considers current localhost movement smooth
 enough. Simulated-latency validation remains open.
 
 Transient failures retry with 250 ms exponential backoff capped at eight seconds
-and six consecutive retries, using rotated resume tokens. Press R after a
-terminal failure to retry; expired account credentials require signing in again.
+and six consecutive retries, using rotated resume tokens. After a terminal
+failure, the HUD explains the likely cause and recovery: press R to retry,
+re-authenticate expired/revoked credentials, wait for a conflicting session to
+close, or return to character selection if the chosen character is unavailable.
 The overlay shows tick, movement round-trip time (including server processing),
 queue depths and authoritative/rendered positions. WebSocket packet loss is
 unavailable. Movement starts at 0.09 m per request for the default 50 ms server

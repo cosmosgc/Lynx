@@ -296,7 +296,7 @@ async fn headless_schedule_connects_moves_and_disconnects() {
         assert_ne!(expected.len(), 0);
         let world = app.world_mut();
         let displayed: Vec<_> = world
-            .query::<(&Sprite, &Transform)>()
+            .query_filtered::<(&Sprite, &Transform), Without<ChildOf>>()
             .iter(world)
             .map(|(_, t)| (t.translation.x, t.translation.y))
             .collect();
@@ -533,6 +533,17 @@ async fn reconnects_with_rotated_resume_token_and_keeps_moving() {
             > position.x
     );
     assert!(!format!("{client:?}").contains(TOKEN));
+    let actor = client.world().actor().unwrap();
+    let facing = client
+        .world()
+        .entities()
+        .find(|entity| entity.entity == actor)
+        .unwrap()
+        .yaw_degrees;
+    assert!(
+        (facing - 90.0).abs() < 0.001,
+        "accepted +X movement must replicate facing"
+    );
 
     // A second successful resume proves that the rotated credential replaced
     // the now-consumed token from the first admission.

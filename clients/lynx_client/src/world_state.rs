@@ -22,6 +22,35 @@ pub struct PublicEntity {
     pub prototype: DefinitionId,
     pub position: WirePosition,
     pub yaw_degrees: f32,
+    #[serde(default)]
+    pub health: Option<PublicHealth>,
+    #[serde(default)]
+    pub interaction: Option<PublicInteraction>,
+    #[serde(default)]
+    pub stunned: bool,
+}
+
+/// Public hit points supplied by the authoritative entity projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct PublicHealth {
+    pub current: i32,
+    pub max: i32,
+}
+
+/// Minimal server-advertised interaction surface for contextual presentation.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct PublicInteraction {
+    #[serde(default)]
+    pub verbs: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+impl PublicInteraction {
+    #[must_use]
+    pub fn is_available(&self) -> bool {
+        self.enabled && !self.verbs.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
@@ -417,6 +446,76 @@ mod tests {
             )
             .unwrap();
         (state, g)
+    }
+
+    #[test]
+    fn public_interaction_only_advertises_enabled_nonempty_actions() {
+        let available: PublicInteraction = serde_json::from_value(json!({
+            "verbs": ["talk"], "range_m": 2.0, "enabled": true
+        }))
+        .unwrap();
+        let disabled: PublicInteraction = serde_json::from_value(json!({
+            "verbs": ["talk"], "enabled": false
+        }))
+        .unwrap();
+        let empty: PublicInteraction = serde_json::from_value(json!({
+            "verbs": [], "enabled": true
+        }))
+        .unwrap();
+        assert!(available.is_available());
+        assert!(!disabled.is_available());
+        assert!(!empty.is_available());
+    }
+
+    #[test]
+    fn public_stunned_status_is_optional_and_decoded() {
+        let mut value = public(actor(1), 1, 1, 0.0);
+        assert!(
+            !serde_json::from_value::<PublicEntity>(value["payload"].clone())
+                .unwrap()
+                .stunned
+        );
+        value["payload"]["stunned"] = json!(true);
+        assert!(
+            serde_json::from_value::<PublicEntity>(value["payload"].clone())
+                .unwrap()
+                .stunned
+        );
+    }
+
+    #[test]
+    fn public_health_updates_and_removal_follow_authority() {
+        let (mut state, generation) = start();
+        assert!(state.entities().all(|entity| entity.health.is_none()));
+        for (tick, health) in [
+            (11, json!({"current": 75, "max": 100})),
+            (12, json!({"current": 25, "max": 100})),
+            (13, Value::Null),
+        ] {
+            let mut update = public(actor(2), tick, tick, 4.0);
+            update["payload"]["health"] = health.clone();
+            state
+                .receive(
+                    generation,
+                    &world(
+                        "world.delta",
+                        tick,
+                        &[actor(1), actor(2)],
+                        &json!([update]),
+                        &Value::Null,
+                    ),
+                )
+                .unwrap();
+            let expected: Option<PublicHealth> = serde_json::from_value(health).unwrap();
+            assert_eq!(
+                state
+                    .entities()
+                    .find(|entity| entity.entity == actor(2))
+                    .unwrap()
+                    .health,
+                expected
+            );
+        }
     }
 
     #[test]
