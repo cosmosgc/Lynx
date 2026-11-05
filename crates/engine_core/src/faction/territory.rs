@@ -1112,7 +1112,7 @@ mod tests {
             let claim = book
                 .claim(
                     &format!("claim-{case}"),
-                    actor(case as u128 + 1),
+                    actor(u128::from(case) + 1),
                     &guards,
                     &zone,
                     claimed_at,
@@ -1130,7 +1130,7 @@ mod tests {
                 assert_eq!(
                     book.capture(
                         &format!("early-capture-{case}"),
-                        actor(case as u128 + 1_000),
+                        actor(u128::from(case) + 1_000),
                         &bandits,
                         &zone,
                         minimum_power,
@@ -1151,7 +1151,7 @@ mod tests {
             let capture = book
                 .capture(
                     &capture_key,
-                    actor(case as u128 + 1_000),
+                    actor(u128::from(case) + 1_000),
                     &bandits,
                     &zone,
                     minimum_power,
@@ -1165,7 +1165,7 @@ mod tests {
             assert_eq!(
                 book.capture(
                     &capture_key,
-                    actor(case as u128 + 2_000),
+                    actor(u128::from(case) + 2_000),
                     &guards,
                     &zone,
                     minimum_power,

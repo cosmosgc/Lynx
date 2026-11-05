@@ -87,6 +87,7 @@ impl ZoneHandoffCoordinator {
     /// Returns an error for invalid request keys/principals, missing route or
     /// atlas placement, ambiguous/missing player actors, an existing
     /// destination actor, or any simulation transfer validation failure.
+    #[allow(clippy::too_many_lines)] // Keep route, lease, actor, and receipt validation in one transaction.
     pub fn handoff_player(
         &mut self,
         atlas: &WorldMapDefinition,
@@ -299,6 +300,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // Exercises handoff, retry deduplication, and snapshot recovery together.
     fn authored_handoff_is_duplicate_safe_and_survives_zone_checkpoint_recovery() {
         let atlas = atlas(false);
         let character = id(IdKind::Character, 7);

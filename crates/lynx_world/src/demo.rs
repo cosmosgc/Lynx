@@ -613,9 +613,9 @@ mod tests {
                             name: MessageKey::parse("behavior.name").unwrap(),
                             description: MessageKey::parse("behavior.description").unwrap(),
                         },
-                        components: Default::default(),
+                        components: std::collections::BTreeMap::default(),
                         presentation: None,
-                        tags: Default::default(),
+                        tags: std::collections::BTreeSet::default(),
                         behavior: Some(BehaviorDefinition { kind, range_m }),
                     },
                 )

@@ -608,7 +608,10 @@ fn periodic_damage_is_tick_based_source_refreshed_and_cleanseable() {
     zone.advance_tick();
     zone.advance_tick();
     assert_eq!(zone.entity(target).unwrap().health.unwrap().current, 18);
-    assert!(zone.entity(target).unwrap().damage_over_time.is_empty());
+    assert_eq!(
+        zone.entity(target).unwrap().damage_over_time,
+        [] as [engine_sim::entity::TimedDamageOverTime; 0]
+    );
 }
 
 #[test]
@@ -640,7 +643,10 @@ fn respawn_uses_server_authored_position_and_preserves_identity_without_control(
         zone.entity(target).unwrap().respawn_at,
         Some(engine_core::time::Tick(2))
     );
-    assert!(zone.entity(target).unwrap().damage_over_time.is_empty());
+    assert_eq!(
+        zone.entity(target).unwrap().damage_over_time,
+        [] as [engine_sim::entity::TimedDamageOverTime; 0]
+    );
 
     zone.advance_tick();
     assert!(!zone.entity(target).unwrap().is_alive());

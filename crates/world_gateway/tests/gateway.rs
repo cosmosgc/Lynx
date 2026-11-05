@@ -469,20 +469,21 @@ fn zone_chat_discovery_and_spoofed_or_invalid_requests() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // This end-to-end test covers the complete chat lifecycle.
 fn zone_chat_is_server_attributed_bounded_ordered_and_survives_resume() {
     let mut f = fixture();
     let alice = connect(&mut f.gateway, "alice", f.alice_principal);
     let bob = connect(&mut f.gateway, "bob", f.bob_principal);
 
-    for (index, content) in ["first", "second", "third"].into_iter().enumerate() {
+    for content in ["first", "second", "third"] {
         let request = envelope(
-            &format!("chat-{index}"),
+            &format!("chat-{content}"),
             "chat.send",
             json!({"channel_id": "zone", "content": content}),
         );
         let reply = f
             .gateway
-            .handle(&alice.session, &request, Millis::new(1_100 + index as i64))
+            .handle(&alice.session, &request, Millis::new(1_100))
             .unwrap();
         assert_eq!(reply[0].kind.as_str(), "chat.send.result");
     }
