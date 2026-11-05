@@ -479,8 +479,8 @@ fn validate_transfer_receipt(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entity::Door;
-    use crate::mind::Mind;
+    use crate::entity::{Door, RespawnPolicy};
+    use crate::mind::{Controller, Mind};
     use engine_core::id::DefinitionId;
     use engine_core::inventory::{Inventory, ItemStack, UniformItemRules};
     use engine_core::math::Vec3;
@@ -631,6 +631,49 @@ mod tests {
         assert_eq!(restored.entity(target).unwrap().shields[0].remaining, 4);
         assert_eq!(restored.combat_audit(), source.combat_audit());
         assert_eq!(restored.snapshot(), snapshot);
+    }
+
+    #[test]
+    fn death_and_respawn_schedule_survive_restart_without_dropping_character_identity() {
+        let mut source = zone();
+        let principal = StableId::from_parts(IdKind::Character, 1, 21);
+        let character = source
+            .spawn(
+                entity(1, PersistencePolicy::PersistentEntity)
+                    .with_health(12)
+                    .with_mind(Mind::player(principal, "old-session"))
+                    .with_respawn_policy(RespawnPolicy {
+                        position: Vec3::new(5.0, 0.0, 5.0),
+                        delay_ticks: 2,
+                    }),
+            )
+            .unwrap();
+        let killer = source
+            .spawn(entity(2, PersistencePolicy::PersistentEntity).with_health(12))
+            .unwrap();
+        let death =
+            source.apply_combat_damage(killer, character, 12, crate::combat::DamageType::Physical);
+        assert!(death.died);
+
+        let snapshot: ZoneSnapshot =
+            serde_json::from_slice(&serde_json::to_vec(&source.snapshot()).unwrap()).unwrap();
+        let mut restored = Zone::restore(&snapshot, nav(), rules()).unwrap();
+        assert!(!restored.entity(character).unwrap().is_alive());
+        assert_eq!(
+            restored.entity(character).unwrap().respawn_at,
+            Some(Tick(2))
+        );
+        restored.advance_tick();
+        assert!(!restored.entity(character).unwrap().is_alive());
+        restored.advance_tick();
+
+        let respawned = restored.entity(character).unwrap();
+        assert!(respawned.is_alive());
+        assert_eq!(respawned.health.unwrap().current, 12);
+        assert_eq!(respawned.position(), Vec3::new(5.0, 0.0, 5.0));
+        let mind = respawned.mind.as_ref().unwrap();
+        assert_eq!(mind.player_character, Some(principal));
+        assert_eq!(mind.controller, Controller::None);
     }
 
     #[test]

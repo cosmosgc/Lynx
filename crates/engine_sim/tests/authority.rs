@@ -593,6 +593,22 @@ fn periodic_damage_is_tick_based_source_refreshed_and_cleanseable() {
         zone.advance_tick();
     }
     assert_eq!(zone.entity(target).unwrap().health.unwrap().current, 20);
+
+    zone.apply_damage_over_time(
+        target,
+        source,
+        2,
+        1,
+        3,
+        engine_sim::combat::DamageType::Fire,
+    )
+    .unwrap();
+    zone.advance_tick();
+    assert_eq!(zone.entity(target).unwrap().health.unwrap().current, 18);
+    zone.advance_tick();
+    zone.advance_tick();
+    assert_eq!(zone.entity(target).unwrap().health.unwrap().current, 18);
+    assert!(zone.entity(target).unwrap().damage_over_time.is_empty());
 }
 
 #[test]

@@ -277,9 +277,9 @@ prioritizing tanks). It is a design proposal, not an implementation contract.
 
 **Acceptance criteria**
 
-- [ ] Effects expire deterministically on tick boundaries and survive snapshot
+- [x] Effects expire deterministically on tick boundaries and survive snapshot
       round trips when their policy says so.
-- [ ] Respawn cannot be triggered by a client-supplied location.
+- [x] Respawn cannot be triggered by a client-supplied location.
 - [ ] Stacking and mitigation rules are covered by table-driven tests.
 - [ ] Death/respawn behavior is documented for reconnect and zone transfer.
 
@@ -319,9 +319,12 @@ Entities with a server-authored `RespawnPolicy` recover at the configured safe
 position after a positive tick delay. Death releases control and clears timed
 effects; there is no lootable corpse or item penalty. The gateway rebinds an
 already-connected principal after respawn and sends a private prediction reset.
-Remaining: table-driven effect/mitigation edge coverage, respawn reconnect and
-zone-transfer policy coverage, and long-term operator export beyond the bounded
-snapshot audit ring.
+Tests additionally verify that a DoT stops at its exclusive expiry tick and
+that a persisted death schedule resumes after restart, restoring the server-set
+position and character identity without restoring the old controller. Remaining:
+table-driven effect/mitigation edge coverage, respawn reconnect and zone-transfer
+policy coverage, and long-term operator export beyond the bounded snapshot audit
+ring.
 
 ---
 
