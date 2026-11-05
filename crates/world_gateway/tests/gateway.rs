@@ -469,6 +469,127 @@ fn zone_chat_discovery_and_spoofed_or_invalid_requests() {
 }
 
 #[test]
+fn zone_chat_is_server_attributed_bounded_ordered_and_survives_resume() {
+    let mut f = fixture();
+    let alice = connect(&mut f.gateway, "alice", f.alice_principal);
+    let bob = connect(&mut f.gateway, "bob", f.bob_principal);
+
+    for (index, content) in ["first", "second", "third"].into_iter().enumerate() {
+        let request = envelope(
+            &format!("chat-{index}"),
+            "chat.send",
+            json!({"channel_id": "zone", "content": content}),
+        );
+        let reply = f
+            .gateway
+            .handle(&alice.session, &request, Millis::new(1_100 + index as i64))
+            .unwrap();
+        assert_eq!(reply[0].kind.as_str(), "chat.send.result");
+    }
+
+    let outbox = f.gateway.take_chat_outbox();
+    assert_eq!(outbox.len(), 6);
+    assert!(outbox.iter().any(|(session, message)| {
+        session == &bob.session
+            && message.kind.as_str() == "chat.message"
+            && message.body["sender_id"] == "alice"
+            && message.body["sender_name"] == f.alice_principal.to_string()
+    }));
+
+    let history = envelope(
+        "history-page",
+        "chat.history",
+        json!({"channel_id": "zone", "limit": 2}),
+    );
+    let page = f
+        .gateway
+        .handle(&bob.session, &history, Millis::new(1_200))
+        .unwrap();
+    assert_eq!(
+        page[0].body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["content"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["second", "third"]
+    );
+    assert_eq!(page[0].body["next_before"], 2);
+    let previous = f
+        .gateway
+        .handle(
+            &bob.session,
+            &envelope(
+                "history-previous",
+                "chat.history",
+                json!({"channel_id": "zone", "limit": 2, "before": 2}),
+            ),
+            Millis::new(1_201),
+        )
+        .unwrap();
+    assert_eq!(previous[0].body["messages"][0]["content"], "first");
+
+    let rate_limited = f
+        .gateway
+        .handle(
+            &alice.session,
+            &envelope(
+                "chat-four",
+                "chat.send",
+                json!({"channel_id": "zone", "content": "fourth"}),
+            ),
+            Millis::new(1_200),
+        )
+        .unwrap();
+    assert_eq!(rate_limited[0].kind.as_str(), "chat.send.result");
+    let rate_limited = f
+        .gateway
+        .handle(
+            &alice.session,
+            &envelope(
+                "chat-five",
+                "chat.send",
+                json!({"channel_id": "zone", "content": "fifth"}),
+            ),
+            Millis::new(1_200),
+        )
+        .unwrap();
+    assert_eq!(rate_limited[0].kind.as_str(), "chat.send.result");
+    let exceeded = f
+        .gateway
+        .handle(
+            &alice.session,
+            &envelope(
+                "chat-six",
+                "chat.send",
+                json!({"channel_id": "zone", "content": "sixth"}),
+            ),
+            Millis::new(1_200),
+        )
+        .unwrap();
+    assert_eq!(exceeded[0].kind.as_str(), "protocol.error");
+
+    f.gateway
+        .disconnect(&alice.session, Tick::ZERO, Millis::new(1_300))
+        .unwrap();
+    let resumed = f
+        .gateway
+        .resume(&alice.token, &handshake(), Tick::ZERO, Millis::new(1_400))
+        .unwrap();
+    let complete_history = envelope(
+        "history-after-resume",
+        "chat.history",
+        json!({"channel_id": "zone", "limit": 100}),
+    );
+    let history = f
+        .gateway
+        .handle(&resumed.session, &complete_history, Millis::new(1_401))
+        .unwrap();
+    assert_eq!(history[0].body["messages"][0]["content"], "first");
+    assert_eq!(history[0].body["messages"][4]["content"], "fifth");
+}
+
+#[test]
 fn session_lifecycle_cancels_queued_movement() {
     for lifecycle in ["close", "disconnect", "resume"] {
         let mut f = fixture();

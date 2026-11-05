@@ -14,6 +14,7 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use engine_content::{BehaviorKind, ContentKind, ContentSet};
 use engine_core::error::{EngineError, ErrorCode};
 use engine_core::faction::{Alignment, FactionCatalog, Thresholds};
 use engine_core::faction::{
@@ -249,6 +250,44 @@ fn install_demo_ai_policy(zone: &mut Zone) -> Result<(), EngineError> {
         navigation_replan: ReplanPolicy::default(),
     }));
     Ok(())
+}
+
+/// Convert loaded, validated behavior definitions into the zone's bounded AI
+/// runtime bindings. Definitions are returned in stable ID order, and malformed
+/// or unsupported behavior data fails closed instead of silently idling.
+pub fn ai_behavior_bindings(
+    content: &ContentSet,
+) -> Result<Vec<AiBehaviorDefinition>, EngineError> {
+    content
+        .definitions
+        .values()
+        .filter(|definition| definition.kind() == ContentKind::Behavior)
+        .map(|definition| {
+            let authored = definition.behavior.as_ref().ok_or_else(|| {
+                EngineError::new(
+                    ErrorCode::InvalidRequest,
+                    "behavior content has no bounded runtime semantics",
+                )
+                .with_detail("behavior", definition.id.to_string())
+            })?;
+            if !authored.range_m.is_finite() || authored.range_m <= 0.0 {
+                return Err(EngineError::new(
+                    ErrorCode::InvalidRequest,
+                    "behavior content range must be finite and positive",
+                )
+                .with_detail("behavior", definition.id.to_string()));
+            }
+            let kind = match authored.kind {
+                BehaviorKind::Guard => AiBehaviorKind::Guard,
+                BehaviorKind::GuardChase => AiBehaviorKind::GuardChase,
+            };
+            Ok(AiBehaviorDefinition {
+                id: definition.id.clone(),
+                kind,
+                range_m: authored.range_m,
+            })
+        })
+        .collect()
 }
 
 fn demo_rules() -> Arc<dyn ItemRules + Send + Sync> {
@@ -523,6 +562,9 @@ fn random_seed() -> Result<u64, EngineError> {
 mod tests {
     use super::*;
     use crate::auth::{Authenticator, digest};
+    use engine_content::{BehaviorDefinition, ContentDefinition, DisplayText};
+    use engine_core::i18n::MessageKey;
+    use engine_core::schema::SchemaVersion;
 
     fn grants(count: usize) -> Vec<Grant> {
         let hashes: Vec<[u8; 32]> = (0..count)
@@ -552,6 +594,42 @@ mod tests {
             );
             assert!(entity.position().x >= 0.0);
         }
+    }
+
+    #[test]
+    fn authored_ai_definitions_map_to_stable_bounded_runtime_bindings() {
+        let mut content = ContentSet::new();
+        for (id, kind, range_m) in [
+            ("behavior.demo_guard", BehaviorKind::Guard, 8.0),
+            ("behavior.demo_chaser", BehaviorKind::GuardChase, 24.0),
+        ] {
+            content
+                .insert_definition(
+                    format!("behaviors/{id}.ron"),
+                    ContentDefinition {
+                        id: definition(id).unwrap(),
+                        version: SchemaVersion::new(1, 0),
+                        display: DisplayText {
+                            name: MessageKey::parse("behavior.name").unwrap(),
+                            description: MessageKey::parse("behavior.description").unwrap(),
+                        },
+                        components: Default::default(),
+                        presentation: None,
+                        tags: Default::default(),
+                        behavior: Some(BehaviorDefinition { kind, range_m }),
+                    },
+                )
+                .unwrap();
+        }
+
+        let bindings = ai_behavior_bindings(&content).unwrap();
+        assert_eq!(bindings.len(), 2);
+        assert_eq!(bindings[0].id.as_str(), "behavior.demo_chaser");
+        assert_eq!(bindings[0].kind, AiBehaviorKind::GuardChase);
+        assert_eq!(bindings[0].range_m, 24.0);
+        assert_eq!(bindings[1].id.as_str(), "behavior.demo_guard");
+        assert_eq!(bindings[1].kind, AiBehaviorKind::Guard);
+        assert_eq!(bindings[1].range_m, 8.0);
     }
 
     #[test]

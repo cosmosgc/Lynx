@@ -923,6 +923,7 @@ mod tests {
             components,
             presentation: None,
             tags: BTreeSet::new(),
+            behavior: None,
         }
     }
 

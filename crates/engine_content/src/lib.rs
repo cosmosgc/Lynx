@@ -12,9 +12,9 @@ pub use bundle::{
     is_sha256_hex, sha256_hex,
 };
 pub use definition::{
-    ContentDefinition, ContentKind, DisplayText, MapPosition, MapZone, MinigameDefinition,
-    Presentation, PresentationMode, RouteKind, UiFieldBinding, UiPanelAction, UiPanelDefinition,
-    WorldMapDefinition, ZoneRoute, is_safe_asset_path,
+    BehaviorDefinition, BehaviorKind, ContentDefinition, ContentKind, DisplayText, MapPosition,
+    MapZone, MinigameDefinition, Presentation, PresentationMode, RouteKind, UiFieldBinding,
+    UiPanelAction, UiPanelDefinition, WorldMapDefinition, ZoneRoute, is_safe_asset_path,
 };
 pub use diagnostic::{Diagnostic, Severity, ValidationReport};
 pub use diff::{ContentDiff, DefinitionChange, VersionBump, diff};

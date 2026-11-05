@@ -637,6 +637,28 @@ pub struct ContentDefinition {
     /// Free-form authoring tags.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub tags: BTreeSet<String>,
+    /// Bounded simulation behavior for `behavior.*` definitions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behavior: Option<BehaviorDefinition>,
+}
+
+/// Declarative inputs for the bounded built-in AI behavior primitives.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BehaviorDefinition {
+    /// Runtime primitive selected by this content definition.
+    pub kind: BehaviorKind,
+    /// Maximum perception and engagement range in meters.
+    pub range_m: f32,
+}
+
+/// Simulation behavior primitives that content may select without code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BehaviorKind {
+    /// Perceive and attack visible hostiles without pursuing them.
+    Guard,
+    /// Perceive and attack visible hostiles, pursuing with bounded paths.
+    GuardChase,
 }
 
 impl ContentDefinition {
@@ -667,6 +689,29 @@ impl ContentDefinition {
                 "components",
                 "definition declares no components",
             ));
+        }
+        match (self.kind(), &self.behavior) {
+            (ContentKind::Behavior, None) => issues.push(ValidationIssue::new(
+                "content.missing_behavior",
+                "behavior",
+                "behavior definitions must declare bounded simulation semantics",
+            )),
+            (ContentKind::Behavior, Some(behavior))
+                if !behavior.range_m.is_finite() || behavior.range_m <= 0.0 =>
+            {
+                issues.push(ValidationIssue::new(
+                    "content.invalid_behavior_range",
+                    "behavior.range_m",
+                    "behavior range must be finite and positive",
+                ));
+            }
+            (ContentKind::Behavior, Some(_)) => {}
+            (_, Some(_)) => issues.push(ValidationIssue::new(
+                "content.unexpected_behavior",
+                "behavior",
+                "only behavior definitions may declare simulation behavior",
+            )),
+            _ => {}
         }
         if let Some(presentation) = &self.presentation {
             issues.extend(presentation.validate("presentation"));
@@ -731,6 +776,7 @@ mod tests {
                 animation_set: None,
             }),
             tags: BTreeSet::new(),
+            behavior: None,
         }
     }
 
@@ -751,6 +797,54 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn behavior_definitions_validate_bounded_runtime_semantics() {
+        let mut definition = definition(PresentationMode::Billboard2d);
+        definition.id = DefinitionId::new("behavior.demo_guard").unwrap();
+        assert_eq!(definition.kind(), ContentKind::Behavior);
+        assert!(
+            definition
+                .validate_shape()
+                .iter()
+                .any(|issue| { issue.code == "content.missing_behavior" })
+        );
+
+        definition.behavior = Some(BehaviorDefinition {
+            kind: BehaviorKind::GuardChase,
+            range_m: 12.0,
+        });
+        let authored = ron::to_string(&definition).unwrap();
+        let parsed: ContentDefinition = ron::from_str(&authored).unwrap();
+        assert_eq!(parsed, definition);
+        let valid_issues = definition.validate_shape();
+        assert!(
+            !valid_issues
+                .iter()
+                .any(|issue| issue.code.contains("behavior")),
+            "unexpected behavior issues: {valid_issues:?}"
+        );
+
+        definition.behavior.as_mut().unwrap().range_m = f32::INFINITY;
+        assert!(
+            definition
+                .validate_shape()
+                .iter()
+                .any(|issue| issue.code == "content.invalid_behavior_range")
+        );
+
+        definition.id = DefinitionId::new("entity.guard").unwrap();
+        definition.behavior = Some(BehaviorDefinition {
+            kind: BehaviorKind::Guard,
+            range_m: 12.0,
+        });
+        assert!(
+            definition
+                .validate_shape()
+                .iter()
+                .any(|issue| issue.code == "content.unexpected_behavior")
+        );
     }
 
     #[test]

@@ -328,7 +328,7 @@ snapshot audit ring.
 ## SIM-006 — AI behaviors, schedules, and perception budgets
 
 - **Priority:** P1
-- **Status:** In progress — opt-in bounded tick-driven guard increment
+- **Status:** In progress — bounded guard primitives, typed behavior authoring, and content-to-runtime binding are implemented; scheduling and graph execution remain
 - **Depends on:** `SIM-001`
 - **References:** `crates/engine_sim/src/ai.rs`, `mind.rs`,
   [world simulation](../world-simulation.md)
@@ -388,14 +388,18 @@ APIs are unchanged. Content-defined behavior graphs, scheduling, group aggro,
 fair scheduling, persistent inspection, and a shared action budget remain. AI
 policy now accepts server-approved `AiBehaviorDefinition` bindings, allowing a
 content behavior ID to select the bounded Guard or GuardChase primitive and its
-perception range; a test verifies a custom ID and constrained range. GuardChase
+perception range; a test verifies a custom ID and constrained range.
+`engine_content` defines and validates typed behavior semantics and finite
+positive ranges, while `lynx_world::demo::ai_behavior_bindings` maps a loaded
+`ContentSet` into stable runtime bindings; tests verify authored primitive and
+range values cross this seam without changing simulation code. GuardChase
 uses the zone's cumulative path budget and per-agent retry state, then moves
 through the same server-side collision and dynamic-obstacle checks as other
 authoritative movement. `cargo test -p engine_sim
 policy_binds_content_behavior_ids_to_bounded_guard_semantics` passes.
-The content loader does not yet hydrate these definitions from authored bundles,
-and only the Guard and GuardChase primitives exist, so content-only behavior
-graphs/schedules remain open. Movement authority is implemented in `SIM-001`;
+Only the Guard and GuardChase primitives exist, so content-only behavior graphs,
+schedules, group aggro, fair scheduling, persistent inspection, and a shared
+action budget remain open. Movement authority is implemented in `SIM-001`;
 visual client reconciliation remains in `SIM-002`.
 
 ---
@@ -461,7 +465,7 @@ Use `Zone::add_dynamic_obstacle` for tick-expiring temporary blockers and
 ## SIM-008 — World chat and presence
 
 - **Priority:** P1
-- **Status:** In progress — Nakama persistent-room chat is integrated; world-zone authorization and moderation pending
+- **Status:** In progress — authenticated zone chat/presence, bounded history, rate limiting, and reconnect tests are implemented; external moderation remains deferred
 - **Depends on:** —
 - **References:** `crates/game_api/src/chat.rs`, `social.rs`,
   [README Phase 3](../../README.md#phase-3--interaction-and-mind-system--in-progress),
@@ -475,21 +479,23 @@ owned by Lynx.
 **Scope**
 
 - Add gateway messages for sending, history, channel listing, and presence.
-- Server-resolve sender identity, channel membership, zone scope, ignore/mute
-  state, and rate limits; reject spoofed senders and unauthorized channels.
+- Server-resolve sender identity, channel membership, zone scope, and rate
+  limits; reject spoofed senders and unauthorized channels.
 - Support zone, party, whisper, and system channels with bounded history and
   pagination.
-- Hook moderation/reporting (`NET-009`) and redact private content from logs.
+- Redact private content from logs. Moderation/reporting and content-policy
+  integration remain in `NET-009`/`CNT-008` and are not part of this increment.
 - Replicate presence changes through the existing interest/session machinery.
 
 **Acceptance criteria**
 
-- [ ] A client cannot send as another character or into a channel it has not
+- [x] A client cannot send as another character or into a channel it has not
       joined.
-- [ ] History is bounded, paginated, and ordered deterministically.
-- [ ] Mute/ignore and rate limits are enforced server-side.
-- [ ] Chat survives reconnect for the retained window where policy allows.
-- [ ] Integration tests cover two sessions in one zone.
+- [x] History is bounded, paginated, and ordered deterministically.
+- [x] Rate limits are enforced server-side. Mute/ignore policy is deferred to
+      `NET-009`/`CNT-008`.
+- [x] Chat survives reconnect for the retained window where policy allows.
+- [x] Integration tests cover two sessions in one zone.
 
 **Increment:** For account sessions with a verified character, the client joins
 the persistent room named by `LYNX_CHAT_ROOM` (default `lynx-zone`) using the

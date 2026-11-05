@@ -590,6 +590,7 @@ mod tests {
                 animation_set: None,
             }),
             tags: BTreeSet::new(),
+            behavior: None,
         }
     }
 
