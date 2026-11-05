@@ -16,7 +16,9 @@ use crate::entity::FactionMembership;
 pub const COMBAT_RULES_VERSION: SchemaVersion = SchemaVersion::new(1, 0);
 
 /// Server-owned damage school selected by an authoritative combat source.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DamageType {
     /// Physical weapon and collision damage.
@@ -28,6 +30,29 @@ pub enum DamageType {
     Frost,
     /// Poison or disease damage.
     Poison,
+}
+
+/// Redacted server-only record of one resolved combat damage application.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CombatAuditEvent {
+    /// Simulation tick when the damage was resolved.
+    pub tick: engine_core::time::Tick,
+    /// Server-resolved source identity; no account credentials or chat data.
+    pub source: engine_core::id::StableId,
+    /// Target entity identity.
+    pub target: engine_core::id::StableId,
+    /// Resolved damage school.
+    pub damage_type: DamageType,
+    /// Input damage before mitigation.
+    pub raw_damage: i32,
+    /// Damage after defense/resistance and before shields.
+    pub mitigated_damage: i32,
+    /// Amount absorbed by shields.
+    pub shield_absorbed: i32,
+    /// Hit points removed.
+    pub health_damage: i32,
+    /// Hit points remaining, if the entity has health.
+    pub remaining_health: Option<i32>,
 }
 
 /// Server-owned resistance values by damage type.
@@ -67,6 +92,9 @@ pub struct CombatStats {
     pub attack: u32,
     /// Non-negative incoming physical mitigation after server-owned loadout effects.
     pub defense: u32,
+    /// Damage school selected by the trusted server-side attack source.
+    #[serde(default)]
+    pub damage_type: DamageType,
     /// Server-owned typed resistances applied after `defense`.
     #[serde(default)]
     pub resistances: Resistances,
@@ -79,6 +107,7 @@ impl CombatStats {
         Self {
             attack,
             defense,
+            damage_type: DamageType::Physical,
             resistances: Resistances {
                 physical: 0,
                 fire: 0,
@@ -92,6 +121,13 @@ impl CombatStats {
     #[must_use]
     pub const fn with_resistances(mut self, resistances: Resistances) -> Self {
         self.resistances = resistances;
+        self
+    }
+
+    /// Select the attack's server-owned damage school.
+    #[must_use]
+    pub const fn with_damage_type(mut self, damage_type: DamageType) -> Self {
+        self.damage_type = damage_type;
         self
     }
 }

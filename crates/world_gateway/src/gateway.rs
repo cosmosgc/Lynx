@@ -1015,6 +1015,16 @@ impl WorldGateway {
 
         // Provisional server-owned movement speed; no client controls this budget.
         let (_, outcomes) = self.zone.advance_movement_tick(interval_ms, 2.0);
+        let respawned: BTreeSet<_> = self.zone.take_respawned_entities().into_iter().collect();
+        let movement_resets = self.zone.take_movement_resets();
+        if !respawned.is_empty() {
+            let sessions: Vec<_> = self.sessions.connected().cloned().collect();
+            for session in sessions {
+                if respawned.contains(&session.actor) {
+                    self.bind_actor(&session);
+                }
+            }
+        }
         let changes = self.sync_world();
         self.pending_changes.extend(changes);
         let changes = std::mem::take(&mut self.pending_changes);
@@ -1032,7 +1042,8 @@ impl WorldGateway {
 
         let tick = self.zone.tick();
         let mut base = ReplicationBatch::new(tick);
-        let mut changes_for_slow_update = BTreeSet::new();
+        let mut changes_for_slow_update = movement_resets.clone();
+        changes_for_slow_update.extend(respawned.iter().copied());
         for change in changes {
             match change {
                 Change::Appeared(entity) => {
@@ -1076,6 +1087,7 @@ impl WorldGateway {
                     position: outcome.position,
                     last_consumed_sequence: Some(outcome.sequence),
                     applied: Some(outcome.applied),
+                    reset: false,
                     slow_multiplier: self
                         .zone
                         .entity(session.actor)
@@ -1096,6 +1108,7 @@ impl WorldGateway {
                                 session.id.as_str(),
                             ),
                             applied: None,
+                            reset: movement_resets.contains(&session.actor),
                             slow_multiplier: actor.slow.map(|slow| slow.multiplier),
                         }
                     })
@@ -1443,7 +1456,9 @@ impl WorldGateway {
             .filter(|entity| {
                 entity.mind.as_ref().is_some_and(|mind| {
                     mind.controller.player_character() == Some(principal)
-                        || (mind.controller == Controller::None && entity.owner == Some(principal))
+                        || (mind.controller == Controller::None
+                            && (mind.player_character == Some(principal)
+                                || entity.owner == Some(principal)))
                 })
             })
             .map(|entity| entity.id)
@@ -1548,6 +1563,7 @@ impl WorldGateway {
                     session.id.as_str(),
                 ),
                 applied: None,
+                reset: false,
                 slow_multiplier: self
                     .zone
                     .entity(session.actor)

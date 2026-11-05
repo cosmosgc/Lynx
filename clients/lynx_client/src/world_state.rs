@@ -86,6 +86,8 @@ struct Movement {
     last_consumed_sequence: Option<u64>,
     applied: Option<bool>,
     #[serde(default)]
+    reset: bool,
+    #[serde(default)]
     slow_multiplier: Option<f32>,
 }
 
@@ -378,6 +380,7 @@ impl WorldState {
             (true, Some(m))
                 if m.tick == tick
                     && m.applied.is_none()
+                    && !m.reset
                     && valid_slow_multiplier(m.slow_multiplier) =>
             {
                 self.reconciliation.baseline(
@@ -392,6 +395,7 @@ impl WorldState {
             (false, Some(m))
                 if m.tick == tick
                     && m.applied.is_some()
+                    && !m.reset
                     && m.last_consumed_sequence.is_some()
                     && valid_slow_multiplier(m.slow_multiplier) =>
             {
@@ -410,8 +414,16 @@ impl WorldState {
                     && m.applied.is_none()
                     && valid_slow_multiplier(m.slow_multiplier) =>
             {
-                // Effect state updates local movement pacing only; they are not
-                // movement acknowledgements or position baselines.
+                if m.reset {
+                    self.reconciliation.reset(
+                        m.position.into(),
+                        m.tick,
+                        m.last_consumed_sequence,
+                        self.domain,
+                    )?;
+                    self.pending = None;
+                    self.last_movement_applied = None;
+                }
                 self.slow_multiplier = m.slow_multiplier;
             }
             (false, None) => {}
@@ -591,6 +603,29 @@ mod tests {
         );
         assert_eq!(state.tick(), Some(12));
         assert_eq!(state.slow_multiplier(), None);
+    }
+
+    #[test]
+    fn private_discontinuity_resets_prediction_to_authoritative_position() {
+        let (mut state, generation) = start();
+        let mut reset = movement(11, 9.0, None, None);
+        reset["reset"] = json!(true);
+        reset["last_consumed_sequence"] = json!(0);
+        state
+            .receive(
+                generation,
+                &world("world.delta", 11, &[actor(1), actor(2)], &json!([]), &reset),
+            )
+            .unwrap();
+        assert_eq!(
+            state.reconciliation().authoritative_position().unwrap().x,
+            9.0
+        );
+        assert_eq!(
+            state.reconciliation().predicted_position(),
+            state.reconciliation().authoritative_position()
+        );
+        assert!(!state.has_pending_movement());
     }
 
     #[test]

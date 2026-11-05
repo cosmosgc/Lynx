@@ -9,7 +9,6 @@ copied from the task entries; a dash means none are declared.
 
 | ID | Task | Priority | Status | Dependencies | Sequencing note |
 | --- | --- | --- | --- | --- | --- |
-| [SIM-018](10-simulation-gameplay.md#sim-018--determinism-and-tick-budget) | Determinism and tick budget | P1 | Ready | — | Establish measured simulation limits alongside feature work. |
 | [PST-007](20-persistence-backend.md#pst-007--postgresql-connection-hardening) | PostgreSQL connection hardening | P1 | Done | — | Verified TLS, bounded pools/retries, and split runtime/migration roles. |
 | [PST-009](20-persistence-backend.md#pst-009--backup-and-restore-verification) | Backup and restore verification | P1 | Ready | — | Define recovery guarantees before OPS-003 automation. |
 | [NET-006](30-networking-security.md#net-006--replication-delivery-slo-and-backpressure) | Replication delivery SLO and backpressure | P1 | Ready | — | Measure delivery limits; informs performance/load work. |
@@ -41,13 +40,16 @@ copied from the task entries; a dash means none are declared.
 | [CLT-005](40-bevy-client.md#clt-005--network-client-loop) | Network client loop | P0 | In progress | `CLT-001`, `CLT-002` | Terminal recovery guidance is in place; automatic-drop injection and account refresh remain. |
 | [CLT-006](40-bevy-client.md#clt-006--entity-presentation-and-interpolation) | Entity presentation and interpolation | P0 | Done | `CLT-004`, `CLT-005` | Base entity visuals are implemented and user-reviewed; network impairment remains in CLT-016 and public status effects are separated into CLT-018. |
 | [CLT-007](40-bevy-client.md#clt-007--local-movement-and-prediction) | Local movement and prediction | P0 | In progress | `SIM-001`, `SIM-002`, `CLT-005` | WASD works visually; current local tests cannot validate latency/rejection; future harness and fixture are tracked in dependent `CLT-016`/`CLT-017`. |
-| [SIM-002](10-simulation-gameplay.md#sim-002--client-prediction-and-reconciliation-contract) | Client prediction and reconciliation contract | P0 | In progress | `SIM-001`, `CLT-005` | Bounded online contract plus 100/200 ms delayed socket correction coverage are implemented; teleport/death/zone-transfer reset callers await `SIM-005`/`SIM-014`, and graphical validation is `CLT-019`. |
+| [SIM-002](10-simulation-gameplay.md#sim-002--client-prediction-and-reconciliation-contract) | Client prediction and reconciliation contract | P0 | In progress | `SIM-001`, `CLT-005` | Bounded online contract and delayed socket correction coverage are implemented; death/respawn now sends private discontinuity resets, zone-transfer reset awaits `SIM-014`, and graphical validation is `CLT-019`. |
+| [SIM-014](10-simulation-gameplay.md#sim-014--additional-zones-and-travel) | Additional zones and travel | P2 | In progress | `SIM-001`, `PST-005` | Prerequisites are complete; implementing validated single-character handoff and recovery. |
+| [SIM-016](10-simulation-gameplay.md#sim-016--faction-and-territory-edge-hardening) | Faction and territory edge hardening | P2 | In progress | `PST-003` | Prerequisite is complete; adding generated invariant and persistence-recovery coverage. |
+| [SIM-018](10-simulation-gameplay.md#sim-018--determinism-and-tick-budget) | Determinism and tick budget | P1 | In progress | — | Establish release-mode workload baselines, overload behavior, and regression checks. |
 | [CLT-002](40-bevy-client.md#clt-002--login-and-session-bootstrap) | Login and session bootstrap | P0 | In progress | `NET-001`, `CLT-001` | Finish server profiles and world-session lifecycle. |
 | [CLT-003](40-bevy-client.md#clt-003--character-selection-and-creation) | Character selection and creation | P0 | In progress | `PST-001`, `CLT-002` | Verify full Bevy onboarding and restart flow against a live server. |
 | [SIM-007](10-simulation-gameplay.md#sim-007--navigation-budgets-and-replan-policy) | Navigation budgets and replan policy | P1 | Done | `SIM-001` | GuardChase uses bounded paths, server movement validation, and retry/expiry handling. |
 | [SIM-006](10-simulation-gameplay.md#sim-006--ai-behaviors-schedules-and-perception-budgets) | AI behaviors, schedules, and perception budgets | P1 | In progress | `SIM-001` | Continue bounded behavior/content hydration; prerequisite of SIM-015. |
-| [CLT-018](40-bevy-client.md#clt-018--public-status-indicators) | Public status indicators | P2 | In progress | `CLT-006` | Public status labels plus owner-private slow prediction are wired; deterministic fixture and visual validation remain. |
-| [SIM-005](10-simulation-gameplay.md#sim-005--combat-depth-status-mitigation-death-respawn) | Combat depth: status, mitigation, death, respawn | P2 | In progress | `SIM-003` | Timed server-owned stun/slow, cleanse, snapshot persistence, movement/action rejection, typed mitigation, and replication landed; DoT/shields, death/respawn policy, and audit logging remain. |
+| [CLT-018](40-bevy-client.md#clt-018--public-status-indicators) | Public status indicators | P2 | In progress | `CLT-006` | Public status labels plus owner-private slow prediction are wired; deterministic fixture remains, with user visual review deferred to CLT-020. |
+| [SIM-005](10-simulation-gameplay.md#sim-005--combat-depth-status-mitigation-death-respawn) | Combat depth: status, mitigation, death, respawn | P2 | In progress | `SIM-003` | Tick-based DoT/shields, typed mitigation, bounded audit, safe respawn, snapshot persistence, and private death/respawn resets are implemented; table-driven edges and transfer/recovery policy coverage remain. |
 | [SIM-008](10-simulation-gameplay.md#sim-008--world-chat-and-presence) | World chat and presence | P1 | In progress | — | Complete authorized routing/moderation path; enables social/client tasks. |
 | [NET-003](30-networking-security.md#net-003--tls-and-reverse-proxy-boundary) | TLS and reverse-proxy boundary | P1 | In progress | — | Validate proxy configuration and deployed certificate boundary. |
 | [NET-004](30-networking-security.md#net-004--protocol-compatibility-lifecycle) | Protocol compatibility lifecycle | P1 | In progress | — | Finish world-message fixtures and breaking-change gate. |
@@ -68,6 +70,7 @@ copied from the task entries; a dash means none are declared.
 | --- | --- | --- | --- | --- | --- |
 | [OPS-016](60-operations-release.md#ops-016--linux-graphical-client-smoke) | Linux graphical client smoke | P2 | Icebox | `OPS-006` | Defer Xvfb/software-render CI until a hosted Linux run can validate and review the screenshot artifact. |
 | [CLT-019](40-bevy-client.md#clt-019--online-reconciliation-visual-validation) | Online reconciliation visual validation | P1 | Icebox | `CLT-007`, `CLT-016`, `CLT-017` | Validate a controlled private correction in the graphical online demo; requires a fixture and graphical environment. |
+| [CLT-020](40-bevy-client.md#clt-020--public-status-visual-validation) | Public status visual validation | P2 | Icebox | `CLT-018` | Defer user review of the deterministic status fixture; simulation tests do not wait on graphical confirmation. |
 
 ## Blocked
 
@@ -86,9 +89,7 @@ permission to start or to alter task status.
 | [SIM-009](10-simulation-gameplay.md#sim-009--parties-and-social-graph) | Parties and social graph | P2 | Blocked | `SIM-008`, `PST-006` | Requires chat/presence and durable sessions. |
 | [SIM-010](10-simulation-gameplay.md#sim-010--trade-and-economy-integrity) | Trade and economy integrity | P2 | Blocked | `SIM-009`, `PST-002`, `PST-014` | Requires social, inventory, and ledger work. |
 | [SIM-013](10-simulation-gameplay.md#sim-013--loot-and-encounter-rewards) | Loot and encounter rewards | P2 | Blocked | `SIM-003`, `PST-014` | Requires combat credit and durable ledger. |
-| [SIM-014](10-simulation-gameplay.md#sim-014--additional-zones-and-travel) | Additional zones and travel | P2 | Blocked | `SIM-001`, `PST-005` | Requires authoritative movement and replay. |
 | [SIM-015](10-simulation-gameplay.md#sim-015--calendar-objectives-and-npc-participation) | Calendar objectives and NPC participation | P2 | Blocked | `SIM-001`, `SIM-006` | Requires bounded AI behavior. |
-| [SIM-016](10-simulation-gameplay.md#sim-016--faction-and-territory-edge-hardening) | Faction and territory edge hardening | P2 | Blocked | `PST-003` | Follows normalized faction persistence. |
 | [SIM-017](10-simulation-gameplay.md#sim-017--minigame-and-panel-expansion) | Minigame and panel expansion | P3 | Blocked | `CNT-005` | Requires definition/panel authoring. |
 | [SIM-019](10-simulation-gameplay.md#sim-019--zone-systems-and-shared-utilities) | Zone systems and shared utilities | P2 | Blocked | `SIM-014`, `PST-005`, `SIM-018`, `CNT-005` | Foundation for systemic zones; requires multi-zone authority, durable recovery, measured tick budgets, and definition schemas. |
 | [SIM-020](10-simulation-gameplay.md#sim-020--zone-work-dynamic-markets-and-faction-contribution) | Zone work, dynamic markets, and faction contribution | P2 | Blocked | `SIM-019`, `SIM-010`, `SIM-011`, `SIM-014`, `PST-003`, `PST-014` | Builds local jobs/trade on shared zone systems and durable faction/economy accounting. |

@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::action::{ActionEffect, ActionKey, ActionResult};
 use crate::ai::{AiDiagnostics, AiNavigationState, AiTickPolicy, AiTickReport};
-use crate::combat::CombatRules;
-use crate::entity::{EntityRecord, TimedSlow};
+use crate::combat::{CombatAuditEvent, CombatRules, DamageType};
+use crate::entity::{EntityRecord, TimedDamageOverTime, TimedShield, TimedSlow};
 use crate::link::{EntityLink, LinkEvent, LinkGraph};
 use crate::movement::{MovementIntent, MovementSequence};
 use crate::nav::{
@@ -29,6 +29,10 @@ pub const LINK_CACHE_LIMIT: usize = 1_024;
 pub const MAX_LINK_TARGETS: usize = 32;
 /// Maximum retained server-only movement diagnostics.
 pub const MOVEMENT_DIAGNOSTIC_LIMIT: usize = 256;
+/// Maximum concurrent timed damage effects or shields on one entity.
+pub const TIMED_COMBAT_EFFECT_LIMIT: usize = 8;
+/// Maximum retained server-only combat audit entries per zone.
+pub const COMBAT_AUDIT_LIMIT: usize = 512;
 
 /// Work limits for one simulation tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -207,6 +211,9 @@ pub struct Zone {
     pub(crate) movement_pending: BTreeMap<StableId, MovementIntent>,
     pub(crate) movement_sequences: BTreeMap<StableId, MovementSequence>,
     pub(crate) movement_diagnostics: VecDeque<Diagnostic>,
+    pub(crate) combat_audit: VecDeque<CombatAuditEvent>,
+    pub(crate) respawned_this_tick: Vec<StableId>,
+    pub(crate) movement_resets: BTreeSet<StableId>,
     pub(crate) path_budget: PathTickBudget,
     pub(crate) path_diagnostics: PathDiagnostics,
     pub(crate) dynamic_blockers: BTreeMap<(usize, usize), Tick>,
@@ -278,6 +285,9 @@ impl Zone {
             movement_pending: BTreeMap::new(),
             movement_sequences: BTreeMap::new(),
             movement_diagnostics: VecDeque::new(),
+            combat_audit: VecDeque::new(),
+            respawned_this_tick: Vec::new(),
+            movement_resets: BTreeSet::new(),
             path_budget,
             path_diagnostics: PathDiagnostics::default(),
             dynamic_blockers: BTreeMap::new(),
@@ -424,8 +434,59 @@ impl Zone {
                 slow.validate()?;
             }
         }
+        if entity.damage_over_time.len() > TIMED_COMBAT_EFFECT_LIMIT
+            || entity.shields.len() > TIMED_COMBAT_EFFECT_LIMIT
+        {
+            return Err(EngineError::new(
+                ErrorCode::CapacityExceeded,
+                "entity timed combat effect limit exceeded",
+            ));
+        }
+        for effect in &entity.damage_over_time {
+            effect.source.expect_kind(IdKind::Entity)?;
+            if effect.damage_per_tick <= 0
+                || effect.interval_ticks == 0
+                || effect.until <= self.tick
+            {
+                return Err(EngineError::new(
+                    ErrorCode::InvalidRequest,
+                    "invalid or expired periodic damage effect",
+                ));
+            }
+        }
+        for shield in &entity.shields {
+            shield.source.expect_kind(IdKind::Entity)?;
+            if shield.remaining <= 0 || shield.until <= self.tick {
+                return Err(EngineError::new(
+                    ErrorCode::InvalidRequest,
+                    "invalid or expired shield",
+                ));
+            }
+        }
         if let Some(movement) = entity.movement {
             movement.validate()?;
+        }
+        if let Some(policy) = entity.respawn_policy {
+            if entity.health.is_none()
+                || policy.delay_ticks == 0
+                || !policy.position.x.is_finite()
+                || !policy.position.y.is_finite()
+                || !policy.position.z.is_finite()
+                || !self.config.contains(policy.position)
+            {
+                return Err(EngineError::new(
+                    ErrorCode::InvalidRequest,
+                    "respawn policy requires health, positive delay, and an in-zone finite position",
+                ));
+            }
+        }
+        if entity.respawn_at.is_some_and(|_| {
+            entity.health.is_none_or(|health| health.is_alive()) || entity.respawn_policy.is_none()
+        }) {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "respawn schedule requires a dead entity with a respawn policy",
+            ));
         }
         if self.entities.contains_key(&entity.id) {
             return Err(
@@ -583,10 +644,163 @@ impl Zone {
         Ok(())
     }
 
+    /// Apply a bounded, server-owned periodic damage effect.
+    /// Reapplication from the same source and school refreshes the expiry and
+    /// keeps the stronger potency without resetting an already-running cadence.
+    pub fn apply_damage_over_time(
+        &mut self,
+        target: StableId,
+        source: StableId,
+        duration_ticks: u64,
+        interval_ticks: u64,
+        damage_per_tick: i32,
+        damage_type: DamageType,
+    ) -> Result<(), EngineError> {
+        source.expect_kind(IdKind::Entity)?;
+        if !self.entities.contains_key(&source) {
+            return Err(EngineError::not_found("damage-over-time source", source));
+        }
+        if duration_ticks == 0 || interval_ticks == 0 || damage_per_tick <= 0 {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "periodic damage requires positive duration, interval, and damage",
+            ));
+        }
+        let until = self.tick.0.checked_add(duration_ticks).ok_or_else(|| {
+            EngineError::new(ErrorCode::InvalidRequest, "invalid effect duration")
+        })?;
+        let next_tick = self.tick.0.checked_add(interval_ticks).ok_or_else(|| {
+            EngineError::new(ErrorCode::InvalidRequest, "invalid effect interval")
+        })?;
+        let entity = self
+            .entities
+            .get_mut(&target)
+            .ok_or_else(|| EngineError::not_found("damage-over-time target", target))?;
+        if !entity.is_alive() {
+            return Err(EngineError::new(
+                ErrorCode::InvalidState,
+                "cannot apply periodic damage to a dead entity",
+            ));
+        }
+        if let Some(active) = entity
+            .damage_over_time
+            .iter_mut()
+            .find(|active| active.source == source && active.damage_type == damage_type)
+        {
+            active.until = active.until.max(Tick(until));
+            active.damage_per_tick = active.damage_per_tick.max(damage_per_tick);
+            active.interval_ticks = active.interval_ticks.min(interval_ticks);
+            return Ok(());
+        }
+        if entity.damage_over_time.len() >= TIMED_COMBAT_EFFECT_LIMIT {
+            return Err(EngineError::new(
+                ErrorCode::CapacityExceeded,
+                "target has reached its periodic damage effect limit",
+            ));
+        }
+        entity.damage_over_time.push(TimedDamageOverTime {
+            source,
+            damage_type,
+            damage_per_tick,
+            interval_ticks,
+            next_tick: Tick(next_tick),
+            until: Tick(until),
+        });
+        entity
+            .damage_over_time
+            .sort_by_key(|effect| (effect.source, effect.damage_type));
+        Ok(())
+    }
+
+    /// Apply a finite shield; independent sources stack up to the per-entity cap.
+    /// Reapplication from the same source refreshes expiry and keeps the larger
+    /// of its current capacity and incoming capacity without adding them.
+    pub fn apply_shield(
+        &mut self,
+        target: StableId,
+        source: StableId,
+        duration_ticks: u64,
+        capacity: i32,
+    ) -> Result<(), EngineError> {
+        source.expect_kind(IdKind::Entity)?;
+        if !self.entities.contains_key(&source) {
+            return Err(EngineError::not_found("shield source", source));
+        }
+        if duration_ticks == 0 || capacity <= 0 {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "shield requires positive duration and capacity",
+            ));
+        }
+        let until = self.tick.0.checked_add(duration_ticks).ok_or_else(|| {
+            EngineError::new(ErrorCode::InvalidRequest, "invalid shield duration")
+        })?;
+        let entity = self
+            .entities
+            .get_mut(&target)
+            .ok_or_else(|| EngineError::not_found("shield target", target))?;
+        if !entity.is_alive() {
+            return Err(EngineError::new(
+                ErrorCode::InvalidState,
+                "cannot shield a dead entity",
+            ));
+        }
+        if let Some(active) = entity
+            .shields
+            .iter_mut()
+            .find(|active| active.source == source)
+        {
+            active.remaining = active.remaining.max(capacity);
+            active.until = active.until.max(Tick(until));
+            return Ok(());
+        }
+        if entity.shields.len() >= TIMED_COMBAT_EFFECT_LIMIT {
+            return Err(EngineError::new(
+                ErrorCode::CapacityExceeded,
+                "target has reached its shield limit",
+            ));
+        }
+        entity.shields.push(TimedShield {
+            source,
+            remaining: capacity,
+            until: Tick(until),
+        });
+        Ok(())
+    }
+
+    /// Clear periodic damage effects without changing other statuses.
+    pub fn cleanse_damage_over_time(&mut self, target: StableId) -> Result<(), EngineError> {
+        let entity = self
+            .entities
+            .get_mut(&target)
+            .ok_or_else(|| EngineError::not_found("cleanse target", target))?;
+        entity.damage_over_time.clear();
+        Ok(())
+    }
+
+    /// Read the bounded, private combat audit ring. It is never replicated.
+    #[must_use]
+    pub fn combat_audit(&self) -> &VecDeque<CombatAuditEvent> {
+        &self.combat_audit
+    }
+
+    /// Take entity IDs respawned by the last tick, for gateway control rebinding
+    /// and client reconciliation resets.
+    pub fn take_respawned_entities(&mut self) -> Vec<StableId> {
+        std::mem::take(&mut self.respawned_this_tick)
+    }
+
+    /// Take pending authoritative movement discontinuities for private delivery.
+    pub fn take_movement_resets(&mut self) -> BTreeSet<StableId> {
+        std::mem::take(&mut self.movement_resets)
+    }
+
     /// Advance the tick and refresh statistics. Timed effects expire before AI
     /// or queued movement can act on the new tick.
     pub fn advance_tick(&mut self) -> TickStats {
         self.tick = self.tick.next();
+        self.respawned_this_tick.clear();
+        let mut due_damage = Vec::new();
         for entity in self.entities.values_mut() {
             if entity.stun_until.is_some_and(|until| until <= self.tick) {
                 entity.stun_until = None;
@@ -594,6 +808,45 @@ impl Zone {
             if entity.slow.is_some_and(|slow| slow.until <= self.tick) {
                 entity.slow = None;
             }
+            entity
+                .damage_over_time
+                .retain(|effect| effect.until > self.tick);
+            for effect in &mut entity.damage_over_time {
+                if effect.next_tick <= self.tick {
+                    due_damage.push((
+                        effect.source,
+                        entity.id,
+                        effect.damage_per_tick,
+                        effect.damage_type,
+                    ));
+                    effect.next_tick = Tick(self.tick.0.saturating_add(effect.interval_ticks));
+                }
+            }
+            entity
+                .shields
+                .retain(|shield| shield.until > self.tick && shield.remaining > 0);
+        }
+        for (source, target, damage, damage_type) in due_damage {
+            let _ = self.apply_combat_damage(source, target, damage, damage_type);
+        }
+        for entity in self.entities.values_mut() {
+            if !entity.respawn_at.is_some_and(|at| at <= self.tick) {
+                continue;
+            }
+            let Some(policy) = entity.respawn_policy else {
+                continue;
+            };
+            if let Some(health) = entity.health.as_mut() {
+                health.current = health.max;
+            }
+            entity.transform.position = policy.position;
+            entity.respawn_at = None;
+            entity.stun_until = None;
+            entity.slow = None;
+            entity.damage_over_time.clear();
+            entity.shields.clear();
+            self.respawned_this_tick.push(entity.id);
+            self.movement_resets.insert(entity.id);
         }
         let blocker_count = self.dynamic_blockers.len();
         self.dynamic_blockers

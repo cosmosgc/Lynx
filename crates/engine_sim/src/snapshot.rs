@@ -26,6 +26,7 @@ use engine_core::schema::{PersistencePolicy, SchemaVersion};
 use engine_core::time::Tick;
 
 use crate::action::{ActionEffect, ActionKey, ActionResult};
+use crate::combat::CombatAuditEvent;
 use crate::entity::EntityRecord;
 use crate::link::{EntityLink, LinkEvent};
 use crate::nav::NavGrid;
@@ -62,6 +63,9 @@ pub struct ZoneSnapshot {
     pub applied_actions: u64,
     /// Link activations since the zone started.
     pub link_activations: u64,
+    /// Bounded, redacted combat audit ring retained with the zone checkpoint.
+    #[serde(default)]
+    pub combat_audit: Vec<CombatAuditEvent>,
 }
 
 /// One snapshot entry that could not be adopted during quarantine-aware
@@ -188,6 +192,7 @@ impl Zone {
             transfers,
             applied_actions: self.stats.applied_actions,
             link_activations: self.stats.link_activations,
+            combat_audit: self.combat_audit.iter().copied().collect(),
         }
     }
 
@@ -263,6 +268,23 @@ impl Zone {
 
         let mut quarantined = Vec::new();
         let mut zone = Zone::new(snapshot.config.clone(), nav, Arc::clone(rules))?;
+        if snapshot.combat_audit.len() > crate::zone::COMBAT_AUDIT_LIMIT
+            || snapshot.combat_audit.iter().any(|entry| {
+                entry.tick > snapshot.tick
+                    || entry.raw_damage < 0
+                    || entry.mitigated_damage < 0
+                    || entry.shield_absorbed < 0
+                    || entry.health_damage < 0
+                    || entry.remaining_health.is_some_and(|health| health < 0)
+            })
+        {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "invalid combat audit history in zone snapshot",
+            ));
+        }
+        zone.combat_audit
+            .extend(snapshot.combat_audit.iter().copied());
         zone.tick = snapshot.tick;
         zone.stats.tick = snapshot.tick;
         zone.stats.applied_actions = snapshot.applied_actions;
@@ -584,6 +606,31 @@ mod tests {
         expired.tick = Tick(3);
         let restored = Zone::restore(&expired, nav(), rules()).unwrap();
         assert_eq!(restored.entity(actor).unwrap().stun_until, None);
+    }
+
+    #[test]
+    fn timed_damage_shields_and_redacted_audit_survive_snapshot_restore() {
+        let mut source = zone();
+        let attacker = source
+            .spawn(entity(1, PersistencePolicy::PersistentEntity).with_health(10))
+            .unwrap();
+        let target = source
+            .spawn(entity(2, PersistencePolicy::PersistentEntity).with_health(20))
+            .unwrap();
+        source
+            .apply_damage_over_time(target, attacker, 6, 2, 4, crate::combat::DamageType::Poison)
+            .unwrap();
+        source.apply_shield(target, attacker, 5, 7).unwrap();
+        let _ = source.apply_combat_damage(attacker, target, 3, crate::combat::DamageType::Fire);
+
+        let encoded = serde_json::to_vec(&source.snapshot()).unwrap();
+        let snapshot: ZoneSnapshot = serde_json::from_slice(&encoded).unwrap();
+        let restored = Zone::restore(&snapshot, nav(), rules()).unwrap();
+
+        assert_eq!(restored.entity(target).unwrap().damage_over_time.len(), 1);
+        assert_eq!(restored.entity(target).unwrap().shields[0].remaining, 4);
+        assert_eq!(restored.combat_audit(), source.combat_audit());
+        assert_eq!(restored.snapshot(), snapshot);
     }
 
     #[test]

@@ -12,7 +12,7 @@ use engine_core::time::Tick;
 use serde::{Deserialize, Serialize};
 
 use crate::action::Verb;
-use crate::combat::CombatStats;
+use crate::combat::{CombatStats, DamageType};
 use crate::mind::Mind;
 use crate::minigame::Minigame;
 
@@ -327,6 +327,43 @@ impl TimedSlow {
     }
 }
 
+/// A server-applied periodic damage source, saved with persistent entities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimedDamageOverTime {
+    /// Server-resolved source used for audit and same-source refresh.
+    pub source: StableId,
+    /// Damage school resolved against the target's server-owned mitigation.
+    pub damage_type: DamageType,
+    /// Damage before target mitigation on each tick.
+    pub damage_per_tick: i32,
+    /// Positive interval between applications.
+    pub interval_ticks: u64,
+    /// Next tick on which this effect applies.
+    pub next_tick: Tick,
+    /// Exclusive expiry tick.
+    pub until: Tick,
+}
+
+/// A finite server-owned damage shield, consumed after resistance/defense.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimedShield {
+    /// Server-resolved source used for deterministic application ordering.
+    pub source: StableId,
+    /// Remaining post-mitigation damage capacity.
+    pub remaining: i32,
+    /// Exclusive expiry tick.
+    pub until: Tick,
+}
+
+/// Server-authored recovery policy for a dead, persistent character.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RespawnPolicy {
+    /// Validated zone-local safe position; never supplied by a client.
+    pub position: Vec3,
+    /// Positive delay from the death tick to the respawn tick.
+    pub delay_ticks: u64,
+}
+
 impl FactionMembership {
     /// Join a faction with no reputation overrides.
     #[must_use]
@@ -366,6 +403,19 @@ pub struct EntityRecord {
     /// Persists with the entity and never replaces the base profile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slow: Option<TimedSlow>,
+    /// Periodic damage; bounded, source-keyed, and simulation-tick-expiring.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub damage_over_time: Vec<TimedDamageOverTime>,
+    /// Ordered finite shields; consumed after mitigation and persisted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shields: Vec<TimedShield>,
+    /// Server-authored respawn destination and delay, when this entity respawns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub respawn_policy: Option<RespawnPolicy>,
+    /// Scheduled respawn tick; absent for living entities and non-respawning
+    /// deaths. Runtime state is persisted with the entity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub respawn_at: Option<Tick>,
     /// Inventory, when the entity can hold items.
     pub inventory: Option<Inventory>,
     /// Faction identity and reputation.
@@ -401,6 +451,10 @@ impl EntityRecord {
             movement: None,
             stun_until: None,
             slow: None,
+            damage_over_time: Vec::new(),
+            shields: Vec::new(),
+            respawn_policy: None,
+            respawn_at: None,
             inventory: None,
             faction: None,
             door: None,
@@ -417,6 +471,13 @@ impl EntityRecord {
     #[must_use]
     pub fn with_health(mut self, max: i32) -> Self {
         self.health = Some(Health::new(max));
+        self
+    }
+
+    /// Attach a server-authored safe respawn policy.
+    #[must_use]
+    pub const fn with_respawn_policy(mut self, policy: RespawnPolicy) -> Self {
+        self.respawn_policy = Some(policy);
         self
     }
 

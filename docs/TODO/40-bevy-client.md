@@ -426,7 +426,7 @@ simulation state is not exposed implicitly.
 - [ ] Status indicators appear/update/clear with authoritative state and entity
       visibility; no private movement/combat internals leak.
 - [ ] A deterministic visual fixture demonstrates at least one status in the
-      graphical client and is reviewed.
+      graphical client. User visual review is tracked separately in CLT-020.
 - [ ] Additional effects are displayed only when modeled by authoritative
       simulation data; unsupported statuses fail closed.
 
@@ -438,8 +438,8 @@ decodes the public flag optionally for compatibility, and the online Bevy
 presentation shows a blue `SLOW` label while authoritative public state says the
 entity is slowed, hiding it again when the status clears or the entity leaves
 interest. Projection and privacy tests cover omission/default behavior and
-ensure no private multiplier or slow component leaks. A deterministic graphical
-fixture and user visual review remain.
+ensure no private multiplier or slow component leaks. A deterministic fixture
+remains; user visual review has been moved to the future CLT-020 task.
 
 ---
 
@@ -826,3 +826,28 @@ graphical validation environment are available.
       after a controlled private movement correction.
 - [ ] Evidence confirms presentation smoothing leaves authoritative state
       unchanged, and records the environment and evidence location.
+
+---
+
+## CLT-020 — Public status visual validation
+
+- **Priority:** P2
+- **Status:** Icebox — user visual review deferred
+- **Depends on:** `CLT-018`
+- **References:** `SIM-005`, [CLT-018](#clt-018--public-status-indicators)
+
+**Why:** Automated tests establish the public status contract and indicator
+updates, but graphical overlap/readability and visual treatment require user
+review. Keep that confirmation out of simulation completion criteria.
+
+**Scope**
+
+- Review the deterministic stunned/slowed status fixture in the Windows demo.
+- Check visibility enter/leave, despawn, overlap, and label readability.
+- Record the environment and any follow-up polish without changing simulation
+  authority or exposing private status data.
+
+**Acceptance criteria**
+
+- [ ] User confirms the status indicators are visually clear in the fixture.
+- [ ] Any requested visual polish is captured as a separate client task.

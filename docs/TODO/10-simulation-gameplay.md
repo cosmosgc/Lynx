@@ -117,7 +117,7 @@ this task owns the authoritative server side.
 ## SIM-002 — Client prediction and reconciliation contract
 
 - **Priority:** P0
-- **Status:** In progress — bounded online reconciliation and delayed socket corrections done; discontinuity callers and graphical validation remain
+- **Status:** In progress — bounded online reconciliation and delayed socket corrections done; death/respawn reset caller added, zone-transfer reset and graphical validation remain
 - **Depends on:** `SIM-001`, `CLT-005`
 - **References:** ADR 0014, `SIM-001`
 
@@ -146,8 +146,8 @@ input sequences and send bounded corrections the client can replay.
 - [x] Corrections never grant the client authority over position, speed, or
        collision.
 - [ ] Reconnect and zone-transfer paths reset prediction state explicitly.
-       Reconnect is covered; the explicit `reset` seam exists, but no teleport,
-       death, or zone-transfer caller exists yet (`SIM-005`, `SIM-014`).
+        Reconnect and death/respawn are covered; zone-transfer reset awaits
+        `SIM-014`.
 - [x] The contract is documented in `docs/networking.md`.
 
 **Foundation:** Initial and resumed snapshots carry the session-private current
@@ -262,7 +262,7 @@ prioritizing tanks). It is a design proposal, not an implementation contract.
 ## SIM-005 — Combat depth: status, mitigation, death, respawn
 
 - **Priority:** P2
-- **Status:** In progress — timed stun/slow plus typed mitigation foundation
+- **Status:** In progress — timed effects, typed attacks, shields, respawn, and bounded audit implemented; broader policy tests and transfer recovery remain
 - **Depends on:** `SIM-003`
 - **References:** `SIM-003`, `SIM-004`
 
@@ -307,9 +307,21 @@ slowed budget.
 versioned server-owned combat data. `CombatRules::resolve_typed_damage` applies
 `defense` only to physical damage and the matching flat resistance to every
 school; the existing physical path is unchanged when resistances are zero. No
-action or wire body can select a damage type or resistance value. Remaining:
-damage-over-time and shields, source-selected damage types with authored
-resistances, death/corpse/respawn policy, penalties, and audit logging.
+action or wire body can select a damage type or resistance value; the trusted
+attacker `CombatStats` selects its damage school. Timed periodic damage is
+source-keyed, uses simulation ticks, refreshes same-source effects without
+compounding, and is capped at eight concurrent sources. Shields are finite,
+tick-expiring, capped at eight, and absorb damage after mitigation in persisted
+application order. A bounded 512-entry redacted combat audit ring records
+resolved source/target IDs, damage school, mitigation, shield absorption, and
+health change; it is snapshot-persistent and never replicated to clients.
+Entities with a server-authored `RespawnPolicy` recover at the configured safe
+position after a positive tick delay. Death releases control and clears timed
+effects; there is no lootable corpse or item penalty. The gateway rebinds an
+already-connected principal after respawn and sends a private prediction reset.
+Remaining: table-driven effect/mitigation edge coverage, respawn reconnect and
+zone-transfer policy coverage, and long-term operator export beyond the bounded
+snapshot audit ring.
 
 ---
 
@@ -624,7 +636,7 @@ chat-family limiter is not an authorization or moderation substitute.
 ## SIM-014 — Additional zones and travel
 
 - **Priority:** P2
-- **Status:** Ready
+- **Status:** In progress — prerequisites verified; server-owned handoff implementation started
 - **Depends on:** `SIM-001`, `PST-005`
 
 **Scope**
@@ -676,7 +688,7 @@ action rules are still design-only.
 ## SIM-016 — Faction and territory edge hardening
 
 - **Priority:** P2
-- **Status:** Ready
+- **Status:** In progress — normalized persistence prerequisite verified; invariant and recovery tests started
 - **Depends on:** `PST-003`
 - **References:** ADR 0020, [world simulation](../world-simulation.md#factions-guilds-and-wealth)
 
@@ -725,7 +737,7 @@ action rules are still design-only.
 ## SIM-018 — Determinism and tick budget
 
 - **Priority:** P1
-- **Status:** Ready
+- **Status:** In progress — benchmark baseline and phase-budget implementation started
 - **Depends on:** —
 - **References:** [architecture §Simulation model](../architecture.md#simulation-model),
   `OPS-001`

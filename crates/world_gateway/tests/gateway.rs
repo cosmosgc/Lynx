@@ -11,11 +11,11 @@ use engine_core::time::{Millis, Tick};
 use engine_net::envelope::{Envelope, MessageId, MessageKind};
 use engine_net::protocol::{ErrorPayload, Handshake};
 use engine_net::replication::{ReplicationBatch, SessionId};
-use engine_sim::action::{ActionEffect, ActionResult, Verb};
+use engine_sim::action::{ActionEffect, ActionRequest, ActionResult, Verb};
 use engine_sim::combat::{CombatRules, CombatStats, FactionAttackRule};
 use engine_sim::entity::{
     Door, EntityRecord, FactionMembership, Interactable, InteractionPermission, MovementProfile,
-    MovementStatus, UiProvider,
+    MovementStatus, RespawnPolicy, UiProvider,
 };
 use engine_sim::mind::{ControlCapability, Mind};
 use engine_sim::minigame::Minigame;
@@ -706,6 +706,68 @@ fn timed_slow_factor_is_private_to_the_controlled_session() {
         deliveries
             .iter()
             .all(|delivery| delivery.session != bob.session)
+    );
+}
+
+#[test]
+fn respawn_sends_private_discontinuity_and_rebinds_live_session() {
+    let mut f = fixture();
+    let alice_entity = f.gateway.zone_mut().entity_mut(f.alice_actor).unwrap();
+    alice_entity.health.as_mut().unwrap().current = 1;
+    alice_entity.respawn_policy = Some(RespawnPolicy {
+        position: Vec3::new(12.0, 0.0, 12.0),
+        delay_ticks: 1,
+    });
+    alice_entity.interactable = Some(Interactable::new(3.0, [Verb::Attack]));
+    let bob_entity = f.gateway.zone_mut().entity_mut(f.bob_actor).unwrap();
+    bob_entity.transform.position = Vec3::new(10.5, 0.0, 10.0);
+    bob_entity.combat = Some(CombatStats::new(2, 0));
+
+    let alice = connect(&mut f.gateway, "alice", f.alice_principal);
+    let _bob = connect(&mut f.gateway, "bob", f.bob_principal);
+    let death = f.gateway.zone_mut().apply_action(
+        &ActionRequest::new("kill-alice-for-respawn", f.bob_actor, Verb::Attack)
+            .on(f.alice_actor)
+            .by(f.bob_principal),
+        Millis::new(1_001),
+    );
+    assert!(death.is_applied(), "{:?}", death.error());
+    assert_eq!(
+        f.gateway.zone().entity(f.alice_actor).unwrap().respawn_at,
+        Some(Tick(1))
+    );
+
+    let deliveries = f
+        .gateway
+        .tick_with_interval(Millis::new(1_050), 50)
+        .unwrap();
+    let delivery = delivery(&deliveries, &alice.session);
+    let movement = delivery.movement.as_ref().unwrap();
+    assert!(movement.reset);
+    assert_eq!(movement.position, Vec3::new(12.0, 0.0, 12.0));
+    assert!(f.gateway.zone().entity(f.alice_actor).unwrap().is_alive());
+    assert!(matches!(
+        &f.gateway
+            .zone()
+            .entity(f.alice_actor)
+            .unwrap()
+            .mind
+            .as_ref()
+            .unwrap()
+            .controller,
+        engine_sim::mind::Controller::Player { character, session }
+            if *character == f.alice_principal && session == alice.session.as_str()
+    ));
+    assert_eq!(
+        f.gateway
+            .zone()
+            .entity(f.alice_actor)
+            .unwrap()
+            .mind
+            .as_ref()
+            .unwrap()
+            .player_character,
+        Some(f.alice_principal)
     );
 }
 

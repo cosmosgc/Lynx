@@ -131,6 +131,10 @@ impl ControlLease {
 pub struct Mind {
     /// Current controller.
     pub controller: Controller,
+    /// Character principal permanently associated with a player body, retained
+    /// while control is released by death or a disconnect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub player_character: Option<StableId>,
     /// Capabilities granted to the controller.
     pub capabilities: BTreeSet<ControlCapability>,
     /// Transfer rules.
@@ -145,6 +149,7 @@ impl Mind {
     pub fn idle() -> Self {
         Self {
             controller: Controller::None,
+            player_character: None,
             capabilities: BTreeSet::new(),
             transfer: TransferPolicy::Forbidden,
             lease: None,
@@ -156,6 +161,7 @@ impl Mind {
     pub fn ai(behavior: DefinitionId) -> Self {
         Self {
             controller: Controller::Ai { behavior },
+            player_character: None,
             capabilities: BTreeSet::from([
                 ControlCapability::Move,
                 ControlCapability::Interact,
@@ -175,6 +181,7 @@ impl Mind {
                 character,
                 session: session.into(),
             },
+            player_character: Some(character),
             capabilities: BTreeSet::from([
                 ControlCapability::Move,
                 ControlCapability::Interact,

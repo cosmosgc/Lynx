@@ -486,10 +486,13 @@ See [ADR 0013](adr/0013-world-gateway-and-reconnect.md).
 - `world.snapshot` includes a private `movement` baseline with `tick`,
   authoritative `position`, `last_consumed_sequence` (number or null), and
   `applied: null`; it may include the controlled actor's exact timed-slow factor.
-  A `world.delta` includes this field for a processed input, with its tick,
-  resulting position, sequence and `applied: true` or `false`. A status-only
-  private movement update may carry `applied: null` when the timed-slow factor
-  changes; clients update local prediction pacing without resetting position.
+   A `world.delta` includes this field for a processed input, with its tick,
+   resulting position, sequence and `applied: true` or `false`. A status-only
+   private movement update may carry `applied: null` when the timed-slow factor
+   changes; clients update local prediction pacing without resetting position.
+   A private update with `reset: true` declares an authoritative discontinuity
+   (such as respawn or zone handoff); the client clears prediction history and
+   installs the supplied position as a fresh baseline.
   Rejections do not explain geometry. This field goes only to the exact control
   session, never to other observers or staff; ordinary public position updates
   still use interest filtering. No movement field is sent on unrelated deltas.

@@ -139,6 +139,9 @@ pub struct MovementReconciliation {
     pub last_consumed_sequence: Option<u64>,
     /// Processing result; absent for a baseline or private status-only update.
     pub applied: Option<bool>,
+    /// This update declares a discontinuity and resets client prediction.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reset: bool,
     /// Controlled actor's timed-slow factor, private to this session.
     /// `None` means no timed slow; never included in public entity replication.
     #[serde(default, skip_serializing_if = "Option::is_none")]

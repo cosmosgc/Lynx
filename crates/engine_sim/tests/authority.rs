@@ -14,10 +14,11 @@ use engine_core::time::Millis;
 use engine_sim::action::{ActionEffect, ActionRequest, Verb};
 use engine_sim::combat::CombatStats;
 use engine_sim::entity::{
-    Door, EntityRecord, FactionMembership, Interactable, InteractionPermission, UiProvider,
+    Door, EntityRecord, FactionMembership, Interactable, InteractionPermission, RespawnPolicy,
+    UiProvider,
 };
 use engine_sim::link::{EntityLink, LinkEvent};
-use engine_sim::mind::Mind;
+use engine_sim::mind::{Controller, Mind};
 use engine_sim::minigame::{DigitHint, Minigame};
 use engine_sim::nav::NavGrid;
 use engine_sim::zone::{Zone, ZoneConfig};
@@ -457,6 +458,187 @@ fn attack_rejects_client_selected_damage_without_changing_health() {
             .iter()
             .any(|effect| matches!(effect, ActionEffect::EntityDied { .. }))
     );
+}
+
+#[test]
+fn attack_uses_only_server_owned_damage_type_and_target_resistances() {
+    let mut zone = test_zone();
+    let (actor, principal) = player_at(&mut zone, 1, Vec3::ZERO, 1);
+    let target = entity(2);
+    zone.spawn(
+        EntityRecord::new(target, text("npc.rat"), Vec3::new(1.0, 0.0, 0.0))
+            .with_health(20)
+            .with_combat(CombatStats::new(0, 100).with_resistances(
+                engine_sim::combat::Resistances {
+                    fire: 2,
+                    ..Default::default()
+                },
+            ))
+            .with_interactable(Interactable::new(2.0, [Verb::Attack])),
+    )
+    .unwrap();
+    zone.entity_mut(actor).unwrap().combat =
+        Some(CombatStats::new(8, 0).with_damage_type(engine_sim::combat::DamageType::Fire));
+
+    let result = zone.apply_action(
+        &ActionRequest::new("server-fire-attack", actor, Verb::Attack)
+            .on(target)
+            .by(principal),
+        Millis::new(1),
+    );
+
+    assert!(result.is_applied(), "{:?}", result.error());
+    assert!(result.effects().iter().any(|effect| matches!(
+        effect,
+        ActionEffect::Damaged {
+            amount: 6,
+            remaining: 14,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn shields_absorb_post_mitigation_damage_and_emit_redacted_audit_records() {
+    let mut zone = test_zone();
+    let (actor, principal) = player_at(&mut zone, 1, Vec3::ZERO, 1);
+    let target = entity(2);
+    zone.spawn(
+        EntityRecord::new(target, text("npc.rat"), Vec3::new(1.0, 0.0, 0.0))
+            .with_health(20)
+            .with_combat(CombatStats::new(0, 100).with_resistances(
+                engine_sim::combat::Resistances {
+                    fire: 2,
+                    ..Default::default()
+                },
+            ))
+            .with_interactable(Interactable::new(2.0, [Verb::Attack])),
+    )
+    .unwrap();
+    zone.entity_mut(actor).unwrap().combat =
+        Some(CombatStats::new(8, 0).with_damage_type(engine_sim::combat::DamageType::Fire));
+    zone.apply_shield(target, actor, 5, 4).unwrap();
+
+    let result = zone.apply_action(
+        &ActionRequest::new("shielded-fire-attack", actor, Verb::Attack)
+            .on(target)
+            .by(principal),
+        Millis::new(1),
+    );
+
+    assert!(result.is_applied(), "{:?}", result.error());
+    assert!(result.effects().iter().any(|effect| matches!(
+        effect,
+        ActionEffect::Damaged {
+            amount: 2,
+            remaining: 18,
+            ..
+        }
+    )));
+    let audit = zone.combat_audit().back().unwrap();
+    assert_eq!(audit.raw_damage, 8);
+    assert_eq!(audit.mitigated_damage, 6);
+    assert_eq!(audit.shield_absorbed, 4);
+    assert_eq!(audit.health_damage, 2);
+    assert_eq!(zone.entity(target).unwrap().health.unwrap().current, 18);
+}
+
+#[test]
+fn periodic_damage_is_tick_based_source_refreshed_and_cleanseable() {
+    let mut zone = test_zone();
+    let (source, _) = player_at(&mut zone, 1, Vec3::ZERO, 1);
+    let target = entity(2);
+    zone.spawn(
+        EntityRecord::new(target, text("npc.rat"), Vec3::new(1.0, 0.0, 0.0))
+            .with_health(30)
+            .with_combat(CombatStats::new(0, 0).with_resistances(
+                engine_sim::combat::Resistances {
+                    fire: 1,
+                    ..Default::default()
+                },
+            )),
+    )
+    .unwrap();
+    zone.apply_damage_over_time(
+        target,
+        source,
+        5,
+        2,
+        5,
+        engine_sim::combat::DamageType::Fire,
+    )
+    .unwrap();
+    zone.advance_tick();
+    assert_eq!(zone.entity(target).unwrap().health.unwrap().current, 30);
+    zone.advance_tick();
+    assert_eq!(zone.entity(target).unwrap().health.unwrap().current, 26);
+
+    zone.apply_damage_over_time(
+        target,
+        source,
+        5,
+        2,
+        7,
+        engine_sim::combat::DamageType::Fire,
+    )
+    .unwrap();
+    zone.advance_tick();
+    assert_eq!(zone.entity(target).unwrap().health.unwrap().current, 26);
+    zone.advance_tick();
+    assert_eq!(zone.entity(target).unwrap().health.unwrap().current, 20);
+    assert_eq!(zone.combat_audit().len(), 2);
+
+    zone.cleanse_damage_over_time(target).unwrap();
+    for _ in 0..4 {
+        zone.advance_tick();
+    }
+    assert_eq!(zone.entity(target).unwrap().health.unwrap().current, 20);
+}
+
+#[test]
+fn respawn_uses_server_authored_position_and_preserves_identity_without_control() {
+    let mut zone = test_zone();
+    let (source, _) = player_at(&mut zone, 1, Vec3::ZERO, 1);
+    let target = entity(2);
+    zone.spawn(
+        EntityRecord::new(target, text("character.test"), Vec3::new(2.0, 0.0, 2.0))
+            .with_health(10)
+            .with_mind(Mind::ai(text("behavior.none")))
+            .with_interactable(Interactable::new(3.0, [Verb::Attack]))
+            .with_respawn_policy(RespawnPolicy {
+                position: Vec3::new(5.0, 0.0, 5.0),
+                delay_ticks: 2,
+            }),
+    )
+    .unwrap();
+    zone.entity_mut(source).unwrap().combat = Some(CombatStats::new(10, 0));
+    let attack = zone.apply_action(
+        &ActionRequest::new("respawn-kill", source, Verb::Attack)
+            .on(target)
+            .by(StableId::from_parts(IdKind::Character, 1, 1)),
+        Millis::new(1),
+    );
+    assert!(attack.is_applied(), "{:?}", attack.error());
+    assert!(!zone.entity(target).unwrap().is_alive());
+    assert_eq!(
+        zone.entity(target).unwrap().respawn_at,
+        Some(engine_core::time::Tick(2))
+    );
+    assert!(zone.entity(target).unwrap().damage_over_time.is_empty());
+
+    zone.advance_tick();
+    assert!(!zone.entity(target).unwrap().is_alive());
+    zone.advance_tick();
+
+    let respawned = zone.entity(target).unwrap();
+    assert!(respawned.is_alive());
+    assert_eq!(respawned.position(), Vec3::new(5.0, 0.0, 5.0));
+    assert_eq!(respawned.id, target);
+    assert_eq!(
+        respawned.mind.as_ref().unwrap().controller,
+        Controller::None
+    );
+    assert_eq!(zone.take_respawned_entities(), vec![target]);
 }
 
 #[test]

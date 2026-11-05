@@ -14,6 +14,7 @@ use engine_core::math::Vec3;
 use engine_core::time::{Millis, Tick};
 use serde::{Deserialize, Serialize};
 
+use crate::combat::{CombatAuditEvent, CombatStats, DamageType};
 use crate::entity::{Door, EntityRecord, Health, Interactable, InteractionPermission, UiProvider};
 use crate::link::LinkEvent;
 use crate::mind::{ControlCapability, Controller};
@@ -382,6 +383,92 @@ impl ActionResult {
 }
 
 impl Zone {
+    pub(crate) fn apply_combat_damage(
+        &mut self,
+        source: StableId,
+        target_id: StableId,
+        raw_damage: i32,
+        damage_type: DamageType,
+    ) -> CombatDamageResolution {
+        let Some(target) = self.entities.get(&target_id) else {
+            return CombatDamageResolution::default();
+        };
+        let Some(_) = target.health.filter(|health| health.is_alive()) else {
+            return CombatDamageResolution::default();
+        };
+        let stats = target.combat.unwrap_or_default();
+        let mitigated = self.config.combat.resolve_typed_damage(
+            CombatStats::new(raw_damage.max(0) as u32, 0),
+            stats,
+            damage_type,
+        );
+
+        let (shield_absorbed, health_damage, remaining, died) = {
+            let target = self
+                .entities
+                .get_mut(&target_id)
+                .expect("target was checked");
+            let mut damage = mitigated;
+            let mut absorbed = 0;
+            for shield in &mut target.shields {
+                if shield.until <= self.tick || damage <= 0 {
+                    continue;
+                }
+                let take = shield.remaining.min(damage);
+                shield.remaining -= take;
+                damage -= take;
+                absorbed += take;
+            }
+            target
+                .shields
+                .retain(|shield| shield.remaining > 0 && shield.until > self.tick);
+            let health = target.health.as_mut().expect("health was checked");
+            let applied = health.damage(damage);
+            let remaining = health.current;
+            let died = !health.is_alive();
+            if died {
+                self.movement_resets.insert(target_id);
+                if let Some(mind) = target.mind.as_mut() {
+                    if let Controller::Player { character, .. } = &mind.controller {
+                        mind.player_character = Some(*character);
+                    }
+                    mind.controller = Controller::None;
+                    mind.lease = None;
+                }
+                target.damage_over_time.clear();
+                target.shields.clear();
+                target.stun_until = None;
+                target.slow = None;
+                target.respawn_at = target
+                    .respawn_policy
+                    .and_then(|policy| self.tick.0.checked_add(policy.delay_ticks))
+                    .map(Tick);
+            }
+            (absorbed, applied, remaining, died)
+        };
+
+        if self.combat_audit.len() == crate::zone::COMBAT_AUDIT_LIMIT {
+            self.combat_audit.pop_front();
+        }
+        self.combat_audit.push_back(CombatAuditEvent {
+            tick: self.tick,
+            source,
+            target: target_id,
+            damage_type,
+            raw_damage,
+            mitigated_damage: mitigated,
+            shield_absorbed,
+            health_damage,
+            remaining_health: Some(remaining),
+        });
+        CombatDamageResolution {
+            health_damage,
+            remaining: Some(remaining),
+            died,
+            had_health: true,
+        }
+    }
+
     /// Validate and apply an action.
     ///
     /// A repeated `request_id` returns the original result and never applies
@@ -870,7 +957,7 @@ impl Zone {
         request: &ActionRequest,
         target_id: StableId,
         health: Option<crate::entity::Health>,
-        target_combat: Option<crate::combat::CombatStats>,
+        _target_combat: Option<crate::combat::CombatStats>,
     ) -> Result<Vec<ActionEffect>, EngineError> {
         // Requests carry intent only. Formula inputs come from the zone's
         // versioned rules and entity components that server-owned systems set.
@@ -897,29 +984,21 @@ impl Zone {
             .get(&request.actor)
             .and_then(|actor| actor.combat)
             .unwrap_or_default();
-        let damage = self
-            .config
-            .combat
-            .resolve_damage(attacker, target_combat.unwrap_or_default());
-
         let mut effects = Vec::new();
-        let mut died = false;
-        if let Some(target) = self.entities.get_mut(&target_id) {
-            if let Some(health) = target.health.as_mut() {
-                let applied = health.damage(damage);
-                effects.push(ActionEffect::Damaged {
-                    source: request.actor,
-                    target: target_id,
-                    amount: applied,
-                    remaining: health.current,
-                });
-                died = !health.is_alive();
-            }
-            if died {
-                if let Some(mind) = target.mind.as_mut() {
-                    mind.controller = Controller::None;
-                    mind.lease = None;
-                }
+        let resolution = self.apply_combat_damage(
+            request.actor,
+            target_id,
+            i32::try_from(attacker.attack).unwrap_or(i32::MAX),
+            attacker.damage_type,
+        );
+        if resolution.had_health {
+            effects.push(ActionEffect::Damaged {
+                source: request.actor,
+                target: target_id,
+                amount: resolution.health_damage,
+                remaining: resolution.remaining.unwrap_or_default(),
+            });
+            if resolution.died {
                 effects.push(ActionEffect::EntityDied {
                     source: request.actor,
                     target: target_id,
@@ -928,6 +1007,14 @@ impl Zone {
         }
         Ok(effects)
     }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct CombatDamageResolution {
+    pub(crate) health_damage: i32,
+    pub(crate) remaining: Option<i32>,
+    pub(crate) died: bool,
+    pub(crate) had_health: bool,
 }
 
 fn authorize_actor(actor: &EntityRecord, principal: Option<StableId>) -> Result<(), EngineError> {
