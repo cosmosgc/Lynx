@@ -768,6 +768,38 @@ def load_phase_progress(readme_path: Path) -> list[dict[str, Any]]:
     ]
 
 
+def load_queue(queue_path: Path) -> list[dict[str, Any]]:
+    """Parse the curated QUEUE.md tables without changing their declared order."""
+    if not queue_path.is_file():
+        return []
+    sections: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    for line in queue_path.read_text(encoding="utf-8").splitlines():
+        heading = re.match(r"^##\s+(.+?)\s*$", line)
+        if heading:
+            current = {"title": heading.group(1), "items": []}
+            sections.append(current)
+            continue
+        if current is None or not line.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) != 6 or all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells):
+            continue
+        task_link = re.fullmatch(r"\[([^]]+)\]\(([^)#]+)(?:#[^)]+)?\)", cells[0])
+        if not task_link:
+            continue
+        current["items"].append({
+            "id": task_link.group(1),
+            "document": task_link.group(2),
+            "title": cells[1],
+            "priority": cells[2],
+            "status": cells[3],
+            "dependencies": cells[4],
+            "note": cells[5],
+        })
+    return [section for section in sections if section["items"]]
+
+
 def _todo_source_files(repository_root: Path):
     """Yield eligible source files without opening their contents."""
     for directory, child_directories, filenames in os.walk(repository_root):
@@ -904,6 +936,9 @@ def create_app(
     def get_repository_root() -> Path:
         return source_todo_dir.resolve().parents[1]
 
+    def get_queue_path() -> Path:
+        return get_repository_root() / "docs" / "TODO" / "QUEUE.md"
+
     def get_history(items: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
         task_items = items if items is not None else get_items()
         items_by_id = {item["id"]: item for item in task_items}
@@ -1018,6 +1053,14 @@ def create_app(
         except (OSError, sqlite3.Error, UnicodeError, ValueError) as error:
             return render_template("error.html", error=str(error)), 500
         return render_template("dependencies.html", items=items)
+
+    @app.get("/queue")
+    def queue():
+        try:
+            sections = load_queue(get_queue_path())
+        except (OSError, UnicodeError, ValueError) as error:
+            return render_template("error.html", error=str(error)), 500
+        return render_template("queue.html", sections=sections)
 
     @app.get("/decisions")
     def decisions():

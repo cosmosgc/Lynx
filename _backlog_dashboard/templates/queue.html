@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Backlog queue · Lynx</title>
+  <style>
+    :root { color-scheme:dark; --bg:#11151b; --panel:#1a2029; --line:#303a47; --muted:#a3afbd; --text:#edf2f7; --blue:#76b7ff; --green:#66d19e; --yellow:#f0c674; --red:#ff8585; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui,sans-serif; }
+    main { max-width:1500px; margin:auto; padding:25px 20px 55px; }
+    h1,h2,p { margin-top:0; } h1 { font-size:clamp(26px,4vw,36px); margin-bottom:5px; }
+    a { color:var(--blue); } .muted { color:var(--muted); }
+    .nav { display:flex; flex-wrap:wrap; gap:8px; margin:16px 0 24px; }
+    .nav a { border:1px solid var(--line); border-radius:7px; padding:7px 10px; color:var(--text); text-decoration:none; }
+    .nav a:hover,.nav a[aria-current=page] { border-color:var(--blue); background:#17334b; }
+    .section { margin:24px 0; }
+    .section-heading { display:flex; flex-wrap:wrap; align-items:baseline; gap:10px; }
+    .section-heading h2 { margin-bottom:10px; }
+    .count { color:var(--muted); font-size:13px; }
+    .table-wrap { overflow-x:auto; background:var(--panel); border:1px solid var(--line); border-radius:10px; }
+    table { width:100%; border-collapse:collapse; }
+    th { position:sticky; top:0; background:#202833; color:var(--muted); text-align:left; font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+    th,td { padding:12px 13px; border-bottom:1px solid var(--line); vertical-align:top; }
+    tr:last-child td { border-bottom:0; }
+    td.task { min-width:235px; } td.note { min-width:300px; color:#c5ced8; }
+    .task a { display:block; text-decoration:none; font-weight:650; }
+    .task span { display:block; color:var(--text); }
+    .badge { display:inline-block; padding:2px 9px; border:1px solid var(--line); border-radius:99px; white-space:nowrap; font-size:12px; }
+    .p0 { color:#ff9e9e; border-color:#714343; }.p1 { color:var(--yellow); border-color:#665632; }
+    .status-done { color:var(--green); }.status-in-progress { color:var(--blue); }.status-blocked { color:var(--red); }
+    .status-icebox { color:#c5a8f2; }.status-ready { color:#c5ced8; }
+    .deps { min-width:130px; overflow-wrap:anywhere; }
+    .empty { padding:18px; background:var(--panel); border:1px solid var(--line); border-radius:10px; }
+    @media(max-width:700px) { main { padding:18px 10px 40px; } table,tbody,tr,td { display:block; } thead { display:none; } tr { padding:10px 12px; border-bottom:1px solid var(--line); } td { padding:4px 0; border:0; min-width:0!important; } td::before { content:attr(data-label) ": "; color:var(--muted); font-size:12px; font-weight:600; } td.task::before { content:""; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Backlog queue</h1>
+    <p class="muted">A readable, live view of <code>docs/TODO/QUEUE.md</code>. The queue order and notes come from that file; task documents remain the source of truth.</p>
+    <nav class="nav" aria-label="Backlog navigation"><a href="/">Backlog</a><a href="/task-order">Plan</a><a href="/queue" aria-current="page">Queue</a><a href="/dependencies">Dependencies</a><a href="/decisions">Decisions</a><a href="/reports">Reports</a><a href="/todos">Source TODOs</a><a href="/history">History</a></nav>
+  </header>
+  {% for section in sections %}
+  <section class="section" aria-labelledby="section-{{ loop.index }}">
+    <div class="section-heading"><h2 id="section-{{ loop.index }}">{{ section.title }}</h2><span class="count">{{ section['items']|length }} tasks · listed in queue order</span></div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Task</th><th>Priority</th><th>Status</th><th>Depends on</th><th>Sequencing note</th></tr></thead>
+      <tbody>{% for item in section['items'] %}
+        <tr>
+          <td class="task" data-label="Task"><a href="{{ url_for('source', file='docs/TODO/' ~ item.document) }}">{{ item.id }}</a><span>{{ item.title }}</span></td>
+          <td data-label="Priority"><span class="badge {{ item.priority|lower }}">{{ item.priority }}</span></td>
+          <td data-label="Status"><span class="badge status-{{ item.status|lower|replace(' ', '-') }}">{{ item.status }}</span></td>
+          <td class="deps" data-label="Depends on">{{ item.dependencies }}</td>
+          <td class="note" data-label="Sequencing note">{{ item.note }}</td>
+        </tr>
+      {% endfor %}</tbody>
+    </table></div>
+  </section>
+  {% else %}<p class="empty">No queue entries found. Check that <code>docs/TODO/QUEUE.md</code> exists and contains Markdown tables.</p>{% endfor %}
+</main>
+</body>
+</html>

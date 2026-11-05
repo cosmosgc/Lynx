@@ -12,6 +12,7 @@ from _backlog_dashboard.app import (
     load_backlog,
     load_decisions,
     load_phase_progress,
+    load_queue,
     order_tasks,
     scan_user_todos,
     sync_user_todos,
@@ -143,6 +144,32 @@ Phase 1  Engine skeleton             [██████████████
 
         self.assertEqual([phase["percent"] for phase in phases], [100, 85])
         self.assertEqual(phases[0]["status"], "Complete")
+
+    def test_queue_view_renders_grouped_queue_entries_and_source_links(self):
+        queue_path = self.todo / "QUEUE.md"
+        queue_path.write_text(
+            """# Backlog queue
+## Ready
+| ID | Task | Priority | Status | Dependencies | Sequencing note |
+| --- | --- | --- | --- | --- | --- |
+| [SIM-003](10-sample.md#sim-003--ready-task) | Ready task | P2 | Ready | — | Start when ready. |
+## Blocked
+| ID | Task | Priority | Status | Dependencies | Sequencing note |
+| --- | --- | --- | --- | --- | --- |
+| [SIM-002](10-sample.md#sim-002--transport) | Transport | P1 | Blocked | `SIM-001` | Needs movement. |
+""",
+            encoding="utf-8",
+        )
+        sections = load_queue(queue_path)
+        self.assertEqual([section["title"] for section in sections], ["Ready", "Blocked"])
+        self.assertEqual(sections[0]["items"][0]["id"], "SIM-003")
+        self.assertEqual(sections[1]["items"][0]["dependencies"], "`SIM-001`")
+
+        response = self.make_app().test_client().get("/queue")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Ready task", response.data)
+        self.assertIn(b"Needs movement", response.data)
+        self.assertIn(b"/source?file=docs/TODO/10-sample.md", response.data)
 
     def test_home_and_api_routes(self):
         app = self.make_app()
