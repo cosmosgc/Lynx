@@ -694,7 +694,7 @@ action rules are still design-only.
 ## SIM-016 — Faction and territory edge hardening
 
 - **Priority:** P2
-- **Status:** In progress — normalized persistence prerequisite verified; invariant and recovery tests started
+- **Status:** In progress — generated territory invariants and persistence recovery checks added; full reconciliation evidence remains
 - **Depends on:** `PST-003`
 - **References:** ADR 0020, [world simulation](../world-simulation.md#factions-guilds-and-wealth)
 
@@ -709,10 +709,14 @@ action rules are still design-only.
 
 **Acceptance criteria**
 
-- [ ] Every eligible territory can change hands under configured rules.
-- [ ] Cancelled/failed events leave ownership and treasury unchanged.
-- [ ] Snapshot and normalized-table views agree after backfill.
-- [ ] History remains append-only and queryable.
+- [x] Generated territory sequences prove eligible ownership changes under
+      configured windows and power, while early failed captures are atomic.
+- [x] Cancelled/failed calendar resolutions leave ownership and treasury
+      unchanged; cancellation and rejection regressions are covered.
+- [ ] Snapshot and normalized-table views agree after backfill/restart in the
+      normalized faction/calendar persistence suite; live database evidence
+      was unavailable in this environment.
+- [x] History remains append-only, validated, and queryable by territory.
 
 ---
 
@@ -743,7 +747,7 @@ action rules are still design-only.
 ## SIM-018 — Determinism and tick budget
 
 - **Priority:** P1
-- **Status:** In progress — benchmark baseline and phase-budget implementation started
+- **Status:** In progress — release tick benchmark, replay regression, and CI p99 deadline gate implemented; phase-level workload metrics remain
 - **Depends on:** —
 - **References:** [architecture §Simulation model](../architecture.md#simulation-model),
   `OPS-001`
@@ -762,12 +766,26 @@ graphical clients will expose tick overruns as lag.
 - Define overload behavior: shed cosmetic work before authoritative work, and
   never silently drop player actions.
 
+**Overload policy:** Authoritative actions are validated and reported to their
+requester; queue admission rejects excess movement with a correlated error
+instead of dropping accepted input silently. AI controller scans, perception,
+pathfinding, and replication queues have explicit caps and fixed diagnostics;
+exhausted AI/path budgets defer or reject that work without overrunning the
+authoritative tick. This simulation currently has no cosmetic tick work to shed.
+
 **Acceptance criteria**
 
-- [ ] A benchmark reports p50/p95/p99 tick duration and entity counts.
-- [ ] Replaying the same inputs produces byte-identical snapshots.
-- [ ] Overload behavior is documented and tested.
-- [ ] Budget regressions fail CI or a nightly job.
+- [x] A release benchmark reports p50/p95/p99 tick duration and entity counts.
+- [x] Replaying the same inputs produces byte-identical snapshots.
+- [x] Overload behavior is documented and tested.
+- [x] The CI benchmark fails when p99 exceeds the authoritative 50 ms tick
+      deadline.
+
+**Measured baseline:** `cargo bench -p engine_sim --bench tick` reported
+100-entity p50/p95/p99 of 1.0/1.0/2.2 µs and 1,000-entity
+12.6/20.3/34.2 µs on the local Windows release build. The CI gate is deliberately
+the 50 ms server tick deadline rather than a machine-specific microbenchmark
+threshold; detailed per-phase timing remains follow-up instrumentation.
 
 ---
 

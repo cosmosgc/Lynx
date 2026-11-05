@@ -14,6 +14,9 @@ use engine_sim::zone::{Zone, ZoneConfig};
 
 const WARMUP_TICKS: usize = 100;
 const SAMPLES: usize = 1_000;
+/// The default server tick deadline; the generous absolute gate tolerates
+/// ordinary shared-runner noise while still catching severe regressions.
+const MAX_P99_TICK_NS: u128 = 50_000_000;
 
 fn stable_id(kind: IdKind, value: u128) -> StableId {
     StableId::from_parts(kind, 1, value)
@@ -52,7 +55,7 @@ fn percentile(sorted_samples: &[u128], percentile: usize) -> u128 {
 
 fn main() {
     println!(
-        "zone tick latency (release; {SAMPLES} measured ticks after {WARMUP_TICKS} warmup ticks)"
+        "zone tick latency (release; {SAMPLES} measured ticks after {WARMUP_TICKS} warmup ticks; p99 budget {MAX_P99_TICK_NS} ns)"
     );
     println!("entities,p50_ns,p95_ns,p99_ns");
     for entity_count in [100, 1_000] {
@@ -68,12 +71,19 @@ fn main() {
             samples.push(start.elapsed().as_nanos());
         }
         samples.sort_unstable();
+        let p99 = percentile(&samples, 99);
         println!(
             "{},{},{},{}",
             zone.entity_count(),
             percentile(&samples, 50),
             percentile(&samples, 95),
-            percentile(&samples, 99),
+            p99,
+        );
+        assert!(
+            p99 <= MAX_P99_TICK_NS,
+            "{}-entity tick p99 {p99} ns exceeds the {} ns authoritative tick budget",
+            zone.entity_count(),
+            MAX_P99_TICK_NS,
         );
     }
 }

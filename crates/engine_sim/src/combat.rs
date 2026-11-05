@@ -320,22 +320,18 @@ mod tests {
             frost: 3,
             poison: 4,
         });
-        assert_eq!(
-            rules.resolve_typed_damage(attacker, armored, DamageType::Physical),
-            5
-        );
-        assert_eq!(
-            rules.resolve_typed_damage(attacker, armored, DamageType::Fire),
-            8
-        );
-        assert_eq!(
-            rules.resolve_typed_damage(attacker, armored, DamageType::Frost),
-            7
-        );
-        assert_eq!(
-            rules.resolve_typed_damage(attacker, armored, DamageType::Poison),
-            6
-        );
+        for (damage_type, expected) in [
+            (DamageType::Physical, 5),
+            (DamageType::Fire, 8),
+            (DamageType::Frost, 7),
+            (DamageType::Poison, 6),
+        ] {
+            assert_eq!(
+                rules.resolve_typed_damage(attacker, armored, damage_type),
+                expected,
+                "{damage_type:?} mitigation",
+            );
+        }
         assert_eq!(
             rules.resolve_typed_damage(CombatStats::new(1, 0), armored, DamageType::Poison),
             i32::try_from(rules.minimum_damage).unwrap()

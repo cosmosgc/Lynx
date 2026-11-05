@@ -1085,4 +1085,104 @@ mod tests {
             ErrorCode::InvalidState
         );
     }
+
+    #[test]
+    fn generated_claim_capture_sequences_preserve_ownership_and_history_invariants() {
+        let guards = faction("faction.guards");
+        let bandits = faction("faction.bandits");
+        let mut seed = 0x5eed_u64;
+        for case in 0..128_u64 {
+            // Deterministic generated rule combinations keep this invariant
+            // test reproducible without introducing a randomized test runtime.
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            let protection_ms = seed % 31;
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            let cooldown_ms = seed % 37;
+            let minimum_power = seed % 11;
+            let rules = TerritoryRules {
+                claim_protection: DurationMs::new(protection_ms),
+                capture_cooldown: DurationMs::new(cooldown_ms),
+                minimum_capture_power: minimum_power,
+                ..TerritoryRules::default()
+            };
+            let zone = zone(&format!("zone.generated_{case}"));
+            let mut book = TerritoryBook::new(rules.clone());
+            book.register(zone.clone()).unwrap();
+            let claimed_at = Millis::new(1_000);
+            let claim = book
+                .claim(
+                    &format!("claim-{case}"),
+                    actor(case as u128 + 1),
+                    &guards,
+                    &zone,
+                    claimed_at,
+                )
+                .unwrap();
+            assert_eq!(book.territory(&zone).unwrap().owner, Some(guards.clone()));
+
+            let active_window = protection_ms.max(cooldown_ms);
+            if active_window > 0 {
+                let blocked_before = Millis::new(
+                    claimed_at.value()
+                        + i64::try_from(active_window - 1).expect("generated duration fits i64"),
+                );
+                let before_failure = book.clone();
+                assert_eq!(
+                    book.capture(
+                        &format!("early-capture-{case}"),
+                        actor(case as u128 + 1_000),
+                        &bandits,
+                        &zone,
+                        minimum_power,
+                        blocked_before,
+                    )
+                    .unwrap_err()
+                    .code(),
+                    ErrorCode::Cooldown
+                );
+                assert_eq!(book, before_failure, "failed capture mutated case {case}");
+            }
+
+            let ready_at = Millis::new(
+                claimed_at.value()
+                    + i64::try_from(active_window).expect("generated duration fits i64"),
+            );
+            let capture_key = format!("capture-{case}");
+            let capture = book
+                .capture(
+                    &capture_key,
+                    actor(case as u128 + 1_000),
+                    &bandits,
+                    &zone,
+                    minimum_power,
+                    ready_at,
+                )
+                .unwrap();
+            assert_eq!(capture.from, Some(guards.clone()));
+            assert_eq!(capture.to, Some(bandits.clone()));
+            assert_eq!(book.territory(&zone).unwrap().revision, claim.revision + 1);
+            assert_eq!(book.history().len(), 2);
+            assert_eq!(
+                book.capture(
+                    &capture_key,
+                    actor(case as u128 + 2_000),
+                    &guards,
+                    &zone,
+                    minimum_power,
+                    Millis::new(ready_at.value() + 1_000),
+                )
+                .unwrap(),
+                capture,
+                "replay changed case {case}"
+            );
+
+            let restored = TerritoryBook::from_parts(
+                rules,
+                book.iter().cloned().collect(),
+                book.history().to_vec(),
+            )
+            .unwrap();
+            assert_eq!(restored, book, "recovery disagreed in case {case}");
+        }
+    }
 }

@@ -145,6 +145,9 @@ jobs:
       - name: Run workspace tests
         run: cargo test --workspace
 
+      - name: Benchmark and gate authoritative zone tick p99
+        run: cargo bench -p engine_sim --bench tick
+
       - name: Build workspace
         run: cargo build --workspace
 
