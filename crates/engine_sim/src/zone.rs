@@ -506,7 +506,8 @@ impl Zone {
             }
         }
         if entity.respawn_at.is_some_and(|_| {
-            entity.health.is_none_or(|health| health.is_alive()) || entity.respawn_policy.is_none()
+            entity.health.is_none_or(super::entity::Health::is_alive)
+                || entity.respawn_policy.is_none()
         }) {
             return Err(EngineError::new(
                 ErrorCode::InvalidRequest,
@@ -569,6 +570,7 @@ impl Zone {
     /// Returns an error for identical zones, missing/non-persistent/dead
     /// entities, zone-local links, invalid or occupied arrivals, incompatible
     /// cooldown targets, capacity failure, or a tick-rebase overflow.
+    #[allow(clippy::too_many_lines)] // Keep the handoff validation and rollback transaction together.
     pub fn transfer_entity_to(
         &mut self,
         destination: &mut Zone,
@@ -991,7 +993,7 @@ impl Zone {
             let _ = self.apply_combat_damage(source, target, damage, damage_type);
         }
         for entity in self.entities.values_mut() {
-            if !entity.respawn_at.is_some_and(|at| at <= self.tick) {
+            if entity.respawn_at.is_none_or(|at| at > self.tick) {
                 continue;
             }
             let Some(policy) = entity.respawn_policy else {

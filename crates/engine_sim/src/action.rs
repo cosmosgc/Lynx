@@ -398,7 +398,7 @@ impl Zone {
         };
         let stats = target.combat.unwrap_or_default();
         let mitigated = self.config.combat.resolve_typed_damage(
-            CombatStats::new(raw_damage.max(0) as u32, 0),
+            CombatStats::new(raw_damage.max(0).cast_unsigned(), 0),
             stats,
             damage_type,
         );
