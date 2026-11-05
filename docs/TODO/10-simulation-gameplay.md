@@ -690,6 +690,14 @@ are not yet durable, and saving the two zone snapshots is not yet one atomic
 transaction, so crash-window recovery remains open work rather than a promised
 guarantee.
 
+`ZoneTickScheduler` defines the initial multi-zone scheduling policy: stable
+round-robin order, one authoritative zone-tick quantum per zone in each batch,
+and a rotating cursor when the global quantum budget is smaller than the active
+zone set. The current single-zone `Service` loop does not yet consume this
+scheduler; connecting zone ownership, gateways, session routing, and per-zone
+persistence to it remains runtime integration work. It therefore provides a
+testable fairness policy, not a claim that multiple zones are already served.
+
 ---
 
 ## SIM-015 — Calendar objectives and NPC participation
