@@ -1003,6 +1003,7 @@ impl WorldGateway {
         result
     }
 
+    #[allow(clippy::too_many_lines)] // Keep the authoritative tick phases in their execution order.
     fn tick_inner(
         &mut self,
         now: Millis,
