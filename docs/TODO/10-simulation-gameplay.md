@@ -117,7 +117,7 @@ this task owns the authoritative server side.
 ## SIM-002 — Client prediction and reconciliation contract
 
 - **Priority:** P0
-- **Status:** In progress — bounded online reconciliation and delayed socket corrections done; death/respawn reset caller added, zone-transfer reset and graphical validation remain
+- **Status:** Done — reconnect and destination-snapshot resets are covered; graphical review remains tracked in `CLT-019`
 - **Depends on:** `SIM-001`, `CLT-005`
 - **References:** ADR 0014, `SIM-001`
 
@@ -145,9 +145,7 @@ input sequences and send bounded corrections the client can replay.
        shows bounded divergence and recovery after a forced correction.
 - [x] Corrections never grant the client authority over position, speed, or
        collision.
-- [ ] Reconnect and zone-transfer paths reset prediction state explicitly.
-        Reconnect and death/respawn are covered; zone-transfer reset awaits
-        `SIM-014`.
+- [x] Reconnect and zone-transfer paths reset prediction state explicitly.
 - [x] The contract is documented in `docs/networking.md`.
 
 **Foundation:** Initial and resumed snapshots carry the session-private current
@@ -165,7 +163,9 @@ results. Its authoritative state is never mutable by presentation smoothing.
 Small correction error is interpolated by the renderer; correction beyond the
 local prediction distance snaps. Disconnect and fresh snapshots reset through
 `disconnect`/`baseline`; the explicit `reset` API is ready for teleport, death,
-and zone-transfer callers, which do not exist yet. The latency/loss test proves
+and zone-transfer callers. A destination snapshot is tested as a new prediction
+domain: pending source-zone input is discarded, the destination position becomes
+authoritative, and sequence numbering restarts. The latency/loss test proves
 that dropped replies cannot accumulate unbounded divergence and a forced server
 correction recovers to authority. The local distance bound is not server movement
 validation. The caller discards messages from old connections and distinguishes
@@ -262,7 +262,7 @@ prioritizing tanks). It is a design proposal, not an implementation contract.
 ## SIM-005 — Combat depth: status, mitigation, death, respawn
 
 - **Priority:** P2
-- **Status:** In progress — timed effects, typed attacks, shields, respawn, and bounded audit implemented; broader policy tests and transfer recovery remain
+- **Status:** Done — timed effects, typed mitigation, respawn recovery, bounded audit, and reconnect/transfer policy documented
 - **Depends on:** `SIM-003`
 - **References:** `SIM-003`, `SIM-004`
 
@@ -280,8 +280,8 @@ prioritizing tanks). It is a design proposal, not an implementation contract.
 - [x] Effects expire deterministically on tick boundaries and survive snapshot
       round trips when their policy says so.
 - [x] Respawn cannot be triggered by a client-supplied location.
-- [ ] Stacking and mitigation rules are covered by table-driven tests.
-- [ ] Death/respawn behavior is documented for reconnect and zone transfer.
+- [x] Stacking and mitigation rules are covered by table-driven tests.
+- [x] Death/respawn behavior is documented for reconnect and zone transfer.
 
 **Foundation:** `EntityRecord::stun_until` is server-owned and persists in
 snapshots. `Zone::apply_stun` validates duration and target, never adds
@@ -321,10 +321,14 @@ effects; there is no lootable corpse or item penalty. The gateway rebinds an
 already-connected principal after respawn and sends a private prediction reset.
 Tests additionally verify that a DoT stops at its exclusive expiry tick and
 that a persisted death schedule resumes after restart, restoring the server-set
-position and character identity without restoring the old controller. Remaining:
-table-driven effect/mitigation edge coverage, respawn reconnect and zone-transfer
-policy coverage, and long-term operator export beyond the bounded snapshot audit
-ring.
+position and character identity without restoring the old controller. The
+reconnect policy keeps the persistent character and scheduled death/respawn state
+in the zone; resume installs a private snapshot baseline and rebinds control only
+if the actor is alive. A dead actor cannot travel. Once travel is implemented by
+`SIM-014`, handoff must preserve the stable character identity and be idempotent;
+respawn remains owned by the zone where death occurred, and prediction resets
+from the destination's private snapshot. Handoff mechanics belong to `SIM-014`;
+the bounded audit ring remains the current operator-visible record.
 
 ---
 

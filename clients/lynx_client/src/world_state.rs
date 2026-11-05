@@ -629,6 +629,43 @@ mod tests {
     }
 
     #[test]
+    fn destination_snapshot_starts_a_fresh_prediction_domain_for_zone_transfer() {
+        let (mut state, _) = start();
+        state.movement_request(pos(1.0)).unwrap();
+        assert!(state.has_pending_movement());
+
+        // A zone transfer establishes a new control session and installs the
+        // destination's private snapshot; no old-zone endpoint is replayed.
+        let destination_generation = state.begin_connection().unwrap();
+        state
+            .receive(destination_generation, &ready(false, "destination-session"))
+            .unwrap();
+        state
+            .receive(
+                destination_generation,
+                &world(
+                    "world.snapshot",
+                    1,
+                    &[actor(1)],
+                    &json!([public(actor(1), 1, 1, 50.0)]),
+                    &movement(1, 50.0, None, None),
+                ),
+            )
+            .unwrap();
+
+        assert_eq!(
+            state.reconciliation().authoritative_position(),
+            Some(pos(50.0))
+        );
+        assert_eq!(state.reconciliation().predicted_position(), Some(pos(50.0)));
+        assert!(!state.has_pending_movement());
+        assert_eq!(
+            state.movement_request(pos(51.0)).unwrap().body["sequence"],
+            1
+        );
+    }
+
+    #[test]
     fn public_health_updates_and_removal_follow_authority() {
         let (mut state, generation) = start();
         assert!(state.entities().all(|entity| entity.health.is_none()));
