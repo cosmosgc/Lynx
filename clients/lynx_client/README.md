@@ -76,6 +76,56 @@ discovery is not specified.
 
 ## Development-only login and online demo
 
+### Playable interactions
+
+Run `cargo run -p lynx_client -- --demo-online`. In the online window:
+
+- **Tab / Shift+Tab** selects targets; **Escape** clears selection.
+- The upper-right interaction HUD lists the target's supported advertised verbs.
+  Press its **number key** to send an action. Approach the target with **WASD**
+  if the server rejects the distance. The door supports opening; the barrel
+  supports inspection and attacks, with authoritative health updates.
+- Approach the vault and choose **use** to open its combination lock. Type the
+  requested number of decimal digits, **Backspace** to edit, and **Enter** to
+  submit. Hints `=`, `↑`, and `↓` mean correct, higher, and lower respectively.
+  Attempts and lockout are server-owned; solving unlocks and closes the panel.
+- **X** closes a panel. Chat composition (**T**) and window focus loss suppress
+  interaction input. Pending actions are never automatically replayed.
+- Walking outside the provider's interaction range automatically closes the
+  panel on the server's next tick. Walk back and use the provider to reopen it.
+  Restart/rebuild `lynx-world` as well as the client to get this behavior.
+
+The executable embeds full Fira Mono (`assets/fonts/OFL.txt`) so Portuguese
+accents render without depending on system fonts or the working directory.
+
+This is a reference lockpick renderer plus a title/schema fallback for unknown
+panels. Generic authored widgets and inventory management remain unfinished.
+`cargo test -p lynx_client --no-default-features` includes real-socket tests for
+these interactions and two-client combat, chat, presence, resume, and history.
+
+### Interaction UI prototype
+
+```text
+cargo run -p lynx_client --features immediate-prototype --example interaction_ui_prototype
+```
+
+This is a throwaway **native Bevy** UI experiment using `bevy_immediate 0.9.0`.
+Use the bottom buttons or Left/Right arrows to compare **A: sidebar**,
+**B: dialog/keypad**, and **C: bottom dock**. Type digits and Enter, or use the
+buttons. The fixture's code is `427`; the left controls simulate moving out of
+range and resetting. All fixture state is visible and lives only in memory.
+It does not connect to a server. The live online client retains its existing UI
+while these layouts are evaluated. The feature is optional and excluded from
+normal and headless builds.
+
+Windows launch and the sidebar's rendering were checked locally on 2026-11-05;
+Portuguese accents render with the bundled font. Screenshots are local evidence
+at `C:/Users/cosmo/AppData/Local/Temp/opencode/lynx-prototype-a.png` (not committed).
+Layout selection is pending user review. Once selected, promote the reviewed
+design and archive the throwaway alternatives on a prototype branch.
+
+### Account screen
+
 Run `cargo run -p lynx_client -- --account` for the in-client account screen.
 Click a field or use Tab, enter an existing email and password, and sign in;
 matching saved sessions are resumed from the OS credential store. Create new

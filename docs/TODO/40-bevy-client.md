@@ -6,7 +6,9 @@ rendering, prediction, UI, localization, packaging, and client-side tests.
 
 **What exists today:** `clients/lynx_client` provides offline scenes and an online
 WASD/chat loop with prediction, remote smoothing, resume and diagnostics.
-Graphical gameplay validation and interaction/inventory remain open.
+Target interactions and the reference lockpick panel are playable, with
+two-client combat/chat coverage. Graphical review, generic panels, and inventory
+remain open.
 [ADR 0001](../adr/0001-rust-and-bevy-version-policy.md) restricts Bevy to
 client/editor crates. Phases 1, 2, 4, and 7 still require further client work.
 
@@ -491,7 +493,7 @@ deferred to CLT-016/017 rather than claimed as visually verified here.
 ## CLT-008 — Interaction, inventory, and UI panels
 
 - **Priority:** P1
-- **Status:** Blocked — `CLT-006`, `SIM-008`
+- **Status:** In progress — target actions and reference lockpick panel playable; generic schemas and inventory remain
 - **Depends on:** `CLT-006`, `SIM-008`
 - **References:** ADR 0015, [content authoring §UI panels](../content-authoring.md#ui-panels)
 
@@ -512,6 +514,36 @@ deferred to CLT-016/017 rather than claimed as visually verified here.
 - [ ] A panel action rejected by the server does not change local state.
 - [ ] Inventory moves match server results after reconnect.
 - [ ] Stale/closed panels cannot send actions for a different target.
+
+**Progress (2026-11-05):** The online HUD lists supported, server-advertised
+parameter-free verbs for the selected target. Number keys submit correlated
+`action.request` intents; one interaction may be in flight, and server rejection
+does not optimistically mutate world state. `ui.state` owns panel replacement and
+closure; disconnect clears panel/hint state. X sends an idempotent `ui.close`.
+The reference `ui.lockpick` panel accepts decimal guesses through `ui.action`,
+shows server-provided comparison hints, attempts, and lockout tick, and closes
+when the server confirms a solve. Submission checks the exact composed panel,
+current target visibility, and advertised `play`; unsupported schemas have a
+read-only title/schema fallback. Server error diagnostics are not displayed.
+
+Real-socket tests cover an out-of-range rejection, opening a door, approaching
+and opening the vault, invalid/stale input rejection, solving from server hints,
+and authoritative panel closure. A two-client test observes the same barrel
+damage. Generic content-defined/localized widgets, inventory owner replication
+and operations, gamepad navigation, and graphical review remain open. No new
+crate is needed for this slice: existing Bevy UI and the framed protocol suffice.
+
+**Follow-up (2026-11-05):** User visually confirmed opening/using the vault and
+guessing its code in the Windows online client (screenshot supplied in chat).
+The server now automatically closes panels on the next tick when the provider
+is outside interaction range, leaves interest, is disabled, or loses/changes its
+UI schema. An unsolicited `ui.state` clears the client panel and hints. Tests
+cover the inclusive distance boundary, single close notification, provider
+removal, stale actions, and walking away/returning through real sockets.
+The live HUD now has an explicit readable width and an embedded full Fira Mono
+font for Portuguese glyphs. A separate, optional `bevy_immediate` 0.9 prototype
+compares sidebar, dialog/keypad, and bottom-dock layouts using in-memory fixtures;
+see the client README. It awaits user layout selection before promotion.
 
 ---
 
@@ -673,7 +705,7 @@ for validated behavior and deferred follow-up work.
 ## CLT-014 — Client integration and protocol tests
 
 - **Priority:** P1
-- **Status:** Blocked — `CLT-005`, `QUA-014`
+- **Status:** In progress — real-socket two-client gameplay/chat/resume coverage; account-service scenario remains
 - **Depends on:** `CLT-005`, `QUA-014`, `CLT-009`
 - **References:** `QUA-014`, `NET-004`
 
@@ -697,9 +729,18 @@ for validated behavior and deferred follow-up work.
 - [ ] CI runs a headless login → move → chat → reconnect scenario.
 - [ ] Protocol fixtures catch accidental wire changes.
 - [ ] Prediction/reconciliation tests run under simulated latency/loss.
-- [ ] Two clients observe the same authoritative state in one test.
-- [ ] Two clients exchange zone chat and observe presence changes without
+- [x] Two clients observe the same authoritative state in one test.
+- [x] Two clients exchange zone chat and observe presence changes without
       duplicate history entries after reconnect.
+
+**Progress (2026-11-05):** `clients/lynx_client/tests/multiplayer.rs` starts the
+real service and two independent WebSocket clients in one interest set. Both
+observe the same server-applied barrel damage, exchange messages with distinct
+server identities, see two connected members, resume one client, page history
+without duplicates, and observe the other member leaving. This uses static demo
+authentication; Nakama login/character creation and service-restart persistence
+are still separate validation work. The suite runs in the existing GPU-free
+client test command.
 
 ---
 

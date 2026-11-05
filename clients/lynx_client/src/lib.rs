@@ -7,6 +7,9 @@ pub mod account_ui;
 pub mod chat;
 pub mod cli;
 #[cfg(feature = "window")]
+pub mod fonts;
+pub mod interaction;
+#[cfg(feature = "window")]
 pub mod nakama_credentials;
 pub mod offline;
 pub mod online;

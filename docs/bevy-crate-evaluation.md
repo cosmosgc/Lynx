@@ -1,6 +1,7 @@
 # Bevy crate evaluation
 
-**Reviewed:** 2026-11-05. This is a fit/compatibility screen, not a dependency proposal; no crate was added.
+**Reviewed:** 2026-11-05. Initial fit/compatibility screen; subsequent prototype
+adoption is recorded below.
 
 ## Project constraints
 
@@ -21,5 +22,13 @@ Lynx pins Bevy **0.20.0** and confines Bevy to client/editor crates; the headles
 | [`dogoap`](https://github.com/victorb/dogoap) | **Conditional — AI-system research/prototype** | The repository describes data-oriented GOAP plus a Bevy integration. Its current `bevy_dogoap` 0.6.0 manifest pins Bevy 0.17 components, not 0.20 ([README](https://github.com/victorb/dogoap), [workspace manifest](https://github.com/victorb/dogoap/blob/master/Cargo.toml), [integration manifest](https://github.com/victorb/dogoap/blob/master/crates/bevy_dogoap/Cargo.toml)). The planner could inform more compositional NPC task planning, but current Lynx AI is headless and server-authoritative, so adopting the Bevy integration directly conflicts with the engine boundary. Revisit only if a Bevy-free core is viable or after a Bevy 0.20 port/prototype and bounded deterministic planning review. |
 
 ## Bottom line
+
+**Prototype adoption (2026-11-05):** At the user's request, `lynx_client` pins
+`bevy_immediate = 0.9.0` behind the optional `immediate-prototype` feature.
+Only `ui` and `bevy_ui_widgets` are enabled; Feathers and scene support are not
+needed. `interaction_ui_prototype` compares three native layouts using a local
+fixture and real Bevy immediate buttons. It builds against the workspace's
+Bevy 0.20.0 and is excluded from normal/headless client builds. User layout
+review remains pending; this is not yet the production panel framework.
 
 The only straightforward current addition is `bevy-persistent` for **client-local preferences**, if Lynx wants Bevy-resource integration instead of its own settings adapter. `bevy_vector_shapes`, `bevy_immediate`, `bevy_rich_text3d`, Avian, `bevy_voxel_world`, and `dogoap` merit targeted prototypes only when their specific feature need lands. The rest are mismatched, outdated, or add an unrelated network/world model. None should be placed in `engine_sim` merely because it integrates with Bevy.

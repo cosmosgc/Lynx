@@ -123,6 +123,8 @@ impl fmt::Debug for ConnectionSettings {
 /// Credentials remain in memory only and are redacted from debug output.
 #[derive(Debug, Resource)]
 pub struct OnlineClient {
+    interaction: crate::interaction::InteractionState,
+    interaction_sequence: u64,
     world: WorldState,
     client: Option<Client>,
     generation: Option<u64>,
@@ -151,6 +153,8 @@ pub struct OnlineClient {
 impl OnlineClient {
     pub fn new(max_prediction_distance: f32) -> Result<Self, world_state::Error> {
         Ok(Self {
+            interaction: crate::interaction::InteractionState::default(),
+            interaction_sequence: 0,
             world: WorldState::new(max_prediction_distance)?,
             client: None,
             generation: None,
@@ -309,6 +313,107 @@ impl OnlineClient {
         self.last_movement_applied
     }
 
+    pub fn interaction(&self) -> &crate::interaction::InteractionState {
+        &self.interaction
+    }
+
+    /// Supported verbs must also be advertised by the current public target.
+    pub fn target_verbs(&self, target: engine_core::id::StableId) -> Vec<&'static str> {
+        let Some(surface) = self
+            .world
+            .entities()
+            .find(|entity| entity.entity == target)
+            .and_then(|entity| entity.interaction.as_ref())
+            .filter(|surface| surface.enabled)
+        else {
+            return Vec::new();
+        };
+        crate::interaction::VERBS
+            .iter()
+            .copied()
+            .filter(|verb| {
+                surface
+                    .verbs
+                    .iter()
+                    .any(|value| value.as_str() == Some(*verb))
+            })
+            .collect()
+    }
+
+    pub fn interact(
+        &mut self,
+        target: engine_core::id::StableId,
+        verb: &str,
+    ) -> Result<(), OnlineError> {
+        if !self.target_verbs(target).contains(&verb) {
+            return Err(OnlineError::Protocol);
+        }
+        self.send_interaction(
+            "action.request",
+            json!({
+                "target": target, "verb": verb, "params": {}, "client_tick": self.world.tick()
+            }),
+        )
+    }
+
+    pub fn close_panel(&mut self) -> Result<(), OnlineError> {
+        self.send_interaction("ui.close", json!({}))
+    }
+
+    /// Echo only the schema of the exact panel the input was composed for.
+    /// Target and outcome remain server-owned; stale UI cannot retarget input.
+    pub fn submit_lock_guess(
+        &mut self,
+        panel: &crate::interaction::Panel,
+        guess: &str,
+    ) -> Result<(), OnlineError> {
+        let lock = self.interaction.lock().ok_or(OnlineError::Protocol)?;
+        if self.interaction.panel() != Some(panel)
+            || lock.solved
+            || !self.world.entities().any(|entity| {
+                entity.entity == panel.target
+                    && entity.interaction.as_ref().is_some_and(|surface| {
+                        surface.enabled
+                            && surface
+                                .verbs
+                                .iter()
+                                .any(|verb| verb.as_str() == Some("play"))
+                    })
+            })
+            || guess.len() != usize::from(lock.length)
+            || !guess.bytes().all(|digit| digit.is_ascii_digit())
+        {
+            return Err(OnlineError::Protocol);
+        }
+        self.send_interaction("ui.action", json!({
+            "schema": panel.schema, "action": "play", "params": {"guess": guess}, "client_tick": self.world.tick()
+        }))
+    }
+
+    fn send_interaction(&mut self, kind: &str, body: serde_json::Value) -> Result<(), OnlineError> {
+        if self.status != OnlineStatus::Active || self.interaction.pending() {
+            return Err(OnlineError::Protocol);
+        }
+        self.interaction_sequence = self
+            .interaction_sequence
+            .checked_add(1)
+            .ok_or(OnlineError::Protocol)?;
+        let id = MessageId::parse(&format!("interaction-{}", self.interaction_sequence))
+            .map_err(|_| OnlineError::Protocol)?;
+        let request = Envelope::new(
+            id.clone(),
+            MessageKind::parse(kind).map_err(|_| OnlineError::Protocol)?,
+            body,
+        );
+        self.client
+            .as_ref()
+            .ok_or(OnlineError::Protocol)?
+            .try_send(&request)
+            .map_err(OnlineError::Send)?;
+        self.interaction.sent(id);
+        Ok(())
+    }
+
     pub fn send_chat(&mut self, content: &str) -> Result<(), OnlineError> {
         let request = game_api::SendChatMessage {
             channel_id: "zone".into(),
@@ -405,6 +510,7 @@ impl OnlineClient {
     /// Tear down the current transport but retain reconnect settings and the
     /// rotated resume token. The world view is invalidated until a new baseline.
     fn close_transport(&mut self) {
+        self.interaction = crate::interaction::InteractionState::default();
         if let Some(mut client) = self.client.take() {
             client.close();
         }
@@ -511,6 +617,14 @@ impl OnlineClient {
             let Ok(envelope) = self.client.as_mut().expect("connected").try_recv() else {
                 break;
             };
+            match self.interaction.receive(&envelope) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(()) => {
+                    self.fail(OnlineError::Protocol);
+                    return;
+                }
+            }
             if envelope.kind.as_str() == "protocol.error" {
                 if let Some(correlation) = envelope.correlation.as_ref()
                     && self.pending_chat.remove(correlation.as_str())

@@ -1064,6 +1064,14 @@ impl WorldGateway {
 
         let mut deliveries = Vec::with_capacity(refreshed.len());
         for (session, update) in refreshed {
+            // Use the authoritative XZ distance and the provider's authored
+            // range, exactly like action validation; never the rendered position.
+            let panel_closed = self.sessions.panel(&session.id).is_some_and(|panel| {
+                !update.set.contains(&panel.target) || !self.panel_in_range(&session, panel)
+            });
+            if panel_closed {
+                self.sessions.clear_panel(&session.id)?;
+            }
             let mut batch = base.clone();
             for entity in &update.added {
                 if !has_state_update(&batch, *entity) {
@@ -1114,10 +1122,11 @@ impl WorldGateway {
                         }
                     })
                 });
-            if filtered.is_empty() && update.is_empty() && movement.is_none() {
+            if filtered.is_empty() && update.is_empty() && movement.is_none() && !panel_closed {
                 continue;
             }
             deliveries.push(SessionDelivery {
+                panel_closed,
                 session: session.id,
                 tick,
                 interest: update,
@@ -1126,6 +1135,23 @@ impl WorldGateway {
             });
         }
         Ok(deliveries)
+    }
+
+    fn panel_in_range(&self, session: &GatewaySession, panel: &OpenPanel) -> bool {
+        let Some(actor) = self.zone.entity(session.actor) else {
+            return false;
+        };
+        let Some(target) = self.zone.entity(panel.target) else {
+            return false;
+        };
+        target
+            .ui
+            .as_ref()
+            .is_some_and(|provider| provider.schema == panel.schema)
+            && target.interactable.as_ref().is_some_and(|surface| {
+                surface.enabled
+                    && actor.position().distance_xz(target.position()) <= surface.range_m
+            })
     }
 
     fn handle_movement(
@@ -1551,6 +1577,7 @@ impl WorldGateway {
             filter_batch(&batch, &audience)
         };
         Ok(SessionDelivery {
+            panel_closed: false,
             session: session.id.clone(),
             tick,
             interest: update,

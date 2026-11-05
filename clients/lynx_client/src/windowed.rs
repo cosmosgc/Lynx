@@ -24,6 +24,7 @@ pub struct OnlineWindowPlugin;
 impl Plugin for OnlineWindowPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ChatComposer>()
+            .init_resource::<LockComposer>()
             .init_resource::<SelectedTarget>()
             // InputPlugin provides this in the windowed app; headless tests add
             // the same resource so the shared keyboard system can run.
@@ -31,6 +32,8 @@ impl Plugin for OnlineWindowPlugin {
             .add_systems(Startup, setup_online)
             .add_systems(Update, select_target.after(crate::online::poll_online).before(chat_keyboard))
             .add_systems(Update, chat_keyboard.after(crate::online::poll_online))
+            .add_systems(Update, interaction_keyboard.after(select_target).before(chat_keyboard))
+            .add_systems(Update, present_interaction_hud.after(interaction_keyboard))
             .add_systems(
                 Update,
                 online_movement.after(chat_keyboard).after(crate::online::smooth_online).before(present_online),
@@ -78,6 +81,136 @@ struct ChatHud;
 
 #[derive(Component)]
 struct TelemetryHud;
+
+#[derive(Component)]
+struct InteractionHud;
+
+#[derive(Resource, Default)]
+struct LockComposer {
+    panel: Option<crate::interaction::Panel>,
+    guess: String,
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn interaction_keyboard(
+    mut client: ResMut<OnlineClient>,
+    selected: Res<SelectedTarget>,
+    keys: Res<ButtonInput<KeyCode>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    composer: Res<ChatComposer>,
+    mut lock_input: ResMut<LockComposer>,
+) {
+    if lock_input.panel.as_ref() != client.interaction().panel() {
+        lock_input.panel = client.interaction().panel().cloned();
+        lock_input.guess.clear();
+    }
+    if composer.active
+        || !windows.single().is_ok_and(|window| window.focused)
+        || client.status() != OnlineStatus::Active
+        || client.interaction().pending()
+    {
+        return;
+    }
+    if keys.just_pressed(KeyCode::KeyX) && client.interaction().panel().is_some() {
+        let _ = client.close_panel();
+        return;
+    }
+    if let Some(lock) = client.interaction().lock() {
+        let length = usize::from(lock.length);
+        if keys.just_pressed(KeyCode::Backspace) {
+            lock_input.guess.pop();
+        }
+        let digits = [
+            KeyCode::Digit0,
+            KeyCode::Digit1,
+            KeyCode::Digit2,
+            KeyCode::Digit3,
+            KeyCode::Digit4,
+            KeyCode::Digit5,
+            KeyCode::Digit6,
+            KeyCode::Digit7,
+            KeyCode::Digit8,
+            KeyCode::Digit9,
+        ];
+        for (digit, key) in "0123456789".chars().zip(digits) {
+            if keys.just_pressed(key) && lock_input.guess.len() < length {
+                lock_input.guess.push(digit);
+            }
+        }
+        if keys.just_pressed(KeyCode::Enter)
+            && let Some(panel) = lock_input.panel.clone()
+            && client.submit_lock_guess(&panel, &lock_input.guess).is_ok()
+        {
+            lock_input.guess.clear();
+        }
+        return;
+    }
+    let Some(target) = selected.0 else {
+        return;
+    };
+    let verbs = client.target_verbs(target);
+    let controls = [
+        KeyCode::Digit1,
+        KeyCode::Digit2,
+        KeyCode::Digit3,
+        KeyCode::Digit4,
+        KeyCode::Digit5,
+        KeyCode::Digit6,
+        KeyCode::Digit7,
+    ];
+    for (verb, key) in verbs.iter().zip(controls) {
+        if keys.just_pressed(key) {
+            let _ = client.interact(target, verb);
+            break;
+        }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn present_interaction_hud(
+    client: Res<OnlineClient>,
+    selected: Res<SelectedTarget>,
+    lock_input: Res<LockComposer>,
+    mut hud: Query<&mut Text, With<InteractionHud>>,
+) {
+    let mut text = String::from("Interação · Tab: selecionar alvo\n");
+    if client.interaction().lock().is_none()
+        && let Some(target) = selected.0
+    {
+        for (index, verb) in client.target_verbs(target).iter().enumerate() {
+            let _ = writeln!(text, "{}: {verb}", index + 1);
+        }
+    }
+    if let Some(lock) = client.interaction().lock() {
+        let _ = writeln!(
+            text,
+            "Código ({} dígitos): {}\nEnter: tentar · Backspace: apagar\nTentativas: {}",
+            lock.length, lock_input.guess, lock.attempts_left
+        );
+        for hint in &lock.hints {
+            text.push_str(match hint {
+                crate::interaction::DigitHint::Exact => "= ",
+                crate::interaction::DigitHint::Higher => "↑ ",
+                crate::interaction::DigitHint::Lower => "↓ ",
+            });
+        }
+        if let Some(tick) = lock.retry_after_tick {
+            let _ = write!(text, "\nBloqueado até tick {tick}");
+        }
+        text.push('\n');
+    }
+    if let Some(panel) = client.interaction().panel() {
+        let _ = writeln!(
+            text,
+            "\n{}\n{}\nX: fechar interface",
+            panel.title, panel.schema
+        );
+    }
+    text.push_str(client.interaction().status());
+    for mut label in &mut hud {
+        label.0.clone_from(&text);
+    }
+}
 
 #[derive(Component)]
 struct OnlineEntity(StableId);
@@ -310,6 +443,20 @@ struct OnlineMotion {
 
 fn setup_online(mut commands: Commands) {
     commands.spawn((Camera2d, SceneCamera));
+    commands.spawn((
+        InteractionHud,
+        Text::new("Interação"),
+        Node {
+            position_type: PositionType::Absolute,
+            right: px(16),
+            top: px(16),
+            width: px(360),
+            max_width: percent(45),
+            padding: UiRect::all(px(10)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.03, 0.04, 0.06, 0.9)),
+    ));
     commands.spawn((
         ChatHud,
         Text::new("Chat da zona · T para escrever · Enter para enviar\nCarregando chat…"),

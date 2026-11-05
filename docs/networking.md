@@ -299,6 +299,12 @@ Entity-provided interfaces are server state, not a client-owned overlay.
 - A disconnect clears the session's panel; a resume starts with no panel.
   A panel action whose provider is gone clears the panel instead of leaving a
   stale interface open.
+- Each authoritative tick also closes a panel if its provider leaves interest,
+  loses its UI/interaction surface, changes schema, becomes disabled, or moves
+  outside the provider's authored interaction range. Distance uses the same XZ
+  metric as action validation, with the exact boundary included. The transport
+  sends an unsolicited `ui.state` with `panel: null` after the world delta.
+  Returning to range does not reopen it; the player must interact again.
 
 Panel targets, schemas, and titles are never accepted from a client. See
 [ADR 0015](adr/0015-ui-panel-session-state.md).

@@ -571,6 +571,146 @@ async fn headless_schedule_connects_moves_and_disconnects() {
             Some(authority)
         );
     }
+    {
+        let mut client = app.world_mut().resource_mut::<OnlineClient>();
+        let vault = client
+            .world()
+            .entities()
+            .find(|entity| entity.prototype.as_str() == "prop.vault")
+            .unwrap()
+            .entity;
+        let door = client
+            .world()
+            .entities()
+            .find(|entity| entity.prototype.as_str() == "prop.door")
+            .unwrap()
+            .entity;
+        assert!(client.interact(door, "attack").is_err());
+        client.interact(vault, "use").unwrap();
+        assert!(client.interact(door, "open").is_err());
+        wait_for_interaction(&mut client).await;
+        assert!(client.interaction().panel().is_none());
+        assert_ne!(
+            client.interaction().status(),
+            "Ação confirmada pelo servidor."
+        );
+        client.interact(door, "open").unwrap();
+        wait_for_interaction(&mut client).await;
+        assert_eq!(
+            client.interaction().status(),
+            "Ação confirmada pelo servidor."
+        );
+        for _ in 0..18 {
+            let position = client
+                .world()
+                .reconciliation()
+                .authoritative_position()
+                .unwrap();
+            client
+                .move_to(Position {
+                    z: position.z + 0.09,
+                    ..position
+                })
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while client.pending_movement() {
+                    client.poll();
+                    assert_eq!(client.status(), OnlineStatus::Active);
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        client.interact(vault, "use").unwrap();
+        wait_for_interaction(&mut client).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while client.interaction().panel().is_none() {
+                client.poll();
+                assert_eq!(client.status(), OnlineStatus::Active);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            client.interaction().panel().unwrap().schema.as_str(),
+            "ui.lockpick"
+        );
+        let abandoned_panel = client.interaction().panel().unwrap().clone();
+        // Walking away closes the server's panel without submitting any action.
+        move_z_steps(&mut client, -0.09, 12).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while client.interaction().panel().is_some() {
+                client.poll();
+                assert_eq!(client.status(), OnlineStatus::Active);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(client.interaction().lock().is_none());
+        assert!(client.submit_lock_guess(&abandoned_panel, "555").is_err());
+        move_z_steps(&mut client, 0.09, 12).await;
+        client.interact(vault, "use").unwrap();
+        wait_for_interaction(&mut client).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while client.interaction().panel().is_none() {
+                client.poll();
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let panel = client.interaction().panel().unwrap().clone();
+        let mut stale = panel.clone();
+        stale.target = door;
+        assert!(client.submit_lock_guess(&stale, "555").is_err());
+        assert!(client.submit_lock_guess(&panel, "xx").is_err());
+        // Solve using only the server's per-digit comparisons, never its seed.
+        let mut low = [0_u8; 3];
+        let mut high = [9_u8; 3];
+        for _ in 0..4 {
+            let digits = std::array::from_fn::<_, 3, _>(|i| u8::midpoint(low[i], high[i]));
+            let guess: String = digits
+                .iter()
+                .map(|digit| char::from(b'0' + digit))
+                .collect();
+            client.submit_lock_guess(&panel, &guess).unwrap();
+            wait_for_interaction(&mut client).await;
+            if let Some(lock) = client.interaction().lock() {
+                if lock.solved {
+                    break;
+                }
+                assert_eq!(lock.hints.len(), 3);
+                for (i, hint) in lock.hints.iter().enumerate() {
+                    match hint {
+                        lynx_client::interaction::DigitHint::Exact => {
+                            low[i] = digits[i];
+                            high[i] = digits[i];
+                        }
+                        lynx_client::interaction::DigitHint::Higher => low[i] = digits[i] + 1,
+                        lynx_client::interaction::DigitHint::Lower => high[i] = digits[i] - 1,
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while client.interaction().panel().is_some() {
+                client.poll();
+                assert_eq!(client.status(), OnlineStatus::Active);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(client.submit_lock_guess(&panel, "555").is_err());
+        client.close_panel().unwrap();
+        wait_for_interaction(&mut client).await;
+        assert!(client.interaction().panel().is_none());
+    }
     assert!(!format!("{:?}", app.world().resource::<OnlineClient>()).contains(TOKEN));
     {
         let mut client = app.world_mut().resource_mut::<OnlineClient>();
@@ -742,4 +882,41 @@ async fn reconnects_with_rotated_resume_token_and_keeps_moving() {
     let _ = stop.send(());
     service.await.unwrap();
     server.await.unwrap().unwrap();
+}
+
+async fn wait_for_interaction(client: &mut OnlineClient) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while client.interaction().pending() {
+            client.poll();
+            assert_eq!(client.status(), OnlineStatus::Active);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+async fn move_z_steps(client: &mut OnlineClient, step: f32, count: usize) {
+    for _ in 0..count {
+        let position = client
+            .world()
+            .reconciliation()
+            .authoritative_position()
+            .unwrap();
+        client
+            .move_to(Position {
+                z: position.z + step,
+                ..position
+            })
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while client.pending_movement() {
+                client.poll();
+                assert_eq!(client.status(), OnlineStatus::Active);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
 }

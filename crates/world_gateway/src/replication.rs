@@ -151,6 +151,9 @@ pub struct MovementReconciliation {
 /// Everything the transport should send to one session for one tick.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionDelivery {
+    /// The server invalidated this session's panel during the tick. Transport
+    /// sends an unsolicited `ui.state` with a null panel after the world delta.
+    pub panel_closed: bool,
     /// Receiving session.
     pub session: SessionId,
     /// Authoritative tick shared by the delivery.
@@ -167,7 +170,10 @@ impl SessionDelivery {
     /// Whether there is anything to send.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.interest.is_empty() && self.batch.is_empty() && self.movement.is_none()
+        self.interest.is_empty()
+            && self.batch.is_empty()
+            && self.movement.is_none()
+            && !self.panel_closed
     }
 }
 

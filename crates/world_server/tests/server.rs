@@ -903,6 +903,7 @@ fn world_updates_round_trip_through_the_wire_body() {
     let parsed: WorldUpdate = serde_json::from_value(update_json).unwrap();
     assert_eq!(parsed, snapshot);
     let delivery = SessionDelivery {
+        panel_closed: false,
         session: SessionId::new("sess-test").unwrap(),
         tick: snapshot.tick,
         interest: snapshot.interest.clone(),

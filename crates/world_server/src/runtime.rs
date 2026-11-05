@@ -436,6 +436,16 @@ impl WorldServer {
                     connection,
                     envelope,
                 });
+                if delivery.panel_closed {
+                    outbound.push(Outbound::Message {
+                        connection,
+                        envelope: Envelope::new(
+                            self.next_message_id(),
+                            message_kind(world_gateway::UI_STATE_KIND),
+                            serde_json::json!({"tick": delivery.tick, "panel": null}),
+                        ),
+                    });
+                }
             }
         }
 

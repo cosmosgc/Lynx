@@ -2796,6 +2796,94 @@ fn panel_actions_use_the_open_target_and_revalidate_range() {
 }
 
 #[test]
+fn tick_closes_panels_outside_authored_range_once_and_rejects_later_actions() {
+    let mut fixture = fixture();
+    let alice = connect(
+        &mut fixture.gateway,
+        "account-alice",
+        fixture.alice_principal,
+    );
+    let _ = open_provider(
+        &mut fixture.gateway,
+        &alice.session,
+        fixture.alice_terminal,
+        "open-range",
+    );
+    let target = fixture
+        .gateway
+        .zone()
+        .entity(fixture.alice_terminal)
+        .unwrap();
+    let position = target.position();
+    let range = target.interactable.as_ref().unwrap().range_m;
+    fixture
+        .gateway
+        .zone_mut()
+        .entity_mut(fixture.alice_actor)
+        .unwrap()
+        .transform
+        .position = Vec3::new(position.x + range, position.y, position.z);
+    let at_boundary = fixture.gateway.tick(Millis::new(2_001)).unwrap();
+    assert!(fixture.gateway.panel(&alice.session).is_some());
+    assert!(at_boundary.iter().all(|delivery| !delivery.panel_closed));
+    fixture
+        .gateway
+        .zone_mut()
+        .entity_mut(fixture.alice_actor)
+        .unwrap()
+        .transform
+        .position
+        .x += 0.01;
+    let outside = fixture.gateway.tick(Millis::new(2_051)).unwrap();
+    assert!(delivery(&outside, &alice.session).panel_closed);
+    assert!(fixture.gateway.panel(&alice.session).is_none());
+    let next = fixture.gateway.tick(Millis::new(2_101)).unwrap();
+    assert!(next.iter().all(|delivery| !delivery.panel_closed));
+    let replies = fixture
+        .gateway
+        .handle(
+            &alice.session,
+            &envelope(
+                "stale-range",
+                UI_ACTION_KIND,
+                json!({"schema":"ui.terminal", "action":"inspect"}),
+            ),
+            Millis::new(2_102),
+        )
+        .unwrap();
+    assert!(
+        replies
+            .iter()
+            .any(|reply| reply.kind.as_str() == "protocol.error")
+    );
+}
+
+#[test]
+fn tick_closes_a_panel_when_its_provider_disappears() {
+    let mut fixture = fixture();
+    let alice = connect(
+        &mut fixture.gateway,
+        "account-alice",
+        fixture.alice_principal,
+    );
+    let _ = open_provider(
+        &mut fixture.gateway,
+        &alice.session,
+        fixture.alice_terminal,
+        "open-provider",
+    );
+    fixture
+        .gateway
+        .zone_mut()
+        .entity_mut(fixture.alice_terminal)
+        .unwrap()
+        .ui = None;
+    let deliveries = fixture.gateway.tick(Millis::new(2_001)).unwrap();
+    assert!(delivery(&deliveries, &alice.session).panel_closed);
+    assert!(fixture.gateway.panel(&alice.session).is_none());
+}
+
+#[test]
 fn a_panel_whose_target_disappeared_is_cleared() {
     let mut fixture = fixture();
     let alice = connect(

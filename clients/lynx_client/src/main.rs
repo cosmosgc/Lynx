@@ -28,6 +28,7 @@ fn main() {
                 ..default()
             }))
             .insert_resource(lynx_client::account_ui::AccountWorldLaunch::default())
+            .add_plugins(lynx_client::fonts::ClientFontPlugin)
             .add_plugins(lynx_client::account_ui::AccountUiPlugin);
         let exit = account_app.run();
         if !exit.is_success() {
@@ -59,6 +60,7 @@ fn main() {
     let first = args.first().map(String::as_str);
     let mut app = App::new();
     app.add_plugins(DefaultPlugins)
+        .add_plugins(lynx_client::fonts::ClientFontPlugin)
         .add_plugins(LynxClientPlugin);
     let _runtime = if let Some(first) =
         first.filter(|first| matches!(*first, "--demo-online" | "--login" | "--login-email"))
@@ -230,6 +232,7 @@ fn run_account_world(bearer: String, character: String) {
     }
     let mut app = App::new();
     app.add_plugins(DefaultPlugins)
+        .add_plugins(lynx_client::fonts::ClientFontPlugin)
         .add_plugins(LynxClientPlugin)
         .insert_resource(client)
         .add_plugins(OnlineWindowPlugin);
