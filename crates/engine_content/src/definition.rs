@@ -417,6 +417,18 @@ pub struct WorldMapDefinition {
 }
 
 impl WorldMapDefinition {
+    /// Resolve an explicitly authored travel route between two zone IDs.
+    /// Reverse travel is available only when the route declares
+    /// `bidirectional`; absence means callers must reject the handoff.
+    #[must_use]
+    pub fn route_kind(&self, from: &DefinitionId, to: &DefinitionId) -> Option<RouteKind> {
+        self.routes.iter().find_map(|route| {
+            ((route.from == *from && route.to == *to)
+                || (route.bidirectional && route.from == *to && route.to == *from))
+                .then_some(route.kind)
+        })
+    }
+
     /// Validate map topology without resolving zone definitions.
     ///
     /// Zone existence and unmapped-zone diagnostics require a loaded
@@ -927,6 +939,14 @@ mod tests {
             }],
         };
         assert_eq!(map.validate_shape(), Vec::new());
+        let starter = DefinitionId::new("zone.starter").unwrap();
+        let market = DefinitionId::new("zone.market").unwrap();
+        let missing = DefinitionId::new("zone.unrouted").unwrap();
+        assert_eq!(map.route_kind(&starter, &market), Some(RouteKind::Passage));
+        assert_eq!(map.route_kind(&market, &starter), Some(RouteKind::Passage));
+        assert_eq!(map.route_kind(&starter, &missing), None);
+        map.routes[0].bidirectional = false;
+        assert_eq!(map.route_kind(&market, &starter), None);
 
         map.zones.push(map_zone("zone.starter", 0, 0));
         map.routes.push(ZoneRoute {

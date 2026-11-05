@@ -467,16 +467,20 @@ impl Zone {
             movement.validate()?;
         }
         if let Some(policy) = entity.respawn_policy {
+            let navigable_safe_point = self.nav.cell_of(policy.position).is_some_and(|cell| {
+                !self.nav.is_blocked(cell.0, cell.1) && !self.dynamic_blockers.contains_key(&cell)
+            });
             if entity.health.is_none()
                 || policy.delay_ticks == 0
                 || !policy.position.x.is_finite()
                 || !policy.position.y.is_finite()
                 || !policy.position.z.is_finite()
                 || !self.config.contains(policy.position)
+                || !navigable_safe_point
             {
                 return Err(EngineError::new(
                     ErrorCode::InvalidRequest,
-                    "respawn policy requires health, positive delay, and an in-zone finite position",
+                    "respawn policy requires health, positive delay, and an in-zone unblocked navigation cell",
                 ));
             }
         }
@@ -836,6 +840,15 @@ impl Zone {
             let Some(policy) = entity.respawn_policy else {
                 continue;
             };
+            let safe_cell = self.nav.cell_of(policy.position);
+            if safe_cell.is_none_or(|cell| {
+                self.nav.is_blocked(cell.0, cell.1) || self.dynamic_blockers.contains_key(&cell)
+            }) {
+                // Temporary blockers do not cancel death or relocate the
+                // character to a client-selected point; retry the authored
+                // safe point on the next authoritative tick.
+                continue;
+            }
             if let Some(health) = entity.health.as_mut() {
                 health.current = health.max;
             }

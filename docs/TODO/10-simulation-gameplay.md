@@ -642,7 +642,7 @@ chat-family limiter is not an authorization or moderation substitute.
 ## SIM-014 — Additional zones and travel
 
 - **Priority:** P2
-- **Status:** In progress — prerequisites verified; server-owned handoff implementation started
+- **Status:** In progress — prerequisites verified and atlas route lookup is explicit; multi-zone handoff/ownership coordination remains
 - **Depends on:** `SIM-001`, `PST-005`
 
 **Scope**
@@ -660,6 +660,14 @@ chat-family limiter is not an authorization or moderation substitute.
 - [ ] A handoff cannot duplicate an entity or leave it in two zones.
 - [ ] A zone crash/restart recovers independently without corrupting others.
 - [ ] Cross-zone chat/party behavior is documented and tested.
+
+**Foundation:** `WorldMapDefinition::route_kind` resolves only an authored
+directed route (or a declared bidirectional reverse route) and returns no route
+for arbitrary zone pairs. The atlas loader validates route endpoints against
+placed zones. This prevents a future handoff caller from treating an arbitrary
+destination as valid, but does not itself move entities. The runtime still
+needs a single-writer multi-zone coordinator, capacity/ownership checks,
+idempotent durable handoff receipts, and per-zone recovery integration.
 
 ---
 
