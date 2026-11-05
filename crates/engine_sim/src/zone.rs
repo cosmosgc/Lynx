@@ -17,6 +17,7 @@ use crate::ai::{AiDiagnostics, AiNavigationState, AiTickPolicy, AiTickReport};
 use crate::combat::{CombatAuditEvent, CombatRules, DamageType};
 use crate::entity::{EntityRecord, TimedDamageOverTime, TimedShield, TimedSlow};
 use crate::link::{EntityLink, LinkEvent, LinkGraph};
+use crate::mind::Controller;
 use crate::movement::{MovementIntent, MovementSequence};
 use crate::nav::{
     NavGrid, PartialPathPolicy, Path, PathBudget, PathDiagnostics, PathError, PathTickBudget,
@@ -554,6 +555,140 @@ impl Zone {
         Ok(removed)
     }
 
+    /// Move one persistent, living entity into another authoritative zone.
+    ///
+    /// Route authorization and a durable handoff receipt belong to the world
+    /// coordinator. This method handles the simulation-state transaction: it
+    /// validates the destination cell, rebases timed state onto the target
+    /// zone's tick, preserves compatible actor cooldowns, and rolls back the
+    /// destination spawn if source removal fails. Entities with zone-local links
+    /// or cooldown targets absent from the destination are refused rather than
+    /// silently losing behavior.
+    ///
+    /// # Errors
+    /// Returns an error for identical zones, missing/non-persistent/dead
+    /// entities, zone-local links, invalid or occupied arrivals, incompatible
+    /// cooldown targets, capacity failure, or a tick-rebase overflow.
+    pub fn transfer_entity_to(
+        &mut self,
+        destination: &mut Zone,
+        id: StableId,
+        position: Vec3,
+    ) -> Result<(), EngineError> {
+        if self.config.instance == destination.config.instance {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "a zone handoff requires distinct zone instances",
+            ));
+        }
+        let entity = self
+            .entities
+            .get(&id)
+            .ok_or_else(|| EngineError::not_found("handoff entity", id))?;
+        if entity.persistence != engine_core::schema::PersistencePolicy::PersistentEntity
+            || entity.health.is_some_and(|health| !health.is_alive())
+        {
+            return Err(EngineError::new(
+                ErrorCode::InvalidState,
+                "only living persistent entities may be handed off",
+            ));
+        }
+        if self
+            .links
+            .links()
+            .iter()
+            .any(|link| link.source == id || link.target == id)
+        {
+            return Err(EngineError::new(
+                ErrorCode::InvalidState,
+                "an entity with zone-local links cannot be handed off",
+            ));
+        }
+        let Some(cell) = destination.nav.cell_of(position) else {
+            return Err(EngineError::new(
+                ErrorCode::OutOfRange,
+                "handoff arrival is outside destination navigation",
+            ));
+        };
+        if !position.x.is_finite()
+            || !position.y.is_finite()
+            || !position.z.is_finite()
+            || !destination.config.contains(position)
+            || destination.nav.is_blocked(cell.0, cell.1)
+            || destination.has_dynamic_obstacle(cell.0, cell.1)
+            || destination
+                .entities
+                .values()
+                .any(|other| destination.nav.cell_of(other.position()) == Some(cell))
+        {
+            return Err(EngineError::new(
+                ErrorCode::Conflict,
+                "handoff arrival is blocked or occupied",
+            ));
+        }
+
+        let source_tick = self.tick;
+        let destination_tick = destination.tick;
+        let mut transferred = entity.clone();
+        transferred.transform.position = position;
+        if let Some(mind) = transferred.mind.as_mut() {
+            mind.controller = Controller::None;
+        }
+        if let Some(policy) = transferred.respawn_policy.as_mut() {
+            policy.position = position;
+        }
+        transferred.stun_until =
+            rebase_optional_tick(transferred.stun_until, source_tick, destination_tick)?;
+        if let Some(mut slow) = transferred.slow {
+            slow.until = rebase_tick(slow.until, source_tick, destination_tick)?;
+            transferred.slow = (slow.until > destination_tick).then_some(slow);
+        }
+        transferred
+            .damage_over_time
+            .retain(|effect| effect.until > source_tick);
+        for effect in &mut transferred.damage_over_time {
+            effect.next_tick = rebase_tick(effect.next_tick, source_tick, destination_tick)?;
+            effect.until = rebase_tick(effect.until, source_tick, destination_tick)?;
+        }
+        transferred
+            .shields
+            .retain(|shield| shield.until > source_tick);
+        for shield in &mut transferred.shields {
+            shield.until = rebase_tick(shield.until, source_tick, destination_tick)?;
+        }
+
+        let action_cooldowns = self
+            .cooldowns
+            .iter()
+            .filter(|((actor, _, _), until)| *actor == id && **until > source_tick)
+            .map(|(key, until)| {
+                if key.2.is_some_and(|target| destination.entity(target).is_none()) {
+                    return Err(EngineError::new(
+                        ErrorCode::InvalidState,
+                        "handoff cannot preserve a cooldown for an entity outside the destination zone",
+                    ));
+                }
+                Ok((key.clone(), rebase_tick(*until, source_tick, destination_tick)?))
+            })
+            .collect::<Result<Vec<_>, EngineError>>()?;
+
+        destination.spawn(transferred)?;
+        if let Err(error) = self.despawn(id) {
+            let _ = destination.despawn(id);
+            return Err(error);
+        }
+        for (key, until) in action_cooldowns {
+            self.cooldowns.remove(&key);
+            destination
+                .cooldowns
+                .entry(key)
+                .and_modify(|current| *current = (*current).max(until))
+                .or_insert(until);
+        }
+        destination.movement_resets.insert(id);
+        Ok(())
+    }
+
     /// Add a validated link.
     ///
     /// # Errors
@@ -1083,4 +1218,24 @@ impl Zone {
         }
         Ok(effects)
     }
+}
+
+fn rebase_tick(value: Tick, source: Tick, destination: Tick) -> Result<Tick, EngineError> {
+    let remaining = value.0.saturating_sub(source.0);
+    destination
+        .0
+        .checked_add(remaining)
+        .map(Tick)
+        .ok_or_else(|| EngineError::new(ErrorCode::InvalidRequest, "handoff tick overflow"))
+}
+
+fn rebase_optional_tick(
+    value: Option<Tick>,
+    source: Tick,
+    destination: Tick,
+) -> Result<Option<Tick>, EngineError> {
+    value
+        .filter(|until| *until > source)
+        .map(|until| rebase_tick(until, source, destination))
+        .transpose()
 }

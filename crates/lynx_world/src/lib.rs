@@ -27,3 +27,4 @@ pub mod schema;
 pub mod service;
 pub mod startup;
 pub mod transport;
+pub mod travel;

@@ -649,7 +649,7 @@ chat-family limiter is not an authorization or moderation substitute.
 ## SIM-014 — Additional zones and travel
 
 - **Priority:** P2
-- **Status:** In progress — atlas route lookup and a multi-zone lease-set seam are implemented; durable handoff/recovery coordination remains
+- **Status:** In progress — authored-route player handoff and multi-zone lease foundations are implemented; durable receipts and runtime scheduling remain
 - **Depends on:** `SIM-001`, `PST-005`
 
 **Scope**
@@ -663,8 +663,8 @@ chat-family limiter is not an authorization or moderation substitute.
 
 **Acceptance criteria**
 
-- [ ] Travel only follows validated routes and server-owned access rules.
-- [ ] A handoff cannot duplicate an entity or leave it in two zones.
+- [x] Travel only follows validated routes and server-owned access rules.
+- [x] A handoff cannot duplicate an entity or leave it in two zones.
 - [ ] A zone crash/restart recovers independently without corrupting others.
 - [ ] Cross-zone chat/party behavior is documented and tested.
 
@@ -675,9 +675,20 @@ placed zones. This prevents a future handoff caller from treating an arbitrary
 destination as valid, but does not itself move entities. `ZoneAuthoritySet`
 acquires independent per-zone leases in stable zone-ID order and attempts to
 release earlier acquisitions if a later zone is unavailable. The runtime still
-needs to connect this seam to multi-zone scheduling, enforce travel
-capacity/access, write idempotent durable handoff receipts, and integrate
+needs to connect this seam to multi-zone scheduling, enforce route-specific
+access and travel cooldowns, write durable handoff receipts, and integrate
 independent recovery.
+
+`ZoneHandoffCoordinator` now validates both atlas placement and the authored
+directed/bidirectional route before moving a persistent, living player entity.
+The simulation handoff validates an unblocked, unoccupied destination cell,
+preserves identity and compatible timed combat/action-cooldown state, clears the
+old controller, and rolls back the destination spawn if source removal fails.
+Request receipts are idempotent and bounded in-process; snapshots taken after a
+completed transfer recover with the entity in exactly one zone. These receipts
+are not yet durable, and saving the two zone snapshots is not yet one atomic
+transaction, so crash-window recovery remains open work rather than a promised
+guarantee.
 
 ---
 
