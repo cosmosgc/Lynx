@@ -93,7 +93,7 @@ mod tests {
 
         assert_eq!(scheduler.schedule(100), ["zone-a", "zone-b"]);
         assert_eq!(scheduler.schedule(1), ["zone-a"]);
-        assert!(scheduler.schedule(0).is_empty());
+        assert_eq!(scheduler.schedule(0), [] as [String; 0]);
     }
 
     #[test]
@@ -111,6 +111,6 @@ mod tests {
         assert!(!scheduler.is_empty());
         assert!(scheduler.unregister("zone-a"));
         assert!(scheduler.is_empty());
-        assert!(scheduler.schedule(1).is_empty());
+        assert_eq!(scheduler.schedule(1), [] as [String; 0]);
     }
 }

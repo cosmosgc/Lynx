@@ -634,7 +634,10 @@ fn chat_history_and_delivery_are_isolated_between_zone_gateways() {
         .unwrap();
     assert_eq!(history[0].kind.as_str(), "chat.history.result");
     assert_eq!(history[0].body["messages"], json!([]));
-    assert!(second_zone.gateway.take_chat_outbox().is_empty());
+    assert_eq!(
+        second_zone.gateway.take_chat_outbox(),
+        [] as [(engine_net::SessionId, engine_net::Envelope); 0]
+    );
 }
 
 #[test]
