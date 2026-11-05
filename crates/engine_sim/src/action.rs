@@ -514,6 +514,12 @@ impl Zone {
                     .with_detail("entity", actor_id.to_string()),
             );
         }
+        if actor.stun_until.is_some() {
+            return Err(EngineError::new(
+                ErrorCode::InvalidState,
+                "a stunned entity cannot act",
+            ));
+        }
         let actor_position = actor.position();
         let mind = actor
             .mind

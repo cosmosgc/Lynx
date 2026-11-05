@@ -69,6 +69,9 @@ pub struct EntitySnapshot {
     /// Publicly visible immobilized status. Speed modifiers remain private.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stunned: bool,
+    /// Publicly visible slowed status. The exact speed multiplier remains private.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub slowed: bool,
     /// Hit points, when damageable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health: Option<HealthSnapshot>,
@@ -92,9 +95,11 @@ impl EntitySnapshot {
             prototype: entity.prototype.clone(),
             position: entity.transform.position,
             yaw_degrees: entity.transform.yaw_degrees,
-            stunned: entity
-                .movement
-                .is_some_and(|movement| movement.status == MovementStatus::Stunned),
+            stunned: entity.stun_until.is_some()
+                || entity
+                    .movement
+                    .is_some_and(|movement| movement.status == MovementStatus::Stunned),
+            slowed: entity.slow.is_some(),
             health: entity.health.map(|health| HealthSnapshot {
                 current: health.current,
                 max: health.max,
@@ -132,8 +137,12 @@ pub struct MovementReconciliation {
     pub position: Vec3,
     /// Last queue-accepted sequence, including cancelled input.
     pub last_consumed_sequence: Option<u64>,
-    /// Processing result; absent for an initial or resumed baseline.
+    /// Processing result; absent for a baseline or private status-only update.
     pub applied: Option<bool>,
+    /// Controlled actor's timed-slow factor, private to this session.
+    /// `None` means no timed slow; never included in public entity replication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slow_multiplier: Option<f32>,
 }
 
 /// Everything the transport should send to one session for one tick.
@@ -256,6 +265,26 @@ mod tests {
         let json = serde_json::to_value(EntitySnapshot::capture(&record)).unwrap();
         assert_eq!(json["stunned"], true);
         assert!(json.get("speed_multiplier").is_none());
+
+        // A timed stun projects the same public flag without exposing its
+        // tick or replacing the underlying movement profile.
+        let mut timed = record.clone();
+        timed.movement = Some(MovementProfile::default());
+        timed.stun_until = Some(engine_core::time::Tick(9));
+        let json = serde_json::to_value(EntitySnapshot::capture(&timed)).unwrap();
+        assert_eq!(json["stunned"], true);
+        assert!(json.get("stun_until").is_none());
+
+        let mut slowed = record;
+        slowed.slow = Some(engine_sim::entity::TimedSlow {
+            until: engine_core::time::Tick(9),
+            multiplier: 0.35,
+        });
+        let json = serde_json::to_value(EntitySnapshot::capture(&slowed)).unwrap();
+        assert_eq!(json["slowed"], true);
+        assert!(json.get("speed_multiplier").is_none());
+        assert!(json.get("multiplier").is_none());
+        assert!(json.get("slow").is_none());
     }
 
     #[test]

@@ -425,7 +425,9 @@ connection and the authoritative zone. It adds no socket and no runtime.
 - **Replication.** `WorldGateway::tick` advances the zone and returns one
   `SessionDelivery` per connected session, containing that session's interest
   delta plus only the replication updates its principal and staff flag admit.
-  Empty deliveries are omitted. There is no whole-zone broadcast path.
+  Public entity snapshots may include bounded status booleans (`stunned`,
+  `slowed`) but never effect timers or exact movement modifiers. Empty deliveries
+  are omitted. There is no whole-zone broadcast path.
 
 See [ADR 0013](adr/0013-world-gateway-and-reconnect.md).
 
@@ -440,9 +442,12 @@ See [ADR 0013](adr/0013-world-gateway-and-reconnect.md).
   a result; hints, attempt counts, lockouts, and unlocks are server effects.
 - Queued movement is checked against a server-owned speed budget, nav-grid
   transitions, zone bounds, destination-cell occupancy, circular body
-  collisions, and a server-owned mobile/stunned status. A rejected endpoint
-  never updates the authoritative transform; see
-  [SIM-001](TODO/10-simulation-gameplay.md#sim-001--server-authoritative-movement).
+  collisions, and a server-owned mobile/stunned status, including a timed stun
+  that expires on a server tick boundary. A rejected endpoint never updates the
+  authoritative transform; see
+  [SIM-001](TODO/10-simulation-gameplay.md#sim-001--server-authoritative-movement)
+  and
+  [SIM-005](TODO/10-simulation-gameplay.md#sim-005--combat-depth-status-mitigation-death-respawn).
 - Combat, inventory, currency, progression, and placement outcomes are
   computed on the server.
 - Client raycasts are selection hints. The server re-checks range, visibility,
@@ -480,11 +485,16 @@ See [ADR 0013](adr/0013-world-gateway-and-reconnect.md).
   `protocol.error` and do not consume the sequence.
 - `world.snapshot` includes a private `movement` baseline with `tick`,
   authoritative `position`, `last_consumed_sequence` (number or null), and
-  `applied: null`. A `world.delta` includes this field for a processed input,
-  with its tick, resulting position, sequence and `applied: true` or `false`.
+  `applied: null`; it may include the controlled actor's exact timed-slow factor.
+  A `world.delta` includes this field for a processed input, with its tick,
+  resulting position, sequence and `applied: true` or `false`. A status-only
+  private movement update may carry `applied: null` when the timed-slow factor
+  changes; clients update local prediction pacing without resetting position.
   Rejections do not explain geometry. This field goes only to the exact control
   session, never to other observers or staff; ordinary public position updates
   still use interest filtering. No movement field is sent on unrelated deltas.
+  Public observers receive only the optional `slowed` boolean, never its exact
+  multiplier or expiry tick.
 - Every queue-accepted sequence is consumed, even if processing rejects it or a
   disconnect cancels it. Resume resets prediction from the baseline, including
   cancelled input. Sequences must strictly increase within a session, may start

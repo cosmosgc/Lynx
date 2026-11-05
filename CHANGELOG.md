@@ -8,6 +8,28 @@ semantic versioning for engine releases and content bundles.
 
 ### Added
 
+- `lynx_client`: deterministic delayed-correction coverage over a real WebSocket.
+  `delayed_private_corrections_remain_bounded_over_websocket` delays
+  `movement.queued` and the private movement result by 100 ms and 200 ms,
+  proving one-in-flight prediction stays bounded and presentation converges to
+  authority without mutating it (`SIM-002`).
+- `engine_sim`: server-owned timed stun. `EntityRecord::stun_until` persists in
+  snapshots, `Zone::apply_stun` keeps the later expiry instead of adding
+  durations, and `cleanse_stun` removes only the timed stun. Expiry happens on
+  the tick boundary; pending movement, actions, and public replication honor it
+  (`SIM-005`).
+- `engine_sim`: server-owned timed slow. Slow expiry and the strongest-multiplier
+  plus latest-expiry stacking rule are deterministic on tick boundaries and
+  survive snapshots. The multiplier is enforced by authoritative movement
+  validation and is not exposed by public replication (`SIM-005`).
+- `world_gateway` and `lynx_client`: public replication exposes a boolean `slowed`
+  status without its timer or movement multiplier. The controlled actor's
+  session-private movement state carries the exact factor for prediction; the
+  online client displays a `SLOW` label for visible affected entities (`CLT-018`).
+- `engine_sim`: typed mitigation. `DamageType` and flat `Resistances` add a
+  versioned combat path where armor mitigates only physical damage and each
+  school uses its own server-owned resistance; the existing physical formula is
+  unchanged for zero resistances (`SIM-005`).
 - `engine_sim`: versioned zone snapshots. `Zone::snapshot` captures persistent
   entities (honoring each record's explicit persistence policy), links whose
   endpoints were saved, the tick counter, active cooldowns, the action and

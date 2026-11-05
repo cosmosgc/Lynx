@@ -15,6 +15,47 @@ use crate::entity::FactionMembership;
 /// The initial version of the built-in physical combat formula.
 pub const COMBAT_RULES_VERSION: SchemaVersion = SchemaVersion::new(1, 0);
 
+/// Server-owned damage school selected by an authoritative combat source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DamageType {
+    /// Physical weapon and collision damage.
+    #[default]
+    Physical,
+    /// Elemental fire damage.
+    Fire,
+    /// Elemental frost damage.
+    Frost,
+    /// Poison or disease damage.
+    Poison,
+}
+
+/// Server-owned resistance values by damage type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Resistances {
+    /// Flat physical mitigation.
+    pub physical: u32,
+    /// Flat fire mitigation.
+    pub fire: u32,
+    /// Flat frost mitigation.
+    pub frost: u32,
+    /// Flat poison mitigation.
+    pub poison: u32,
+}
+
+impl Resistances {
+    /// Flat mitigation for one damage type.
+    #[must_use]
+    pub const fn of(self, damage_type: DamageType) -> u32 {
+        match damage_type {
+            DamageType::Physical => self.physical,
+            DamageType::Fire => self.fire,
+            DamageType::Frost => self.frost,
+            DamageType::Poison => self.poison,
+        }
+    }
+}
+
 /// Server-owned, resolved combat inputs for one entity.
 ///
 /// A content loader or authoritative equipment system resolves base attributes,
@@ -26,13 +67,32 @@ pub struct CombatStats {
     pub attack: u32,
     /// Non-negative incoming physical mitigation after server-owned loadout effects.
     pub defense: u32,
+    /// Server-owned typed resistances applied after `defense`.
+    #[serde(default)]
+    pub resistances: Resistances,
 }
 
 impl CombatStats {
     /// Build resolved combat inputs.
     #[must_use]
     pub const fn new(attack: u32, defense: u32) -> Self {
-        Self { attack, defense }
+        Self {
+            attack,
+            defense,
+            resistances: Resistances {
+                physical: 0,
+                fire: 0,
+                frost: 0,
+                poison: 0,
+            },
+        }
+    }
+
+    /// Continue building with typed resistances.
+    #[must_use]
+    pub const fn with_resistances(mut self, resistances: Resistances) -> Self {
+        self.resistances = resistances;
+        self
     }
 }
 
@@ -142,10 +202,31 @@ impl CombatRules {
         self.allow_friendly_fire || attacker.faction != target.faction
     }
 
-    /// Resolve v1 physical damage from server-owned stats only.
+    /// Resolve v1 damage from server-owned stats only.
     #[must_use]
     pub fn resolve_damage(&self, attacker: CombatStats, target: CombatStats) -> i32 {
-        let raw = attacker.attack.saturating_sub(target.defense);
+        self.resolve_typed_damage(attacker, target, DamageType::Physical)
+    }
+
+    /// Resolve v1 damage for an authoritative damage type. Physical targets use
+    /// `defense` plus physical resistance; other schools use only their typed
+    /// resistance, so armor never silently mitigates magic.
+    #[must_use]
+    pub fn resolve_typed_damage(
+        &self,
+        attacker: CombatStats,
+        target: CombatStats,
+        damage_type: DamageType,
+    ) -> i32 {
+        let armor = if damage_type == DamageType::Physical {
+            target.defense
+        } else {
+            0
+        };
+        let raw = attacker
+            .attack
+            .saturating_sub(armor)
+            .saturating_sub(target.resistances.of(damage_type));
         let damage = raw.max(self.minimum_damage).min(i32::MAX as u32);
         i32::try_from(damage).unwrap_or(i32::MAX)
     }
@@ -191,5 +272,42 @@ mod tests {
             ..CombatRules::default()
         };
         assert!(unsupported.validate().is_err());
+    }
+
+    #[test]
+    fn typed_resistances_are_flat_and_armor_only_mitigates_physical() {
+        let rules = CombatRules::default();
+        let attacker = CombatStats::new(10, 0);
+        let armored = CombatStats::new(0, 4).with_resistances(Resistances {
+            physical: 1,
+            fire: 2,
+            frost: 3,
+            poison: 4,
+        });
+        assert_eq!(
+            rules.resolve_typed_damage(attacker, armored, DamageType::Physical),
+            5
+        );
+        assert_eq!(
+            rules.resolve_typed_damage(attacker, armored, DamageType::Fire),
+            8
+        );
+        assert_eq!(
+            rules.resolve_typed_damage(attacker, armored, DamageType::Frost),
+            7
+        );
+        assert_eq!(
+            rules.resolve_typed_damage(attacker, armored, DamageType::Poison),
+            6
+        );
+        assert_eq!(
+            rules.resolve_typed_damage(CombatStats::new(1, 0), armored, DamageType::Poison),
+            i32::try_from(rules.minimum_damage).unwrap()
+        );
+        // The default physical path is unchanged for stats without resistances.
+        assert_eq!(
+            rules.resolve_damage(CombatStats::new(9, 0), CombatStats::new(3, 4)),
+            5
+        );
     }
 }

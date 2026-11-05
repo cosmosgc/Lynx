@@ -33,6 +33,131 @@ fn message(kind: &str, body: serde_json::Value) -> Envelope {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn delayed_private_corrections_remain_bounded_over_websocket() {
+    for delay_ms in [100, 200] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/world", listener.local_addr().unwrap());
+        let (stop, stopped) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            socket.next().await.unwrap().unwrap();
+            for envelope in [
+                message(
+                    "world.ready",
+                    serde_json::json!({"session":"delayed", "actor":StableId::from_parts(IdKind::Entity, 1, 1), "resumed":false}),
+                ),
+                message(
+                    "world.snapshot",
+                    serde_json::json!({"tick":10,"interest":{"set":[],"added":[],"removed":[]},"batch":{"tick":10,"updates":[]},"movement":{"tick":10,"position":{"x":0,"y":0,"z":0},"last_consumed_sequence":null,"applied":null}}),
+                ),
+            ] {
+                socket
+                    .send(Message::Binary(encode_frame(&envelope).unwrap().into()))
+                    .await
+                    .unwrap();
+            }
+            let request = loop {
+                let Message::Binary(bytes) = socket.next().await.unwrap().unwrap() else {
+                    continue;
+                };
+                let envelope = decode_frame(&bytes).unwrap();
+                if envelope.kind.as_str() == "movement.request" {
+                    break envelope;
+                }
+            };
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            let sequence = request.body["sequence"].as_u64().unwrap();
+            let mut queued = message("movement.queued", serde_json::json!({"sequence":sequence}));
+            queued.correlation = Some(request.id);
+            socket
+                .send(Message::Binary(encode_frame(&queued).unwrap().into()))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            let correction = message(
+                "world.delta",
+                serde_json::json!({"tick":11,"interest":{"set":[],"added":[],"removed":[]},"batch":{"tick":11,"updates":[]},"movement":{"tick":11,"position":{"x":0,"y":0,"z":0},"last_consumed_sequence":sequence,"applied":false}}),
+            );
+            socket
+                .send(Message::Binary(encode_frame(&correction).unwrap().into()))
+                .await
+                .unwrap();
+            let _ = stopped.await;
+        });
+        let mut client = OnlineClient::new(1.0).unwrap();
+        client
+            .connect(Config {
+                url,
+                bearer: "test-secret".into(),
+                character: None,
+                handshake: demo::handshake().unwrap(),
+                last_ack_tick: Tick::ZERO,
+            })
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while client.status() != OnlineStatus::Active {
+                client.poll();
+                assert!(!matches!(client.status(), OnlineStatus::Failed(_)));
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let origin = client
+            .world()
+            .reconciliation()
+            .authoritative_position()
+            .unwrap();
+        let destination = Position { x: 0.75, ..origin };
+        client.move_to(destination).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while client.pending_movement() {
+                // A delayed acknowledgement/result must not allow another send
+                // or accumulate prediction beyond the one permitted endpoint.
+                assert!(client.move_to(Position { x: 1.0, ..origin }).is_err());
+                assert_eq!(
+                    client.world().reconciliation().predicted_position(),
+                    Some(destination)
+                );
+                assert_eq!(
+                    client.world().reconciliation().authoritative_position(),
+                    Some(origin)
+                );
+                client.poll();
+                assert_eq!(client.status(), OnlineStatus::Active);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(client.last_movement_applied(), Some(false));
+        client.smooth_presentation(0.5);
+        assert_eq!(
+            client
+                .world()
+                .reconciliation()
+                .presentation_position()
+                .unwrap()
+                .x,
+            0.375
+        );
+        assert_eq!(
+            client.world().reconciliation().authoritative_position(),
+            Some(origin)
+        );
+        client.smooth_presentation(1.0);
+        assert_eq!(
+            client.world().reconciliation().presentation_position(),
+            Some(origin)
+        );
+        stop.send(()).unwrap();
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn acknowledges_applied_snapshot_and_fails_on_stale_delta() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}/world", listener.local_addr().unwrap());
@@ -397,6 +522,55 @@ async fn headless_schedule_connects_moves_and_disconnects() {
             .x
             > position.x
     );
+    // Predict a locally permitted endpoint that exceeds the server's 50 ms
+    // movement budget. Admission succeeds, but authoritative processing rejects
+    // it. Exercise the real socket/private-result path, not a fabricated result.
+    {
+        let mut client = app.world_mut().resource_mut::<OnlineClient>();
+        let authority = client
+            .world()
+            .reconciliation()
+            .authoritative_position()
+            .unwrap();
+        client
+            .move_to(Position {
+                x: authority.x + 0.9,
+                ..authority
+            })
+            .unwrap();
+        assert_ne!(
+            client.world().reconciliation().presentation_position(),
+            Some(authority)
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while client.pending_movement() {
+                client.poll();
+                assert_eq!(client.status(), OnlineStatus::Active);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(client.last_movement_applied(), Some(false));
+        assert_eq!(
+            client.world().reconciliation().authoritative_position(),
+            Some(authority)
+        );
+        client.smooth_presentation(0.5);
+        assert_ne!(
+            client.world().reconciliation().presentation_position(),
+            Some(authority)
+        );
+        assert_eq!(
+            client.world().reconciliation().authoritative_position(),
+            Some(authority)
+        );
+        client.smooth_presentation(1.0);
+        assert_eq!(
+            client.world().reconciliation().presentation_position(),
+            Some(authority)
+        );
+    }
     assert!(!format!("{:?}", app.world().resource::<OnlineClient>()).contains(TOKEN));
     {
         let mut client = app.world_mut().resource_mut::<OnlineClient>();

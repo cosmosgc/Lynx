@@ -117,7 +117,7 @@ this task owns the authoritative server side.
 ## SIM-002 — Client prediction and reconciliation contract
 
 - **Priority:** P0
-- **Status:** In progress — bounded online reconciliation implemented; visual validation pending
+- **Status:** In progress — bounded online reconciliation and delayed socket corrections done; discontinuity callers and graphical validation remain
 - **Depends on:** `SIM-001`, `CLT-005`
 - **References:** ADR 0014, `SIM-001`
 
@@ -128,50 +128,61 @@ input sequences and send bounded corrections the client can replay.
 **Scope**
 
 - Define input sequence numbers, server acknowledgements, and correction
-  payloads (authoritative position, velocity, tick, last processed input).
-- Keep a bounded client replay buffer; replay unacknowledged inputs after a
-  correction and smooth visual error without changing simulation state.
+  payloads (authoritative position, tick, and last processed input). Velocity is
+  not part of this protocol version.
+- Keep the bounded one-entry in-flight prediction that the server's
+  single-pending-input rule permits; a correction replaces that prediction and
+  never retries an ambiguously delivered endpoint.
+- Smooth presentation error toward the latest private authoritative result
+  without changing simulation, collision, or request state.
 - Define behavior for teleports, zone changes, deaths, and reconnect snapshots,
   which reset the prediction history.
 - Document thresholds for "accept small error" versus "snap".
 
 **Acceptance criteria**
 
-- [x] A simulated-latency/loss harness shows bounded divergence under normal
-       movement and recovery after a forced correction.
+- [x] Delayed queue/result coverage at 100 ms and 200 ms over a real WebSocket
+       shows bounded divergence and recovery after a forced correction.
 - [x] Corrections never grant the client authority over position, speed, or
        collision.
-- [x] Reconnect and zone-transfer paths reset prediction state explicitly.
+- [ ] Reconnect and zone-transfer paths reset prediction state explicitly.
+       Reconnect is covered; the explicit `reset` seam exists, but no teleport,
+       death, or zone-transfer caller exists yet (`SIM-005`, `SIM-014`).
 - [x] The contract is documented in `docs/networking.md`.
 
 **Foundation:** Initial and resumed snapshots carry the session-private current
 position and optional last queue-consumed sequence (including cancelled input).
 Processed inputs carry a tick-stamped applied/rejected result and position for
 that exact session only. Disconnect and delivery failure recover via a baseline,
-not replay of per-input results. Exhausting u64 requires a new session. Client
-replay/smoothing, velocity and non-reconnect reset policies remain open.
+not replay of per-input results. Exhausting u64 requires a new session. The
+client implements bounded prediction, presentation smoothing, and an explicit
+reset seam; velocity remains deliberately absent.
 
 The client reconciliation module is wired through `WorldState` and the bounded
 background transport. It predicts the server-permitted single pending endpoint,
 keeps it in a one-entry replay buffer, and consumes only correlated private
 results. Its authoritative state is never mutable by presentation smoothing.
 Small correction error is interpolated by the renderer; correction beyond the
-local prediction distance snaps. Disconnect, fresh snapshots, teleport/death/
-zone-transfer callers use the explicit reset path. The latency/loss test proves
+local prediction distance snaps. Disconnect and fresh snapshots reset through
+`disconnect`/`baseline`; the explicit `reset` API is ready for teleport, death,
+and zone-transfer callers, which do not exist yet. The latency/loss test proves
 that dropped replies cannot accumulate unbounded divergence and a forced server
 correction recovers to authority. The local distance bound is not server movement
 validation. The caller discards messages from old connections and distinguishes
 resumed from new sessions.
 
-**Visual validation (2026-10-29):**
-- Screen: `lynx_client --demo-online` online 2D presentation.
-- Journey: receive a private movement correction and observe the presentation
-  position converge without changing authoritative state.
-- Evidence: blocked — this headless environment has no developer window capture
-  or live demo service configured; the presentation seam was checked through
-  `lynx_client` headless reconciliation and online integration tests instead.
-- Automated checks: `cargo test -p lynx_client --no-default-features`.
-- Result: automated checks passed; visual acceptance remains open.
+`delayed_private_corrections_remain_bounded_over_websocket` delays both
+`movement.queued` and the private rejected result by 100 ms and 200 ms against a
+stub gateway. While the result is pending, additional requests fail, the
+presentation endpoint stays bounded, and authority is unchanged. Presentation
+then interpolates to authority without mutating it. This is deterministic
+transport delay, not a jitter/loss simulation and not a 100–200 ms round-trip
+polish measurement; CLT-016 remains the UI-response measurement and CLT-019 the
+graphical acceptance.
+
+Graphical validation of the online correction journey is deferred to
+[`CLT-019`](40-bevy-client.md#clt-019--online-reconciliation-visual-validation),
+which requires a controlled correction and a graphical demo environment.
 
 ---
 
@@ -251,7 +262,7 @@ prioritizing tanks). It is a design proposal, not an implementation contract.
 ## SIM-005 — Combat depth: status, mitigation, death, respawn
 
 - **Priority:** P2
-- **Status:** Ready
+- **Status:** In progress — timed stun/slow plus typed mitigation foundation
 - **Depends on:** `SIM-003`
 - **References:** `SIM-003`, `SIM-004`
 
@@ -271,6 +282,34 @@ prioritizing tanks). It is a design proposal, not an implementation contract.
 - [ ] Respawn cannot be triggered by a client-supplied location.
 - [ ] Stacking and mitigation rules are covered by table-driven tests.
 - [ ] Death/respawn behavior is documented for reconnect and zone transfer.
+
+**Foundation:** `EntityRecord::stun_until` is server-owned and persists in
+snapshots. `Zone::apply_stun` validates duration and target, never adds
+durations, keeps the later expiry on reapplication, and `cleanse_stun` removes
+only the timed stun so a permanent stunned profile remains. Expiry occurs on the
+exclusive `advance_tick` boundary before AI or movement acts; pending movement is
+revalidated during processing. Stunned actors are rejected by the shared action
+pipeline, and public replication derives `stunned` from both the timed stun and
+the static profile. Spawn/restore normalizes already-expired stuns. Tests cover
+boundary expiry, stacking, cleanse, snapshot round trip, pending movement
+rejection, and action rejection. `TimedSlow` is likewise server-owned,
+snapshot-persistent, and tick-expiring. `Zone::apply_slow` rejects invalid
+targets, dead actors, and out-of-range multipliers; reapplication keeps the
+strongest multiplier and latest expiry without compounding. The effective
+multiplier is applied inside authoritative movement validation. Nearby
+observers receive only a public `slowed` flag; the exact factor is sent only in
+the controlled actor's private movement state so local prediction can match the
+server without granting authority. Tests cover stacking, cleanse, expiry,
+snapshot recovery, private delivery, and rejection of movement that exceeds the
+slowed budget.
+
+`DamageType` (`physical`, `fire`, `frost`, `poison`) and flat `Resistances` are
+versioned server-owned combat data. `CombatRules::resolve_typed_damage` applies
+`defense` only to physical damage and the matching flat resistance to every
+school; the existing physical path is unchanged when resistances are zero. No
+action or wire body can select a damage type or resistance value. Remaining:
+damage-over-time and shields, source-selected damage types with authored
+resistances, death/corpse/respawn policy, penalties, and audit logging.
 
 ---
 

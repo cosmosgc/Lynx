@@ -559,6 +559,34 @@ mod tests {
     }
 
     #[test]
+    fn timed_stun_survives_snapshot_and_expires_without_wall_clock_decay() {
+        let mut source = zone();
+        let actor = source
+            .spawn(entity(1, PersistencePolicy::PersistentEntity).with_health(10))
+            .unwrap();
+        source.apply_stun(actor, 3).unwrap();
+        source.apply_slow(actor, 4, 0.5).unwrap();
+        source.advance_tick();
+        let bytes = serde_json::to_vec(&source.snapshot()).unwrap();
+        let snapshot: ZoneSnapshot = serde_json::from_slice(&bytes).unwrap();
+        let mut restored = Zone::restore(&snapshot, nav(), rules()).unwrap();
+        assert_eq!(restored.entity(actor).unwrap().stun_until, Some(Tick(3)));
+        assert_eq!(restored.entity(actor).unwrap().slow.unwrap().until, Tick(4));
+        restored.advance_tick();
+        assert_eq!(restored.entity(actor).unwrap().stun_until, Some(Tick(3)));
+        assert!(restored.entity(actor).unwrap().slow.is_some());
+        restored.advance_tick();
+        assert_eq!(restored.entity(actor).unwrap().stun_until, None);
+        assert!(restored.entity(actor).unwrap().slow.is_some());
+        restored.advance_tick();
+        assert!(restored.entity(actor).unwrap().slow.is_none());
+        let mut expired = snapshot;
+        expired.tick = Tick(3);
+        let restored = Zone::restore(&expired, nav(), rules()).unwrap();
+        assert_eq!(restored.entity(actor).unwrap().stun_until, None);
+    }
+
+    #[test]
     fn an_unsupported_snapshot_version_is_rejected() {
         let mut source = zone();
         source

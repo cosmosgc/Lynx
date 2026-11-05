@@ -40,6 +40,7 @@ impl Plugin for OnlineWindowPlugin {
             .add_systems(Update, present_health.after(present_online))
             .add_systems(Update, present_interactions.after(present_online))
             .add_systems(Update, present_status.after(present_online))
+            .add_systems(Update, present_slow.after(present_online))
             .add_systems(Update, present_target.after(present_online).after(select_target))
             .add_systems(
                 Update,
@@ -103,6 +104,9 @@ struct InteractionMarker(StableId);
 #[derive(Component)]
 struct StatusMarker(StableId);
 
+#[derive(Component)]
+struct SlowMarker(StableId);
+
 #[allow(clippy::needless_pass_by_value)]
 fn present_interactions(
     client: Res<OnlineClient>,
@@ -137,11 +141,28 @@ fn present_status(client: Res<OnlineClient>, mut markers: Query<(&StatusMarker, 
         .map(|entity| entity.entity)
         .collect();
     for (marker, mut visibility) in &mut markers {
-        *visibility = if stunned.contains(&marker.0) {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
+        *visibility = status_visibility(stunned.contains(&marker.0));
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn present_slow(client: Res<OnlineClient>, mut markers: Query<(&SlowMarker, &mut Visibility)>) {
+    let slowed: BTreeSet<_> = client
+        .world()
+        .entities()
+        .filter(|entity| entity.slowed)
+        .map(|entity| entity.entity)
+        .collect();
+    for (marker, mut visibility) in &mut markers {
+        *visibility = status_visibility(slowed.contains(&marker.0));
+    }
+}
+
+fn status_visibility(active: bool) -> Visibility {
+    if active {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
     }
 }
 
@@ -416,6 +437,9 @@ fn movement_destination(
     keys: &ButtonInput<KeyCode>,
     step: f32,
 ) -> Option<Position> {
+    if !step.is_finite() || step <= 0.0 {
+        return None;
+    }
     let mut x = 0.0_f32;
     let mut z = 0.0_f32;
     if keys.pressed(KeyCode::KeyW) {
@@ -721,6 +745,17 @@ fn present_online(
                     Transform::from_xyz(30.0, 52.0, 0.6),
                     Visibility::Hidden,
                 ));
+                parent.spawn((
+                    SlowMarker(public.entity),
+                    Text2d::new("SLOW"),
+                    TextFont {
+                        font_size: bevy::text::FontSize::Px(10.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.45, 0.75, 1.0)),
+                    Transform::from_xyz(30.0, 40.0, 0.6),
+                    Visibility::Hidden,
+                ));
                 // Segmented ground ring works with the existing sprite renderer.
                 // It is presentation only, not a collision/range boundary.
                 for segment in 0..32_u16 {
@@ -1010,6 +1045,12 @@ mod tests {
             })),
             Some(1.0)
         );
+    }
+
+    #[test]
+    fn status_indicators_follow_authoritative_presence_and_clearing() {
+        assert_eq!(status_visibility(true), Visibility::Inherited);
+        assert_eq!(status_visibility(false), Visibility::Hidden);
     }
 
     #[test]
@@ -1303,6 +1344,7 @@ mod tests {
         let mut keys = ButtonInput::<KeyCode>::default();
         assert_eq!(movement_destination(origin, &keys, 0.09), None);
         keys.press(KeyCode::KeyW);
+        assert_eq!(movement_destination(origin, &keys, 0.0), None);
         let up = movement_destination(origin, &keys, 0.09).unwrap();
         assert_eq!(up.y, origin.y);
         assert!((up.z - (origin.z - 0.09)).abs() < 1e-6);

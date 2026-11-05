@@ -8,6 +8,7 @@ use engine_core::id::{DefinitionId, StableId};
 use engine_core::inventory::Inventory;
 use engine_core::math::Vec3;
 use engine_core::schema::{ComponentInstance, ComponentKey, PersistencePolicy};
+use engine_core::time::Tick;
 use serde::{Deserialize, Serialize};
 
 use crate::action::Verb;
@@ -296,6 +297,36 @@ impl Default for MovementProfile {
     }
 }
 
+/// A server-owned timed movement slow.
+///
+/// The multiplier scales the entity's resolved movement profile and is never
+/// accepted from a client request. A slow with multiplier `0.0` roots the
+/// entity without changing its locomotion status.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TimedSlow {
+    /// Exclusive simulation tick at which the slow expires.
+    pub until: Tick,
+    /// Finite multiplier in `[0.0, 1.0)`.
+    pub multiplier: f32,
+}
+
+impl TimedSlow {
+    /// Validate content or persisted slow inputs.
+    ///
+    /// # Errors
+    /// Returns [`ErrorCode::InvalidRequest`] for a non-finite multiplier or one
+    /// outside `[0.0, 1.0)`.
+    pub fn validate(self) -> Result<(), EngineError> {
+        if !self.multiplier.is_finite() || !(0.0..1.0).contains(&self.multiplier) {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "slow multiplier must be finite and less than one",
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl FactionMembership {
     /// Join a faction with no reputation overrides.
     #[must_use]
@@ -327,6 +358,14 @@ pub struct EntityRecord {
     /// Server-owned collision and locomotion status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub movement: Option<MovementProfile>,
+    /// Server-owned timed stun, active until this exclusive simulation tick.
+    /// Persists with the entity; independent of permanent locomotion restrictions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stun_until: Option<Tick>,
+    /// Server-owned timed movement slow, active until its exclusive tick.
+    /// Persists with the entity and never replaces the base profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slow: Option<TimedSlow>,
     /// Inventory, when the entity can hold items.
     pub inventory: Option<Inventory>,
     /// Faction identity and reputation.
@@ -360,6 +399,8 @@ impl EntityRecord {
             interactable: None,
             mind: None,
             movement: None,
+            stun_until: None,
+            slow: None,
             inventory: None,
             faction: None,
             door: None,
@@ -416,6 +457,15 @@ impl EntityRecord {
     pub fn movement_profile(&self) -> Option<MovementProfile> {
         self.movement
             .or_else(|| self.mind.as_ref().map(|_| MovementProfile::default()))
+            .map(|mut profile| {
+                if self.stun_until.is_some() {
+                    profile.status = MovementStatus::Stunned;
+                }
+                if let Some(slow) = self.slow {
+                    profile.speed_multiplier *= slow.multiplier;
+                }
+                profile
+            })
     }
 
     /// Attach an inventory.

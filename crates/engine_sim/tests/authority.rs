@@ -79,6 +79,26 @@ fn action(actor: StableId, principal: StableId, target: StableId, verb: Verb) ->
         .at_tick(engine_core::time::Tick::ZERO)
 }
 
+#[test]
+fn timed_stun_prevents_actions_until_expiry() {
+    let mut zone = test_zone();
+    let (actor, principal) = player_at(&mut zone, 1, Vec3::new(1.0, 0.0, 1.0), 4);
+    let door = door_at(&mut zone, 2, Vec3::new(2.0, 0.0, 1.0), &[Verb::Open]);
+    zone.apply_stun(actor, 1).unwrap();
+    let stunned = zone.apply_action(&action(actor, principal, door, Verb::Open), Millis::new(1));
+    assert_eq!(stunned.error().unwrap().code(), ErrorCode::InvalidState);
+    assert!(!zone.entity(door).unwrap().door.as_ref().unwrap().open);
+    zone.advance_tick();
+    let recovered = zone.apply_action(
+        &ActionRequest::new("after-stun", actor, Verb::Open)
+            .on(door)
+            .by(principal),
+        Millis::new(1),
+    );
+    assert!(recovered.is_applied(), "{:?}", recovered.error());
+    assert!(zone.entity(door).unwrap().door.as_ref().unwrap().open);
+}
+
 fn vault_at(zone: &mut Zone, seed: u128, position: Vec3) -> StableId {
     let vault = entity(seed);
     zone.spawn(

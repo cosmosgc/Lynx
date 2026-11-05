@@ -41,11 +41,13 @@ copied from the task entries; a dash means none are declared.
 | [CLT-005](40-bevy-client.md#clt-005--network-client-loop) | Network client loop | P0 | In progress | `CLT-001`, `CLT-002` | Terminal recovery guidance is in place; automatic-drop injection and account refresh remain. |
 | [CLT-006](40-bevy-client.md#clt-006--entity-presentation-and-interpolation) | Entity presentation and interpolation | P0 | Done | `CLT-004`, `CLT-005` | Base entity visuals are implemented and user-reviewed; network impairment remains in CLT-016 and public status effects are separated into CLT-018. |
 | [CLT-007](40-bevy-client.md#clt-007--local-movement-and-prediction) | Local movement and prediction | P0 | In progress | `SIM-001`, `SIM-002`, `CLT-005` | WASD works visually; current local tests cannot validate latency/rejection; future harness and fixture are tracked in dependent `CLT-016`/`CLT-017`. |
-| [SIM-002](10-simulation-gameplay.md#sim-002--client-prediction-and-reconciliation-contract) | Client prediction and reconciliation contract | P0 | In progress | `SIM-001`, `CLT-005` | Resume visual validation when client/network environment is available. |
+| [SIM-002](10-simulation-gameplay.md#sim-002--client-prediction-and-reconciliation-contract) | Client prediction and reconciliation contract | P0 | In progress | `SIM-001`, `CLT-005` | Bounded online contract plus 100/200 ms delayed socket correction coverage are implemented; teleport/death/zone-transfer reset callers await `SIM-005`/`SIM-014`, and graphical validation is `CLT-019`. |
 | [CLT-002](40-bevy-client.md#clt-002--login-and-session-bootstrap) | Login and session bootstrap | P0 | In progress | `NET-001`, `CLT-001` | Finish server profiles and world-session lifecycle. |
 | [CLT-003](40-bevy-client.md#clt-003--character-selection-and-creation) | Character selection and creation | P0 | In progress | `PST-001`, `CLT-002` | Verify full Bevy onboarding and restart flow against a live server. |
 | [SIM-007](10-simulation-gameplay.md#sim-007--navigation-budgets-and-replan-policy) | Navigation budgets and replan policy | P1 | Done | `SIM-001` | GuardChase uses bounded paths, server movement validation, and retry/expiry handling. |
 | [SIM-006](10-simulation-gameplay.md#sim-006--ai-behaviors-schedules-and-perception-budgets) | AI behaviors, schedules, and perception budgets | P1 | In progress | `SIM-001` | Continue bounded behavior/content hydration; prerequisite of SIM-015. |
+| [CLT-018](40-bevy-client.md#clt-018--public-status-indicators) | Public status indicators | P2 | In progress | `CLT-006` | Public status labels plus owner-private slow prediction are wired; deterministic fixture and visual validation remain. |
+| [SIM-005](10-simulation-gameplay.md#sim-005--combat-depth-status-mitigation-death-respawn) | Combat depth: status, mitigation, death, respawn | P2 | In progress | `SIM-003` | Timed server-owned stun/slow, cleanse, snapshot persistence, movement/action rejection, typed mitigation, and replication landed; DoT/shields, death/respawn policy, and audit logging remain. |
 | [SIM-008](10-simulation-gameplay.md#sim-008--world-chat-and-presence) | World chat and presence | P1 | In progress | — | Complete authorized routing/moderation path; enables social/client tasks. |
 | [NET-003](30-networking-security.md#net-003--tls-and-reverse-proxy-boundary) | TLS and reverse-proxy boundary | P1 | In progress | — | Validate proxy configuration and deployed certificate boundary. |
 | [NET-004](30-networking-security.md#net-004--protocol-compatibility-lifecycle) | Protocol compatibility lifecycle | P1 | In progress | — | Finish world-message fixtures and breaking-change gate. |
@@ -65,7 +67,7 @@ copied from the task entries; a dash means none are declared.
 | ID | Task | Priority | Status | Dependencies | Sequencing note |
 | --- | --- | --- | --- | --- | --- |
 | [OPS-016](60-operations-release.md#ops-016--linux-graphical-client-smoke) | Linux graphical client smoke | P2 | Icebox | `OPS-006` | Defer Xvfb/software-render CI until a hosted Linux run can validate and review the screenshot artifact. |
-| [CLT-018](40-bevy-client.md#clt-018--public-status-indicators) | Public status indicators | P2 | Icebox | `CLT-006` | Complete the safe public-status contract and validate the stunned tag with a deterministic visual fixture. |
+| [CLT-019](40-bevy-client.md#clt-019--online-reconciliation-visual-validation) | Online reconciliation visual validation | P1 | Icebox | `CLT-007`, `CLT-016`, `CLT-017` | Validate a controlled private correction in the graphical online demo; requires a fixture and graphical environment. |
 
 ## Blocked
 
@@ -81,7 +83,6 @@ permission to start or to alter task status.
 | [NET-008](30-networking-security.md#net-008--admin-and-moderation-actions) | Admin and moderation actions | P2 | Blocked | `NET-001` | Requires production identity/roles. |
 | [NET-009](30-networking-security.md#net-009--chat-and-content-moderation-pipeline) | Chat and content moderation pipeline | P2 | Blocked | `SIM-008`, `CNT-008` | Requires chat routing and content policy. |
 | [NET-011](30-networking-security.md#net-011--anti-cheat-and-anomaly-detection) | Anti-cheat and anomaly detection | P2 | Blocked | `NET-002`, `SIM-001`, `SIM-003` | Depends on rate limits and server-authoritative gameplay. |
-| [SIM-005](10-simulation-gameplay.md#sim-005--combat-depth-status-mitigation-death-respawn) | Combat depth: status, mitigation, death, respawn | P2 | Blocked | `SIM-003` | Builds on server-derived combat. |
 | [SIM-009](10-simulation-gameplay.md#sim-009--parties-and-social-graph) | Parties and social graph | P2 | Blocked | `SIM-008`, `PST-006` | Requires chat/presence and durable sessions. |
 | [SIM-010](10-simulation-gameplay.md#sim-010--trade-and-economy-integrity) | Trade and economy integrity | P2 | Blocked | `SIM-009`, `PST-002`, `PST-014` | Requires social, inventory, and ledger work. |
 | [SIM-013](10-simulation-gameplay.md#sim-013--loot-and-encounter-rewards) | Loot and encounter rewards | P2 | Blocked | `SIM-003`, `PST-014` | Requires combat credit and durable ledger. |

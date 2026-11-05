@@ -21,7 +21,7 @@
 //! - Whole-zone broadcasts do not exist. A session receives one delivery per
 //!   tick containing only its interest delta and audience-filtered updates.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
 use engine_core::error::{EngineError, ErrorCode};
@@ -260,6 +260,7 @@ pub struct UiState {
 struct TrackedEntity {
     snapshot: EntitySnapshot,
     inventory: Option<engine_core::inventory::Inventory>,
+    slow_multiplier: Option<f32>,
     sequence: u64,
 }
 
@@ -268,6 +269,7 @@ enum Change {
     Appeared(StableId),
     Changed(StableId),
     InventoryChanged(StableId),
+    SlowChanged(StableId),
 }
 
 /// The authoritative gateway for one zone.
@@ -1030,6 +1032,7 @@ impl WorldGateway {
 
         let tick = self.zone.tick();
         let mut base = ReplicationBatch::new(tick);
+        let mut changes_for_slow_update = BTreeSet::new();
         for change in changes {
             match change {
                 Change::Appeared(entity) => {
@@ -1040,6 +1043,9 @@ impl WorldGateway {
                 }
                 Change::InventoryChanged(entity) => {
                     self.push_owner_state(&mut base, entity)?;
+                }
+                Change::SlowChanged(entity) => {
+                    changes_for_slow_update.insert(entity);
                 }
             }
         }
@@ -1070,6 +1076,29 @@ impl WorldGateway {
                     position: outcome.position,
                     last_consumed_sequence: Some(outcome.sequence),
                     applied: Some(outcome.applied),
+                    slow_multiplier: self
+                        .zone
+                        .entity(session.actor)
+                        .and_then(|entity| entity.slow.map(|slow| slow.multiplier)),
+                })
+                .or_else(|| {
+                    changes_for_slow_update.contains(&session.actor).then(|| {
+                        let actor = self
+                            .zone
+                            .entity(session.actor)
+                            .expect("session actor exists");
+                        MovementReconciliation {
+                            tick,
+                            position: actor.position(),
+                            last_consumed_sequence: self.zone.last_movement_sequence(
+                                session.actor,
+                                session.principal,
+                                session.id.as_str(),
+                            ),
+                            applied: None,
+                            slow_multiplier: actor.slow.map(|slow| slow.multiplier),
+                        }
+                    })
                 });
             if filtered.is_empty() && update.is_empty() && movement.is_none() {
                 continue;
@@ -1519,6 +1548,10 @@ impl WorldGateway {
                     session.id.as_str(),
                 ),
                 applied: None,
+                slow_multiplier: self
+                    .zone
+                    .entity(session.actor)
+                    .and_then(|actor| actor.slow.map(|slow| slow.multiplier)),
             }),
         })
     }
@@ -1530,17 +1563,22 @@ impl WorldGateway {
         for entity in self.zone.entities() {
             let snapshot = EntitySnapshot::capture(entity);
             let inventory = entity.inventory.clone();
+            let slow_multiplier = entity.slow.map(|slow| slow.multiplier);
             world.upsert(interest_entity(entity));
             let sequence = if let Some(previous) = self.tracked.get(&entity.id) {
                 let snapshot_changed = previous.snapshot != snapshot;
                 let inventory_changed = previous.inventory != inventory;
+                let slow_changed = previous.slow_multiplier != slow_multiplier;
                 if snapshot_changed {
                     changes.push(Change::Changed(entity.id));
                 }
                 if inventory_changed {
                     changes.push(Change::InventoryChanged(entity.id));
                 }
-                if snapshot_changed || inventory_changed {
+                if slow_changed {
+                    changes.push(Change::SlowChanged(entity.id));
+                }
+                if snapshot_changed || inventory_changed || slow_changed {
                     previous.sequence.saturating_add(1)
                 } else {
                     previous.sequence
@@ -1557,6 +1595,7 @@ impl WorldGateway {
                 TrackedEntity {
                     snapshot,
                     inventory,
+                    slow_multiplier,
                     sequence,
                 },
             );

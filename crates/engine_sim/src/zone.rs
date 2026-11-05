@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::action::{ActionEffect, ActionKey, ActionResult};
 use crate::ai::{AiDiagnostics, AiNavigationState, AiTickPolicy, AiTickReport};
 use crate::combat::CombatRules;
-use crate::entity::EntityRecord;
+use crate::entity::{EntityRecord, TimedSlow};
 use crate::link::{EntityLink, LinkEvent, LinkGraph};
 use crate::movement::{MovementIntent, MovementSequence};
 use crate::nav::{
@@ -412,8 +412,18 @@ impl Zone {
     /// [`ErrorCode::OutOfRange`] for a position outside the zone,
     /// [`ErrorCode::Conflict`] for a duplicate ID, and
     /// [`ErrorCode::CapacityExceeded`] when the zone is full.
-    pub fn spawn(&mut self, entity: EntityRecord) -> Result<StableId, EngineError> {
+    pub fn spawn(&mut self, mut entity: EntityRecord) -> Result<StableId, EngineError> {
         entity.id.expect_kind(IdKind::Entity)?;
+        if entity.stun_until.is_some_and(|until| until <= self.tick) {
+            entity.stun_until = None;
+        }
+        if let Some(slow) = entity.slow {
+            if slow.until <= self.tick {
+                entity.slow = None;
+            } else {
+                slow.validate()?;
+            }
+        }
         if let Some(movement) = entity.movement {
             movement.validate()?;
         }
@@ -481,9 +491,110 @@ impl Zone {
         self.nav.line_of_sight(from, to)
     }
 
-    /// Advance the tick and refresh statistics.
+    /// Apply a server-owned timed stun. Reapplication keeps the later expiry;
+    /// durations never add and client action payloads cannot call this method.
+    ///
+    /// # Errors
+    /// Rejects zero/overflowing durations and missing or dead targets.
+    pub fn apply_stun(&mut self, target: StableId, duration_ticks: u64) -> Result<(), EngineError> {
+        let until = self
+            .tick
+            .0
+            .checked_add(duration_ticks)
+            .filter(|_| duration_ticks > 0)
+            .ok_or_else(|| EngineError::new(ErrorCode::InvalidRequest, "invalid stun duration"))?;
+        let entity = self
+            .entities
+            .get_mut(&target)
+            .ok_or_else(|| EngineError::not_found("stun target", target))?;
+        if !entity.is_alive() {
+            return Err(EngineError::new(
+                ErrorCode::InvalidState,
+                "cannot stun a dead entity",
+            ));
+        }
+        entity.stun_until = Some(entity.stun_until.unwrap_or(Tick(until)).max(Tick(until)));
+        Ok(())
+    }
+
+    /// Cleanse only the timed stun; permanent locomotion restrictions remain.
+    ///
+    /// # Errors
+    /// Returns an error if the target does not exist.
+    pub fn cleanse_stun(&mut self, target: StableId) -> Result<(), EngineError> {
+        let entity = self
+            .entities
+            .get_mut(&target)
+            .ok_or_else(|| EngineError::not_found("stun target", target))?;
+        entity.stun_until = None;
+        Ok(())
+    }
+
+    /// Apply a timed slow. Reapplication uses the strongest multiplier and
+    /// latest expiry; these dimensions do not compound.
+    ///
+    /// # Errors
+    /// Rejects zero/overflowing durations, invalid multipliers, and missing or
+    /// dead targets.
+    pub fn apply_slow(
+        &mut self,
+        target: StableId,
+        duration_ticks: u64,
+        multiplier: f32,
+    ) -> Result<(), EngineError> {
+        let until = self
+            .tick
+            .0
+            .checked_add(duration_ticks)
+            .filter(|_| duration_ticks > 0)
+            .ok_or_else(|| EngineError::new(ErrorCode::InvalidRequest, "invalid slow duration"))?;
+        let incoming = TimedSlow {
+            until: Tick(until),
+            multiplier,
+        };
+        incoming.validate()?;
+        let entity = self
+            .entities
+            .get_mut(&target)
+            .ok_or_else(|| EngineError::not_found("slow target", target))?;
+        if !entity.is_alive() {
+            return Err(EngineError::new(
+                ErrorCode::InvalidState,
+                "cannot slow a dead entity",
+            ));
+        }
+        entity.slow = Some(entity.slow.map_or(incoming, |active| TimedSlow {
+            until: active.until.max(incoming.until),
+            multiplier: active.multiplier.min(incoming.multiplier),
+        }));
+        Ok(())
+    }
+
+    /// Remove the timed slow without changing the base movement profile.
+    ///
+    /// # Errors
+    /// Returns an error if the target does not exist.
+    pub fn cleanse_slow(&mut self, target: StableId) -> Result<(), EngineError> {
+        let entity = self
+            .entities
+            .get_mut(&target)
+            .ok_or_else(|| EngineError::not_found("slow target", target))?;
+        entity.slow = None;
+        Ok(())
+    }
+
+    /// Advance the tick and refresh statistics. Timed effects expire before AI
+    /// or queued movement can act on the new tick.
     pub fn advance_tick(&mut self) -> TickStats {
         self.tick = self.tick.next();
+        for entity in self.entities.values_mut() {
+            if entity.stun_until.is_some_and(|until| until <= self.tick) {
+                entity.stun_until = None;
+            }
+            if entity.slow.is_some_and(|slow| slow.until <= self.tick) {
+                entity.slow = None;
+            }
+        }
         let blocker_count = self.dynamic_blockers.len();
         self.dynamic_blockers
             .retain(|_, expires_at| *expires_at > self.tick);

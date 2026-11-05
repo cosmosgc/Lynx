@@ -307,7 +307,9 @@ async fn pump(
 /// Validate a world URL without connecting or exposing it in an error.
 /// Plaintext is restricted to literal loopback IPs, not DNS names.
 pub fn validate_server_url(url: &str) -> Result<(), Failure> {
-    validate_url(url).map(|_| ())
+    validate_url(url)
+        .map(|_| ())
+        .map_err(|_| Failure::InvalidConfiguration)
 }
 
 fn validate_url(

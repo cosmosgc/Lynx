@@ -28,6 +28,8 @@ pub struct PublicEntity {
     pub interaction: Option<PublicInteraction>,
     #[serde(default)]
     pub stunned: bool,
+    #[serde(default)]
+    pub slowed: bool,
 }
 
 /// Public hit points supplied by the authoritative entity projection.
@@ -83,6 +85,8 @@ struct Movement {
     position: WirePosition,
     last_consumed_sequence: Option<u64>,
     applied: Option<bool>,
+    #[serde(default)]
+    slow_multiplier: Option<f32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,6 +127,7 @@ pub struct WorldState {
     entities: BTreeMap<StableId, (u64, u64, PublicEntity)>,
     pending: Option<(MessageId, u64)>,
     last_movement_applied: Option<bool>,
+    slow_multiplier: Option<f32>,
     reconciliation: Reconciliation,
 }
 
@@ -138,6 +143,7 @@ impl WorldState {
             entities: BTreeMap::new(),
             pending: None,
             last_movement_applied: None,
+            slow_multiplier: None,
             reconciliation: Reconciliation::new(max_prediction_distance)?,
         })
     }
@@ -165,6 +171,7 @@ impl WorldState {
         self.entities.clear();
         self.pending = None;
         self.last_movement_applied = None;
+        self.slow_multiplier = None;
         self.reconciliation.disconnect();
     }
 
@@ -198,6 +205,10 @@ impl WorldState {
     /// server rejected the endpoint and the local position was corrected.
     pub(crate) fn take_movement_applied(&mut self) -> Option<bool> {
         self.last_movement_applied.take()
+    }
+    /// Exact timed-slow factor for this controlled actor, from private state.
+    pub fn slow_multiplier(&self) -> Option<f32> {
+        self.slow_multiplier
     }
     pub fn reconciliation(&self) -> &Reconciliation {
         &self.reconciliation
@@ -351,20 +362,38 @@ impl WorldState {
         {
             return Err(Error::InvalidMessage);
         }
-        match (snapshot, update.movement) {
-            (true, Some(m)) if m.tick == update.tick && m.applied.is_none() => {
+        self.apply_movement_update(snapshot, update.tick, update.movement)?;
+        self.entities = entities;
+        self.tick = Some(update.tick);
+        Ok(())
+    }
+
+    fn apply_movement_update(
+        &mut self,
+        snapshot: bool,
+        tick: u64,
+        movement: Option<Movement>,
+    ) -> Result<(), Error> {
+        match (snapshot, movement) {
+            (true, Some(m))
+                if m.tick == tick
+                    && m.applied.is_none()
+                    && valid_slow_multiplier(m.slow_multiplier) =>
+            {
                 self.reconciliation.baseline(
                     m.position.into(),
                     m.tick,
                     m.last_consumed_sequence,
                     self.domain,
                 )?;
+                self.slow_multiplier = m.slow_multiplier;
                 self.pending = None;
             }
             (false, Some(m))
-                if m.tick == update.tick
+                if m.tick == tick
                     && m.applied.is_some()
-                    && m.last_consumed_sequence.is_some() =>
+                    && m.last_consumed_sequence.is_some()
+                    && valid_slow_multiplier(m.slow_multiplier) =>
             {
                 self.reconciliation.processed(
                     m.last_consumed_sequence.unwrap(),
@@ -373,15 +402,27 @@ impl WorldState {
                     m.applied.unwrap(),
                 )?;
                 self.last_movement_applied = m.applied;
+                self.slow_multiplier = m.slow_multiplier;
                 self.pending = None;
+            }
+            (false, Some(m))
+                if m.tick == tick
+                    && m.applied.is_none()
+                    && valid_slow_multiplier(m.slow_multiplier) =>
+            {
+                // Effect state updates local movement pacing only; they are not
+                // movement acknowledgements or position baselines.
+                self.slow_multiplier = m.slow_multiplier;
             }
             (false, None) => {}
             _ => return Err(Error::InvalidMessage),
         }
-        self.entities = entities;
-        self.tick = Some(update.tick);
         Ok(())
     }
+}
+
+fn valid_slow_multiplier(multiplier: Option<f32>) -> bool {
+    multiplier.is_none_or(|value| value.is_finite() && (0.0..1.0).contains(&value))
 }
 
 #[cfg(test)]
@@ -481,6 +522,75 @@ mod tests {
                 .unwrap()
                 .stunned
         );
+    }
+
+    #[test]
+    fn public_slowed_status_is_optional_and_decoded_without_modifier() {
+        let mut value = public(actor(1), 1, 1, 0.0);
+        let decoded: PublicEntity = serde_json::from_value(value["payload"].clone()).unwrap();
+        assert!(!decoded.slowed);
+        value["payload"]["slowed"] = json!(true);
+        let decoded: PublicEntity = serde_json::from_value(value["payload"].clone()).unwrap();
+        assert!(decoded.slowed);
+        assert!(value["payload"].get("slow").is_none());
+        assert!(value["payload"].get("multiplier").is_none());
+    }
+
+    #[test]
+    fn private_slow_updates_change_prediction_without_resetting_position() {
+        let (mut state, generation) = start();
+        let before = state.reconciliation().authoritative_position();
+        let mut slowed = movement(11, 99.0, None, None);
+        slowed["slow_multiplier"] = json!(0.35);
+        state
+            .receive(
+                generation,
+                &world(
+                    "world.delta",
+                    11,
+                    &[actor(1), actor(2)],
+                    &json!([]),
+                    &slowed,
+                ),
+            )
+            .unwrap();
+        assert_eq!(state.slow_multiplier(), Some(0.35));
+        assert_eq!(state.reconciliation().authoritative_position(), before);
+
+        let mut cleared = movement(12, 77.0, None, None);
+        cleared["slow_multiplier"] = Value::Null;
+        state
+            .receive(
+                generation,
+                &world(
+                    "world.delta",
+                    12,
+                    &[actor(1), actor(2)],
+                    &json!([]),
+                    &cleared,
+                ),
+            )
+            .unwrap();
+        assert_eq!(state.slow_multiplier(), None);
+        assert_eq!(state.reconciliation().authoritative_position(), before);
+
+        let mut invalid = movement(13, 55.0, None, None);
+        invalid["slow_multiplier"] = json!(1.0);
+        assert_eq!(
+            state.receive(
+                generation,
+                &world(
+                    "world.delta",
+                    13,
+                    &[actor(1), actor(2)],
+                    &json!([]),
+                    &invalid
+                ),
+            ),
+            Err(Error::InvalidMessage)
+        );
+        assert_eq!(state.tick(), Some(12));
+        assert_eq!(state.slow_multiplier(), None);
     }
 
     #[test]

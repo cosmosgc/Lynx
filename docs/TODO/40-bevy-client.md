@@ -313,7 +313,7 @@ user cited FFXIV): a ground ring/marker under entities, a ground-facing cue,
 readable nameplates, health display, and a contextual interaction
 indicator. Create Lynx's own visual language rather than copying game assets.
 The client `PublicEntity` projection contains prototype, position, yaw, optional
-public health, interaction availability, and the initial stunned flag. Names
+public health, interaction availability, and public stunned/slowed flags. Names
 currently derive from prototype IDs; localized identity and broader status
 effects have separate follow-up work. Never infer hidden/private state client-side.
 
@@ -400,8 +400,7 @@ in chat and is not stored in the repository.
 ## CLT-018 — Public status indicators
 
 - **Priority:** P2
-- **Status:** Icebox — initial stunned-state projection/tag exists; needs a
-  complete presentation contract, fixture, and visual validation
+- **Status:** In progress — safe stunned/slowed booleans and client indicators implemented; fixture and visual validation remain
 - **Depends on:** `CLT-006`
 - **References:** [CLT-006](#clt-006--entity-presentation-and-interpolation), `SIM-002`
 
@@ -413,8 +412,9 @@ simulation state is not exposed implicitly.
 
 - Define which statuses are safe and useful to replicate to nearby observers;
   expose only approved public status identifiers, never internal modifiers.
-- Complete the current stunned-state `STUN` indicator, including reliable
-  clearing/update behavior and a deterministic fixture that makes it visible.
+- Complete the current `STUN` indicator and the new `SLOW` indicator, including
+  reliable clearing/update behavior and a deterministic fixture that makes them
+  visible.
 - Add icon/label treatments for additional modeled public effects only when the
   simulation has authoritative semantics and content mappings for them.
 - Validate visibility enter/leave, despawn, overlap/readability, and visual
@@ -429,6 +429,17 @@ simulation state is not exposed implicitly.
       graphical client and is reviewed.
 - [ ] Additional effects are displayed only when modeled by authoritative
       simulation data; unsupported statuses fail closed.
+
+**Implementation progress:** Public entity replication now includes optional
+`stunned` and `slowed` booleans only. The timed slow's expiry tick and exact
+movement multiplier are never broadcast to observers; the controlled actor's
+session receives its exact factor for local movement prediction. `PublicEntity`
+decodes the public flag optionally for compatibility, and the online Bevy
+presentation shows a blue `SLOW` label while authoritative public state says the
+entity is slowed, hiding it again when the status clears or the entity leaves
+interest. Projection and privacy tests cover omission/default behavior and
+ensure no private multiplier or slow component leaks. A deterministic graphical
+fixture and user visual review remain.
 
 ---
 
@@ -785,3 +796,33 @@ the future fixture and diagnostic work in this task.
       visible and the final rendered position converges to authority.
 - [ ] A desync diagnostic includes the input sequence and server tick (plus
       predicted/corrected positions) and is verified to redact credentials.
+
+---
+
+## CLT-019 — Online reconciliation visual validation
+
+- **Priority:** P1
+- **Status:** Icebox — graphical demo validation deferred
+- **Depends on:** `CLT-007`, `CLT-016`, `CLT-017`
+- **References:** `SIM-002`, [CLT-016](#clt-016--movement-latency-validation), [CLT-017](#clt-017--rejected-movement-and-desync-evidence)
+
+**Why:** Headless reconciliation and online integration tests establish the
+bounded contract, but the online demo has no built-in way to induce a correction.
+Keep the visual acceptance criterion until a controlled correction fixture and
+graphical validation environment are available.
+
+**Scope**
+
+- Run `lynx_client --demo-online` against a controlled authoritative correction
+  using the fixture/harness from `CLT-016` or `CLT-017`.
+- Observe and record presentation convergence (or snap for a large correction)
+  while confirming presentation smoothing does not mutate authoritative state.
+- Capture the environment and evidence location; document any remaining demo or
+  diagnostic limitations.
+
+**Acceptance criteria**
+
+- [ ] The online graphical demo visibly converges to the authoritative position
+      after a controlled private movement correction.
+- [ ] Evidence confirms presentation smoothing leaves authoritative state
+      unchanged, and records the environment and evidence location.

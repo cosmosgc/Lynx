@@ -439,6 +439,101 @@ fn only_controlled_entities_can_move() {
 }
 
 #[test]
+fn timed_stun_revalidates_pending_movement_and_expires_on_boundary() {
+    let mut z = clear_setup();
+    let actor = id(IdKind::Entity, 1);
+    z.queue_movement(intent(1, pos(1.0, 0.5))).unwrap();
+    z.apply_stun(actor, 2).unwrap();
+    assert!(!z.advance_movement_tick(500, 2.0).1[0].applied);
+    assert!(z.queue_movement(intent(2, pos(1.0, 0.5))).is_err());
+    z.advance_tick();
+    assert_eq!(z.entity(actor).unwrap().stun_until, None);
+    z.queue_movement(intent(2, pos(1.0, 0.5))).unwrap();
+    assert!(z.advance_movement_tick(500, 2.0).1[0].applied);
+}
+
+#[test]
+fn timed_stun_stacking_and_cleanse_preserve_base_profile() {
+    for (first, second, expected) in [(5, 2, 5), (2, 5, 5), (3, 3, 3)] {
+        let mut z = clear_setup();
+        let actor = id(IdKind::Entity, 1);
+        let base = MovementProfile {
+            speed_multiplier: 0.5,
+            ..MovementProfile::default()
+        };
+        z.entity_mut(actor).unwrap().movement = Some(base);
+        z.apply_stun(actor, first).unwrap();
+        z.apply_stun(actor, second).unwrap();
+        assert_eq!(z.entity(actor).unwrap().stun_until, Some(Tick(expected)));
+        assert!(z.apply_stun(actor, 0).is_err());
+        assert_eq!(z.entity(actor).unwrap().stun_until, Some(Tick(expected)));
+        z.cleanse_stun(actor).unwrap();
+        assert_eq!(z.entity(actor).unwrap().movement_profile(), Some(base));
+        z.entity_mut(actor)
+            .unwrap()
+            .movement
+            .as_mut()
+            .unwrap()
+            .status = MovementStatus::Stunned;
+        z.apply_stun(actor, 2).unwrap();
+        z.cleanse_stun(actor).unwrap();
+        assert!(
+            !z.entity(actor)
+                .unwrap()
+                .movement_profile()
+                .unwrap()
+                .can_move()
+        );
+    }
+}
+
+#[test]
+fn timed_slow_scales_server_movement_and_uses_strongest_longest_rule() {
+    let mut z = clear_setup();
+    let actor = id(IdKind::Entity, 1);
+    let base = MovementProfile {
+        speed_multiplier: 0.8,
+        ..MovementProfile::default()
+    };
+    z.entity_mut(actor).unwrap().movement = Some(base);
+    z.apply_slow(actor, 5, 0.5).unwrap();
+    z.apply_slow(actor, 2, 0.7).unwrap();
+    assert_eq!(z.entity(actor).unwrap().slow.unwrap().until, Tick(5));
+    assert_eq!(z.entity(actor).unwrap().slow.unwrap().multiplier, 0.5);
+    assert_eq!(
+        z.entity(actor)
+            .unwrap()
+            .movement_profile()
+            .unwrap()
+            .speed_multiplier,
+        0.4
+    );
+    assert!(z.apply_slow(actor, 0, 0.5).is_err());
+    assert!(z.apply_slow(actor, 1, 1.0).is_err());
+
+    // The slow is applied by the authoritative speed budget, not only a view.
+    z.queue_movement(intent(1, pos(0.8, 0.5))).unwrap();
+    assert!(z.advance_movement_tick(500, 2.0).1[0].applied);
+    assert!(z.entity(actor).unwrap().position().x < 1.1);
+    z.cleanse_slow(actor).unwrap();
+    assert_eq!(z.entity(actor).unwrap().movement_profile(), Some(base));
+}
+
+#[test]
+fn timed_slow_expires_on_tick_boundary_and_pending_move_is_revalidated() {
+    let mut z = clear_setup();
+    let actor = id(IdKind::Entity, 1);
+    z.apply_slow(actor, 1, 0.25).unwrap();
+    z.queue_movement(intent(1, pos(1.5, 0.5))).unwrap();
+    assert!(!z.advance_movement_tick(500, 2.0).1[0].applied);
+    // advance_movement_tick validates on the current tick and then advances,
+    // so the one-tick slow is expired by the time it returns.
+    assert!(z.entity(actor).unwrap().slow.is_none());
+    z.queue_movement(intent(2, pos(1.5, 0.5))).unwrap();
+    assert!(z.advance_movement_tick(500, 2.0).1[0].applied);
+}
+
+#[test]
 fn destination_cell_occupancy_and_body_collision_reject_moves() {
     let mut z = clear_setup();
     let actor = id(IdKind::Entity, 1);

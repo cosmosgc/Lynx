@@ -300,7 +300,7 @@ impl OnlineClient {
     }
     /// Current bounded movement step in metres.
     pub fn movement_step(&self) -> f32 {
-        self.movement_step
+        slowed_step(self.movement_step, self.world.slow_multiplier())
     }
     pub fn pending_movement(&self) -> bool {
         self.world.has_pending_movement()
@@ -753,6 +753,10 @@ impl OnlineClient {
     }
 }
 
+fn slowed_step(step: f32, multiplier: Option<f32>) -> f32 {
+    step * multiplier.unwrap_or(1.0)
+}
+
 fn protocol_error(envelope: &Envelope) -> OnlineError {
     match envelope
         .body
@@ -857,5 +861,17 @@ pub(crate) fn poll_online(client: Option<ResMut<OnlineClient>>) {
 pub(crate) fn smooth_online(client: Option<ResMut<OnlineClient>>) {
     if let Some(mut client) = client {
         client.smooth_presentation(0.25);
+    }
+}
+
+#[cfg(test)]
+mod movement_tests {
+    use super::slowed_step;
+
+    #[test]
+    fn private_slow_factor_scales_local_prediction_step() {
+        assert!((slowed_step(0.09, Some(0.35)) - 0.0315).abs() < f32::EPSILON);
+        assert_eq!(slowed_step(0.09, None), 0.09);
+        assert_eq!(slowed_step(0.09, Some(0.0)), 0.0);
     }
 }

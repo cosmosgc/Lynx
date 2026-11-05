@@ -54,7 +54,7 @@ recommendation, not a commitment; re-order when a dependency or risk changes.
 | Order | Task | Why now |
 | --- | --- | --- |
 | 0 | [CLT-004](40-bevy-client.md#clt-004--scene-camera-and-input-abstraction) — scene, camera, and input | The client workspace exists, but the scene is still an offline placeholder; the vertical slice needs an integrated client. |
-| 1 | [SIM-002](10-simulation-gameplay.md#sim-002--client-prediction-and-reconciliation-contract) — movement reconciliation | Server movement authority is done; client reconciliation still needs networking, rendering, and reset integration. |
+| 1 | [SIM-005](10-simulation-gameplay.md#sim-005--combat-depth-status-mitigation-death-respawn) — combat depth | Timed stun/slow and typed mitigation are in place; DoT, shields, and death/respawn policy are the next playable-combat gaps. Graphical reconciliation validation remains separate in CLT-019. |
 
 The one-zone chat client is delivered by
 [CLT-009](40-bevy-client.md#clt-009--chat-and-presence-ui). Cross-client chat

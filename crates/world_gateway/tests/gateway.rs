@@ -681,6 +681,35 @@ fn gateway_revalidates_stunned_and_zero_speed_movement() {
 }
 
 #[test]
+fn timed_slow_factor_is_private_to_the_controlled_session() {
+    let mut f = fixture();
+    let alice = connect(&mut f.gateway, "alice", f.alice_principal);
+    let bob = connect(&mut f.gateway, "bob", f.bob_principal);
+    f.gateway
+        .zone_mut()
+        .apply_slow(f.alice_actor, 4, 0.35)
+        .unwrap();
+
+    let deliveries = f
+        .gateway
+        .tick_with_interval(Millis::new(1_050), 50)
+        .unwrap();
+    let alice_delivery = delivery(&deliveries, &alice.session);
+    assert_eq!(
+        alice_delivery
+            .movement
+            .as_ref()
+            .and_then(|movement| movement.slow_multiplier),
+        Some(0.35)
+    );
+    assert!(
+        deliveries
+            .iter()
+            .all(|delivery| delivery.session != bob.session)
+    );
+}
+
+#[test]
 fn gateway_enforces_speed_budget_and_dead_actor_combat_authority() {
     let mut f = fixture();
     let alice = connect(&mut f.gateway, "alice", f.alice_principal);
@@ -2248,7 +2277,11 @@ fn unknown_kinds_produce_correlated_errors_without_closing_the_session() {
         fixture.alice_principal,
     );
 
-    let request = envelope("req_unknown_0001", "chat.send", json!({ "text": "hello" }));
+    let request = envelope(
+        "req_unknown_0001",
+        "fixture.never_supported",
+        json!({ "text": "hello" }),
+    );
     let replies = fixture
         .gateway
         .handle(&alice.session, &request, Millis::new(2_000))
