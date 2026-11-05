@@ -3,7 +3,7 @@
 //! The crate splits the service into six pieces:
 //!
 //! - [`auth`] maps hashed bearer tokens to trusted server-side identities;
-//! - [`authority`] holds and renews the single-writer zone lease;
+//! - [`authority`] holds and renews single-writer zone leases;
 //! - [`backend`] commits calendar and faction snapshots for the demo;
 //! - [`demo`] builds the in-memory zone, calendar, and server handshake;
 //! - [`persistence`] writes and loads durable whole-world snapshot files;

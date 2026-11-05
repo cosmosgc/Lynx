@@ -645,7 +645,7 @@ chat-family limiter is not an authorization or moderation substitute.
 ## SIM-014 — Additional zones and travel
 
 - **Priority:** P2
-- **Status:** In progress — prerequisites verified and atlas route lookup is explicit; multi-zone handoff/ownership coordination remains
+- **Status:** In progress — atlas route lookup and a multi-zone lease-set seam are implemented; durable handoff/recovery coordination remains
 - **Depends on:** `SIM-001`, `PST-005`
 
 **Scope**
@@ -668,9 +668,12 @@ chat-family limiter is not an authorization or moderation substitute.
 directed route (or a declared bidirectional reverse route) and returns no route
 for arbitrary zone pairs. The atlas loader validates route endpoints against
 placed zones. This prevents a future handoff caller from treating an arbitrary
-destination as valid, but does not itself move entities. The runtime still
-needs a single-writer multi-zone coordinator, capacity/ownership checks,
-idempotent durable handoff receipts, and per-zone recovery integration.
+destination as valid, but does not itself move entities. `ZoneAuthoritySet`
+acquires independent per-zone leases in stable zone-ID order and attempts to
+release earlier acquisitions if a later zone is unavailable. The runtime still
+needs to connect this seam to multi-zone scheduling, enforce travel
+capacity/access, write idempotent durable handoff receipts, and integrate
+independent recovery.
 
 ---
 

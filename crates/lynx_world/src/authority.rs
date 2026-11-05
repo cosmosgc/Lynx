@@ -10,6 +10,7 @@
 //! file-backed or memory-only service has no shared database to fence against
 //! and runs without one.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -175,6 +176,126 @@ impl ZoneAuthority {
     }
 }
 
+/// A set of per-zone leases held by one server process.
+///
+/// Acquisition is deterministic by zone ID. If any zone is unavailable or a
+/// store operation fails, release is attempted for leases acquired earlier in
+/// this attempt before returning. This is a convenience for servers that host
+/// several zone instances; each zone still has an independent fencing token and
+/// recovery stream.
+#[derive(Debug, Clone)]
+pub struct ZoneAuthoritySet {
+    zones: BTreeMap<String, ZoneAuthority>,
+}
+
+impl ZoneAuthoritySet {
+    /// Acquire all requested zone leases for one owner.
+    ///
+    /// Returns `Ok(None)` when any zone is already owned. Empty and duplicate
+    /// zone IDs are rejected.
+    pub fn acquire(
+        store: &Arc<dyn ZoneLeaseStore>,
+        zone_ids: impl IntoIterator<Item = impl AsRef<str>>,
+        owner: &str,
+        ttl: Duration,
+    ) -> Result<Option<Self>, EngineError> {
+        let mut requested = zone_ids
+            .into_iter()
+            .map(|zone_id| zone_id.as_ref().to_owned())
+            .collect::<Vec<_>>();
+        requested.sort();
+        if requested.is_empty() || requested.iter().any(String::is_empty) {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "a non-empty set of zone IDs is required",
+            ));
+        }
+        if requested.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "zone IDs in an authority set must be unique",
+            ));
+        }
+
+        let mut zones = BTreeMap::new();
+        for zone_id in requested {
+            match ZoneAuthority::acquire(Arc::clone(store), &zone_id, owner, ttl) {
+                Ok(Some(authority)) => {
+                    zones.insert(zone_id, authority);
+                }
+                Ok(None) => {
+                    release_best_effort(zones.into_values());
+                    return Ok(None);
+                }
+                Err(error) => {
+                    release_best_effort(zones.into_values());
+                    return Err(error);
+                }
+            }
+        }
+        Ok(Some(Self { zones }))
+    }
+
+    /// The authority for a zone in this set, if held.
+    #[must_use]
+    pub fn get(&self, zone_id: &str) -> Option<&ZoneAuthority> {
+        self.zones.get(zone_id)
+    }
+
+    /// The zone IDs held in stable order.
+    pub fn zone_ids(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.zones.keys().map(String::as_str)
+    }
+
+    /// Renew every held lease. Returns `false` if any lease was lost.
+    ///
+    /// A caller must stop serving every zone in the set when this returns
+    /// `false`; partial authority is not treated as a successful renewal.
+    pub fn renew_all(&self) -> Result<bool, EngineError> {
+        let mut held = true;
+        let mut first_error = None;
+        for authority in self.zones.values() {
+            match authority.renew() {
+                Ok(Some(_)) => {}
+                Ok(None) => held = false,
+                Err(error) => {
+                    held = false;
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        Ok(held)
+    }
+
+    /// Release every held lease. Returns `false` if any lease was already lost.
+    pub fn release_all(&self) -> Result<bool, EngineError> {
+        let mut released = true;
+        let mut first_error = None;
+        for authority in self.zones.values() {
+            match authority.release() {
+                Ok(value) => released &= value,
+                Err(error) if first_error.is_none() => first_error = Some(error),
+                Err(_) => {}
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        Ok(released)
+    }
+}
+
+fn release_best_effort(authorities: impl IntoIterator<Item = ZoneAuthority>) {
+    for authority in authorities {
+        let _ = authority.release();
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -188,6 +309,11 @@ pub(crate) mod tests {
 
     #[derive(Debug, Default)]
     struct MemoryState {
+        zones: BTreeMap<String, MemoryZoneState>,
+    }
+
+    #[derive(Debug, Default)]
+    struct MemoryZoneState {
         owner: Option<String>,
         token: i64,
         events: Vec<ZoneEvent>,
@@ -201,15 +327,16 @@ pub(crate) mod tests {
             _ttl: Duration,
         ) -> Result<Option<ZoneLease>, EngineError> {
             let mut state = self.state.lock().unwrap();
-            if state.owner.is_some() {
+            let zone = state.zones.entry(zone_id.to_owned()).or_default();
+            if zone.owner.is_some() {
                 return Ok(None);
             }
-            state.token += 1;
-            state.owner = Some(owner.to_owned());
+            zone.token += 1;
+            zone.owner = Some(owner.to_owned());
             Ok(Some(ZoneLease {
                 zone_id: zone_id.to_owned(),
                 owner: owner.to_owned(),
-                fencing_token: state.token,
+                fencing_token: zone.token,
                 expires_at: SystemTime::now() + Duration::from_secs(30),
             }))
         }
@@ -222,23 +349,27 @@ pub(crate) mod tests {
             _ttl: Duration,
         ) -> Result<Option<ZoneLease>, EngineError> {
             let state = self.state.lock().unwrap();
+            let Some(zone) = state.zones.get(zone_id) else {
+                return Ok(None);
+            };
             Ok(
-                (state.owner.as_deref() == Some(owner) && state.token == token).then(|| {
-                    ZoneLease {
-                        zone_id: zone_id.to_owned(),
-                        owner: owner.to_owned(),
-                        fencing_token: token,
-                        expires_at: SystemTime::now() + Duration::from_secs(30),
-                    }
+                (zone.owner.as_deref() == Some(owner) && zone.token == token).then(|| ZoneLease {
+                    zone_id: zone_id.to_owned(),
+                    owner: owner.to_owned(),
+                    fencing_token: token,
+                    expires_at: SystemTime::now() + Duration::from_secs(30),
                 }),
             )
         }
 
-        fn release(&self, _zone_id: &str, owner: &str, token: i64) -> Result<bool, EngineError> {
+        fn release(&self, zone_id: &str, owner: &str, token: i64) -> Result<bool, EngineError> {
             let mut state = self.state.lock().unwrap();
-            let held = state.owner.as_deref() == Some(owner) && state.token == token;
+            let Some(zone) = state.zones.get_mut(zone_id) else {
+                return Ok(false);
+            };
+            let held = zone.owner.as_deref() == Some(owner) && zone.token == token;
             if held {
-                state.owner = None;
+                zone.owner = None;
             }
             Ok(held)
         }
@@ -256,19 +387,20 @@ pub(crate) mod tests {
 
         fn append_events(
             &self,
-            _zone_id: &str,
+            zone_id: &str,
             owner: &str,
             token: i64,
             events: &[ZoneEventInput<'_>],
         ) -> Result<Vec<i64>, EngineError> {
             let mut state = self.state.lock().unwrap();
-            if state.owner.as_deref() != Some(owner) || state.token != token {
+            let zone = state.zones.entry(zone_id.to_owned()).or_default();
+            if zone.owner.as_deref() != Some(owner) || zone.token != token {
                 return Err(EngineError::new(
                     ErrorCode::Conflict,
                     "the zone lease is no longer authoritative",
                 ));
             }
-            let first_sequence = i64::try_from(state.events.len()).map_err(|_| {
+            let first_sequence = i64::try_from(zone.events.len()).map_err(|_| {
                 EngineError::new(ErrorCode::Internal, "the zone event sequence overflowed")
             })?;
             let event_count = i64::try_from(events.len()).map_err(|_| {
@@ -288,7 +420,7 @@ pub(crate) mod tests {
                 } = *event;
                 let sequence = first_sequence + i64::try_from(sequences.len()).unwrap();
                 sequences.push(sequence);
-                state.events.push(ZoneEvent {
+                zone.events.push(ZoneEvent {
                     sequence,
                     tick,
                     occurred_at: SystemTime::now(),
@@ -303,13 +435,15 @@ pub(crate) mod tests {
 
         fn events_after(
             &self,
-            _zone_id: &str,
+            zone_id: &str,
             sequence: i64,
         ) -> Result<Vec<ZoneEvent>, EngineError> {
             let state = self.state.lock().unwrap();
             Ok(state
-                .events
-                .iter()
+                .zones
+                .get(zone_id)
+                .into_iter()
+                .flat_map(|zone| &zone.events)
                 .filter(|event| event.sequence > sequence)
                 .cloned()
                 .collect())
@@ -317,12 +451,129 @@ pub(crate) mod tests {
     }
 
     const ZONE: &str = "zone_00000000000000000000000001";
+    const ZONE_B: &str = "zone_00000000000000000000000002";
 
     fn authority(store: &Arc<MemoryLeases>, owner: &str) -> ZoneAuthority {
         let store: Arc<dyn ZoneLeaseStore> = store.clone();
         ZoneAuthority::acquire(store, ZONE, owner, Duration::from_secs(30))
             .unwrap()
             .unwrap()
+    }
+
+    #[test]
+    fn one_server_can_hold_independent_authority_for_multiple_zones() {
+        let store = Arc::new(MemoryLeases::default());
+        let store_dyn: Arc<dyn ZoneLeaseStore> = store.clone();
+        let authorities = ZoneAuthoritySet::acquire(
+            &store_dyn,
+            [ZONE_B, ZONE],
+            "owner-a",
+            Duration::from_secs(30),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(authorities.zone_ids().collect::<Vec<_>>(), [ZONE, ZONE_B]);
+        assert!(authorities.get(ZONE).is_some());
+        assert!(authorities.get(ZONE_B).is_some());
+        assert!(authorities.renew_all().unwrap());
+
+        let other: Arc<dyn ZoneLeaseStore> = store.clone();
+        assert!(
+            ZoneAuthority::acquire(other, ZONE, "owner-b", Duration::from_secs(30))
+                .unwrap()
+                .is_none()
+        );
+        assert!(authorities.release_all().unwrap());
+
+        let other: Arc<dyn ZoneLeaseStore> = store;
+        assert!(
+            ZoneAuthority::acquire(other, ZONE, "owner-b", Duration::from_secs(30))
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn recovery_of_one_zone_does_not_fence_another_zones_log() {
+        let store = Arc::new(MemoryLeases::default());
+        let store_dyn: Arc<dyn ZoneLeaseStore> = store.clone();
+        let authorities = ZoneAuthoritySet::acquire(
+            &store_dyn,
+            [ZONE, ZONE_B],
+            "owner-a",
+            Duration::from_secs(30),
+        )
+        .unwrap()
+        .unwrap();
+        let source = authorities.get(ZONE).unwrap();
+        let destination = authorities.get(ZONE_B).unwrap();
+        let payload = serde_json::json!({"checkpoint": true});
+
+        assert_eq!(
+            source
+                .append_event(Tick(1), EVENT_WORLD_SNAPSHOT, None, &payload)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            destination
+                .append_event(Tick(1), EVENT_WORLD_SNAPSHOT, None, &payload)
+                .unwrap(),
+            0
+        );
+        assert!(source.release().unwrap());
+
+        let store_dyn: Arc<dyn ZoneLeaseStore> = store.clone();
+        let recovered = ZoneAuthority::acquire(store_dyn, ZONE, "owner-b", Duration::from_secs(30))
+            .unwrap()
+            .unwrap();
+        assert!(
+            source
+                .append_event(Tick(2), EVENT_WORLD_SNAPSHOT, None, &payload)
+                .is_err()
+        );
+        assert_eq!(
+            recovered
+                .append_event(Tick(2), EVENT_WORLD_SNAPSHOT, None, &payload)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            destination
+                .append_event(Tick(2), EVENT_WORLD_SNAPSHOT, None, &payload)
+                .unwrap(),
+            1
+        );
+        assert_eq!(recovered.events_after(0).unwrap().len(), 1);
+        assert_eq!(destination.events_after(0).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_partial_zone_set_acquisition_releases_every_lease_it_took() {
+        let store = Arc::new(MemoryLeases::default());
+        let _occupied = {
+            let store: Arc<dyn ZoneLeaseStore> = store.clone();
+            ZoneAuthority::acquire(store, ZONE_B, "owner-b", Duration::from_secs(30))
+                .unwrap()
+                .unwrap()
+        };
+        let store_dyn: Arc<dyn ZoneLeaseStore> = store.clone();
+        let authorities = ZoneAuthoritySet::acquire(
+            &store_dyn,
+            [ZONE, ZONE_B],
+            "owner-a",
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        assert!(authorities.is_none());
+
+        let store_dyn: Arc<dyn ZoneLeaseStore> = store;
+        assert!(
+            ZoneAuthority::acquire(store_dyn, ZONE, "owner-c", Duration::from_secs(30))
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
