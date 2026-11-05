@@ -591,6 +591,53 @@ fn zone_chat_is_server_attributed_bounded_ordered_and_survives_resume() {
 }
 
 #[test]
+fn chat_history_and_delivery_are_isolated_between_zone_gateways() {
+    let mut first_zone = fixture();
+    let mut second_zone = fixture();
+    let first_sender = connect(
+        &mut first_zone.gateway,
+        "first-sender",
+        first_zone.alice_principal,
+    );
+    let second_observer = connect(
+        &mut second_zone.gateway,
+        "second-observer",
+        second_zone.bob_principal,
+    );
+
+    let sent = first_zone
+        .gateway
+        .handle(
+            &first_sender.session,
+            &envelope(
+                "zone-local-chat",
+                "chat.send",
+                json!({"channel_id": "zone", "content": "only in first zone"}),
+            ),
+            Millis::new(1_100),
+        )
+        .unwrap();
+    assert_eq!(sent[0].kind.as_str(), "chat.send.result");
+    assert_eq!(first_zone.gateway.take_chat_outbox().len(), 1);
+
+    let history = second_zone
+        .gateway
+        .handle(
+            &second_observer.session,
+            &envelope(
+                "second-zone-history",
+                "chat.history",
+                json!({"channel_id": "zone", "limit": 10}),
+            ),
+            Millis::new(1_101),
+        )
+        .unwrap();
+    assert_eq!(history[0].kind.as_str(), "chat.history.result");
+    assert_eq!(history[0].body["messages"], json!([]));
+    assert!(second_zone.gateway.take_chat_outbox().is_empty());
+}
+
+#[test]
 fn session_lifecycle_cancels_queued_movement() {
     for lifecycle in ["close", "disconnect", "resume"] {
         let mut f = fixture();

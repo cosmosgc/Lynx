@@ -666,7 +666,7 @@ chat-family limiter is not an authorization or moderation substitute.
 - [x] Travel only follows validated routes and server-owned access rules.
 - [x] A handoff cannot duplicate an entity or leave it in two zones.
 - [ ] A zone crash/restart recovers independently without corrupting others.
-- [ ] Cross-zone chat/party behavior is documented and tested.
+- [x] Cross-zone chat/party behavior is documented and tested.
 
 **Foundation:** `WorldMapDefinition::route_kind` resolves only an authored
 directed route (or a declared bidirectional reverse route) and returns no route
@@ -697,6 +697,15 @@ zone set. The current single-zone `Service` loop does not yet consume this
 scheduler; connecting zone ownership, gateways, session routing, and per-zone
 persistence to it remains runtime integration work. It therefore provides a
 testable fairness policy, not a claim that multiple zones are already served.
+
+Until the multi-zone session router exists, zone chat and history are scoped to
+one gateway/zone: messages are not forwarded to another zone, and disconnected
+or traveling players do not receive a cross-zone backlog. Party membership and
+cross-zone party presence/invites are not implemented; no party state is
+replicated between zones. A gateway integration test sends in one zone and
+checks that another zone's history and delivery outbox remain empty. Cross-zone
+social features require an explicit global coordinator and privacy/access
+rules rather than implicit fanout.
 
 ---
 
