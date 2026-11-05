@@ -4,6 +4,7 @@ use engine_core::error::{EngineError, ErrorCode};
 use engine_core::id::StableId;
 use engine_core::math::Vec3;
 use engine_core::time::Tick;
+use std::time::Instant;
 
 use crate::entity::{EntityRecord, MovementProfile};
 use crate::mind::{ControlCapability, Controller};
@@ -207,6 +208,7 @@ impl Zone {
         elapsed_ms: u32,
         speed_m_per_s: f32,
     ) -> (TickStats, Vec<MovementOutcome>) {
+        let movement_started = Instant::now();
         let pending = std::mem::take(&mut self.movement_pending);
         let mut outcomes = Vec::with_capacity(pending.len());
         for (actor, intent) in pending {
@@ -252,7 +254,10 @@ impl Zone {
                 tick: self.tick.next(),
             });
         }
-        (self.advance_tick(), outcomes)
+        let movement_ns = movement_started.elapsed().as_nanos();
+        let stats = self.advance_tick();
+        self.phase_timings.movement_ns = movement_ns;
+        (stats, outcomes)
     }
 
     /// Reject destination-cell occupancy and horizontal body intersections.

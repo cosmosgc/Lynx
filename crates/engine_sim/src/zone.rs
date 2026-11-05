@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::sync::Arc;
+use std::time::Instant;
 
 use engine_core::error::{EngineError, ErrorCode};
 use engine_core::id::{DefinitionId, IdKind, StableId};
@@ -95,6 +96,23 @@ pub struct TickStats {
     pub applied_actions: u64,
     /// Link activations since the zone started.
     pub link_activations: u64,
+}
+
+/// Wall-clock measurements of work phases in the most recently completed
+/// authoritative tick. These diagnostics never enter snapshots or simulation
+/// decisions, so timing variability cannot affect deterministic outcomes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TickPhaseTimings {
+    /// Expiration/application of timed effects and due respawns.
+    pub effects_ns: u128,
+    /// Queued movement validation and application, excluding the other tick phases.
+    pub movement_ns: u128,
+    /// Navigation blocker expiry and per-tick path-budget reset.
+    pub navigation_ns: u128,
+    /// Tick-driven AI decisions and action attempts.
+    pub ai_ns: u128,
+    /// Final entity and controller counters.
+    pub statistics_ns: u128,
 }
 
 /// Static configuration for a zone instance.
@@ -208,6 +226,7 @@ pub struct Zone {
     pub(crate) link_cooldowns: BTreeMap<(StableId, StableId, LinkEvent), Tick>,
     pub(crate) tick: Tick,
     pub(crate) stats: TickStats,
+    pub(crate) phase_timings: TickPhaseTimings,
     pub(crate) movement_pending: BTreeMap<StableId, MovementIntent>,
     pub(crate) movement_sequences: BTreeMap<StableId, MovementSequence>,
     pub(crate) movement_diagnostics: VecDeque<Diagnostic>,
@@ -282,6 +301,7 @@ impl Zone {
             link_cooldowns: BTreeMap::new(),
             tick: Tick::ZERO,
             stats: TickStats::default(),
+            phase_timings: TickPhaseTimings::default(),
             movement_pending: BTreeMap::new(),
             movement_sequences: BTreeMap::new(),
             movement_diagnostics: VecDeque::new(),
@@ -802,8 +822,10 @@ impl Zone {
     /// Advance the tick and refresh statistics. Timed effects expire before AI
     /// or queued movement can act on the new tick.
     pub fn advance_tick(&mut self) -> TickStats {
+        self.phase_timings = TickPhaseTimings::default();
         self.tick = self.tick.next();
         self.respawned_this_tick.clear();
+        let effects_started = Instant::now();
         let mut due_damage = Vec::new();
         for entity in self.entities.values_mut() {
             if entity.stun_until.is_some_and(|until| until <= self.tick) {
@@ -861,6 +883,8 @@ impl Zone {
             self.respawned_this_tick.push(entity.id);
             self.movement_resets.insert(entity.id);
         }
+        self.phase_timings.effects_ns = effects_started.elapsed().as_nanos();
+        let navigation_started = Instant::now();
         let blocker_count = self.dynamic_blockers.len();
         self.dynamic_blockers
             .retain(|_, expires_at| *expires_at > self.tick);
@@ -870,7 +894,11 @@ impl Zone {
             }
         }
         self.path_budget.reset();
+        self.phase_timings.navigation_ns = navigation_started.elapsed().as_nanos();
+        let ai_started = Instant::now();
         self.run_ai_tick();
+        self.phase_timings.ai_ns = ai_started.elapsed().as_nanos();
+        let statistics_started = Instant::now();
         self.stats.tick = self.tick;
         self.stats.entity_count = self.entities.len();
         self.stats.controlled_entities = self
@@ -878,6 +906,7 @@ impl Zone {
             .values()
             .filter(|entity| entity.is_controlled())
             .count();
+        self.phase_timings.statistics_ns = statistics_started.elapsed().as_nanos();
         self.stats.clone()
     }
 
@@ -885,6 +914,12 @@ impl Zone {
     #[must_use]
     pub fn stats(&self) -> &TickStats {
         &self.stats
+    }
+
+    /// Timings of the last tick's phases, kept outside deterministic state.
+    #[must_use]
+    pub fn tick_phase_timings(&self) -> TickPhaseTimings {
+        self.phase_timings
     }
 
     /// Validate structural invariants and report non-fatal problems.

@@ -340,6 +340,19 @@ fn seeded_multi_entity_replay_has_byte_identical_snapshots() {
 }
 
 #[test]
+fn phase_timings_are_runtime_diagnostics_not_snapshot_state() {
+    let mut zone = clear_setup();
+    zone.advance_movement_tick(50, 2.0);
+    let _timings = zone.tick_phase_timings();
+    let snapshot = serde_json::to_value(zone.snapshot()).unwrap();
+    assert!(snapshot.get("phase_timings").is_none());
+
+    let mut replay = clear_setup();
+    replay.advance_movement_tick(50, 2.0);
+    assert_eq!(zone.snapshot(), replay.snapshot());
+}
+
+#[test]
 fn cancellation_is_session_scoped_and_keeps_sequence_consumed() {
     let mut z = setup();
     let actor = id(IdKind::Entity, 1);

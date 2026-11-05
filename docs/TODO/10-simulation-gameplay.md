@@ -755,7 +755,7 @@ action rules are still design-only.
 ## SIM-018 — Determinism and tick budget
 
 - **Priority:** P1
-- **Status:** In progress — release tick benchmark, replay regression, and CI p99 deadline gate implemented; phase-level workload metrics remain
+- **Status:** In progress — release tick benchmark, runtime phase timings, replay regression, and CI p99 deadline gate implemented; broader workload scenarios remain
 - **Depends on:** —
 - **References:** [architecture §Simulation model](../architecture.md#simulation-model),
   `OPS-001`
@@ -790,10 +790,14 @@ authoritative tick. This simulation currently has no cosmetic tick work to shed.
       deadline.
 
 **Measured baseline:** `cargo bench -p engine_sim --bench tick` reported
-100-entity p50/p95/p99 of 1.0/1.0/2.2 µs and 1,000-entity
-12.6/20.3/34.2 µs on the local Windows release build. The CI gate is deliberately
-the 50 ms server tick deadline rather than a machine-specific microbenchmark
-threshold; detailed per-phase timing remains follow-up instrumentation.
+100-entity p50/p95/p99 of 1.5/2.5/2.8 µs and 1,000-entity
+13.5/26.0/38.6 µs on the local Windows release build. At 1,000 entities, phase
+p99 was effects 29.2 µs, movement 0.2 µs, navigation 0.1 µs, AI 0.2 µs, and
+statistics 4.8 µs. The benchmark also reports p99 for effects, movement, navigation, AI, and statistics phases. Runtime phase
+measurements are diagnostics only and never enter snapshots or influence
+simulation decisions. The CI gate is deliberately the 50 ms server tick deadline
+rather than a machine-specific microbenchmark threshold; broader combat/AI
+workload scenarios remain follow-up coverage.
 
 ---
 

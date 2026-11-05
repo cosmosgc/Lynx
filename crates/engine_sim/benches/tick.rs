@@ -57,27 +57,50 @@ fn main() {
     println!(
         "zone tick latency (release; {SAMPLES} measured ticks after {WARMUP_TICKS} warmup ticks; p99 budget {MAX_P99_TICK_NS} ns)"
     );
-    println!("entities,p50_ns,p95_ns,p99_ns");
+    println!(
+        "entities,tick_p50_ns,tick_p95_ns,tick_p99_ns,effects_p99_ns,movement_p99_ns,navigation_p99_ns,ai_p99_ns,statistics_p99_ns"
+    );
     for entity_count in [100, 1_000] {
         let mut zone = zone_with_entities(entity_count);
         for _ in 0..WARMUP_TICKS {
-            black_box(zone.advance_tick());
+            black_box(zone.advance_movement_tick(50, 2.0));
         }
 
         let mut samples = Vec::with_capacity(SAMPLES);
+        let mut effects = Vec::with_capacity(SAMPLES);
+        let mut movement = Vec::with_capacity(SAMPLES);
+        let mut navigation = Vec::with_capacity(SAMPLES);
+        let mut ai = Vec::with_capacity(SAMPLES);
+        let mut statistics = Vec::with_capacity(SAMPLES);
         for _ in 0..SAMPLES {
             let start = Instant::now();
-            black_box(zone.advance_tick());
+            black_box(zone.advance_movement_tick(50, 2.0));
             samples.push(start.elapsed().as_nanos());
+            let phases = zone.tick_phase_timings();
+            effects.push(phases.effects_ns);
+            movement.push(phases.movement_ns);
+            navigation.push(phases.navigation_ns);
+            ai.push(phases.ai_ns);
+            statistics.push(phases.statistics_ns);
         }
         samples.sort_unstable();
+        effects.sort_unstable();
+        movement.sort_unstable();
+        navigation.sort_unstable();
+        ai.sort_unstable();
+        statistics.sort_unstable();
         let p99 = percentile(&samples, 99);
         println!(
-            "{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{}",
             zone.entity_count(),
             percentile(&samples, 50),
             percentile(&samples, 95),
             p99,
+            percentile(&effects, 99),
+            percentile(&movement, 99),
+            percentile(&navigation, 99),
+            percentile(&ai, 99),
+            percentile(&statistics, 99),
         );
         assert!(
             p99 <= MAX_P99_TICK_NS,
