@@ -11,9 +11,6 @@
     main { max-width:1500px; margin:auto; padding:25px 20px 55px; }
     h1,h2,p { margin-top:0; } h1 { font-size:clamp(26px,4vw,36px); margin-bottom:5px; }
     a { color:var(--blue); } .muted { color:var(--muted); }
-    .nav { display:flex; flex-wrap:wrap; gap:8px; margin:16px 0 24px; }
-    .nav a { border:1px solid var(--line); border-radius:7px; padding:7px 10px; color:var(--text); text-decoration:none; }
-    .nav a:hover,.nav a[aria-current=page] { border-color:var(--blue); background:#17334b; }
     .section { margin:24px 0; }
     .section-heading { display:flex; flex-wrap:wrap; align-items:baseline; gap:10px; }
     .section-heading h2 { margin-bottom:10px; }
@@ -40,7 +37,7 @@
   <header>
     <h1>Backlog queue</h1>
     <p class="muted">A readable, live view of <code>docs/TODO/QUEUE.md</code>. The queue order and notes come from that file; task documents remain the source of truth.</p>
-    <nav class="nav" aria-label="Backlog navigation"><a href="/">Backlog</a><a href="/task-order">Plan</a><a href="/queue" aria-current="page">Queue</a><a href="/dependencies">Dependencies</a><a href="/decisions">Decisions</a><a href="/reports">Reports</a><a href="/todos">Source TODOs</a><a href="/history">History</a></nav>
+    {% set active_page = 'queue' %}{% include '_navbar.html' %}
   </header>
   {% for section in sections %}
   <section class="section" aria-labelledby="section-{{ loop.index }}">

@@ -41,9 +41,6 @@
     .section { margin:28px 0; }
     .section-heading { display:flex; align-items:baseline; gap:10px; }
     .section-heading p { margin:0; color:var(--muted); }
-    .nav { display:flex; flex-wrap:wrap; gap:8px; margin:18px 0 24px; }
-    .nav a { border:1px solid var(--line); border-radius:7px; padding:7px 10px; color:var(--text); text-decoration:none; }
-    .nav a:hover,.nav a[aria-current=page] { border-color:var(--blue); background:#17334b; }
     .category-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(270px,1fr)); gap:12px; }
     .category-card { text-align:left; color:var(--text); cursor:pointer; padding:15px; }
     .category-card:hover { border-color:var(--blue); }
@@ -99,9 +96,7 @@
   <header>
     <h1>Lynx backlog progress</h1>
     <p class="subtle">Live backlog manager parsed from task sections under <code>docs/TODO/</code>. Status remains source-controlled in Markdown.</p>
-    <nav class="nav" aria-label="Backlog navigation">
-      <a href="/" aria-current="page">Backlog</a><a href="/task-order">Plan</a><a href="/queue">Queue</a><a href="/dependencies">Dependencies</a><a href="/decisions">Decisions</a><a href="/reports">Reports</a><a href="/todos">Source TODOs</a><a href="/history">History</a>
-    </nav>
+    {% set active_page = 'backlog' %}{% include '_navbar.html' %}
   </header>
 
   <section class="section" aria-labelledby="category-heading">

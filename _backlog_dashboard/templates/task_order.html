@@ -19,7 +19,6 @@
     .toggle-row { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:8px 0; }
     .toggle-label { color:var(--muted); font-size:12px; }
     .filter-toggle[aria-pressed=true] { border-color:var(--blue); background:#17334b; }
-    .nav { display:flex; flex-wrap:wrap; gap:8px; margin:16px 0 24px; }.nav a { border:1px solid var(--line); border-radius:7px; padding:7px 10px; color:var(--text); text-decoration:none; }.nav a:hover,.nav a[aria-current=page] { border-color:var(--blue); background:#17334b; }
     .suggestion-controls { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:12px 0; }
     .suggestion-controls label { color:var(--muted); }
     .suggestion-controls input { width:82px; }
@@ -64,7 +63,7 @@
   <header>
     <h1>Task order and prompt builder</h1>
     <p class="muted">Tasks are listed in prerequisite-first order. Status is read from the backlog Markdown and cannot be changed here.</p>
-    <nav class="nav" aria-label="Backlog navigation"><a href="/">Backlog</a><a href="/task-order" aria-current="page">Plan</a><a href="/queue">Queue</a><a href="/dependencies">Dependencies</a><a href="/decisions">Decisions</a><a href="/reports">Reports</a><a href="/todos">Source TODOs</a><a href="/history">History</a></nav>
+    {% set active_page = 'plan' %}{% include '_navbar.html' %}
   </header>
   <div class="layout">
     <section class="panel">

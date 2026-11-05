@@ -1,0 +1,15 @@
+<style>
+  .nav { display:flex; flex-wrap:wrap; gap:8px; margin:16px 0 24px; }
+  .nav a { border:1px solid var(--line, #303a47); border-radius:7px; padding:7px 10px; color:var(--text, #edf2f7); text-decoration:none; }
+  .nav a:hover,.nav a[aria-current="page"] { border-color:var(--blue, #76b7ff); background:#17334b; }
+</style>
+<nav class="nav" aria-label="Backlog navigation">
+  {% for label, href, page in [
+    ('Backlog', '/', 'backlog'), ('Plan', '/task-order', 'plan'),
+    ('Queue', '/queue', 'queue'), ('Dependencies', '/dependencies', 'dependencies'),
+    ('Decisions', '/decisions', 'decisions'), ('Reports', '/reports', 'reports'),
+    ('Source TODOs', '/todos', 'todos'), ('History', '/history', 'history')
+  ] %}
+  <a href="{{ href }}"{% if active_page == page %} aria-current="page"{% endif %}>{{ label }}</a>
+  {% endfor %}
+</nav>

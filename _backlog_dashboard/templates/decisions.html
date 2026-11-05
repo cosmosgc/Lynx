@@ -13,9 +13,6 @@
     h1 { margin-bottom:4px; font-size:clamp(24px,4vw,34px); }
     a { color:var(--blue); }
     .muted { color:var(--muted); }
-    .nav { display:flex; flex-wrap:wrap; gap:8px; margin:16px 0 24px; }
-    .nav a { border:1px solid var(--line); border-radius:7px; padding:7px 10px; color:var(--text); text-decoration:none; }
-    .nav a:hover,.nav a[aria-current=page] { border-color:var(--blue); background:#17334b; }
     .section { margin:28px 0; }
     .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,390px),1fr)); gap:12px; }
     .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:17px; min-width:0; }
@@ -39,9 +36,7 @@
   <header>
     <h1>Architecture decisions</h1>
     <p class="muted">Decision gates from the roadmap and ADRs are connected to the tasks they unblock or reference. Source files remain authoritative.</p>
-    <nav class="nav" aria-label="Backlog navigation">
-      <a href="/">Backlog</a><a href="/task-order">Plan</a><a href="/queue">Queue</a><a href="/dependencies">Dependencies</a><a href="/decisions" aria-current="page">Decisions</a><a href="/reports">Reports</a><a href="/todos">Source TODOs</a><a href="/history">History</a>
-    </nav>
+    {% set active_page = 'decisions' %}{% include '_navbar.html' %}
   </header>
 
   <section class="section" aria-labelledby="gates-heading">
