@@ -10,6 +10,10 @@ use crate::service::{AccountId, ApiError, SessionToken};
 pub enum FriendState {
     /// The accounts are mutual friends.
     Friend,
+    /// The authenticated account sent a request that is not yet accepted.
+    OutgoingRequest,
+    /// The other account sent a request that is not yet accepted.
+    IncomingRequest,
     /// The authenticated account blocked the other account.
     Blocked,
 }
@@ -29,7 +33,7 @@ pub struct Friend {
     pub state: FriendState,
 }
 
-/// Friends and blocks for the authenticated account.
+/// Friends, invitations, and blocks for the authenticated account.
 ///
 /// Adapters must derive the caller from `token`; a client never submits its own
 /// account ID. Platform friendships are normally symmetric, but blocks are
@@ -39,8 +43,23 @@ pub trait SocialService {
     /// List friends and blocked accounts for the authenticated account.
     fn friends(&self, token: &SessionToken) -> Result<Vec<Friend>, ApiError>;
 
-    /// Add a mutual friend relationship.
-    fn add_friend(&self, token: &SessionToken, friend: &AccountId) -> Result<(), ApiError>;
+    /// Send a friend request. A request from the other account may be accepted
+    /// by the platform as part of this operation.
+    fn request_friend(&self, token: &SessionToken, friend: &AccountId) -> Result<(), ApiError>;
+
+    /// Accept an incoming friend request.
+    fn accept_friend_request(
+        &self,
+        token: &SessionToken,
+        friend: &AccountId,
+    ) -> Result<(), ApiError>;
+
+    /// Decline an incoming request or cancel an outgoing request.
+    fn dismiss_friend_request(
+        &self,
+        token: &SessionToken,
+        friend: &AccountId,
+    ) -> Result<(), ApiError>;
 
     /// Remove a mutual friend relationship.
     fn remove_friend(&self, token: &SessionToken, friend: &AccountId) -> Result<(), ApiError>;

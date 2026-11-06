@@ -14,8 +14,9 @@ use game_api::{
     Account, ApiError, AuthService, CalendarService, Character, CharacterCreationKey,
     CharacterCreationReceipt, CharacterId, CharacterIntentService, CharacterService,
     CharacterWorldService, ConflictResolutionView, CreateCharacter, DeviceLogin,
-    EventEnrollmentView, FactionService, FactionView, HealthService, HealthStatus,
-    InventoryService, InventorySlot, Session, SessionToken, TerritoryView, WorldEventView,
+    EventEnrollmentView, FactionService, FactionView, Friend, HealthService, HealthStatus,
+    InventoryService, InventorySlot, Session, SessionToken, SocialService, TerritoryView,
+    WorldEventView,
 };
 
 use crate::{
@@ -157,6 +158,67 @@ impl AuthService for NakamaPostgresBackend {
 
     fn logout(&self, token: &SessionToken) -> Result<(), ApiError> {
         self.nakama.logout(token)
+    }
+}
+
+impl SocialService for NakamaPostgresBackend {
+    fn friends(&self, token: &SessionToken) -> Result<Vec<Friend>, ApiError> {
+        self.account_for_token(token)?;
+        self.nakama.friends(token)
+    }
+
+    fn request_friend(
+        &self,
+        token: &SessionToken,
+        friend: &game_api::AccountId,
+    ) -> Result<(), ApiError> {
+        self.account_for_token(token)?;
+        self.nakama.request_friend(token, friend)
+    }
+
+    fn accept_friend_request(
+        &self,
+        token: &SessionToken,
+        friend: &game_api::AccountId,
+    ) -> Result<(), ApiError> {
+        self.account_for_token(token)?;
+        self.nakama.accept_friend_request(token, friend)
+    }
+
+    fn dismiss_friend_request(
+        &self,
+        token: &SessionToken,
+        friend: &game_api::AccountId,
+    ) -> Result<(), ApiError> {
+        self.account_for_token(token)?;
+        self.nakama.dismiss_friend_request(token, friend)
+    }
+
+    fn remove_friend(
+        &self,
+        token: &SessionToken,
+        friend: &game_api::AccountId,
+    ) -> Result<(), ApiError> {
+        self.account_for_token(token)?;
+        self.nakama.remove_friend(token, friend)
+    }
+
+    fn block_account(
+        &self,
+        token: &SessionToken,
+        account: &game_api::AccountId,
+    ) -> Result<(), ApiError> {
+        self.account_for_token(token)?;
+        self.nakama.block_account(token, account)
+    }
+
+    fn unblock_account(
+        &self,
+        token: &SessionToken,
+        account: &game_api::AccountId,
+    ) -> Result<(), ApiError> {
+        self.account_for_token(token)?;
+        self.nakama.unblock_account(token, account)
     }
 }
 

@@ -32,11 +32,11 @@ impl SocialService for MemoryBackend {
         let mut friends = Vec::new();
 
         if let Some(relations) = state.friends.get(&account_id) {
-            for other in relations.keys() {
+            for (other, status) in relations {
                 if is_blocked(&state, &account_id, other) {
                     continue;
                 }
-                friends.push(friend_from(&state, other.clone(), FriendState::Friend));
+                friends.push(friend_from(&state, other.clone(), *status));
             }
         }
         if let Some(blocked) = state.blocked.get(&account_id) {
@@ -49,7 +49,7 @@ impl SocialService for MemoryBackend {
         Ok(friends)
     }
 
-    fn add_friend(&self, token: &SessionToken, friend: &AccountId) -> Result<(), ApiError> {
+    fn request_friend(&self, token: &SessionToken, friend: &AccountId) -> Result<(), ApiError> {
         let mut state = self.lock_state()?;
         let account_id = Self::account_for_token(&state, token)?;
         if account_id == *friend {
@@ -66,16 +66,95 @@ impl SocialService for MemoryBackend {
             ));
         }
 
-        state
+        let current = state
             .friends
-            .entry(account_id.clone())
-            .or_default()
-            .insert(friend.clone(), FriendState::Friend);
-        state
+            .get(&account_id)
+            .and_then(|relations| relations.get(friend))
+            .copied();
+        match current {
+            Some(FriendState::Friend | FriendState::OutgoingRequest) => return Ok(()),
+            Some(FriendState::IncomingRequest) => {
+                set_relationship(&mut state, &account_id, friend, FriendState::Friend);
+                set_relationship(&mut state, friend, &account_id, FriendState::Friend);
+            }
+            Some(FriendState::Blocked) => {
+                return Err(ApiError::Conflict(
+                    "a block prevents this friendship".into(),
+                ));
+            }
+            None => {
+                set_relationship(
+                    &mut state,
+                    &account_id,
+                    friend,
+                    FriendState::OutgoingRequest,
+                );
+                set_relationship(
+                    &mut state,
+                    friend,
+                    &account_id,
+                    FriendState::IncomingRequest,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn accept_friend_request(
+        &self,
+        token: &SessionToken,
+        friend: &AccountId,
+    ) -> Result<(), ApiError> {
+        let mut state = self.lock_state()?;
+        let account_id = Self::account_for_token(&state, token)?;
+        if state
             .friends
-            .entry(friend.clone())
-            .or_default()
-            .insert(account_id, FriendState::Friend);
+            .get(&account_id)
+            .and_then(|relations| relations.get(friend))
+            == Some(&FriendState::Friend)
+        {
+            return Ok(());
+        }
+        if state
+            .friends
+            .get(&account_id)
+            .and_then(|relations| relations.get(friend))
+            != Some(&FriendState::IncomingRequest)
+        {
+            return Err(ApiError::Conflict(
+                "no incoming friend request exists".into(),
+            ));
+        }
+        set_relationship(&mut state, &account_id, friend, FriendState::Friend);
+        set_relationship(&mut state, friend, &account_id, FriendState::Friend);
+        Ok(())
+    }
+
+    fn dismiss_friend_request(
+        &self,
+        token: &SessionToken,
+        friend: &AccountId,
+    ) -> Result<(), ApiError> {
+        let mut state = self.lock_state()?;
+        let account_id = Self::account_for_token(&state, token)?;
+        let pending = state
+            .friends
+            .get(&account_id)
+            .and_then(|relations| relations.get(friend))
+            .is_some_and(|status| {
+                matches!(
+                    status,
+                    FriendState::IncomingRequest | FriendState::OutgoingRequest
+                )
+            });
+        if pending {
+            if let Some(relations) = state.friends.get_mut(&account_id) {
+                relations.remove(friend);
+            }
+            if let Some(relations) = state.friends.get_mut(friend) {
+                relations.remove(&account_id);
+            }
+        }
         Ok(())
     }
 
@@ -125,6 +204,14 @@ impl SocialService for MemoryBackend {
     }
 }
 
+fn set_relationship(state: &mut State, owner: &AccountId, other: &AccountId, status: FriendState) {
+    state
+        .friends
+        .entry(owner.clone())
+        .or_default()
+        .insert(other.clone(), status);
+}
+
 #[cfg(test)]
 mod tests {
     use game_api::AuthService;
@@ -137,17 +224,35 @@ mod tests {
     }
 
     #[test]
-    fn friendships_are_mutual_and_removable() {
+    fn friend_requests_are_directional_until_accepted_and_then_mutual() {
         let backend = MemoryBackend::new();
         let first = account(&backend, "device-1");
         let second = account(&backend, "device-2");
         backend
-            .add_friend(&first.token, &second.account_id)
+            .request_friend(&first.token, &second.account_id)
             .unwrap();
         assert_eq!(backend.friends(&first.token).unwrap().len(), 1);
         assert_eq!(backend.friends(&second.token).unwrap().len(), 1);
         assert_eq!(
             backend.friends(&first.token).unwrap()[0].state,
+            FriendState::OutgoingRequest
+        );
+        assert_eq!(
+            backend.friends(&second.token).unwrap()[0].state,
+            FriendState::IncomingRequest
+        );
+        backend
+            .accept_friend_request(&second.token, &first.account_id)
+            .unwrap();
+        backend
+            .accept_friend_request(&second.token, &first.account_id)
+            .unwrap();
+        assert_eq!(
+            backend.friends(&first.token).unwrap()[0].state,
+            FriendState::Friend
+        );
+        assert_eq!(
+            backend.friends(&second.token).unwrap()[0].state,
             FriendState::Friend
         );
 
@@ -164,7 +269,7 @@ mod tests {
         let first = account(&backend, "device-1");
         let second = account(&backend, "device-2");
         backend
-            .add_friend(&first.token, &second.account_id)
+            .request_friend(&first.token, &second.account_id)
             .unwrap();
         backend
             .block_account(&first.token, &second.account_id)
@@ -175,11 +280,11 @@ mod tests {
         assert_eq!(first_view[0].state, FriendState::Blocked);
         assert_eq!(backend.friends(&second.token).unwrap(), Vec::new());
         assert!(matches!(
-            backend.add_friend(&first.token, &second.account_id),
+            backend.request_friend(&first.token, &second.account_id),
             Err(ApiError::Conflict(_))
         ));
         assert!(matches!(
-            backend.add_friend(&second.token, &first.account_id),
+            backend.request_friend(&second.token, &first.account_id),
             Err(ApiError::Conflict(_))
         ));
 
@@ -187,7 +292,11 @@ mod tests {
             .unblock_account(&first.token, &second.account_id)
             .unwrap();
         assert_eq!(backend.friends(&first.token).unwrap(), Vec::new());
-        assert!(backend.add_friend(&first.token, &second.account_id).is_ok());
+        assert!(
+            backend
+                .request_friend(&first.token, &second.account_id)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -195,12 +304,12 @@ mod tests {
         let backend = MemoryBackend::new();
         let first = account(&backend, "device-1");
         assert!(matches!(
-            backend.add_friend(&first.token, &first.account_id),
+            backend.request_friend(&first.token, &first.account_id),
             Err(ApiError::Conflict(_))
         ));
         let missing = AccountId::new("missing-account").unwrap();
         assert!(matches!(
-            backend.add_friend(&first.token, &missing),
+            backend.request_friend(&first.token, &missing),
             Err(ApiError::NotFound(_))
         ));
         assert!(matches!(

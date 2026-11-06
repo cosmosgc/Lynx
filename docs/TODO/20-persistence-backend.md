@@ -593,9 +593,11 @@ echoed by the provider cannot reach logs or clients.
 
 **Still open:**
 
-- **Social:** Evolve `game_api::FriendState` and operations to represent Nakama's
-  outgoing/incoming requests, accept/decline, mutual friends, and blocks. The
-  current immediate-mutual `add_friend` contract is not sufficient.
+- **Social:** The first slice now models Nakama's outgoing/incoming requests,
+  mutual friends, and blocks in `game_api`; `NakamaClient` maps the Nakama REST
+  friend states and operations, and `NakamaPostgresBackend` exposes that
+  authenticated contract. Friend request listing/mutations have HTTP-stub tests.
+  A live Nakama contract test and user-facing friend-management flow remain.
 - **Chat:** the Bevy client has a configured persistent room socket, but the
   general `ChatService`/gateway contract does not yet cover direct, group,
   party, and global channel lifecycles. Generic channel discovery remains

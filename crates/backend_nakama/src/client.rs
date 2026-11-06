@@ -7,8 +7,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use engine_core::Locale;
 use game_api::{
-    Account, AccountId, ApiError, AuthService, DeviceLogin, HealthService, HealthStatus, Session,
-    SessionToken,
+    Account, AccountId, ApiError, AuthService, DeviceLogin, Friend, FriendState, HealthService,
+    HealthStatus, Session, SessionToken, SocialService,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -198,6 +198,134 @@ impl HealthService for NakamaClient {
     }
 }
 
+impl SocialService for NakamaClient {
+    fn friends(&self, token: &SessionToken) -> Result<Vec<Friend>, ApiError> {
+        self.telemetry.measure(|| {
+            const PAGE_SIZE: &str = "1000";
+            const PAGE_LIMIT: usize = 100;
+            let mut cursor: Option<String> = None;
+            let mut friends = std::collections::BTreeMap::new();
+
+            for _ in 0..PAGE_LIMIT {
+                let mut request = self
+                    .agent
+                    .get(self.endpoint("/v2/friend"))
+                    .header("Authorization", format!("Bearer {}", token.expose_secret()))
+                    .query("limit", PAGE_SIZE);
+                if let Some(value) = cursor.as_deref() {
+                    request = request.query("cursor", value);
+                }
+                let page: NakamaFriendList = Self::decode_json(
+                    request
+                        .call()
+                        .map_err(|_| ApiError::Transport("Nakama request failed".into()))?,
+                )?;
+                for relation in page.friends {
+                    let account_id = AccountId::new(relation.user.id).map_err(|_| {
+                        ApiError::Transport("Nakama returned an invalid friend account ID".into())
+                    })?;
+                    let state = match relation.state {
+                        0 => FriendState::Friend,
+                        1 => FriendState::OutgoingRequest,
+                        2 => FriendState::IncomingRequest,
+                        3 => FriendState::Blocked,
+                        _ => {
+                            return Err(ApiError::Transport(
+                                "Nakama returned an unknown friend state".into(),
+                            ));
+                        }
+                    };
+                    friends.insert(
+                        account_id.clone(),
+                        Friend {
+                            account_id,
+                            username: relation.user.username,
+                            display_name: relation.user.display_name,
+                            state,
+                        },
+                    );
+                }
+                cursor = page.cursor.filter(|value| !value.is_empty());
+                if cursor.is_none() {
+                    return Ok(friends.into_values().collect());
+                }
+                if cursor.as_ref().is_some_and(|value| value.len() > 4096) {
+                    return Err(ApiError::Transport(
+                        "Nakama returned an invalid friend cursor".into(),
+                    ));
+                }
+            }
+
+            Err(ApiError::Transport(
+                "Nakama friend list exceeded the bounded page limit".into(),
+            ))
+        })
+    }
+
+    fn request_friend(&self, token: &SessionToken, friend: &AccountId) -> Result<(), ApiError> {
+        self.change_friend(token, "/v2/friend", friend, true)
+    }
+
+    fn accept_friend_request(
+        &self,
+        token: &SessionToken,
+        friend: &AccountId,
+    ) -> Result<(), ApiError> {
+        // Nakama accepts an incoming request when the recipient adds the sender.
+        self.change_friend(token, "/v2/friend", friend, true)
+    }
+
+    fn dismiss_friend_request(
+        &self,
+        token: &SessionToken,
+        friend: &AccountId,
+    ) -> Result<(), ApiError> {
+        self.change_friend(token, "/v2/friend", friend, false)
+    }
+
+    fn remove_friend(&self, token: &SessionToken, friend: &AccountId) -> Result<(), ApiError> {
+        self.change_friend(token, "/v2/friend", friend, false)
+    }
+
+    fn block_account(&self, token: &SessionToken, account: &AccountId) -> Result<(), ApiError> {
+        self.change_friend(token, "/v2/friend/block", account, true)
+    }
+
+    fn unblock_account(&self, token: &SessionToken, account: &AccountId) -> Result<(), ApiError> {
+        self.change_friend(token, "/v2/friend", account, false)
+    }
+}
+
+impl NakamaClient {
+    fn change_friend(
+        &self,
+        token: &SessionToken,
+        path: &str,
+        account: &AccountId,
+        add: bool,
+    ) -> Result<(), ApiError> {
+        self.telemetry.measure(|| {
+            let url = self.endpoint(path);
+            let response = if add {
+                self.agent
+                    .post(url)
+                    .header("Authorization", format!("Bearer {}", token.expose_secret()))
+                    .query("ids", account.as_str())
+                    .send_empty()
+            } else {
+                self.agent
+                    .delete(url)
+                    .header("Authorization", format!("Bearer {}", token.expose_secret()))
+                    .query("ids", account.as_str())
+                    .call()
+            }
+            .map_err(|_| ApiError::Transport("Nakama request failed".into()))?;
+            Self::checked_body(response)?;
+            Ok(())
+        })
+    }
+}
+
 impl AuthService for NakamaClient {
     fn authenticate_device(&self, request: &DeviceLogin) -> Result<Session, ApiError> {
         self.telemetry.measure(|| {
@@ -303,6 +431,20 @@ struct NakamaUser {
 }
 
 #[derive(Deserialize)]
+struct NakamaFriendList {
+    #[serde(default)]
+    friends: Vec<NakamaFriend>,
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct NakamaFriend {
+    user: NakamaUser,
+    state: i32,
+}
+
+#[derive(Deserialize)]
 struct NakamaErrorResponse {
     #[serde(default)]
     code: Option<i64>,
@@ -380,6 +522,91 @@ mod tests {
         assert_eq!(snapshot.count, 2);
         assert_eq!(snapshot.failures, 1);
         assert_eq!(snapshot.duration_buckets[5], 2);
+    }
+
+    #[test]
+    fn social_contract_preserves_nakama_states_and_uses_authenticated_routes() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = std::thread::spawn(move || {
+            let expected = [
+                ("GET", "/v2/friend?limit=1000"),
+                ("GET", "/v2/friend?limit=1000&cursor=next-page"),
+                ("POST", "/v2/friend?ids=outgoing"),
+                ("POST", "/v2/friend?ids=incoming"),
+                ("DELETE", "/v2/friend?ids=incoming"),
+                ("POST", "/v2/friend/block?ids=blocked"),
+                ("DELETE", "/v2/friend?ids=blocked"),
+            ];
+            for (index, (method, path)) in expected.into_iter().enumerate() {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut request_line = String::new();
+                reader.read_line(&mut request_line).unwrap();
+                let mut authorization = String::new();
+                let mut content_length = 0;
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).unwrap();
+                    if header == "\r\n" || header.is_empty() {
+                        break;
+                    }
+                    let lower = header.to_ascii_lowercase();
+                    if lower.starts_with("authorization:") {
+                        authorization = header.trim().to_owned();
+                    }
+                    if let Some(value) = lower.strip_prefix("content-length:") {
+                        content_length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+                let mut body = vec![0; content_length];
+                reader.read_exact(&mut body).unwrap();
+                assert_eq!(request_line.trim(), format!("{method} {path} HTTP/1.1"));
+                assert_eq!(authorization, "authorization: Bearer test-token");
+                let response_body = match index {
+                    0 => {
+                        r#"{"friends":[{"user":{"id":"friend","username":"friend-name"},"state":0}],"cursor":"next-page"}"#
+                    }
+                    1 => {
+                        r#"{"friends":[{"user":{"id":"outgoing"},"state":1},{"user":{"id":"incoming"},"state":2},{"user":{"id":"blocked"},"state":3}]}"#
+                    }
+                    _ => "{}",
+                };
+                let mut stream = reader.into_inner();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response_body.len(),
+                    response_body
+                )
+                .unwrap();
+                stream.flush().unwrap();
+            }
+        });
+
+        let client = NakamaClient::new(NakamaConfig::new(format!("http://{address}"))).unwrap();
+        let token = SessionToken::new("test-token").unwrap();
+        let friends = client.friends(&token).unwrap();
+        assert_eq!(friends.len(), 4);
+        assert_eq!(friends[0].state, FriendState::Blocked);
+        assert_eq!(friends[1].state, FriendState::Friend);
+        assert_eq!(friends[2].state, FriendState::IncomingRequest);
+        assert_eq!(friends[3].state, FriendState::OutgoingRequest);
+
+        let account = |value| AccountId::new(value).unwrap();
+        client.request_friend(&token, &account("outgoing")).unwrap();
+        client
+            .accept_friend_request(&token, &account("incoming"))
+            .unwrap();
+        client
+            .dismiss_friend_request(&token, &account("incoming"))
+            .unwrap();
+        client.block_account(&token, &account("blocked")).unwrap();
+        client.unblock_account(&token, &account("blocked")).unwrap();
+        worker.join().unwrap();
     }
 
     #[test]
