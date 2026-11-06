@@ -38,7 +38,7 @@ copied from the task entries; a dash means none are declared.
 
 | ID | Task | Priority | Status | Dependencies | Sequencing note |
 | --- | --- | --- | --- | --- | --- |
-| [CLT-005](40-bevy-client.md#clt-005--network-client-loop) | Network client loop | P0 | In progress | `CLT-001`, `CLT-002` | Terminal recovery and injected-drop auto-reconnect are in place; account refresh remains. |
+| [CLT-005](40-bevy-client.md#clt-005--network-client-loop) | Network client loop | P0 | Done | `CLT-001`, `CLT-002` | Background reconnect, saved Nakama-session refresh, and terminal recovery are covered. |
 | [CLT-006](40-bevy-client.md#clt-006--entity-presentation-and-interpolation) | Entity presentation and interpolation | P0 | Done | `CLT-004`, `CLT-005` | Base entity visuals are implemented and user-reviewed; network impairment remains in CLT-016 and public status effects are separated into CLT-018. |
 | [CLT-007](40-bevy-client.md#clt-007--local-movement-and-prediction) | Local movement and prediction | P0 | In progress | `SIM-001`, `SIM-002`, `CLT-005` | WASD works visually; current local tests cannot validate latency/rejection; future harness and fixture are tracked in dependent `CLT-016`/`CLT-017`. |
 | [SIM-002](10-simulation-gameplay.md#sim-002--client-prediction-and-reconciliation-contract) | Client prediction and reconciliation contract | P0 | Done | `SIM-001`, `CLT-005` | Reconnect, death/respawn, and destination-snapshot resets are covered; graphical review remains in `CLT-019`. |

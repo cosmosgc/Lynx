@@ -15,7 +15,10 @@ use lynx_client_net::{Client, Config, Failure, SendError, Status};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::time::{Duration, Instant};
+use std::{
+    sync::{Arc, Mutex, mpsc},
+    time::{Duration, Instant},
+};
 
 use crate::{
     chat::{ChatFeed, ChatMember, ChatMessage},
@@ -56,6 +59,8 @@ pub enum OnlineStatus {
     Connecting,
     AwaitingSnapshot,
     Active,
+    /// Refreshing a saved Nakama session off the Bevy frame thread.
+    RefreshingCredentials,
     /// Waiting to retry after a transient transport failure.
     Reconnecting {
         attempt: u32,
@@ -75,6 +80,7 @@ pub enum OnlineError {
     Conflict,
     State(world_state::Error),
     Send(SendError),
+    CredentialRefresh(crate::nakama_credentials::NakamaLoginError),
 }
 
 impl OnlineError {
@@ -91,7 +97,11 @@ impl OnlineError {
                 | Failure::Unavailable
                 | Failure::IncomingQueueFull,
             ) => true,
-            Self::Transport(_) | Self::Protocol | Self::State(_) | Self::Send(_) => false,
+            Self::Transport(_)
+            | Self::Protocol
+            | Self::State(_)
+            | Self::Send(_)
+            | Self::CredentialRefresh(_) => false,
         }
     }
 }
@@ -136,6 +146,10 @@ pub struct OnlineClient {
     chat_request_sequence: u64,
     chat_bootstrapped: bool,
     nakama_chat: Option<NakamaChatClient>,
+    credential_refresher: Option<Arc<CredentialRefresher>>,
+    credential_refresh:
+        Option<Mutex<mpsc::Receiver<Result<String, crate::nakama_credentials::NakamaLoginError>>>>,
+    credential_refresh_state: CredentialRefreshState,
     settings: Option<ConnectionSettings>,
     runtime: Option<tokio::runtime::Handle>,
     retry_at: Option<Instant>,
@@ -148,6 +162,23 @@ pub struct OnlineClient {
     last_round_trip: Option<Duration>,
     movement_step: f32,
     last_movement_applied: Option<bool>,
+}
+
+type CredentialRefreshFn =
+    dyn Fn() -> Result<String, crate::nakama_credentials::NakamaLoginError> + Send + Sync;
+
+struct CredentialRefresher(Arc<CredentialRefreshFn>);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CredentialRefreshState {
+    NotUsed,
+    Succeeded,
+}
+
+impl fmt::Debug for CredentialRefresher {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("CredentialRefresher([redacted])")
+    }
 }
 
 impl OnlineClient {
@@ -166,6 +197,9 @@ impl OnlineClient {
             chat_request_sequence: 0,
             chat_bootstrapped: false,
             nakama_chat: None,
+            credential_refresher: None,
+            credential_refresh: None,
+            credential_refresh_state: CredentialRefreshState::NotUsed,
             settings: None,
             runtime: None,
             retry_at: None,
@@ -181,12 +215,26 @@ impl OnlineClient {
         })
     }
 
+    /// Enable asynchronous refresh for an authenticated Nakama session.
+    /// The closure should refresh from secure storage and persist the rotated
+    /// refresh token before returning the replacement access token.
+    pub fn set_credential_refresher(
+        &mut self,
+        refresher: impl Fn() -> Result<String, crate::nakama_credentials::NakamaLoginError>
+        + Send
+        + Sync
+        + 'static,
+    ) {
+        self.credential_refresher = Some(Arc::new(CredentialRefresher(Arc::new(refresher))));
+    }
+
     /// Replaces any prior connection. Must be called inside a Tokio runtime.
     /// The caller supplies credentials and the hello acknowledgement explicitly.
     pub fn connect(&mut self, config: Config) -> Result<(), world_state::Error> {
         self.close_transport();
         self.runtime = Some(tokio::runtime::Handle::current());
         self.nakama_chat = None;
+        self.credential_refresh_state = CredentialRefreshState::NotUsed;
         self.settings = Some(ConnectionSettings {
             url: config.url,
             bearer: config.bearer,
@@ -213,6 +261,7 @@ impl OnlineClient {
         }
         self.close_transport();
         self.consecutive_failures = 0;
+        self.credential_refresh_state = CredentialRefreshState::NotUsed;
         self.start_connection(true)
     }
 
@@ -540,6 +589,7 @@ impl OnlineClient {
     pub fn disconnect(&mut self) {
         self.close_transport();
         self.nakama_chat = None;
+        self.credential_refresh = None;
         self.settings = None;
         self.runtime = None;
         self.reconnect_attempts = 0;
@@ -550,6 +600,14 @@ impl OnlineClient {
     fn fail(&mut self, error: OnlineError) {
         let used_resume = self.attempt_used_resume;
         let received_token = self.attempt_received_token;
+        let refresh_credentials = !used_resume
+            && matches!(error, OnlineError::Transport(Failure::Authentication))
+            && self.credential_refresh_state == CredentialRefreshState::NotUsed
+            && self.credential_refresher.is_some()
+            && self
+                .settings
+                .as_ref()
+                .is_some_and(|settings| settings.character.is_some());
         self.close_transport();
         // A consumed resume token is only invalidated by an explicit rejection;
         // a plain transport loss keeps it so the next attempt can still resume.
@@ -562,6 +620,10 @@ impl OnlineClient {
             && let Some(settings) = self.settings.as_mut()
         {
             settings.resume = None;
+        }
+        if refresh_credentials {
+            self.start_credential_refresh();
+            return;
         }
         if !error.retryable(used_resume) || self.consecutive_failures >= 6 {
             self.status = OnlineStatus::Failed(error);
@@ -577,6 +639,58 @@ impl OnlineClient {
         self.status = OnlineStatus::Reconnecting {
             attempt: self.reconnect_attempts,
         };
+    }
+
+    fn start_credential_refresh(&mut self) {
+        let Some(refresher) = self.credential_refresher.clone() else {
+            return;
+        };
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send((refresher.0)());
+        });
+        self.credential_refresh = Some(Mutex::new(receiver));
+        self.status = OnlineStatus::RefreshingCredentials;
+    }
+
+    fn poll_credential_refresh(&mut self) {
+        let Some(receiver) = self.credential_refresh.as_ref() else {
+            return;
+        };
+        let result = receiver
+            .lock()
+            .expect("credential refresh mutex poisoned")
+            .try_recv();
+        match result {
+            Ok(Ok(access_token)) => {
+                self.credential_refresh = None;
+                let Some(settings) = self.settings.as_mut() else {
+                    self.status = OnlineStatus::Failed(OnlineError::Protocol);
+                    return;
+                };
+                settings.bearer = access_token;
+                settings.resume = None;
+                self.nakama_chat = None;
+                self.credential_refresh_state = CredentialRefreshState::Succeeded;
+                self.consecutive_failures = 0;
+                if let Err(error) = self.start_connection(false) {
+                    self.fail(error);
+                }
+            }
+            Ok(Err(error)) => {
+                self.credential_refresh = None;
+                self.status = OnlineStatus::Failed(OnlineError::CredentialRefresh(error));
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.credential_refresh = None;
+                self.status = OnlineStatus::Failed(OnlineError::CredentialRefresh(
+                    crate::nakama_credentials::NakamaLoginError::Authentication(
+                        lynx_client_net::NakamaAuthFailure::Unavailable,
+                    ),
+                ));
+            }
+        }
     }
 
     fn try_scheduled_reconnect(&mut self) {
@@ -618,6 +732,7 @@ impl OnlineClient {
     /// Process at most a bounded number of messages and coalesce tick acks.
     #[allow(clippy::too_many_lines)] // Poll is the single bounded dispatcher for connection-scoped events.
     pub fn poll(&mut self) {
+        self.poll_credential_refresh();
         self.try_scheduled_reconnect();
         let Some(client) = self.client.as_ref() else {
             return;

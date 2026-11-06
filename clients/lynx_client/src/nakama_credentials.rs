@@ -4,7 +4,7 @@
 //! store is unavailable, login fails instead of writing credentials in
 //! plaintext.
 
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use engine_core::Locale;
 use game_api::DeviceLogin;
@@ -83,8 +83,52 @@ pub enum CredentialStoreError {
 pub enum NakamaLoginError {
     Authentication(NakamaAuthFailure),
     CredentialStore(CredentialStoreError),
+    NoSavedCredentials,
     DeviceIdGeneration,
     PasswordInput,
+}
+
+/// Refresh an existing OS-stored Nakama session without prompting for a password.
+pub struct SavedNakamaSessionRefresher {
+    server_url: String,
+    server_key: String,
+    store: Arc<dyn NakamaCredentialStore>,
+}
+
+impl SavedNakamaSessionRefresher {
+    #[must_use]
+    pub fn new(
+        server_url: impl Into<String>,
+        server_key: impl Into<String>,
+        store: Arc<dyn NakamaCredentialStore>,
+    ) -> Self {
+        Self {
+            server_url: server_url.into(),
+            server_key: server_key.into(),
+            store,
+        }
+    }
+
+    /// Exchange the saved refresh token and persist its rotated replacement.
+    pub fn refresh_access_token(&self) -> Result<String, NakamaLoginError> {
+        let client = NakamaAuthClient::new(lynx_client_net::NakamaAuthConfig::new(
+            &self.server_url,
+            &self.server_key,
+        ))
+        .map_err(NakamaLoginError::Authentication)?;
+        let session = refresh_saved_session(&client, &self.server_url, self.store.as_ref())?;
+        Ok(session.access_token().to_owned())
+    }
+}
+
+impl fmt::Debug for SavedNakamaSessionRefresher {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SavedNakamaSessionRefresher")
+            .field("server_url", &"[redacted]")
+            .field("server_key", &"[redacted]")
+            .field("store", &"[redacted]")
+            .finish()
+    }
 }
 
 /// Outcome of clearing a saved Nakama device session.
@@ -160,6 +204,26 @@ impl NakamaCredentialStore for OsNakamaCredentialStore {
 
 fn keyring_entry(server_url: &str) -> Result<keyring::Entry, CredentialStoreError> {
     keyring::Entry::new(KEYRING_SERVICE, server_url).map_err(|_| CredentialStoreError::Unavailable)
+}
+
+/// Refresh the saved Nakama credential and persist the rotated token before
+/// returning the replacement access session.
+pub fn refresh_saved_session(
+    client: &NakamaAuthClient,
+    server_url: &str,
+    store: &dyn NakamaCredentialStore,
+) -> Result<NakamaSession, NakamaLoginError> {
+    let previous = store
+        .load(server_url)
+        .map_err(NakamaLoginError::CredentialStore)?
+        .ok_or(NakamaLoginError::NoSavedCredentials)?;
+    let session = client
+        .refresh(previous.refresh_token())
+        .map_err(NakamaLoginError::Authentication)?;
+    store
+        .save(server_url, &previous.rotated(session.refresh_token()))
+        .map_err(NakamaLoginError::CredentialStore)?;
+    Ok(session)
 }
 
 /// Resume a saved account or create a new device account, persisting each
@@ -520,6 +584,40 @@ mod tests {
         let saved = store.load(&server_url).unwrap().unwrap();
         assert_eq!(saved.device_id(), device_id);
         assert_eq!(saved.refresh_token(), "refresh-two");
+    }
+
+    #[test]
+    fn saved_session_refresher_rotates_the_secure_credential() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let server_url = format!("http://{}", listener.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut stream);
+            assert!(request.starts_with("POST /v2/account/session/refresh "));
+            assert!(request.contains("refresh-before"));
+            respond_json(
+                &mut stream,
+                b"{\"token\":\"access-after\",\"refresh_token\":\"refresh-after\"}",
+            );
+        });
+
+        let store = Arc::new(MemoryStore::default());
+        store
+            .save(
+                &server_url,
+                &NakamaCredential::email("account@example.test", "refresh-before"),
+            )
+            .unwrap();
+        let refresher = SavedNakamaSessionRefresher::new(&server_url, "public-key", store.clone());
+        assert_eq!(refresher.refresh_access_token().unwrap(), "access-after");
+        worker.join().unwrap();
+
+        let saved = store.load(&server_url).unwrap().unwrap();
+        assert_eq!(saved.email.as_deref(), Some("account@example.test"));
+        assert_eq!(saved.refresh_token(), "refresh-after");
+        let debug = format!("{refresher:?}");
+        assert!(!debug.contains(&server_url));
+        assert!(!debug.contains("public-key"));
     }
 
     #[test]

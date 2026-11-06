@@ -99,6 +99,9 @@ fn main() {
             semver::Version::parse(env!("CARGO_PKG_VERSION")).expect("valid package version");
         let runtime = tokio::runtime::Runtime::new().expect("Tokio runtime");
         let mut client = OnlineClient::new(1.0).expect("valid prediction limit");
+        if login {
+            configure_nakama_refresh(&mut client);
+        }
         {
             let _guard = runtime.enter();
             client
@@ -218,6 +221,7 @@ fn run_account_world(bearer: String, character: String) {
         eprintln!("Could not initialize the world client.");
         return;
     };
+    configure_nakama_refresh(&mut client);
     {
         let _guard = runtime.enter();
         if client
@@ -246,6 +250,25 @@ fn run_account_world(bearer: String, character: String) {
         ));
     let _runtime = runtime;
     app.run();
+}
+
+#[cfg(feature = "window")]
+fn configure_nakama_refresh(client: &mut lynx_client::online::OnlineClient) {
+    use lynx_client::nakama_credentials::{OsNakamaCredentialStore, SavedNakamaSessionRefresher};
+    use std::sync::Arc;
+
+    let (Ok(server_url), Ok(server_key)) = (
+        std::env::var("LYNX_NAKAMA_URL"),
+        std::env::var("LYNX_NAKAMA_SERVER_KEY"),
+    ) else {
+        return;
+    };
+    let refresher = Arc::new(SavedNakamaSessionRefresher::new(
+        server_url,
+        server_key,
+        Arc::new(OsNakamaCredentialStore),
+    ));
+    client.set_credential_refresher(move || refresher.refresh_access_token());
 }
 
 fn load_repository_env() {

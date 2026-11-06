@@ -244,7 +244,7 @@ unversioned until a manifest is built.
 ## CLT-005 — Network client loop
 
 - **Priority:** P0
-- **Status:** In progress — background loop, rotated-token resume, terminal recovery guidance, and injected-drop auto-reconnect implemented; account refresh remains
+- **Status:** Done — background reconnect, Nakama access-token refresh, and terminal recovery are implemented and tested
 - **Depends on:** `CLT-001`, `CLT-002`
 - **References:** [networking](../networking.md), `engine_net`
 
@@ -276,16 +276,21 @@ rotated-token resume and movement after resume. A Windows local demo session was
 also visually confirmed active, with tick 807, six entities,
 accepted movement, zero reconnects, and empty transport queues (developer-provided
 screenshot, 2026-11-04). This is static-token demo coverage, not Nakama account
-login. Terminal failures now show a category-specific explanation and recovery
-step in the online HUD: expired/revoked credentials direct the user to restart
-and sign in again (`R` retries current credentials), a session conflict advises
-waiting for the other session before retry, and a forbidden character directs the
-user back to character selection. Other failures advise checking connectivity
-and pressing `R`. Unit tests cover the recovery guidance. An in-process TCP proxy
-now injects a real transport drop: the client notices it without an explicit
+login. Terminal failures show a category-specific explanation and recovery step
+in the online HUD. A rejected Nakama access token first triggers one background
+refresh; if its refresh credential is expired or revoked, the user is directed to
+sign in again (`R` retries). A session conflict advises waiting for the other
+session before retry, and a forbidden character directs the user back to character
+selection. Other failures advise checking connectivity and pressing `R`. Unit
+tests cover the recovery guidance. An in-process TCP proxy now injects a real
+transport drop: the client notices it without an explicit
 `reconnect()`, enters the automatic backoff path, resumes with the rotated
 token, and keeps moving from the same authoritative baseline. Account refresh
-remains open.
+now runs on a worker after the world edge rejects a saved Nakama access token.
+The rotated refresh token is persisted to the OS credential store before the
+client retries admission; expired/revoked refresh credentials retain an
+actionable sign-in recovery path. A mock-edge integration test verifies the
+refreshed bearer is used on retry without blocking the Bevy polling loop.
 
 ---
 

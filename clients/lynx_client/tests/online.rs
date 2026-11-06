@@ -1254,3 +1254,100 @@ fn click_lock_button(app: &mut bevy::prelude::App, id: &str) {
     app.update();
     app.update();
 }
+
+#[tokio::test]
+#[allow(clippy::result_large_err)] // The tungstenite upgrade callback uses a large HTTP response error.
+async fn rejected_nakama_access_token_refreshes_off_thread_and_retries_admission() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/world", listener.local_addr().unwrap());
+    let (stop, stopped) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut rejected, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let length = rejected.read(&mut buffer).await.unwrap();
+            assert_ne!(length, 0, "client closed before sending handshake");
+            request.extend_from_slice(&buffer[..length]);
+            if request.windows(4).any(|part| part == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let request = String::from_utf8_lossy(&request).to_ascii_lowercase();
+        assert!(request.contains("authorization: bearer expired-access"));
+        rejected
+            .write_all(
+                b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket =
+            tokio_tungstenite::accept_hdr_async(stream, |request: &Request, response: Response| {
+                let bearer = request
+                    .headers()
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok());
+                assert_eq!(bearer, Some("Bearer refreshed-access"));
+                Ok(response)
+            })
+            .await
+            .unwrap();
+        let actor = StableId::from_parts(IdKind::Entity, 1, 1);
+        for envelope in [
+            message(
+                "world.ready",
+                serde_json::json!({"session":"refreshed", "actor":actor, "resumed":false}),
+            ),
+            message(
+                "world.snapshot",
+                serde_json::json!({"tick":1,"interest":{"set":[],"added":[],"removed":[]},"batch":{"tick":1,"updates":[]},"movement":{"tick":1,"position":{"x":0,"y":0,"z":0},"last_consumed_sequence":null,"applied":null}}),
+            ),
+        ] {
+            socket
+                .send(Message::Binary(encode_frame(&envelope).unwrap().into()))
+                .await
+                .unwrap();
+        }
+        let _ = stopped.await;
+    });
+
+    let refresh_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let refresh_count_clone = refresh_count.clone();
+    let mut client = OnlineClient::new(1.0).unwrap();
+    client.set_credential_refresher(move || {
+        refresh_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok("refreshed-access".to_owned())
+    });
+    client
+        .connect(Config {
+            url,
+            bearer: "expired-access".into(),
+            character: Some("character-1".into()),
+            handshake: demo::handshake().unwrap(),
+            last_ack_tick: Tick::ZERO,
+        })
+        .unwrap();
+
+    let mut saw_refreshing = false;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while client.status() != OnlineStatus::Active {
+            client.poll();
+            saw_refreshing |= client.status() == OnlineStatus::RefreshingCredentials;
+            assert!(!matches!(client.status(), OnlineStatus::Failed(_)));
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    assert!(saw_refreshing);
+    assert_eq!(refresh_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(client.status(), OnlineStatus::Active);
+    stop.send(()).unwrap();
+    server.await.unwrap();
+}

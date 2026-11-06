@@ -553,6 +553,7 @@ fn status_label(status: OnlineStatus) -> String {
         OnlineStatus::Connecting => "connecting".to_owned(),
         OnlineStatus::AwaitingSnapshot => "awaiting snapshot".to_owned(),
         OnlineStatus::Active => "active".to_owned(),
+        OnlineStatus::RefreshingCredentials => "refreshing account session".to_owned(),
         OnlineStatus::Reconnecting { attempt } => format!("reconnecting (attempt {attempt})"),
         OnlineStatus::Failed(error) => format!("connection failed: {}", failure_label(error)),
     }
@@ -574,6 +575,15 @@ fn failure_label(error: crate::online::OnlineError) -> &'static str {
         }
         OnlineError::Transport(lynx_client_net::Failure::Timeout) => "connection timed out",
         OnlineError::Protocol | OnlineError::State(_) => "server/client protocol state error",
+        OnlineError::CredentialRefresh(
+            crate::nakama_credentials::NakamaLoginError::Authentication(
+                lynx_client_net::NakamaAuthFailure::Authentication,
+            ),
+        ) => "account credentials expired or revoked",
+        OnlineError::CredentialRefresh(
+            crate::nakama_credentials::NakamaLoginError::CredentialStore(_),
+        ) => "secure credential store unavailable",
+        OnlineError::CredentialRefresh(_) => "account session refresh failed",
         OnlineError::Transport(_) | OnlineError::Closed | OnlineError::Send(_) => {
             "connection could not be established"
         }
@@ -589,6 +599,14 @@ fn recovery_hint(status: OnlineStatus) -> Option<&'static str> {
         OnlineStatus::Failed(crate::online::OnlineError::Conflict) => {
             Some("Wait for the other session to close, then press R to retry.")
         }
+        OnlineStatus::Failed(crate::online::OnlineError::CredentialRefresh(
+            crate::nakama_credentials::NakamaLoginError::Authentication(
+                lynx_client_net::NakamaAuthFailure::Authentication,
+            ),
+        )) => Some("Your saved account session expired. Restart Lynx and sign in again."),
+        OnlineStatus::Failed(crate::online::OnlineError::CredentialRefresh(_)) => Some(
+            "Check Nakama connectivity and the secure credential store, then press R to retry.",
+        ),
         OnlineStatus::Failed(crate::online::OnlineError::Transport(
             lynx_client_net::Failure::CharacterForbidden,
         )) => Some("Return to character selection, choose an available character, and reconnect."),
