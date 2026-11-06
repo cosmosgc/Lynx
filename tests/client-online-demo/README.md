@@ -29,6 +29,27 @@ Transient disconnects retry automatically; R retries a terminal failure.
 If connection fails, copy the detailed reason
 from the window title when reporting the problem.
 
+## Chat window
+
+The chat window is a `bevy_immediate` floating window shown in the lower-left
+corner when the client joins the world.
+
+1. Drag the title bar to move it. Drag any edge or corner to resize it. Both
+   operations are clamped to the game viewport.
+2. Click **X** in the title bar (or press **X**) to close the window. Press **T**
+   to reopen it and start composing in the selected tab. **Enter** sends,
+   **Escape** cancels.
+3. Click a tab to switch channels. **Zona** and **Sussurros** are always listed;
+   **Grupo** and **Party** appear automatically once those channels become
+   active. Inactive tabs show their unread count in parentheses.
+4. **PageUp / PageDown** browse recent history; PageUp also requests an older
+   zone-history page when one is available.
+
+The window remembers its position and size while the client runs. The gateway
+currently authorizes sends only to the zone channel; using another tab is safe
+and reports a server notice instead of posting the message.
+
+
 ## Live keypad minigame
 
 These launchers now use the selected **`bevy_immediate` keypad dialog** in the

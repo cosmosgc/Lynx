@@ -99,6 +99,15 @@ Run `cargo run -p lynx_client -- --demo-online`. In the online window:
 - Walking outside the provider's interaction range automatically closes the
   panel on the server's next tick. Walk back and use the provider to reopen it.
   Restart/rebuild `lynx-world` as well as the client to get this behavior.
+- The chat window is a `bevy_immediate` floating window. Drag its title bar to
+  move it and its edges or corners to resize it; both stay clamped inside the
+  game viewport. Use the **X** in its title bar (or the **X** key) to close it and
+  **T** to reopen it and compose. **Enter** sends, **Escape** cancels. It
+  remembers position and size while the client runs.
+- Chat tabs are **Zona** and **Sussurros**, plus **Grupo** and **Party** once
+  those channels become active. Inactive tabs show unread counts. **PageUp /
+  PageDown** browse history. The gateway currently accepts sends only on the
+  zone channel; other tabs report a safe server notice.
 
 The executable embeds full Fira Mono (`assets/fonts/OFL.txt`) so Portuguese
 accents render without depending on system fonts or the working directory.

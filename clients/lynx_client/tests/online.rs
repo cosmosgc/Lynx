@@ -395,6 +395,7 @@ async fn headless_schedule_connects_moves_and_disconnects() {
             .add_plugins((
                 lynx_client::windowed::OnlineWindowPlugin,
                 lynx_client::lock_panel::LockPanelPlugin,
+                lynx_client::ui::chat::ChatPanelPlugin,
             ));
         app.world_mut().spawn((Window::default(), PrimaryWindow));
     }

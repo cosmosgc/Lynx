@@ -415,12 +415,24 @@ impl OnlineClient {
     }
 
     pub fn send_chat(&mut self, content: &str) -> Result<(), OnlineError> {
+        self.send_chat_to("zone", content)
+    }
+
+    /// Post a message to a specific channel. The server remains authoritative
+    /// over which channels the selected character may write to.
+    pub fn send_chat_to(&mut self, channel_id: &str, content: &str) -> Result<(), OnlineError> {
+        let channel = channel_id.trim();
         let request = game_api::SendChatMessage {
-            channel_id: "zone".into(),
+            channel_id: channel.to_owned(),
             content: content.to_owned(),
         };
         request.validate().map_err(|_| OnlineError::Protocol)?;
         if let Some(chat) = &self.nakama_chat {
+            // The Nakama adapter currently joins one persistent zone room.
+            if channel != "zone" {
+                self.chat.show_send_error(Some("invalid_request"));
+                return Err(OnlineError::Protocol);
+            }
             chat.send(content.trim()).map_err(|error| {
                 self.chat.show_send_error(Some(match error {
                     NakamaChatFailure::QueueFull => "rate_limited",
@@ -432,7 +444,7 @@ impl OnlineClient {
         } else {
             self.send_chat_request(
                 "chat.send",
-                json!({"channel_id": "zone", "content": content.trim()}),
+                json!({"channel_id": channel, "content": content.trim()}),
                 None,
             )
         }

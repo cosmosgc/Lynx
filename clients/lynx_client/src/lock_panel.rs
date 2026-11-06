@@ -30,7 +30,8 @@ struct LockDialogWindow;
 use crate::{
     interaction::DigitHint,
     online::{OnlineClient, OnlineStatus},
-    windowed::{ChatComposer, LockComposer, chat_keyboard, interaction_keyboard},
+    ui::chat::{ChatComposer, chat_keyboard},
+    windowed::{LockComposer, interaction_keyboard},
 };
 
 #[derive(Debug)]

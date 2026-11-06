@@ -19,6 +19,8 @@ pub mod reconciliation;
 pub mod replay;
 pub mod server_browser;
 #[cfg(feature = "window")]
+pub mod ui;
+#[cfg(feature = "window")]
 pub mod windowed;
 pub mod world_state;
 pub mod zone_scene;
