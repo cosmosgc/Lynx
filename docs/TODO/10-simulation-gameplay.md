@@ -472,7 +472,7 @@ Use `Zone::add_dynamic_obstacle` for tick-expiring temporary blockers and
 ## SIM-008 — World chat and presence
 
 - **Priority:** P1
-- **Status:** In progress — authenticated zone chat/presence, bounded history, rate limiting, and reconnect tests are implemented; external moderation remains deferred
+- **Status:** In progress — one authenticated Nakama persistent room is integrated in the client; full Nakama-backed global/direct/group/party chat and world admission binding remain
 - **Depends on:** —
 - **References:** `crates/game_api/src/chat.rs`, `social.rs`,
   [README Phase 3](../../README.md#phase-3--interaction-and-mind-system--in-progress),
@@ -488,8 +488,9 @@ owned by Lynx.
 - Add gateway messages for sending, history, channel listing, and presence.
 - Server-resolve sender identity, channel membership, zone scope, and rate
   limits; reject spoofed senders and unauthorized channels.
-- Support zone, party, whisper, and system channels with bounded history and
-  pagination.
+- Connect global, direct, group, and party chat to Nakama's realtime channels
+  with bounded persistent history and pagination. Keep any Lynx-only fallback
+  explicitly development-only.
 - Redact private content from logs. Moderation/reporting and content-policy
   integration remain in `NET-009`/`CNT-008` and are not part of this increment.
 - Replicate presence changes through the existing interest/session machinery.
@@ -524,8 +525,8 @@ per-session outbox and routes messages only to attached connections. History is
 volatile across process restarts, and disconnected clients must request it
 again. The gateway fallback caps sends at five messages per session per second
 and presence at 100 entries. `NET-009` moderation/reporting and `CNT-008`
-user-content policy remain unavailable; party/whisper/system routing,
-mute/ignore, and durable retention remain open. The transport's existing
+user-content policy remain unavailable; authenticated routing for direct,
+group, and party conversations remains open. The transport's existing
 chat-family limiter is not an authorization or moderation substitute.
 
 ---
@@ -533,15 +534,17 @@ chat-family limiter is not an authorization or moderation substitute.
 ## SIM-009 — Parties and social graph
 
 - **Priority:** P2
-- **Status:** Blocked — `SIM-008`, `PST-006`
+- **Status:** In progress — use Nakama friends/groups/parties as the social source of truth; Lynx retains authoritative gameplay-specific party effects
 - **Depends on:** `SIM-008`, `PST-006`
 
 **Scope**
 
-- Party invite/accept/leave/kick, leader transfer, roles, and ready checks.
-- Party chat, shared markers, loot rules, and a party finder with configurable
-  eligibility (per the world-simulation guide).
-- Friends/ignore lists and presence that survives reconnect.
+- Nakama-backed party/group invites, membership, leadership/roles, presence,
+  and party chat using Nakama's native social primitives.
+- Keep ready-check authorization, combat/loot consequences, and shared markers
+  in Lynx when they affect authoritative gameplay; use Nakama group/party
+  membership as input, never as world-state authority.
+- Friends/blocks and presence backed by Nakama and surviving client reconnect.
 - Bounded party size and abuse controls.
 
 **Acceptance criteria**

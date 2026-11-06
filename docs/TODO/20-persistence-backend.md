@@ -541,7 +541,7 @@ world database or snapshots.
 ## PST-010 — Nakama adapter coverage
 
 - **Priority:** P1
-- **Status:** Done — auth, character, inventory, faction, and calendar coverage; social/chat/admin explicitly deferred by contract and API constraints
+- **Status:** In progress — auth, character, inventory, faction, and calendar coverage are implemented; Nakama social, group/party, and chat adapters are now required by ADR 0002 and remain to be connected
 - **Depends on:** `PST-001`, `PST-002`
 - **References:** [ADR 0018](../adr/0018-nakama-adapter-seam-and-replacement-criteria.md),
   `crates/backend_nakama`
@@ -550,20 +550,21 @@ world database or snapshots.
 composes those identities with Lynx PostgreSQL character, inventory, faction,
 and calendar data. The world HTTP edge exposes authenticated character
 management and inventory reads; mutations remain trusted world persistence.
-Social/chat are not a mechanical quick adapter: the current `FriendState`
-cannot represent Nakama's incoming/outgoing invitation states, and
-`ChatService::channels` requires generic discovery unavailable through the
-public REST API.
+Social/chat require contracts that preserve Nakama's incoming/outgoing friend
+invitation states and realtime channel semantics. Generic channel discovery is
+not exposed through the public REST API, so supported channel discovery must be
+explicit and account-authorized rather than pretending to enumerate every
+Nakama channel.
 
 **Scope**
 
-- Implement applicable remaining `game_api` service traits over Nakama REST and
-  realtime socket APIs behind the existing seam.
+- Implement applicable `game_api` social, group/party, and chat contracts over
+  Nakama REST and realtime socket APIs behind the existing seam.
 - Keep Lynx-owned character records in the PostgreSQL character store unless the
   backend-of-record decision explicitly changes; do not describe the current
   HTTP character routes as Nakama character storage.
-- Evolve the social/chat contracts before implementing them so Nakama invitation
-  states and socket-driven channel semantics are preserved rather than flattened.
+- Evolve the social/chat contracts so Nakama invitation states and
+  socket-driven channel semantics are preserved rather than flattened.
 - Map Nakama errors to `ApiError` without leaking HTTP bodies or tokens.
 - Keep Nakama types out of `game_api` and engine crates.
 - Add shared contract tests against a test Nakama instance; skip when
@@ -590,24 +591,27 @@ Nakama error mapping now uses the HTTP status and numeric code only. Provider
 response bodies are never copied into `ApiError`, so credentials or request data
 echoed by the provider cannot reach logs or clients.
 
-**Deferred with reasons:**
+**Still open:**
 
-- **Social:** `game_api::FriendState` cannot represent Nakama's outgoing and
-  incoming invitation states, and `add_friend` currently promises an immediate
-  mutual friendship while Nakama creates a request. Integrate only after the
-  contract models invitations explicitly.
-- **Chat:** channel discovery and message sends require Nakama's realtime socket;
-  the public REST API exposes history but not generic channel listing. Add a
-  socket-capable adapter and channel semantics before implementing `ChatService`.
+- **Social:** Evolve `game_api::FriendState` and operations to represent Nakama's
+  outgoing/incoming requests, accept/decline, mutual friends, and blocks. The
+  current immediate-mutual `add_friend` contract is not sufficient.
+- **Chat:** the Bevy client has a configured persistent room socket, but the
+  general `ChatService`/gateway contract does not yet cover direct, group,
+  party, and global channel lifecycles. Generic channel discovery remains
+  explicit because Nakama's public REST API does not provide it.
+- **Groups/parties:** connect Nakama group and realtime party membership,
+  invites, roles, and chat. Keep ready checks and gameplay markers in Lynx only
+  where they affect authoritative world actions.
 - **Admin:** Lynx administration uses separate admin authentication and the
   Lynx-owned append-only audit log. It is intentionally not routed through a
   player Nakama session.
 
-These deferrals and the keep/replace decision are recorded in
-[ADR 0018](../adr/0018-nakama-adapter-seam-and-replacement-criteria.md). The
-decision is to keep Nakama as the identity/session backend and keep Lynx
-PostgreSQL as the source of truth for characters, inventory, factions, and
-calendar state.
+The keep/replace decision is recorded in
+[ADR 0018](../adr/0018-nakama-adapter-seam-and-replacement-criteria.md). Nakama
+is the source of truth for identity and platform social state; Lynx PostgreSQL
+remains the source of truth for characters, inventory, factions, calendar, and
+authoritative world state.
 
 **Validation:** Shared character and inventory contract assertions run against
 both the memory adapter and the Nakama/PostgreSQL adapter (using a local Nakama
@@ -632,8 +636,9 @@ scoped Clippy, and formatting pass with the PostgreSQL test configuration.
 - [x] Errors map to stable `ErrorCode` categories and retryability.
 - [x] The adapter can be replaced without changing gameplay crates.
 - [x] The decision to keep or retire the adapter is recorded in ADR 0018.
-- [x] Social, chat, and admin are explicitly deferred with contract or API
-      reasons instead of being approximated.
+- [ ] Social, chat, group, and party operations use Nakama through evolved
+      `game_api` contracts that preserve native invitation/channel semantics.
+- [x] Admin remains separate from player Nakama sessions and uses Lynx audit.
 
 ---
 
