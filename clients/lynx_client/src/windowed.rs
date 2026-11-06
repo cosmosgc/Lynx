@@ -58,8 +58,8 @@ impl Plugin for OnlineWindowPlugin {
 }
 
 #[derive(Debug, Resource)]
-struct ChatComposer {
-    active: bool,
+pub(crate) struct ChatComposer {
+    pub(crate) active: bool,
     text: String,
     history_offset: usize,
     presence_refresh: Timer,
@@ -86,13 +86,13 @@ struct TelemetryHud;
 struct InteractionHud;
 
 #[derive(Resource, Default)]
-struct LockComposer {
-    panel: Option<crate::interaction::Panel>,
-    guess: String,
+pub(crate) struct LockComposer {
+    pub(crate) panel: Option<crate::interaction::Panel>,
+    pub(crate) guess: String,
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn interaction_keyboard(
+pub(crate) fn interaction_keyboard(
     mut client: ResMut<OnlineClient>,
     selected: Res<SelectedTarget>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -171,6 +171,7 @@ fn present_interaction_hud(
     client: Res<OnlineClient>,
     selected: Res<SelectedTarget>,
     lock_input: Res<LockComposer>,
+    dialog: Option<Res<crate::lock_panel::LiveLockDialog>>,
     mut hud: Query<&mut Text, With<InteractionHud>>,
 ) {
     let mut text = String::from("Interação · Tab: selecionar alvo\n");
@@ -181,7 +182,7 @@ fn present_interaction_hud(
             let _ = writeln!(text, "{}: {verb}", index + 1);
         }
     }
-    if let Some(lock) = client.interaction().lock() {
+    if let Some(lock) = client.interaction().lock().filter(|_| dialog.is_none()) {
         let _ = writeln!(
             text,
             "Código ({} dígitos): {}\nEnter: tentar · Backspace: apagar\nTentativas: {}",
@@ -199,7 +200,9 @@ fn present_interaction_hud(
         }
         text.push('\n');
     }
-    if let Some(panel) = client.interaction().panel() {
+    if let Some(panel) = client.interaction().panel()
+        && (dialog.is_none() || client.interaction().lock().is_none())
+    {
         let _ = writeln!(
             text,
             "\n{}\n{}\nX: fechar interface",
@@ -220,7 +223,7 @@ struct FacingIndicator(StableId);
 
 /// Local UI selection only; does not grant permission to act on an entity.
 #[derive(Resource, Default)]
-struct SelectedTarget(Option<StableId>);
+pub(crate) struct SelectedTarget(Option<StableId>);
 
 #[derive(Component)]
 struct TargetRing(StableId);
@@ -484,7 +487,7 @@ fn setup_online(mut commands: Commands) {
     ));
 }
 
-fn chat_keyboard(
+pub(crate) fn chat_keyboard(
     mut events: MessageReader<KeyboardInput>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut composer: ResMut<ChatComposer>,

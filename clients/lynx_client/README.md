@@ -87,10 +87,15 @@ Run `cargo run -p lynx_client -- --demo-online`. In the online window:
   supports inspection and attacks, with authoritative health updates.
 - Approach the vault and choose **use** to open its combination lock. Type the
   requested number of decimal digits, **Backspace** to edit, and **Enter** to
-  submit. Hints `=`, `↑`, and `↓` mean correct, higher, and lower respectively.
+  submit, or click the live `bevy_immediate` dialog's keypad and **Tentar** button.
+  Hints `correto`, `maior`, and `menor` mean correct, higher, and lower respectively.
   Attempts and lockout are server-owned; solving unlocks and closes the panel.
-- **X** closes a panel. Chat composition (**T**) and window focus loss suppress
-  interaction input. Pending actions are never automatically replayed.
+- The dialog is a draggable floating window. Drag its title bar to move it; it
+  is clamped inside the game viewport so it cannot be lost off-screen. Use the
+  **X** in the top-right corner (or the **X** key) to close it. It remembers its
+  last position while the client is running. Chat composition
+  (**T**) and window focus loss suppress interaction input. Pending actions are
+  never automatically replayed.
 - Walking outside the provider's interaction range automatically closes the
   panel on the server's next tick. Walk back and use the provider to reopen it.
   Restart/rebuild `lynx-world` as well as the client to get this behavior.
@@ -114,15 +119,20 @@ Use the bottom buttons or Left/Right arrows to compare **A: sidebar**,
 **B: dialog/keypad**, and **C: bottom dock**. Type digits and Enter, or use the
 buttons. The fixture's code is `427`; the left controls simulate moving out of
 range and resetting. All fixture state is visible and lives only in memory.
-It does not connect to a server. The live online client retains its existing UI
-while these layouts are evaluated. The feature is optional and excluded from
-normal and headless builds.
+It does not connect to a server. The user selected **B: dialog/keypad**, which
+has now been implemented in the live online client (`src/lock_panel.rs`). Run
+the usual `tests/client-online-demo` launchers to use it with the real world,
+chat, combat, and vault. The example stays behind `immediate-prototype` for
+historical comparison; `bevy_immediate` itself is now a normal window-only
+dependency, excluded from no-default-features headless builds.
 
 Windows launch and the sidebar's rendering were checked locally on 2026-11-05;
 Portuguese accents render with the bundled font. Screenshots are local evidence
 at `C:/Users/cosmo/AppData/Local/Temp/opencode/lynx-prototype-a.png` (not committed).
-Layout selection is pending user review. Once selected, promote the reviewed
-design and archive the throwaway alternatives on a prototype branch.
+The production dialog uses actual server panel identity, bounded code input,
+pending-request gates, authoritative hints and closure. It has no fixture state
+or layout switcher. Real-socket integration coverage drives keypad pointer
+events, server submissions, and out-of-range closure without a display/GPU.
 
 ### Account screen
 

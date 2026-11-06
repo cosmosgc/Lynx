@@ -390,7 +390,12 @@ async fn headless_schedule_connects_moves_and_disconnects() {
         use bevy::prelude::*;
         use bevy::window::PrimaryWindow;
         app.init_resource::<ButtonInput<KeyCode>>()
-            .add_plugins(lynx_client::windowed::OnlineWindowPlugin);
+            .init_resource::<bevy::input_focus::InputFocus>()
+            .init_resource::<UiScale>()
+            .add_plugins((
+                lynx_client::windowed::OnlineWindowPlugin,
+                lynx_client::lock_panel::LockPanelPlugin,
+            ));
         app.world_mut().spawn((Window::default(), PrimaryWindow));
     }
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -638,6 +643,77 @@ async fn headless_schedule_connects_moves_and_disconnects() {
             "ui.lockpick"
         );
         let abandoned_panel = client.interaction().panel().unwrap().clone();
+        #[cfg(feature = "window")]
+        {
+            app.update();
+            app.update();
+            assert!(has_lock_dialog(&mut app));
+            click_lock_button(&mut app, "submit");
+            assert!(
+                !app.world()
+                    .resource::<OnlineClient>()
+                    .interaction()
+                    .pending()
+            );
+            {
+                use bevy::prelude::*;
+                let world = app.world_mut();
+                world
+                    .query_filtered::<&mut Window, With<bevy::window::PrimaryWindow>>()
+                    .single_mut(world)
+                    .unwrap()
+                    .focused = false;
+            }
+            click_lock_button(&mut app, "5");
+            assert!(
+                app.world_mut()
+                    .query::<&bevy::prelude::Text>()
+                    .iter(app.world())
+                    .any(|text| text.0 == "[ ___ ]")
+            );
+            {
+                use bevy::prelude::*;
+                let world = app.world_mut();
+                world
+                    .query_filtered::<&mut Window, With<bevy::window::PrimaryWindow>>()
+                    .single_mut(world)
+                    .unwrap()
+                    .focused = true;
+            }
+            click_lock_button(&mut app, "5");
+            assert!(
+                app.world_mut()
+                    .query::<&bevy::prelude::Text>()
+                    .iter(app.world())
+                    .any(|text| text.0 == "[ 5__ ]")
+            );
+            click_lock_button(&mut app, "erase");
+            app.update();
+            assert!(has_named_entity(&mut app, "lock-dialog-titlebar"));
+            assert!(has_named_entity(&mut app, "lock-button-close"));
+            click_lock_button(&mut app, "close");
+            {
+                let mut client = app.world_mut().resource_mut::<OnlineClient>();
+                wait_for_interaction(&mut client).await;
+                assert!(client.interaction().panel().is_none());
+            }
+            app.update();
+            app.update();
+            assert!(!has_lock_dialog(&mut app));
+        }
+        #[cfg(feature = "window")]
+        let mut client = app.world_mut().resource_mut::<OnlineClient>();
+        client.interact(vault, "use").unwrap();
+        wait_for_interaction(&mut client).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while client.interaction().panel().is_none() {
+                client.poll();
+                assert_eq!(client.status(), OnlineStatus::Active);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
         // Walking away closes the server's panel without submitting any action.
         move_z_steps(&mut client, -0.09, 12).await;
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -651,6 +727,14 @@ async fn headless_schedule_connects_moves_and_disconnects() {
         .unwrap();
         assert!(client.interaction().lock().is_none());
         assert!(client.submit_lock_guess(&abandoned_panel, "555").is_err());
+        #[cfg(feature = "window")]
+        {
+            app.update();
+            app.update();
+            assert!(!has_lock_dialog(&mut app));
+        }
+        #[cfg(feature = "window")]
+        let mut client = app.world_mut().resource_mut::<OnlineClient>();
         move_z_steps(&mut client, 0.09, 12).await;
         client.interact(vault, "use").unwrap();
         wait_for_interaction(&mut client).await;
@@ -676,6 +760,23 @@ async fn headless_schedule_connects_moves_and_disconnects() {
                 .iter()
                 .map(|digit| char::from(b'0' + digit))
                 .collect();
+            #[cfg(feature = "window")]
+            {
+                app.update();
+                app.update();
+                for digit in guess.chars() {
+                    let id = if digit == '0' {
+                        "zero".to_owned()
+                    } else {
+                        digit.to_string()
+                    };
+                    click_lock_button(&mut app, &id);
+                }
+                click_lock_button(&mut app, "submit");
+                client = app.world_mut().resource_mut::<OnlineClient>();
+                assert!(client.interaction().pending());
+            }
+            #[cfg(not(feature = "window"))]
             client.submit_lock_guess(&panel, &guess).unwrap();
             wait_for_interaction(&mut client).await;
             if let Some(lock) = client.interaction().lock() {
@@ -919,4 +1020,67 @@ async fn move_z_steps(client: &mut OnlineClient, step: f32, count: usize) {
         .await
         .unwrap();
     }
+}
+
+#[cfg(feature = "window")]
+fn has_named_entity(app: &mut bevy::prelude::App, expected: &str) -> bool {
+    app.world_mut()
+        .query::<&bevy::prelude::Name>()
+        .iter(app.world())
+        .any(|name| name.as_str() == expected)
+}
+
+#[cfg(feature = "window")]
+fn has_lock_dialog(app: &mut bevy::prelude::App) -> bool {
+    has_named_entity(app, "online-lock-dialog")
+}
+
+#[cfg(feature = "window")]
+fn click_lock_button(app: &mut bevy::prelude::App, id: &str) {
+    use bevy::picking::{
+        backend::HitData,
+        events::{Pointer, PointerClick},
+        pointer::{Location, PointerButton, PointerId},
+    };
+    use bevy::prelude::*;
+    let name = format!("lock-button-{id}");
+    let button = app
+        .world_mut()
+        .query::<(Entity, &Name)>()
+        .iter(app.world())
+        .find(|(_, candidate)| candidate.as_str() == name)
+        .unwrap()
+        .0;
+    let window = app
+        .world_mut()
+        .query_filtered::<Entity, With<bevy::window::PrimaryWindow>>()
+        .single(app.world())
+        .unwrap();
+    let event = PointerClick {
+        entity: button,
+        pointer: Pointer::new(
+            PointerId::Mouse,
+            Location {
+                target: bevy::camera::RenderTarget::Window(bevy::window::WindowRef::Primary)
+                    .normalize(Some(window))
+                    .unwrap(),
+                position: Vec2::ZERO,
+            },
+        ),
+        button: PointerButton::Primary,
+        hit: HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
+        duration: Duration::from_millis(20),
+        count: 1,
+    };
+    app.add_systems(
+        PreUpdate,
+        move |mut commands: Commands, mut sent: Local<bool>| {
+            if !*sent {
+                commands.trigger(event.clone());
+                *sent = true;
+            }
+        },
+    );
+    app.update();
+    app.update();
 }

@@ -10,8 +10,8 @@ repository.workspace = true
 
 [features]
 default = ["window"]
-window = ["bevy/bevy_window", "bevy/bevy_winit", "bevy/x11", "bevy/2d_bevy_render", "bevy/bevy_ui", "bevy/bevy_ui_render", "bevy/bevy_text", "bevy/default_font", "dep:rpassword"]
-immediate-prototype = ["window", "dep:bevy_immediate", "bevy/ui_picking", "bevy/bevy_input_focus", "bevy/bevy_ui_widgets"]
+window = ["bevy/bevy_window", "bevy/bevy_winit", "bevy/x11", "bevy/2d_bevy_render", "bevy/bevy_ui", "bevy/bevy_ui_render", "bevy/bevy_text", "bevy/default_font", "dep:rpassword", "dep:bevy_immediate", "bevy/ui_picking", "bevy/bevy_input_focus", "bevy/bevy_ui_widgets"]
+immediate-prototype = ["window"]
 
 [dependencies]
 bevy = { workspace = true, features = ["std", "async_executor"] }

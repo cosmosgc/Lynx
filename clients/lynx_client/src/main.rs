@@ -111,7 +111,8 @@ fn main() {
                 })
                 .expect("new connection generation");
         }
-        app.insert_resource(client).add_plugins(OnlineWindowPlugin);
+        app.insert_resource(client)
+            .add_plugins((OnlineWindowPlugin, lynx_client::lock_panel::LockPanelPlugin));
         Some(runtime)
     } else {
         let options = lynx_client::cli::parse_offline_args(args).unwrap_or_else(|error| {
@@ -235,7 +236,7 @@ fn run_account_world(bearer: String, character: String) {
         .add_plugins(lynx_client::fonts::ClientFontPlugin)
         .add_plugins(LynxClientPlugin)
         .insert_resource(client)
-        .add_plugins(OnlineWindowPlugin);
+        .add_plugins((OnlineWindowPlugin, lynx_client::lock_panel::LockPanelPlugin));
     let _runtime = runtime;
     app.run();
 }

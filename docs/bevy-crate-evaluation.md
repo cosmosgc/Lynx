@@ -31,4 +31,11 @@ fixture and real Bevy immediate buttons. It builds against the workspace's
 Bevy 0.20.0 and is excluded from normal/headless client builds. User layout
 review remains pending; this is not yet the production panel framework.
 
+**Selected layout integration:** The user selected the dialog/keypad variant.
+`bevy_immediate` is now enabled by the normal client `window` feature, and
+`lock_panel.rs` renders the real server-backed minigame in both demo and account
+online windows. The standalone example remains a historical fixture. Headless
+no-default-features builds still exclude the dependency. This validates one
+minigame panel; generic authored schemas and inventory remain separate work.
+
 The only straightforward current addition is `bevy-persistent` for **client-local preferences**, if Lynx wants Bevy-resource integration instead of its own settings adapter. `bevy_vector_shapes`, `bevy_immediate`, `bevy_rich_text3d`, Avian, `bevy_voxel_world`, and `dogoap` merit targeted prototypes only when their specific feature need lands. The rest are mismatched, outdated, or add an unrelated network/world model. None should be placed in `engine_sim` merely because it integrates with Bevy.

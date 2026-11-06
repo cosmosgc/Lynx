@@ -545,6 +545,26 @@ font for Portuguese glyphs. A separate, optional `bevy_immediate` 0.9 prototype
 compares sidebar, dialog/keypad, and bottom-dock layouts using in-memory fixtures;
 see the client README. It awaits user layout selection before promotion.
 
+**Selected layout promoted:** The user chose the keypad dialog. The normal
+window build now includes `bevy_immediate` and uses `lock_panel.rs` for the live
+vault. Both `tests/client-online-demo` and account-world launch paths install it;
+movement, chat, combat, telemetry, and reconnect remain in the same application.
+Mouse digits/edit/submit/close share the existing code composer and authoritative
+session API with keyboard shortcuts. Buttons gate pending requests, chat focus,
+window focus, and panel identity. GPU-free integration tests drive pointer events
+through the real keypad and socket-backed vault, including distance closure.
+The standalone layout example is only a historical fixture, not the game demo.
+The documented demo launchers were also smoke-run locally: the loopback server
+listened, the windowed client reached `active` with advancing ticks, stayed up,
+and logged no errors. That confirms the integrated window boots; keypad visual
+review in the live window is still a user-facing follow-up. The user then
+confirmed the live keypad works and requested window chrome: the dialog is now a
+draggable `FloatingWindow` with a title bar, an OS-style **X** in the top-right
+corner, remembered position across openings, and full-viewport clamping so it
+cannot be dragged off-screen. The close button uses the same
+idempotent server-owned `ui.close` path; pointer integration coverage exercises
+it, then reopens the vault for the out-of-range closure check.
+
 ---
 
 ## CLT-009 — Chat and presence UI
