@@ -579,6 +579,12 @@ async fn headless_schedule_connects_moves_and_disconnects() {
     }
     {
         let mut client = app.world_mut().resource_mut::<OnlineClient>();
+        let barrel = client
+            .world()
+            .entities()
+            .find(|entity| entity.prototype.as_str() == "prop.barrel")
+            .unwrap()
+            .entity;
         let vault = client
             .world()
             .entities()
@@ -592,6 +598,24 @@ async fn headless_schedule_connects_moves_and_disconnects() {
             .unwrap()
             .entity;
         assert!(client.interact(door, "attack").is_err());
+        client.interact(barrel, "use").unwrap();
+        wait_for_interaction(&mut client).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while client.interaction().panel().is_none() {
+                client.poll();
+                assert_eq!(client.status(), OnlineStatus::Active);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            client.interaction().panel().unwrap().schema.as_str(),
+            "ui.display"
+        );
+        client.close_panel().unwrap();
+        wait_for_interaction(&mut client).await;
+        assert!(client.interaction().panel().is_none());
         client.interact(vault, "use").unwrap();
         assert!(client.interact(door, "open").is_err());
         wait_for_interaction(&mut client).await;

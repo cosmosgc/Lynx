@@ -120,6 +120,7 @@ pub fn build_zone(grants: &[Grant]) -> Result<Zone, EngineError> {
         owner_crate: definition("prop.owner_crate")?,
         vault: definition("prop.vault")?,
         lockpick_schema: definition("ui.lockpick")?,
+        display_schema: definition("ui.display")?,
         lockpick_minigame: definition("minigame.lockpick")?,
     };
 
@@ -200,7 +201,7 @@ pub fn restore_zone_quarantining(
 fn spawn_navigation_scenario(zone: &mut Zone) -> Result<(), EngineError> {
     let guard_faction = definition(DEMO_DEFENDERS)?;
     let raider_faction = definition(DEMO_ATTACKERS)?;
-    let mut guard = EntityRecord::new(
+    let guard = EntityRecord::new(
         StableId::from_parts(IdKind::Entity, 1, DEMO_GUARD_ID),
         definition("character.demo_guard")?,
         DEMO_GUARD_START,
@@ -213,7 +214,6 @@ fn spawn_navigation_scenario(zone: &mut Zone) -> Result<(), EngineError> {
     // Keep visible statuses in the built-in development world as a deterministic
     // graphical fixture. These are public flags only; private timing and
     // movement modifiers remain server-side.
-    guard.stun_until = Some(Tick(1_000_000));
     zone.spawn(guard)?;
     let mut raider = EntityRecord::new(
         StableId::from_parts(IdKind::Entity, 1, DEMO_TARGET_ID),
@@ -224,6 +224,7 @@ fn spawn_navigation_scenario(zone: &mut Zone) -> Result<(), EngineError> {
     .with_faction(FactionMembership::new(raider_faction))
     .with_interactable(Interactable::new(2.0, [Verb::Attack]))
     .with_persistence(PersistencePolicy::PersistentEntity);
+    raider.stun_until = Some(Tick(1_000_000));
     raider.slow = Some(TimedSlow {
         until: Tick(1_000_000),
         multiplier: 0.35,
@@ -310,6 +311,7 @@ struct DemoDefinitions {
     owner_crate: DefinitionId,
     vault: DefinitionId,
     lockpick_schema: DefinitionId,
+    display_schema: DefinitionId,
     lockpick_minigame: DefinitionId,
 }
 
@@ -349,8 +351,13 @@ fn spawn_grant(
         )
         .with_health(100)
         .with_interactable(
-            Interactable::new(4.0, [Verb::Inspect, Verb::Attack]).without_line_of_sight(),
+            Interactable::new(4.0, [Verb::Inspect, Verb::Attack, Verb::Use])
+                .without_line_of_sight(),
         )
+        .with_ui(UiProvider::new(
+            definitions.display_schema.clone(),
+            "Barrel Display",
+        ))
         .with_persistence(PersistencePolicy::PersistentEntity),
     )?;
 
@@ -657,6 +664,23 @@ mod tests {
     }
 
     #[test]
+    fn demo_barrel_exposes_a_distinct_generic_panel_schema() {
+        let grant = grants(1).remove(0);
+        let zone = build_zone(std::slice::from_ref(&grant)).unwrap();
+        let barrel = zone
+            .entity(StableId::from_parts(
+                IdKind::Entity,
+                1,
+                grant.principal.random_bits() ^ 0x200,
+            ))
+            .expect("barrel is spawned");
+
+        assert!(barrel.interactable.as_ref().unwrap().supports(&Verb::Use));
+        assert_eq!(barrel.ui.as_ref().unwrap().schema.as_str(), "ui.display");
+        assert!(barrel.minigame.is_none());
+    }
+
+    #[test]
     fn built_in_navigation_scenario_has_deterministic_public_status_fixtures() {
         let zone = build_zone(&grants(1)).unwrap();
         let guard = zone
@@ -666,7 +690,8 @@ mod tests {
             .entity(StableId::from_parts(IdKind::Entity, 1, DEMO_TARGET_ID))
             .expect("raider fixture is spawned");
 
-        assert!(guard.stun_until.is_some());
+        assert!(guard.stun_until.is_none());
+        assert!(raider.stun_until.is_some());
         assert_eq!(raider.slow.map(|slow| slow.multiplier), Some(0.35));
     }
 

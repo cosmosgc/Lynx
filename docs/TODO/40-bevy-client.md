@@ -449,7 +449,7 @@ presentation shows a blue `SLOW` label while authoritative public state says the
 entity is slowed, hiding it again when the status clears or the entity leaves
 interest. Projection and privacy tests cover omission/default behavior and
 ensure no private multiplier or slow component leaks. The built-in navigation
-scenario keeps the guard stunned and raider slowed for graphical inspection;
+scenario keeps the non-AI raider stunned and slowed for graphical inspection;
 the gateway still exposes only the public booleans. User visual review has been
 moved to the future `CLT-020` task.
 
@@ -503,7 +503,7 @@ deferred to CLT-016/017 rather than claimed as visually verified here.
 ## CLT-008 — Interaction, inventory, and UI panels
 
 - **Priority:** P1
-- **Status:** In progress — target actions and reference lockpick panel playable; generic schemas and inventory remain
+- **Status:** In progress — server-authoritative actions and distinct generic/lockpick panels are covered; inventory UI and content-defined widgets remain
 - **Depends on:** `CLT-006`, `SIM-008`
 - **References:** ADR 0015, [content authoring §UI panels](../content-authoring.md#ui-panels)
 
@@ -520,10 +520,10 @@ deferred to CLT-016/017 rather than claimed as visually verified here.
 
 **Acceptance criteria**
 
-- [ ] Different entity types open different panels through one protocol.
-- [ ] A panel action rejected by the server does not change local state.
+- [x] Different entity types open different panels through one protocol.
+- [x] A panel action rejected by the server does not change local state.
 - [ ] Inventory moves match server results after reconnect.
-- [ ] Stale/closed panels cannot send actions for a different target.
+- [x] Stale/closed panels cannot send actions for a different target.
 
 **Progress (2026-11-05):** The online HUD lists supported, server-advertised
 parameter-free verbs for the selected target. Number keys submit correlated
@@ -535,6 +535,14 @@ shows server-provided comparison hints, attempts, and lockout tick, and closes
 when the server confirms a solve. Submission checks the exact composed panel,
 current target visibility, and advertised `play`; unsupported schemas have a
 read-only title/schema fallback. Server error diagnostics are not displayed.
+
+The demo barrel now exposes a read-only `ui.display` panel alongside the vault's
+`ui.lockpick` minigame. A real-socket client test opens both schemas through the
+same `ui.state` lifecycle and closes the display panel authoritatively. A focused
+client test verifies a rejected panel action preserves the server-owned panel;
+stale-target and closed-panel protections remain covered by client and gateway
+tests. This does not yet provide content-authored localized widgets or inventory
+operations.
 
 Real-socket tests cover an out-of-range rejection, opening a door, approaching
 and opening the vault, invalid/stale input rejection, solving from server hints,

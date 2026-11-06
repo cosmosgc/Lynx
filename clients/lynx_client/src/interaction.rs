@@ -233,6 +233,37 @@ mod tests {
     }
 
     #[test]
+    fn rejected_panel_action_preserves_authoritative_panel_state() {
+        let mut state = InteractionState::default();
+        let target = StableId::from_parts(IdKind::Entity, 1, 7);
+        state
+            .receive(&reply(
+                "ui.state",
+                json!({
+                    "tick":4,
+                    "panel":{"target":target,"schema":"ui.display","title":"Display"}
+                }),
+                "open",
+            ))
+            .unwrap();
+        let before = state.panel().cloned().unwrap();
+        state.sent(MessageId::parse("panel-action").unwrap());
+
+        assert!(
+            state
+                .receive(&reply(
+                    "action.result",
+                    json!({"outcome":{"status":"rejected","error":{"code":"out_of_range"}}}),
+                    "panel-action",
+                ))
+                .unwrap()
+        );
+
+        assert_eq!(state.panel(), Some(&before));
+        assert!(!state.pending());
+    }
+
+    #[test]
     fn unrelated_results_cannot_complete_pending_actions_and_errors_are_safe() {
         let mut state = InteractionState::default();
         state.sent(MessageId::parse("action").unwrap());
