@@ -15,9 +15,9 @@ use game_api::{
     CharacterCreationReceipt, CharacterId, CharacterIntentService, CharacterService,
     CharacterWorldService, ConflictResolutionView, CreateCharacter, CreateGroup, DeviceLogin,
     EventEnrollmentView, FactionService, FactionView, Friend, GroupId, GroupMember,
-    GroupMembership, GroupPage, GroupService, HealthService, HealthStatus, InventoryService,
-    InventorySlot, Session, SessionToken, SocialGroup, SocialService, TerritoryView,
-    WorldEventView,
+    GroupMembership, GroupPage, GroupSearch, GroupService, HealthService, HealthStatus,
+    InventoryService, InventorySlot, Session, SessionToken, SocialGroup, SocialService,
+    TerritoryView, WorldEventView,
 };
 
 use crate::{
@@ -224,6 +224,17 @@ impl SocialService for NakamaPostgresBackend {
 }
 
 impl GroupService for NakamaPostgresBackend {
+    fn discover_groups(
+        &self,
+        token: &SessionToken,
+        search: &GroupSearch,
+        limit: u16,
+        cursor: Option<&str>,
+    ) -> Result<GroupPage<SocialGroup>, ApiError> {
+        self.account_for_token(token)?;
+        self.nakama.discover_groups(token, search, limit, cursor)
+    }
+
     fn my_groups(
         &self,
         token: &SessionToken,

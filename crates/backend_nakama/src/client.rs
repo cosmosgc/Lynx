@@ -8,8 +8,9 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use engine_core::Locale;
 use game_api::{
     Account, AccountId, ApiError, AuthService, CreateGroup, DeviceLogin, Friend, FriendState,
-    GroupId, GroupMember, GroupMembership, GroupPage, GroupRole, GroupService, HealthService,
-    HealthStatus, Session, SessionToken, SocialGroup, SocialService, validate_group_page,
+    GroupId, GroupMember, GroupMembership, GroupPage, GroupRole, GroupSearch, GroupService,
+    HealthService, HealthStatus, Session, SessionToken, SocialGroup, SocialService,
+    validate_group_page,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -183,6 +184,49 @@ impl NakamaClient {
 }
 
 impl GroupService for NakamaClient {
+    fn discover_groups(
+        &self,
+        token: &SessionToken,
+        search: &GroupSearch,
+        limit: u16,
+        cursor: Option<&str>,
+    ) -> Result<GroupPage<SocialGroup>, ApiError> {
+        search.validate()?;
+        validate_group_page(limit, cursor)?;
+        self.telemetry.measure(|| {
+            let mut request = self
+                .agent
+                .get(self.endpoint("/v2/group"))
+                .header("Authorization", format!("Bearer {}", token.expose_secret()))
+                .query("limit", limit.to_string());
+            if let Some(name) = search.name.as_deref() {
+                request = request.query("name", name);
+            }
+            if let Some(open) = search.open {
+                request = request.query("open", open.to_string());
+            }
+            if let Some(members) = search.members {
+                request = request.query("members", members.to_string());
+            }
+            if let Some(cursor) = cursor {
+                request = request.query("cursor", cursor);
+            }
+            let page: NakamaGroupList = Self::decode_json(
+                request
+                    .call()
+                    .map_err(|_| ApiError::Transport("Nakama request failed".into()))?,
+            )?;
+            Ok(GroupPage {
+                items: page
+                    .groups
+                    .into_iter()
+                    .map(TryInto::try_into)
+                    .collect::<Result<Vec<_>, ApiError>>()?,
+                cursor: page.cursor.filter(|value| !value.is_empty()),
+            })
+        })
+    }
+
     fn my_groups(
         &self,
         token: &SessionToken,
@@ -671,6 +715,14 @@ struct NakamaUserGroupList {
 }
 
 #[derive(Deserialize)]
+struct NakamaGroupList {
+    #[serde(default)]
+    groups: Vec<NakamaGroup>,
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct NakamaUserGroup {
     group: NakamaGroup,
     state: i32,
@@ -972,6 +1024,65 @@ mod tests {
         client
             .demote_members(&token, &group_id, &[account])
             .unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn group_discovery_forwards_validated_native_filters() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).unwrap();
+            assert!(request_line.starts_with(
+                "GET /v2/group?limit=5&name=Raiders&open=true&members=3&cursor=next "
+            ));
+            let mut authorization = String::new();
+            loop {
+                let mut header = String::new();
+                reader.read_line(&mut header).unwrap();
+                if header == "\r\n" || header.is_empty() {
+                    break;
+                }
+                if header.to_ascii_lowercase().starts_with("authorization:") {
+                    authorization = header.trim().to_owned();
+                }
+            }
+            assert_eq!(authorization, "authorization: Bearer test-token");
+            let body = r#"{"groups":[{"id":"guild_1","creatorId":"user_1","name":"Raiders","description":"Raid together","open":true,"edgeCount":3,"maxCount":20}],"cursor":"next-page"}"#;
+            let mut stream = reader.into_inner();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+            stream.flush().unwrap();
+        });
+
+        let client = NakamaClient::new(NakamaConfig::new(format!("http://{address}"))).unwrap();
+        let token = SessionToken::new("test-token").unwrap();
+        let page = client
+            .discover_groups(
+                &token,
+                &GroupSearch {
+                    name: Some("Raiders".into()),
+                    open: Some(true),
+                    members: Some(3),
+                },
+                5,
+                Some("next"),
+            )
+            .unwrap();
+        assert_eq!(page.items[0].name, "Raiders");
+        assert_eq!(page.items[0].member_count, 3);
+        assert_eq!(page.cursor.as_deref(), Some("next-page"));
         worker.join().unwrap();
     }
 

@@ -603,10 +603,11 @@ echoed by the provider cannot reach logs or clients.
   party, and global channel lifecycles. Generic channel discovery remains
   explicit because Nakama's public REST API does not provide it.
 - **Groups:** the persistent-group contract and authenticated Nakama REST
-  operations now cover listing memberships/rosters, creation, join requests,
-  leaving, adding/kicking members, and role promotion/demotion. The adapter maps
-  Nakama membership states and bounds pages and mutation inputs; HTTP-stub tests
-  cover the routes. A live Nakama contract test and user-facing group flow remain.
+  operations now cover discovery, listing memberships/rosters, creation, join
+  requests, leaving, adding/kicking members, and role promotion/demotion. The
+  adapter maps Nakama membership states and bounds pages and mutation inputs;
+  HTTP-stub tests cover the routes. A live Nakama contract test and user-facing
+  group flow remain.
 - **Parties:** realtime party membership, invites, and chat require Nakama socket
   integration. Keep ready checks and gameplay markers in Lynx only where they
   affect authoritative world actions.

@@ -114,6 +114,37 @@ pub struct GroupPage<T> {
     pub cursor: Option<String>,
 }
 
+/// Filters for authenticated Nakama group discovery.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupSearch {
+    /// Optional prefix/name search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Filter by whether a group accepts immediate joins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open: Option<bool>,
+    /// Filter by exact current member count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub members: Option<u32>,
+}
+
+impl GroupSearch {
+    /// Validate user-provided discovery filters.
+    pub fn validate(&self) -> Result<(), ApiError> {
+        if self.name.as_ref().is_some_and(|name| {
+            name.trim().is_empty() || name.len() > 64 || name.chars().any(char::is_control)
+        }) {
+            return Err(ApiError::InvalidRequest("invalid group search name".into()));
+        }
+        if self.members.is_some_and(|members| members > 1000) {
+            return Err(ApiError::InvalidRequest(
+                "group member filter exceeds the supported capacity".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Validated input for creating a persistent social group.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateGroup {
@@ -150,6 +181,15 @@ impl CreateGroup {
 
 /// Authenticated operations on Nakama groups.
 pub trait GroupService {
+    /// Search discoverable groups using Nakama's native filters.
+    fn discover_groups(
+        &self,
+        token: &SessionToken,
+        search: &GroupSearch,
+        limit: u16,
+        cursor: Option<&str>,
+    ) -> Result<GroupPage<SocialGroup>, ApiError>;
+
     /// List groups for the caller, including join requests and current role.
     fn my_groups(
         &self,
@@ -254,5 +294,22 @@ mod tests {
         assert!(validate_group_page(0, None).is_err());
         assert!(validate_group_page(MAX_GROUP_PAGE + 1, None).is_err());
         assert!(validate_group_page(1, Some("x".repeat(4097).as_str())).is_err());
+        assert!(GroupSearch::default().validate().is_ok());
+        assert!(
+            GroupSearch {
+                name: Some("\n".into()),
+                ..GroupSearch::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            GroupSearch {
+                members: Some(1001),
+                ..GroupSearch::default()
+            }
+            .validate()
+            .is_err()
+        );
     }
 }
