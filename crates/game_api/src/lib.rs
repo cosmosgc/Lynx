@@ -5,6 +5,7 @@ pub mod calendar;
 pub mod character;
 pub mod chat;
 pub mod faction;
+pub mod group;
 pub mod inventory;
 pub mod service;
 pub mod social;
@@ -27,6 +28,10 @@ pub use chat::{
 };
 pub use faction::{
     FactionMemberView, FactionService, FactionStore, FactionView, TerritoryView, validate_snapshot,
+};
+pub use group::{
+    CreateGroup, GroupId, GroupMember, GroupMembership, GroupPage, GroupRole, GroupService,
+    MAX_GROUP_PAGE, SocialGroup, validate_group_page,
 };
 pub use inventory::{
     InventoryReconciliation, InventoryService, InventorySlot, InventoryStore,

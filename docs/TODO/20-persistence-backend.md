@@ -602,9 +602,14 @@ echoed by the provider cannot reach logs or clients.
   general `ChatService`/gateway contract does not yet cover direct, group,
   party, and global channel lifecycles. Generic channel discovery remains
   explicit because Nakama's public REST API does not provide it.
-- **Groups/parties:** connect Nakama group and realtime party membership,
-  invites, roles, and chat. Keep ready checks and gameplay markers in Lynx only
-  where they affect authoritative world actions.
+- **Groups:** the persistent-group contract and authenticated Nakama REST
+  operations now cover listing memberships/rosters, creation, join requests,
+  leaving, adding/kicking members, and role promotion/demotion. The adapter maps
+  Nakama membership states and bounds pages and mutation inputs; HTTP-stub tests
+  cover the routes. A live Nakama contract test and user-facing group flow remain.
+- **Parties:** realtime party membership, invites, and chat require Nakama socket
+  integration. Keep ready checks and gameplay markers in Lynx only where they
+  affect authoritative world actions.
 - **Admin:** Lynx administration uses separate admin authentication and the
   Lynx-owned append-only audit log. It is intentionally not routed through a
   player Nakama session.

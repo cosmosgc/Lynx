@@ -13,9 +13,10 @@ use engine_core::{DefinitionId, IdKind};
 use game_api::{
     Account, ApiError, AuthService, CalendarService, Character, CharacterCreationKey,
     CharacterCreationReceipt, CharacterId, CharacterIntentService, CharacterService,
-    CharacterWorldService, ConflictResolutionView, CreateCharacter, DeviceLogin,
-    EventEnrollmentView, FactionService, FactionView, Friend, HealthService, HealthStatus,
-    InventoryService, InventorySlot, Session, SessionToken, SocialService, TerritoryView,
+    CharacterWorldService, ConflictResolutionView, CreateCharacter, CreateGroup, DeviceLogin,
+    EventEnrollmentView, FactionService, FactionView, Friend, GroupId, GroupMember,
+    GroupMembership, GroupPage, GroupService, HealthService, HealthStatus, InventoryService,
+    InventorySlot, Session, SessionToken, SocialGroup, SocialService, TerritoryView,
     WorldEventView,
 };
 
@@ -219,6 +220,88 @@ impl SocialService for NakamaPostgresBackend {
     ) -> Result<(), ApiError> {
         self.account_for_token(token)?;
         self.nakama.unblock_account(token, account)
+    }
+}
+
+impl GroupService for NakamaPostgresBackend {
+    fn my_groups(
+        &self,
+        token: &SessionToken,
+        limit: u16,
+        cursor: Option<&str>,
+    ) -> Result<GroupPage<GroupMembership>, ApiError> {
+        self.account_for_token(token)?;
+        self.nakama.my_groups(token, limit, cursor)
+    }
+
+    fn group_members(
+        &self,
+        token: &SessionToken,
+        group: &GroupId,
+        limit: u16,
+        cursor: Option<&str>,
+    ) -> Result<GroupPage<GroupMember>, ApiError> {
+        self.account_for_token(token)?;
+        self.nakama.group_members(token, group, limit, cursor)
+    }
+
+    fn create_group(
+        &self,
+        token: &SessionToken,
+        request: &CreateGroup,
+    ) -> Result<SocialGroup, ApiError> {
+        self.account_for_token(token)?;
+        self.nakama.create_group(token, request)
+    }
+
+    fn request_join(&self, token: &SessionToken, group: &GroupId) -> Result<(), ApiError> {
+        self.account_for_token(token)?;
+        self.nakama.request_join(token, group)
+    }
+
+    fn leave_group(&self, token: &SessionToken, group: &GroupId) -> Result<(), ApiError> {
+        self.account_for_token(token)?;
+        self.nakama.leave_group(token, group)
+    }
+
+    fn add_members(
+        &self,
+        token: &SessionToken,
+        group: &GroupId,
+        accounts: &[game_api::AccountId],
+    ) -> Result<(), ApiError> {
+        self.account_for_token(token)?;
+        self.nakama.add_members(token, group, accounts)
+    }
+
+    fn kick_members(
+        &self,
+        token: &SessionToken,
+        group: &GroupId,
+        accounts: &[game_api::AccountId],
+    ) -> Result<(), ApiError> {
+        self.account_for_token(token)?;
+        self.nakama.kick_members(token, group, accounts)
+    }
+
+    fn promote_members(
+        &self,
+        token: &SessionToken,
+        group: &GroupId,
+        accounts: &[game_api::AccountId],
+    ) -> Result<(), ApiError> {
+        self.account_for_token(token)?;
+        self.nakama.promote_members(token, group, accounts)
+    }
+
+    fn demote_members(
+        &self,
+        token: &SessionToken,
+        group: &GroupId,
+        accounts: &[game_api::AccountId],
+    ) -> Result<(), ApiError> {
+        self.account_for_token(token)?;
+        self.nakama.demote_members(token, group, accounts)
     }
 }
 

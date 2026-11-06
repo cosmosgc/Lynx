@@ -7,8 +7,9 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use engine_core::Locale;
 use game_api::{
-    Account, AccountId, ApiError, AuthService, DeviceLogin, Friend, FriendState, HealthService,
-    HealthStatus, Session, SessionToken, SocialService,
+    Account, AccountId, ApiError, AuthService, CreateGroup, DeviceLogin, Friend, FriendState,
+    GroupId, GroupMember, GroupMembership, GroupPage, GroupRole, GroupService, HealthService,
+    HealthStatus, Session, SessionToken, SocialGroup, SocialService, validate_group_page,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -177,6 +178,185 @@ impl NakamaClient {
             refresh_token,
             created: response.created,
             expires_at: None,
+        })
+    }
+}
+
+impl GroupService for NakamaClient {
+    fn my_groups(
+        &self,
+        token: &SessionToken,
+        limit: u16,
+        cursor: Option<&str>,
+    ) -> Result<GroupPage<GroupMembership>, ApiError> {
+        validate_group_page(limit, cursor)?;
+        self.telemetry.measure(|| {
+            let mut request = self
+                .agent
+                .get(self.endpoint("/v2/user/group"))
+                .header("Authorization", format!("Bearer {}", token.expose_secret()))
+                .query("limit", limit.to_string());
+            if let Some(cursor) = cursor {
+                request = request.query("cursor", cursor);
+            }
+            let page: NakamaUserGroupList = Self::decode_json(
+                request
+                    .call()
+                    .map_err(|_| ApiError::Transport("Nakama request failed".into()))?,
+            )?;
+            Ok(GroupPage {
+                items: page
+                    .user_groups
+                    .into_iter()
+                    .map(|entry| {
+                        Ok(GroupMembership {
+                            group: entry.group.try_into()?,
+                            role: group_role(entry.state)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ApiError>>()?,
+                cursor: page.cursor.filter(|value| !value.is_empty()),
+            })
+        })
+    }
+
+    fn group_members(
+        &self,
+        token: &SessionToken,
+        group: &GroupId,
+        limit: u16,
+        cursor: Option<&str>,
+    ) -> Result<GroupPage<GroupMember>, ApiError> {
+        validate_group_page(limit, cursor)?;
+        self.telemetry.measure(|| {
+            let mut request = self
+                .agent
+                .get(self.endpoint(&format!("/v2/group/{group}/user")))
+                .header("Authorization", format!("Bearer {}", token.expose_secret()))
+                .query("limit", limit.to_string());
+            if let Some(cursor) = cursor {
+                request = request.query("cursor", cursor);
+            }
+            let page: NakamaGroupUserList = Self::decode_json(
+                request
+                    .call()
+                    .map_err(|_| ApiError::Transport("Nakama request failed".into()))?,
+            )?;
+            Ok(GroupPage {
+                items: page
+                    .group_users
+                    .into_iter()
+                    .map(|entry| {
+                        Ok(GroupMember {
+                            account_id: AccountId::new(entry.user.id).map_err(|_| {
+                                ApiError::Transport("Nakama returned an invalid account ID".into())
+                            })?,
+                            username: entry.user.username,
+                            role: group_role(entry.state)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ApiError>>()?,
+                cursor: page.cursor.filter(|value| !value.is_empty()),
+            })
+        })
+    }
+
+    fn create_group(
+        &self,
+        token: &SessionToken,
+        request: &CreateGroup,
+    ) -> Result<SocialGroup, ApiError> {
+        request.validate()?;
+        self.telemetry.measure(|| {
+            let response = Self::send_json(
+                self.agent
+                    .post(self.endpoint("/v2/group"))
+                    .header("Authorization", format!("Bearer {}", token.expose_secret())),
+                &json!({
+                    "name": request.name,
+                    "description": request.description,
+                    "open": request.open,
+                    "maxCount": request.max_count,
+                }),
+            )?;
+            let group: NakamaGroup = Self::decode_json(response)?;
+            group.try_into()
+        })
+    }
+
+    fn request_join(&self, token: &SessionToken, group: &GroupId) -> Result<(), ApiError> {
+        self.group_action(token, group, "join", None)
+    }
+
+    fn leave_group(&self, token: &SessionToken, group: &GroupId) -> Result<(), ApiError> {
+        self.group_action(token, group, "leave", None)
+    }
+
+    fn add_members(
+        &self,
+        token: &SessionToken,
+        group: &GroupId,
+        accounts: &[AccountId],
+    ) -> Result<(), ApiError> {
+        self.group_action(token, group, "add", Some(accounts))
+    }
+
+    fn kick_members(
+        &self,
+        token: &SessionToken,
+        group: &GroupId,
+        accounts: &[AccountId],
+    ) -> Result<(), ApiError> {
+        self.group_action(token, group, "kick", Some(accounts))
+    }
+
+    fn promote_members(
+        &self,
+        token: &SessionToken,
+        group: &GroupId,
+        accounts: &[AccountId],
+    ) -> Result<(), ApiError> {
+        self.group_action(token, group, "promote", Some(accounts))
+    }
+
+    fn demote_members(
+        &self,
+        token: &SessionToken,
+        group: &GroupId,
+        accounts: &[AccountId],
+    ) -> Result<(), ApiError> {
+        self.group_action(token, group, "demote", Some(accounts))
+    }
+}
+
+impl NakamaClient {
+    fn group_action(
+        &self,
+        token: &SessionToken,
+        group: &GroupId,
+        action: &str,
+        accounts: Option<&[AccountId]>,
+    ) -> Result<(), ApiError> {
+        if accounts.is_some_and(|accounts| accounts.is_empty() || accounts.len() > 100) {
+            return Err(ApiError::InvalidRequest(
+                "group account list must contain between 1 and 100 accounts".into(),
+            ));
+        }
+        self.telemetry.measure(|| {
+            let mut request = self
+                .agent
+                .post(self.endpoint(&format!("/v2/group/{group}/{action}")))
+                .header("Authorization", format!("Bearer {}", token.expose_secret()));
+            if let Some(accounts) = accounts {
+                for account in accounts {
+                    request = request.query("userIds", account.as_str());
+                }
+            }
+            let response = request
+                .send_empty()
+                .map_err(|_| ApiError::Transport("Nakama request failed".into()))?;
+            Self::checked_body(response)?;
+            Ok(())
         })
     }
 }
@@ -445,6 +625,85 @@ struct NakamaFriend {
 }
 
 #[derive(Deserialize)]
+struct NakamaGroup {
+    id: String,
+    #[serde(rename = "creatorId")]
+    creator_id: String,
+    name: String,
+    #[serde(default)]
+    description: String,
+    open: bool,
+    #[serde(rename = "edgeCount")]
+    member_count: i32,
+    #[serde(rename = "maxCount")]
+    max_count: i32,
+}
+
+impl TryFrom<NakamaGroup> for SocialGroup {
+    type Error = ApiError;
+
+    fn try_from(group: NakamaGroup) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: GroupId::new(group.id)
+                .map_err(|_| ApiError::Transport("Nakama returned an invalid group ID".into()))?,
+            creator_id: AccountId::new(group.creator_id).map_err(|_| {
+                ApiError::Transport("Nakama returned an invalid group creator ID".into())
+            })?,
+            name: group.name,
+            description: group.description,
+            open: group.open,
+            member_count: u32::try_from(group.member_count).map_err(|_| {
+                ApiError::Transport("Nakama returned an invalid group member count".into())
+            })?,
+            max_count: u32::try_from(group.max_count).map_err(|_| {
+                ApiError::Transport("Nakama returned an invalid group capacity".into())
+            })?,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct NakamaUserGroupList {
+    #[serde(default)]
+    user_groups: Vec<NakamaUserGroup>,
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct NakamaUserGroup {
+    group: NakamaGroup,
+    state: i32,
+}
+
+#[derive(Deserialize)]
+struct NakamaGroupUserList {
+    #[serde(default)]
+    group_users: Vec<NakamaGroupUser>,
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct NakamaGroupUser {
+    user: NakamaUser,
+    state: i32,
+}
+
+fn group_role(state: i32) -> Result<GroupRole, ApiError> {
+    match state {
+        0 => Ok(GroupRole::Owner),
+        1 => Ok(GroupRole::Admin),
+        2 => Ok(GroupRole::Member),
+        3 => Ok(GroupRole::JoinRequest),
+        4 => Ok(GroupRole::Banned),
+        _ => Err(ApiError::Transport(
+            "Nakama returned an unknown group role".into(),
+        )),
+    }
+}
+
+#[derive(Deserialize)]
 struct NakamaErrorResponse {
     #[serde(default)]
     code: Option<i64>,
@@ -606,6 +865,113 @@ mod tests {
             .unwrap();
         client.block_account(&token, &account("blocked")).unwrap();
         client.unblock_account(&token, &account("blocked")).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn group_contract_paginates_maps_roles_and_authenticates_mutations() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = std::thread::spawn(move || {
+            let expected = [
+                ("GET", "/v2/user/group?limit=10"),
+                ("GET", "/v2/group/group_1/user?limit=10"),
+                ("POST", "/v2/group"),
+                ("POST", "/v2/group/group_1/join"),
+                ("POST", "/v2/group/group_1/leave"),
+                ("POST", "/v2/group/group_1/add?userIds=account_2"),
+                ("POST", "/v2/group/group_1/kick?userIds=account_2"),
+                ("POST", "/v2/group/group_1/promote?userIds=account_2"),
+                ("POST", "/v2/group/group_1/demote?userIds=account_2"),
+            ];
+            for (index, (method, path)) in expected.into_iter().enumerate() {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut request_line = String::new();
+                reader.read_line(&mut request_line).unwrap();
+                let mut authorization = String::new();
+                let mut content_length = 0;
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).unwrap();
+                    if header == "\r\n" || header.is_empty() {
+                        break;
+                    }
+                    let lower = header.to_ascii_lowercase();
+                    if lower.starts_with("authorization:") {
+                        authorization = header.trim().to_owned();
+                    }
+                    if let Some(value) = lower.strip_prefix("content-length:") {
+                        content_length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+                let mut body = vec![0; content_length];
+                reader.read_exact(&mut body).unwrap();
+                assert_eq!(request_line.trim(), format!("{method} {path} HTTP/1.1"));
+                assert_eq!(authorization, "authorization: Bearer test-token");
+                if index == 2 {
+                    let json: Value = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(json["name"], "Explorers");
+                    assert_eq!(json["maxCount"], 50);
+                }
+                let response_body = match index {
+                    0 => {
+                        r#"{"user_groups":[{"group":{"id":"group_1","creatorId":"account_1","name":"Explorers","description":"World travelers","open":false,"edgeCount":3,"maxCount":50},"state":1}],"cursor":"next"}"#
+                    }
+                    1 => {
+                        r#"{"group_users":[{"user":{"id":"account_1","username":"owner"},"state":0},{"user":{"id":"account_2"},"state":3}] }"#
+                    }
+                    2 => {
+                        r#"{"id":"group_1","creatorId":"account_1","name":"Explorers","description":"World travelers","open":false,"edgeCount":1,"maxCount":50}"#
+                    }
+                    _ => "{}",
+                };
+                let mut stream = reader.into_inner();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response_body.len(),
+                    response_body
+                )
+                .unwrap();
+                stream.flush().unwrap();
+            }
+        });
+
+        let client = NakamaClient::new(NakamaConfig::new(format!("http://{address}"))).unwrap();
+        let token = SessionToken::new("test-token").unwrap();
+        let groups = client.my_groups(&token, 10, None).unwrap();
+        assert_eq!(groups.cursor.as_deref(), Some("next"));
+        assert_eq!(groups.items[0].role, GroupRole::Admin);
+        let group_id = GroupId::new("group_1").unwrap();
+        let members = client.group_members(&token, &group_id, 10, None).unwrap();
+        assert_eq!(members.items[0].role, GroupRole::Owner);
+        assert_eq!(members.items[1].role, GroupRole::JoinRequest);
+        let request = CreateGroup {
+            name: "Explorers".into(),
+            description: "World travelers".into(),
+            open: false,
+            max_count: 50,
+        };
+        assert_eq!(client.create_group(&token, &request).unwrap().id, group_id);
+        client.request_join(&token, &group_id).unwrap();
+        client.leave_group(&token, &group_id).unwrap();
+        let account = AccountId::new("account_2").unwrap();
+        client
+            .add_members(&token, &group_id, std::slice::from_ref(&account))
+            .unwrap();
+        client
+            .kick_members(&token, &group_id, std::slice::from_ref(&account))
+            .unwrap();
+        client
+            .promote_members(&token, &group_id, std::slice::from_ref(&account))
+            .unwrap();
+        client
+            .demote_members(&token, &group_id, &[account])
+            .unwrap();
         worker.join().unwrap();
     }
 
