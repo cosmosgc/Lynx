@@ -244,7 +244,7 @@ unversioned until a manifest is built.
 ## CLT-005 — Network client loop
 
 - **Priority:** P0
-- **Status:** In progress — background loop, rotated-token resume and terminal recovery guidance implemented; account refresh and injected-drop validation remain
+- **Status:** In progress — background loop, rotated-token resume, terminal recovery guidance, and injected-drop auto-reconnect implemented; account refresh remains
 - **Depends on:** `CLT-001`, `CLT-002`
 - **References:** [networking](../networking.md), `engine_net`
 
@@ -281,8 +281,11 @@ step in the online HUD: expired/revoked credentials direct the user to restart
 and sign in again (`R` retries current credentials), a session conflict advises
 waiting for the other session before retry, and a forbidden character directs the
 user back to character selection. Other failures advise checking connectivity
-and pressing `R`. Unit tests cover the recovery guidance. Automatic-drop
-injection and account refresh remain open.
+and pressing `R`. Unit tests cover the recovery guidance. An in-process TCP proxy
+now injects a real transport drop: the client notices it without an explicit
+`reconnect()`, enters the automatic backoff path, resumes with the rotated
+token, and keeps moving from the same authoritative baseline. Account refresh
+remains open.
 
 ---
 

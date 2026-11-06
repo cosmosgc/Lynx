@@ -8,6 +8,14 @@ semantic versioning for engine releases and content bundles.
 
 ### Added
 
+- `lynx_client`: reusable immediate-mode floating-window chrome and a chat window
+  with draggable/resizable/closable behavior, remembered geometry, dynamic
+  zone/whisper/group/party tabs, unread counts, presence, and bounded history
+  navigation. Channel sends go through the new `send_chat_to` seam; the current
+  gateway authorizes zone sends only.
+- `lynx_client`: injected transport-drop coverage. A local TCP proxy closes the
+  active socket so the client's automatic backoff, rotated-token resume, and
+  post-resume movement run without an explicit `reconnect()` (`CLT-005`).
 - `lynx_client`: deterministic delayed-correction coverage over a real WebSocket.
   `delayed_private_corrections_remain_bounded_over_websocket` delays
   `movement.queued` and the private movement result by 100 ms and 200 ms,

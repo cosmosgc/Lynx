@@ -986,6 +986,175 @@ async fn reconnects_with_rotated_resume_token_and_keeps_moving() {
     server.await.unwrap().unwrap();
 }
 
+/// TCP proxy used to inject a transport drop without stopping the authority.
+/// Each accepted connection is forwarded byte-for-byte until the watch value
+/// changes, at which point both halves are dropped to close the sockets.
+async fn spawn_drop_proxy(
+    target: std::net::SocketAddr,
+) -> (
+    std::net::SocketAddr,
+    watch::Sender<u64>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (drop_signal, drop_rx) = watch::channel(0_u64);
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((client, _)) = listener.accept().await else {
+                return;
+            };
+            let mut connection_drop = drop_rx.clone();
+            // Connections accepted after a drop must wait for the next signal,
+            // not inherit the already-fired one.
+            connection_drop.borrow_and_update();
+            tokio::spawn(async move {
+                let Ok(upstream) = tokio::net::TcpStream::connect(target).await else {
+                    return;
+                };
+                let (mut client_read, mut client_write) = client.into_split();
+                let (mut upstream_read, mut upstream_write) = upstream.into_split();
+                tokio::select! {
+                    _ = tokio::io::copy(&mut client_read, &mut upstream_write) => {}
+                    _ = tokio::io::copy(&mut upstream_read, &mut client_write) => {}
+                    _ = connection_drop.changed() => {}
+                }
+            });
+        }
+    });
+    (address, drop_signal, task)
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // The injected-drop flow needs a real in-process server.
+async fn automatically_reconnects_after_injected_transport_drop() {
+    const TOKEN: &str = "drop-test-secret";
+    let auth = Authenticator::new(&[digest(TOKEN)]).unwrap();
+    let grants: Vec<_> = auth.grants().cloned().collect();
+    let gateway = WorldGateway::new(
+        demo::build_zone(&grants).unwrap(),
+        demo::handshake().unwrap(),
+        GatewayConfig::default(),
+        SystemResumeTokens::new(),
+    )
+    .unwrap();
+    let (events, receiver) = transport::event_channel();
+    let (shutdown, shutdown_rx) = watch::channel(false);
+    let service = tokio::spawn(
+        Service::new(WorldServer::new(gateway), Duration::from_millis(50))
+            .run(receiver, shutdown_rx),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server_address = listener.local_addr().unwrap();
+    let (proxy_address, drop_signal, proxy) = spawn_drop_proxy(server_address).await;
+    let (stop, stop_rx) = oneshot::channel();
+    let server = tokio::spawn(transport::serve_with_shutdown(
+        listener,
+        Arc::new(AppState::new(events, auth)),
+        async {
+            let _ = stop_rx.await;
+        },
+    ));
+    let url = format!("ws://{proxy_address}/world");
+
+    let mut client = OnlineClient::new(1.0).unwrap();
+    client
+        .connect(Config {
+            url,
+            bearer: TOKEN.into(),
+            character: None,
+            handshake: demo::handshake().unwrap(),
+            last_ack_tick: Tick::ZERO,
+        })
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            client.poll();
+            assert!(!matches!(client.status(), OnlineStatus::Failed(_)));
+            if client.status() == OnlineStatus::Active && client.resume_available() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let before = client
+        .world()
+        .reconciliation()
+        .authoritative_position()
+        .unwrap();
+    assert_eq!(client.reconnect_attempts(), 0);
+
+    // Close the proxied transport. The client must notice on its own, back off,
+    // reconnect with the rotated resume token, and restore the same baseline.
+    drop_signal.send(1).unwrap();
+    let mut saw_reconnecting = false;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            client.poll();
+            assert!(!matches!(client.status(), OnlineStatus::Failed(_)));
+            if matches!(client.status(), OnlineStatus::Reconnecting { .. }) {
+                saw_reconnecting = true;
+            }
+            if client.status() == OnlineStatus::Active
+                && client.resumed()
+                && client.resume_available()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(saw_reconnecting, "drop must enter the automatic retry path");
+    assert_eq!(client.reconnect_attempts(), 1);
+    assert_eq!(
+        client
+            .world()
+            .reconciliation()
+            .authoritative_position()
+            .unwrap(),
+        before
+    );
+
+    let position = before;
+    client
+        .move_to(Position {
+            x: position.x + 0.09,
+            ..position
+        })
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            client.poll();
+            assert!(!matches!(client.status(), OnlineStatus::Failed(_)));
+            if client.last_movement_applied() == Some(true) && !client.pending_movement() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        client
+            .world()
+            .reconciliation()
+            .authoritative_position()
+            .unwrap()
+            .x
+            > position.x
+    );
+
+    let _ = shutdown.send(true);
+    let _ = stop.send(());
+    proxy.abort();
+    service.await.unwrap();
+    server.await.unwrap().unwrap();
+}
+
 async fn wait_for_interaction(client: &mut OnlineClient) {
     tokio::time::timeout(Duration::from_secs(5), async {
         while client.interaction().pending() {
