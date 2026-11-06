@@ -24,7 +24,7 @@ use engine_core::id::{DefinitionId, IdKind, StableId};
 use engine_core::inventory::{ItemRules, UniformItemRules};
 use engine_core::math::Vec3;
 use engine_core::schema::PersistencePolicy;
-use engine_core::time::{DurationMs, Millis};
+use engine_core::time::{DurationMs, Millis, Tick};
 use engine_core::world_event::{
     CancellationPolicy, ConflictRule, EnrollmentRules, EventSchedule, EventSide, EventSideRole,
     WORLD_EVENT_SCHEMA_VERSION, WorldCalendar, WorldEvent, WorldEventStatus,
@@ -33,7 +33,9 @@ use engine_net::protocol::Handshake;
 use engine_sim::action::Verb;
 use engine_sim::ai::{AiBehaviorDefinition, AiBehaviorKind, AiTickPolicy, PerceptionBudget};
 use engine_sim::combat::CombatStats;
-use engine_sim::entity::{Door, EntityRecord, FactionMembership, Interactable, UiProvider};
+use engine_sim::entity::{
+    Door, EntityRecord, FactionMembership, Interactable, TimedSlow, UiProvider,
+};
 use engine_sim::mind::Mind;
 use engine_sim::minigame::Minigame;
 use engine_sim::nav::{NavGrid, ReplanPolicy};
@@ -198,29 +200,35 @@ pub fn restore_zone_quarantining(
 fn spawn_navigation_scenario(zone: &mut Zone) -> Result<(), EngineError> {
     let guard_faction = definition(DEMO_DEFENDERS)?;
     let raider_faction = definition(DEMO_ATTACKERS)?;
-    zone.spawn(
-        EntityRecord::new(
-            StableId::from_parts(IdKind::Entity, 1, DEMO_GUARD_ID),
-            definition("character.demo_guard")?,
-            DEMO_GUARD_START,
-        )
-        .with_health(100)
-        .with_combat(CombatStats::default())
-        .with_faction(FactionMembership::new(guard_faction))
-        .with_mind(Mind::ai(definition("behavior.demo_guard_chase")?))
-        .with_persistence(PersistencePolicy::PersistentEntity),
-    )?;
-    zone.spawn(
-        EntityRecord::new(
-            StableId::from_parts(IdKind::Entity, 1, DEMO_TARGET_ID),
-            definition("character.demo_raider")?,
-            DEMO_TARGET_START,
-        )
-        .with_health(100)
-        .with_faction(FactionMembership::new(raider_faction))
-        .with_interactable(Interactable::new(2.0, [Verb::Attack]))
-        .with_persistence(PersistencePolicy::PersistentEntity),
-    )?;
+    let mut guard = EntityRecord::new(
+        StableId::from_parts(IdKind::Entity, 1, DEMO_GUARD_ID),
+        definition("character.demo_guard")?,
+        DEMO_GUARD_START,
+    )
+    .with_health(100)
+    .with_combat(CombatStats::default())
+    .with_faction(FactionMembership::new(guard_faction))
+    .with_mind(Mind::ai(definition("behavior.demo_guard_chase")?))
+    .with_persistence(PersistencePolicy::PersistentEntity);
+    // Keep visible statuses in the built-in development world as a deterministic
+    // graphical fixture. These are public flags only; private timing and
+    // movement modifiers remain server-side.
+    guard.stun_until = Some(Tick(1_000_000));
+    zone.spawn(guard)?;
+    let mut raider = EntityRecord::new(
+        StableId::from_parts(IdKind::Entity, 1, DEMO_TARGET_ID),
+        definition("character.demo_raider")?,
+        DEMO_TARGET_START,
+    )
+    .with_health(100)
+    .with_faction(FactionMembership::new(raider_faction))
+    .with_interactable(Interactable::new(2.0, [Verb::Attack]))
+    .with_persistence(PersistencePolicy::PersistentEntity);
+    raider.slow = Some(TimedSlow {
+        until: Tick(1_000_000),
+        multiplier: 0.35,
+    });
+    zone.spawn(raider)?;
     Ok(())
 }
 
@@ -646,6 +654,20 @@ mod tests {
         assert_eq!(minigame.definition.as_str(), "minigame.lockpick");
         assert_eq!(minigame.length, 3);
         assert!(minigame.attempts > 0);
+    }
+
+    #[test]
+    fn built_in_navigation_scenario_has_deterministic_public_status_fixtures() {
+        let zone = build_zone(&grants(1)).unwrap();
+        let guard = zone
+            .entity(StableId::from_parts(IdKind::Entity, 1, DEMO_GUARD_ID))
+            .expect("guard fixture is spawned");
+        let raider = zone
+            .entity(StableId::from_parts(IdKind::Entity, 1, DEMO_TARGET_ID))
+            .expect("raider fixture is spawned");
+
+        assert!(guard.stun_until.is_some());
+        assert_eq!(raider.slow.map(|slow| slow.multiplier), Some(0.35));
     }
 
     #[test]

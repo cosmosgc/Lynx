@@ -405,7 +405,7 @@ in chat and is not stored in the repository.
 ## CLT-018 — Public status indicators
 
 - **Priority:** P2
-- **Status:** In progress — safe stunned/slowed booleans and client indicators implemented; fixture and visual validation remain
+- **Status:** In progress — safe stunned/slowed booleans, indicators, and deterministic demo fixture implemented; visual review remains in `CLT-020`
 - **Depends on:** `CLT-006`
 - **References:** [CLT-006](#clt-006--entity-presentation-and-interpolation), `SIM-002`
 
@@ -430,8 +430,8 @@ simulation state is not exposed implicitly.
 - [ ] Public status contract is explicit, bounded, and covered by privacy tests.
 - [ ] Status indicators appear/update/clear with authoritative state and entity
       visibility; no private movement/combat internals leak.
-- [ ] A deterministic visual fixture demonstrates at least one status in the
-      graphical client. User visual review is tracked separately in CLT-020.
+- [x] A deterministic visual fixture demonstrates statuses in the graphical
+      client. User visual review is tracked separately in `CLT-020`.
 - [ ] Additional effects are displayed only when modeled by authoritative
       simulation data; unsupported statuses fail closed.
 
@@ -443,8 +443,10 @@ decodes the public flag optionally for compatibility, and the online Bevy
 presentation shows a blue `SLOW` label while authoritative public state says the
 entity is slowed, hiding it again when the status clears or the entity leaves
 interest. Projection and privacy tests cover omission/default behavior and
-ensure no private multiplier or slow component leaks. A deterministic fixture
-remains; user visual review has been moved to the future CLT-020 task.
+ensure no private multiplier or slow component leaks. The built-in navigation
+scenario keeps the guard stunned and raider slowed for graphical inspection;
+the gateway still exposes only the public booleans. User visual review has been
+moved to the future `CLT-020` task.
 
 ---
 
