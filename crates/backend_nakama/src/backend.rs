@@ -57,6 +57,18 @@ impl NakamaPostgresBackend {
             character_store: self.characters.telemetry().snapshot(),
         }
     }
+
+    /// Open a long-lived Nakama realtime session for a validated player token.
+    /// The returned socket is separate from world admission; dropping it ends
+    /// Nakama party membership without changing Lynx world state.
+    pub async fn connect_realtime(
+        &self,
+        token: &SessionToken,
+    ) -> Result<crate::realtime::NakamaRealtimeSession, ApiError> {
+        self.account_for_token(token)?;
+        self.nakama.connect_realtime(token).await
+    }
+
     /// Compose established Nakama and PostgreSQL adapters.
     #[must_use]
     pub fn new(

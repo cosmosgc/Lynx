@@ -56,6 +56,7 @@ pub struct NakamaClient {
     agent: ureq::Agent,
     base_url: String,
     http_key: Option<String>,
+    timeout: Duration,
 }
 
 impl fmt::Debug for NakamaClient {
@@ -105,7 +106,16 @@ impl NakamaClient {
             agent: ureq::Agent::new_with_config(agent_config),
             base_url: base_url.to_owned(),
             http_key: config.http_key,
+            timeout: config.timeout,
         })
+    }
+
+    /// Open a long-lived Nakama realtime session authenticated with a client token.
+    pub async fn connect_realtime(
+        &self,
+        token: &SessionToken,
+    ) -> Result<crate::realtime::NakamaRealtimeSession, ApiError> {
+        crate::realtime::NakamaRealtimeSession::connect(&self.base_url, token, self.timeout).await
     }
 
     /// Return a shared, process-local telemetry handle for this adapter.

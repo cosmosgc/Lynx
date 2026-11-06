@@ -1,4 +1,5 @@
-//! Native Nakama adapter. This is the only crate that knows Nakama's HTTP API.
+//! Nakama REST and realtime adapters. This is the only crate that knows Nakama's
+//! HTTP and socket protocols.
 
 pub mod backend;
 pub mod character_store;
@@ -8,6 +9,7 @@ pub mod identity_store;
 pub mod inventory_store;
 pub mod postgres_connection;
 pub mod postgres_pool;
+pub mod realtime;
 pub mod telemetry;
 
 pub use backend::{BackendTelemetrySnapshot, NakamaPostgresBackend};

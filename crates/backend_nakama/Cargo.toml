@@ -1,6 +1,6 @@
 [package]
 name = "backend_nakama"
-description = "Native Nakama HTTP adapter for Lynx"
+description = "Native Nakama HTTP and realtime adapter for Lynx"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -19,6 +19,9 @@ rustls-pki-types = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+futures-util = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
 tracing = { workspace = true }
 ureq = { workspace = true }
 

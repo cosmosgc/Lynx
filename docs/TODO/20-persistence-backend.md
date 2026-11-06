@@ -598,19 +598,24 @@ echoed by the provider cannot reach logs or clients.
   friend states and operations, and `NakamaPostgresBackend` exposes that
   authenticated contract. Friend request listing/mutations have HTTP-stub tests.
   A live Nakama contract test and user-facing friend-management flow remain.
-- **Chat:** the Bevy client has a configured persistent room socket, but the
-  general `ChatService`/gateway contract does not yet cover direct, group,
-  party, and global channel lifecycles. Generic channel discovery remains
-  explicit because Nakama's public REST API does not provide it.
+- **Chat/realtime:** `backend_nakama::NakamaRealtimeSession` now owns an
+  authenticated, long-lived Nakama WebSocket with typed room/direct/group
+  channel join, leave, send, and history operations; unmatched realtime events
+  are buffered for consumers. Keep Lynx zone chat authoritative in Lynx.
+  The socket session is currently an adapter-level interface; a shared
+  application event/session contract and client-facing channel discovery still
+  need integration.
 - **Groups:** the persistent-group contract and authenticated Nakama REST
   operations now cover discovery, listing memberships/rosters, creation, join
   requests, leaving, adding/kicking members, and role promotion/demotion. The
   adapter maps Nakama membership states and bounds pages and mutation inputs;
   HTTP-stub tests cover the routes. A live Nakama contract test and user-facing
   group flow remain.
-- **Parties:** realtime party membership, invites, and chat require Nakama socket
-  integration. Keep ready checks and gameplay markers in Lynx only where they
-  affect authoritative world actions.
+- **Parties:** the Nakama socket session now supports create/join/leave/close,
+  join-request listing/approval/rejection, and leader promotion. Session
+  lifetime controls Nakama membership; invites/matchmaking and UI integration
+  remain. Keep ready checks and gameplay markers in Lynx only where they affect
+  authoritative world actions.
 - **Admin:** Lynx administration uses separate admin authentication and the
   Lynx-owned append-only audit log. It is intentionally not routed through a
   player Nakama session.
