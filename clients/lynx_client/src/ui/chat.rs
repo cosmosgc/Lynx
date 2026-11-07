@@ -277,8 +277,10 @@ impl Plugin for ChatPanelPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ChatPanel>()
             .init_resource::<ChatComposer>()
-            .add_plugins(BevyImmediatePlugin::<CapsUi>::new())
-            .add_plugins(ImmediateWindowPlugin);
+            .add_plugins(BevyImmediatePlugin::<CapsUi>::new());
+        if !app.is_plugin_added::<ImmediateWindowPlugin>() {
+            app.add_plugins(ImmediateWindowPlugin);
+        }
         if !app.is_plugin_added::<FloatingWindowPlugin>() {
             app.add_plugins(FloatingWindowPlugin);
         }

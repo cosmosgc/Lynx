@@ -10,6 +10,8 @@ pub mod cli;
 pub mod fonts;
 pub mod interaction;
 #[cfg(feature = "window")]
+pub mod inventory_panel;
+#[cfg(feature = "window")]
 pub mod lock_panel;
 pub mod nakama_credentials;
 pub mod offline;

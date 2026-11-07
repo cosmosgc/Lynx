@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use engine_core::id::{IdKind, StableId};
+use engine_core::id::{DefinitionId, IdKind, StableId};
 use engine_core::time::Tick;
 use engine_net::{
     envelope::{Envelope, MessageId, MessageKind},
@@ -328,7 +328,9 @@ async fn rejected_updates_are_not_acknowledged() {
         })
         .await
         .unwrap();
-        let expected = if case == "owner" || case == "reliable" {
+        // Owner-only state is supported now, but this incomplete inventory
+        // payload is still rejected atomically.
+        let expected = if case == "reliable" {
             lynx_client::world_state::Error::UnsupportedReplication
         } else {
             lynx_client::world_state::Error::InvalidMessage
@@ -394,6 +396,7 @@ async fn headless_schedule_connects_moves_and_disconnects() {
             .init_resource::<UiScale>()
             .add_plugins((
                 lynx_client::windowed::OnlineWindowPlugin,
+                lynx_client::inventory_panel::InventoryPanelPlugin,
                 lynx_client::lock_panel::LockPanelPlugin,
                 lynx_client::ui::chat::ChatPanelPlugin,
             ));
@@ -412,6 +415,16 @@ async fn headless_schedule_connects_moves_and_disconnects() {
     })
     .await
     .unwrap();
+    let inventory = app
+        .world()
+        .resource::<OnlineClient>()
+        .world()
+        .inventory()
+        .expect("the demo actor receives its owner inventory");
+    assert_eq!(
+        inventory.total_quantity(&DefinitionId::new("item.torch").unwrap()),
+        3
+    );
     #[cfg(feature = "window")]
     {
         use bevy::prelude::*;

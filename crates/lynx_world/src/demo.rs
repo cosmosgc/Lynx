@@ -21,7 +21,7 @@ use engine_core::faction::{
     Faction, FactionDefinition, FactionWorld, GovernancePolicy, PowerRules, TerritoryRules,
 };
 use engine_core::id::{DefinitionId, IdKind, StableId};
-use engine_core::inventory::{ItemRules, UniformItemRules};
+use engine_core::inventory::{Inventory, ItemRules, ItemStack, UniformItemRules};
 use engine_core::math::Vec3;
 use engine_core::schema::PersistencePolicy;
 use engine_core::time::{DurationMs, Millis, Tick};
@@ -303,6 +303,23 @@ fn demo_rules() -> Arc<dyn ItemRules + Send + Sync> {
     Arc::new(UniformItemRules::new(99))
 }
 
+/// Deterministic starting inventory so every demo actor exercises owner-only
+/// replication and the read-only client inventory window.
+fn demo_inventory(seed: u128) -> Result<Inventory, EngineError> {
+    let rules = UniformItemRules::new(99);
+    let mut inventory = Inventory::with_capacity(8)?;
+    inventory.try_add(ItemStack::new(definition("item.torch")?, 3), &rules)?;
+    inventory.try_add(ItemStack::new(definition("item.coin")?, 25), &rules)?;
+    inventory.try_add(
+        ItemStack::unique(
+            definition("item.vault_key")?,
+            StableId::from_parts(IdKind::Item, 1, seed ^ 0x500),
+        ),
+        &rules,
+    )?;
+    Ok(inventory)
+}
+
 /// Content definitions the demo zone needs, resolved once at build time.
 struct DemoDefinitions {
     character: DefinitionId,
@@ -329,6 +346,7 @@ fn spawn_grant(
             .with_health(100)
             .with_combat(CombatStats::default())
             .with_mind(Mind::player(grant.principal, "unbound"))
+            .with_inventory(demo_inventory(seed)?)
             .with_persistence(PersistencePolicy::PersistentEntity),
     )?;
 
@@ -608,6 +626,20 @@ mod tests {
                 Some(grant.principal)
             );
             assert!(entity.position().x >= 0.0);
+            let inventory = entity.inventory.as_ref().expect("actor has inventory");
+            assert_eq!(inventory.capacity(), 8);
+            assert_eq!(
+                inventory.total_quantity(&definition("item.torch").unwrap()),
+                3
+            );
+            assert_eq!(
+                inventory.total_quantity(&definition("item.coin").unwrap()),
+                25
+            );
+            assert_eq!(
+                inventory.total_quantity(&definition("item.vault_key").unwrap()),
+                1
+            );
         }
     }
 

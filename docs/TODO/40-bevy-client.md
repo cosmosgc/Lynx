@@ -511,7 +511,7 @@ deferred to CLT-016/017 rather than claimed as visually verified here.
 ## CLT-008 — Interaction, inventory, and UI panels
 
 - **Priority:** P1
-- **Status:** In progress — server-authoritative actions and distinct generic/lockpick panels are covered; inventory UI and content-defined widgets remain
+- **Status:** In progress — server-authoritative actions, distinct generic/lockpick panels, and read-only owner inventory presentation are covered; inventory operations and content-defined widgets remain
 - **Depends on:** `CLT-006`, `SIM-008`
 - **References:** ADR 0015, [content authoring §UI panels](../content-authoring.md#ui-panels)
 
@@ -555,8 +555,8 @@ operations.
 Real-socket tests cover an out-of-range rejection, opening a door, approaching
 and opening the vault, invalid/stale input rejection, solving from server hints,
 and authoritative panel closure. A two-client test observes the same barrel
-damage. Generic content-defined/localized widgets, inventory owner replication
-and operations, gamepad navigation, and graphical review remain open. No new
+damage. Generic content-defined/localized widgets, inventory operations, gamepad
+navigation, and graphical review remain open. No new
 crate is needed for this slice: existing Bevy UI and the framed protocol suffice.
 
 **Follow-up (2026-11-05):** User visually confirmed opening/using the vault and
@@ -590,6 +590,20 @@ corner, remembered position across openings, and full-viewport clamping so it
 cannot be dragged off-screen. The close button uses the same
 idempotent server-owned `ui.close` path; pointer integration coverage exercises
 it, then reopens the vault for the out-of-range closure check.
+
+**Owner inventory (2026-11-07):** The world-state view now decodes session-private
+`owner_only` replication only for the controlled actor, validates each inventory
+structurally, ignores owner state for other owned entities, orders updates by
+sequence then tick, and clears the inventory on disconnect and on every fresh
+snapshot. Malformed owner state rejects the whole delta atomically, and private
+inventory contents are redacted from diagnostics. The built-in demo character
+starts with deterministic stackable and unique items. A `bevy_immediate` window
+(**I** to toggle; **Escape** or the title-bar **X** to close) shows slot, derived
+item name, quantity, and unique marker; it is suppressed during chat composition
+and focus loss and is installed on both online launch paths. This is
+presentation only: moves, equip, split/merge, and container transfers still need
+a server-validated protocol, so the reconnect-inventory acceptance criterion
+remains open.
 
 ---
 

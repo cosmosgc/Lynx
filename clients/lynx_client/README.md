@@ -114,6 +114,12 @@ Run `cargo run -p lynx_client -- --demo-online`. In the online window:
   game viewport. Use the **X** in its title bar (or the **X** key) to close it and
   **T** to reopen it and compose. **Enter** sends, **Escape** cancels. It
   remembers position and size while the client runs.
+- The inventory window is also a `bevy_immediate` floating window. Press **I**
+  to toggle it and **Escape** or the title-bar **X** to close. It lists the
+  controlled actor's server-replicated slots with derived item names, quantities,
+  and unique markers; drag its title bar or edges like the chat window. It is
+  read-only: moves, equip, split/merge, and container transfers still need a
+  server-validated protocol. Chat composition and focus loss suppress **I**.
 - Chat tabs are **Zona** and **Sussurros**, plus **Grupo** and **Party** once
   those channels become active. Inactive tabs show unread counts. **PageUp /
   PageDown** browse history. The gateway currently accepts sends only on the
@@ -123,7 +129,8 @@ The executable embeds full Fira Mono (`assets/fonts/OFL.txt`) so Portuguese
 accents render without depending on system fonts or the working directory.
 
 This is a reference lockpick renderer plus a title/schema fallback for unknown
-panels. Generic authored widgets and inventory management remain unfinished.
+panels. Generic authored widgets and inventory management remain unfinished; the
+owner inventory window is read-only presentation.
 `cargo test -p lynx_client --no-default-features` includes real-socket tests for
 these interactions and two-client combat, chat, presence, resume, and history.
 
@@ -263,8 +270,9 @@ Entities with an enabled server-advertised interaction show a small gold marker;
 it is an availability cue only, not authorization or an interaction action.
 Nameplates, status displays, and contextual interaction
 affordances remain planned, backed by server-approved public data.
-Interaction execution and inventory remain future work
-in CLT-008. The handshake uses this workspace's package version for engine and
+Interaction execution and inventory operations remain future work
+in CLT-008; the owner inventory window is display-only. The handshake uses this
+workspace's package version for engine and
 content, matching the built-in demo server.
 The Windows online demo was visually confirmed with movement, chat, presence,
 and live diagnostics; the user considers current localhost movement smooth

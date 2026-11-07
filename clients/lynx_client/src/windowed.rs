@@ -331,7 +331,7 @@ fn health_bar_bundle(entity: StableId, fill: bool) -> impl Bundle {
     )
 }
 
-fn prototype_name(prototype: &engine_core::id::DefinitionId) -> String {
+pub(crate) fn prototype_name(prototype: &engine_core::id::DefinitionId) -> String {
     let leaf = prototype
         .as_str()
         .rsplit('.')

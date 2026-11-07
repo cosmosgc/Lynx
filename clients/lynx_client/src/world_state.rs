@@ -7,9 +7,12 @@
 use std::collections::BTreeMap;
 
 use engine_core::id::{DefinitionId, StableId};
+use engine_core::inventory::{Inventory, UniformItemRules};
 use engine_net::envelope::{Envelope, MessageId, MessageKind};
 use engine_net::interest::{InterestUpdate, MAX_INTEREST_ENTITIES};
-use engine_net::replication::{ReplicationBatch, ReplicationCategory, SessionId};
+use engine_net::replication::{
+    ReplicationBatch, ReplicationCategory, ReplicationUpdate, SessionId,
+};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -99,6 +102,31 @@ struct Update {
     movement: Option<Movement>,
 }
 
+/// Private owner-state payload; the inventory is never retained for other entities.
+#[derive(Debug, Deserialize)]
+struct OwnerInventory {
+    inventory: Inventory,
+}
+
+#[derive(Clone)]
+struct OwnedInventory {
+    sequence: u64,
+    tick: u64,
+    inventory: Inventory,
+}
+
+// Owner state is private. Keep it out of diagnostics even if the surrounding
+// `WorldState` is formatted.
+impl std::fmt::Debug for OwnedInventory {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OwnedInventory")
+            .field("sequence", &self.sequence)
+            .field("tick", &self.tick)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     StaleGeneration,
@@ -127,6 +155,7 @@ pub struct WorldState {
     domain: SessionDomain,
     tick: Option<u64>,
     entities: BTreeMap<StableId, (u64, u64, PublicEntity)>,
+    owner_inventory: Option<OwnedInventory>,
     pending: Option<(MessageId, u64)>,
     last_movement_applied: Option<bool>,
     slow_multiplier: Option<f32>,
@@ -143,6 +172,7 @@ impl WorldState {
             domain: SessionDomain::New,
             tick: None,
             entities: BTreeMap::new(),
+            owner_inventory: None,
             pending: None,
             last_movement_applied: None,
             slow_multiplier: None,
@@ -171,6 +201,7 @@ impl WorldState {
         self.ready = None;
         self.tick = None;
         self.entities.clear();
+        self.owner_inventory = None;
         self.pending = None;
         self.last_movement_applied = None;
         self.slow_multiplier = None;
@@ -187,6 +218,12 @@ impl WorldState {
 
     pub fn entities(&self) -> impl Iterator<Item = &PublicEntity> {
         self.entities.values().map(|(_, _, entity)| entity)
+    }
+    /// The controlled actor's private inventory, once the server replicated it.
+    ///
+    /// Owner state for other entities is never retained.
+    pub fn inventory(&self) -> Option<&Inventory> {
+        self.owner_inventory.as_ref().map(|owned| &owned.inventory)
     }
     pub fn tick(&self) -> Option<u64> {
         self.tick
@@ -318,39 +355,51 @@ impl WorldState {
         {
             return Err(Error::Capacity);
         }
+        let actor = self
+            .ready
+            .as_ref()
+            .map(|ready| ready.actor)
+            .ok_or(Error::UnexpectedMessage)?;
         let mut entities = if snapshot {
             BTreeMap::new()
         } else {
             self.entities.clone()
         };
+        let mut owner_inventory = if snapshot {
+            None
+        } else {
+            self.owner_inventory.clone()
+        };
         entities.retain(|id, _| update.interest.set.contains(id));
         for item in &update.batch.updates {
-            if !matches!(
-                item.category,
-                ReplicationCategory::InterestManaged | ReplicationCategory::StateSnapshot
-            ) {
-                return Err(Error::UnsupportedReplication);
-            }
-            let id = item.entity.ok_or(Error::InvalidMessage)?;
-            if !update.interest.set.contains(&id) {
-                return Err(Error::InvalidMessage);
-            }
-            let entity: PublicEntity =
-                serde_json::from_value(item.payload.clone()).map_err(|_| Error::InvalidMessage)?;
-            if entity.entity != id
-                || !entity.position.x.is_finite()
-                || !entity.position.y.is_finite()
-                || !entity.position.z.is_finite()
-                || !entity.yaw_degrees.is_finite()
-            {
-                return Err(Error::InvalidMessage);
-            }
-            let order = (item.sequence, item.tick.0);
-            if entities
-                .get(&id)
-                .is_none_or(|(seq, tick, _)| order > (*seq, *tick))
-            {
-                entities.insert(id, (order.0, order.1, entity));
+            match item.category {
+                ReplicationCategory::InterestManaged | ReplicationCategory::StateSnapshot => {
+                    let id = item.entity.ok_or(Error::InvalidMessage)?;
+                    if !update.interest.set.contains(&id) {
+                        return Err(Error::InvalidMessage);
+                    }
+                    let entity: PublicEntity = serde_json::from_value(item.payload.clone())
+                        .map_err(|_| Error::InvalidMessage)?;
+                    if entity.entity != id
+                        || !entity.position.x.is_finite()
+                        || !entity.position.y.is_finite()
+                        || !entity.position.z.is_finite()
+                        || !entity.yaw_degrees.is_finite()
+                    {
+                        return Err(Error::InvalidMessage);
+                    }
+                    let order = (item.sequence, item.tick.0);
+                    if entities
+                        .get(&id)
+                        .is_none_or(|(seq, tick, _)| order > (*seq, *tick))
+                    {
+                        entities.insert(id, (order.0, order.1, entity));
+                    }
+                }
+                ReplicationCategory::OwnerOnly => {
+                    Self::apply_owner_update(&mut owner_inventory, actor, item)?;
+                }
+                _ => return Err(Error::UnsupportedReplication),
             }
         }
         // The set is authoritative, including on snapshots and when an entity
@@ -366,7 +415,39 @@ impl WorldState {
         }
         self.apply_movement_update(snapshot, update.tick, update.movement)?;
         self.entities = entities;
+        self.owner_inventory = owner_inventory;
         self.tick = Some(update.tick);
+        Ok(())
+    }
+
+    fn apply_owner_update(
+        owner_inventory: &mut Option<OwnedInventory>,
+        actor: StableId,
+        item: &ReplicationUpdate,
+    ) -> Result<(), Error> {
+        let id = item.entity.ok_or(Error::InvalidMessage)?;
+        // The server also sends private state for other entities the principal
+        // owns. Only the controlled actor is presentable.
+        if id != actor {
+            return Ok(());
+        }
+        let state: OwnerInventory =
+            serde_json::from_value(item.payload.clone()).map_err(|_| Error::InvalidMessage)?;
+        state
+            .inventory
+            .validate(&UniformItemRules::new(u32::MAX))
+            .map_err(|_| Error::InvalidMessage)?;
+        let order = (item.sequence, item.tick.0);
+        if owner_inventory
+            .as_ref()
+            .is_none_or(|owned| order > (owned.sequence, owned.tick))
+        {
+            *owner_inventory = Some(OwnedInventory {
+                sequence: order.0,
+                tick: order.1,
+                inventory: state.inventory,
+            });
+        }
         Ok(())
     }
 
@@ -478,6 +559,13 @@ mod tests {
     }
     fn movement(tick: u64, x: f32, seq: Option<u64>, applied: Option<bool>) -> Value {
         json!({"tick": tick, "position": {"x": x, "y": 0, "z": 0}, "last_consumed_sequence": seq, "applied": applied})
+    }
+    fn torch(quantity: u32) -> Value {
+        json!({"definition": "item.torch", "quantity": quantity, "instance": null})
+    }
+    fn owner(id: StableId, tick: u64, sequence: u64, slots: &[Value]) -> Value {
+        json!({"category": "owner_only", "entity": id, "tick": tick, "sequence": sequence,
+            "payload": {"inventory": {"capacity": slots.len(), "slots": slots}}})
     }
     fn pos(x: f32) -> Position {
         Position { x, y: 0.0, z: 0.0 }
@@ -883,7 +971,7 @@ mod tests {
         assert_eq!(state.entities().next().unwrap().position.x, 0.0);
         assert_eq!(state.reconciliation().predicted_position(), Some(pos(1.0)));
 
-        for category in ["owner_only", "reliable_event", "property_scoped", "admin"] {
+        for category in ["reliable_event", "property_scoped", "admin"] {
             let reliable = json!({"category": category, "entity": actor(1), "session": "session-1", "tick": 11, "payload": {"secret": true}});
             let delta = world(
                 "world.delta",
@@ -910,5 +998,260 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state.entities().count(), 2);
+    }
+
+    fn definition(name: &str) -> DefinitionId {
+        DefinitionId::new(name).unwrap()
+    }
+
+    #[test]
+    fn owner_inventory_tracks_the_controlled_actor_with_latest_wins() {
+        let (mut state, g) = start();
+        assert!(state.inventory().is_none());
+
+        state
+            .receive(
+                g,
+                &world(
+                    "world.delta",
+                    11,
+                    &[actor(1), actor(2)],
+                    &json!([owner(actor(1), 11, 1, &[torch(2)])]),
+                    &Value::Null,
+                ),
+            )
+            .unwrap();
+        let inventory = state.inventory().unwrap();
+        assert_eq!(inventory.capacity(), 1);
+        assert_eq!(inventory.occupied_slots(), 1);
+        assert_eq!(inventory.total_quantity(&definition("item.torch")), 2);
+
+        // A delta without owner state leaves the private inventory unchanged.
+        state
+            .receive(
+                g,
+                &world(
+                    "world.delta",
+                    12,
+                    &[actor(1), actor(2)],
+                    &json!([]),
+                    &Value::Null,
+                ),
+            )
+            .unwrap();
+        assert_eq!(
+            state
+                .inventory()
+                .unwrap()
+                .total_quantity(&definition("item.torch")),
+            2
+        );
+
+        state
+            .receive(
+                g,
+                &world(
+                    "world.delta",
+                    13,
+                    &[actor(1), actor(2)],
+                    &json!([owner(actor(1), 13, 2, &[torch(5)])]),
+                    &Value::Null,
+                ),
+            )
+            .unwrap();
+        assert_eq!(
+            state
+                .inventory()
+                .unwrap()
+                .total_quantity(&definition("item.torch")),
+            5
+        );
+
+        // A reliable update from an older sequence is ignored even at a newer tick.
+        state
+            .receive(
+                g,
+                &world(
+                    "world.delta",
+                    14,
+                    &[actor(1), actor(2)],
+                    &json!([owner(actor(1), 14, 1, &[torch(9)])]),
+                    &Value::Null,
+                ),
+            )
+            .unwrap();
+        assert_eq!(
+            state
+                .inventory()
+                .unwrap()
+                .total_quantity(&definition("item.torch")),
+            5
+        );
+        assert_eq!(state.tick(), Some(14));
+    }
+
+    #[test]
+    fn owner_inventory_for_other_owned_entities_is_ignored() {
+        let (mut state, g) = start();
+        state
+            .receive(
+                g,
+                &world(
+                    "world.delta",
+                    11,
+                    &[actor(1), actor(2)],
+                    &json!([owner(actor(2), 11, 1, &[torch(99)])]),
+                    &Value::Null,
+                ),
+            )
+            .unwrap();
+        assert!(state.inventory().is_none());
+        assert_eq!(state.tick(), Some(11));
+    }
+
+    #[test]
+    fn owner_inventory_is_scoped_to_a_connection_and_cleared_by_snapshots() {
+        let (mut state, g) = start();
+        state
+            .receive(
+                g,
+                &world(
+                    "world.delta",
+                    11,
+                    &[actor(1), actor(2)],
+                    &json!([owner(actor(1), 11, 1, &[torch(2)])]),
+                    &Value::Null,
+                ),
+            )
+            .unwrap();
+        state.disconnect(g).unwrap();
+        assert!(state.inventory().is_none());
+
+        let next = state.begin_connection().unwrap();
+        state.receive(next, &ready(true, "session-1")).unwrap();
+        state
+            .receive(
+                next,
+                &world(
+                    "world.snapshot",
+                    20,
+                    &[actor(1)],
+                    &json!([
+                        public(actor(1), 20, 1, 0.0),
+                        owner(actor(1), 20, 3, &[torch(4)])
+                    ]),
+                    &movement(20, 0.0, None, None),
+                ),
+            )
+            .unwrap();
+        assert_eq!(
+            state
+                .inventory()
+                .unwrap()
+                .total_quantity(&definition("item.torch")),
+            4
+        );
+
+        // A fresh connection's snapshot is authoritative even when it carries
+        // no owner state.
+        state.disconnect(next).unwrap();
+        let third = state.begin_connection().unwrap();
+        state.receive(third, &ready(true, "session-1")).unwrap();
+        state
+            .receive(
+                third,
+                &world(
+                    "world.snapshot",
+                    21,
+                    &[actor(1)],
+                    &json!([public(actor(1), 21, 2, 0.0)]),
+                    &movement(21, 0.0, None, None),
+                ),
+            )
+            .unwrap();
+        assert!(state.inventory().is_none());
+    }
+
+    #[test]
+    fn invalid_owner_inventory_rejects_the_whole_update_atomically() {
+        let (mut state, g) = start();
+        state
+            .receive(
+                g,
+                &world(
+                    "world.delta",
+                    11,
+                    &[actor(1), actor(2)],
+                    &json!([owner(actor(1), 11, 1, &[torch(2)])]),
+                    &Value::Null,
+                ),
+            )
+            .unwrap();
+
+        let invalid_payloads = [
+            owner(actor(1), 12, 2, &[torch(0)]),
+            json!({
+                "category": "owner_only",
+                "entity": actor(1),
+                "tick": 12,
+                "sequence": 2,
+                "payload": {"inventory": {"capacity": 0, "slots": []}}
+            }),
+            json!({
+                "category": "owner_only",
+                "entity": actor(1),
+                "tick": 12,
+                "sequence": 2,
+                "payload": {}
+            }),
+        ];
+        for owner_update in invalid_payloads {
+            let delta = world(
+                "world.delta",
+                12,
+                &[actor(1), actor(2)],
+                &json!([public(actor(1), 12, 2, 9.0), owner_update]),
+                &Value::Null,
+            );
+            assert_eq!(state.receive(g, &delta), Err(Error::InvalidMessage));
+            assert_eq!(state.tick(), Some(11));
+            assert_eq!(
+                state
+                    .entities()
+                    .find(|entity| entity.entity == actor(1))
+                    .unwrap()
+                    .position
+                    .x,
+                0.0
+            );
+            assert_eq!(
+                state
+                    .inventory()
+                    .unwrap()
+                    .total_quantity(&definition("item.torch")),
+                2
+            );
+        }
+    }
+
+    #[test]
+    fn owner_inventory_is_redacted_from_debug_output() {
+        let (mut state, g) = start();
+        state
+            .receive(
+                g,
+                &world(
+                    "world.delta",
+                    11,
+                    &[actor(1), actor(2)],
+                    &json!([owner(actor(1), 11, 1, &[torch(2)])]),
+                    &Value::Null,
+                ),
+            )
+            .unwrap();
+        let debug = format!("{state:?}");
+        assert!(debug.contains("OwnedInventory"));
+        assert!(!debug.contains("item.torch"));
+        assert!(!debug.contains("torch"));
     }
 }

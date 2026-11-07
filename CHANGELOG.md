@@ -15,6 +15,13 @@ semantic versioning for engine releases and content bundles.
 
 ### Added
 
+- `lynx_client` and `lynx_world`: read-only owner inventory presentation. The
+  client retains session-private `owner_only` inventory only for the controlled
+  actor, validates and orders it, clears it on disconnect and fresh snapshots,
+  and redacts its contents from diagnostics. A toggleable `bevy_immediate`
+  window shows slots, derived item names, quantities, and unique items, while
+  the demo actor starts with deterministic items. Moves, equip, split/merge, and
+  container transfers remain server-protocol work (`CLT-008`).
 - `lynx_client`: account-screen server browser with validated host/IP and port
   profiles, pinning, bounded recent history, atomic OS-config persistence, and
   an explicit local/remote transport policy (`ws://`/`http://` only for loopback

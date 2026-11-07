@@ -116,6 +116,7 @@ fn main() {
         }
         app.insert_resource(client).add_plugins((
             OnlineWindowPlugin,
+            lynx_client::inventory_panel::InventoryPanelPlugin,
             lynx_client::lock_panel::LockPanelPlugin,
             lynx_client::ui::chat::ChatPanelPlugin,
         ));
@@ -248,6 +249,7 @@ fn run_account_world(launch: lynx_client::account_ui::WorldLaunch) {
         .insert_resource(client)
         .add_plugins((
             OnlineWindowPlugin,
+            lynx_client::inventory_panel::InventoryPanelPlugin,
             lynx_client::lock_panel::LockPanelPlugin,
             lynx_client::ui::chat::ChatPanelPlugin,
         ));
