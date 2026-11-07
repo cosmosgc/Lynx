@@ -931,6 +931,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One end-to-end HTTP contract fixture.
     fn group_contract_paginates_maps_roles_and_authenticates_mutations() {
         use std::io::{BufRead, BufReader, Read, Write};
         use std::net::TcpListener;

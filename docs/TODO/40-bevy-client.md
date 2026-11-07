@@ -73,7 +73,7 @@ window displaying the default offline placeholder scene.
 ## CLT-002 — Login and session bootstrap
 
 - **Priority:** P0
-- **Status:** In progress — secure Nakama credential/session groundwork exists; server browser and world-session lifecycle remain
+- **Status:** In progress — secure Nakama groundwork and the account-screen server browser exist; live multi-server and credential isolation remain
 - **Depends on:** `NET-001`, `CLT-001`
 - **References:** [networking §Transport](../networking.md#transport)
 
@@ -103,7 +103,7 @@ window displaying the default offline placeholder scene.
 
 - [ ] Players can add and connect to multiple servers using an IP/hostname and
       port.
-- [ ] Recent connections appear in history, and pinned servers remain easy to
+- [x] Recent connections appear in history, and pinned servers remain easy to
       find across restarts.
 - [ ] Remembered credentials are isolated per server and stored only in the
       operating system's secure credential store.
@@ -120,16 +120,24 @@ for accounts created through `account_portal/`. It prompts for passwords without
 echo, stores account identity plus rotating refresh tokens in the OS credential
 store, supports logout, and reaches the character HTTP API. Access tokens remain
 in memory. The `--account` Bevy screen signs in to existing email accounts and
-reuses the secure refresh token; new accounts use `account_portal/`. The server browser/profiles/history, localized
-errors, and world resume-token lifecycle remain open. The new `server_browser`
-module provides validated IP/DNS profiles, stable per-server keys, pin ordering,
-and a bounded recent list, with strict JSON serialization containing no
-credential fields. It now loads and saves a bounded profile file through a
-sibling temporary file, rejecting malformed and oversized documents. The
-persistence API is not yet wired to a UI or OS-specific config path; remote
-transport still requires WSS. Focused model tests pass (3/3), but the new file
-I/O path has not been tested. `NET-001` and `CLT-001` remain prerequisites and
-are not assumed complete.
+reuses the secure refresh token; new accounts use `account_portal/`. The server
+browser/profiles/history are now wired into that screen: players can add a
+server by name, host/IP, and port, select it, pin/unpin it, and see recent
+successful connections. Profiles load from `LYNX_SERVER_BROWSER_PATH` or the
+OS configuration directory and persist atomically without credential fields.
+Pinned profiles sort first and history is unique and bounded. The selected
+profile supplies both the character API and world WebSocket endpoints, with
+`wss://`/`https://` required for remote hosts and plaintext restricted to
+loopback and private-network addresses. Focused tests cover round-trip
+persistence through a new parent directory, missing/corrupt/oversized documents,
+temporary-file cleanup, pin/recent ordering, URL policy (including IPv6), and
+secret-free serialization (7/7). The screen also has a pure selection/endpoint
+test. Localized errors, per-world-profile credential isolation, live multi-server
+reconnect, and world resume-token lifecycle remain open. Nakama credentials are
+still scoped to the configured Nakama server rather than each world profile.
+The server-browser UI itself has not been visually reviewed against a live
+server, and no live multi-instance policy run is claimed. `NET-001` and
+`CLT-001` remain prerequisites and are not assumed complete.
 
 ---
 

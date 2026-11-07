@@ -50,29 +50,39 @@ produce a visible placeholder and a scene warning instead of panicking. The
 current policy accepts PNG billboard portraits and GLB/GLTF models; verified
 assets are recorded but not decoded by the placeholder renderer yet.
 
-## Planned server browser
+## Server browser
 
-The client is intended to provide a server browser, similar to those in Valve
-games. Players will be able to add multiple servers by IP address or hostname
-and port, connect to a server, and revisit servers from connection history or a
-pinned list.
+The `--account` screen provides a server browser. Players can add multiple
+servers by IP address or hostname and port, select the active server, pin
+favourites, and revisit recent successful connections. Profiles are validated
+and persisted without credentials; set `LYNX_SERVER_BROWSER_PATH` to choose the
+file, or use the OS configuration directory (`%APPDATA%\lynx\servers.json` on
+Windows, `$XDG_CONFIG_HOME/lynx/servers.json` or `~/.config/lynx/servers.json`
+on Linux, and `~/Library/Application Support/lynx/servers.json` on macOS).
+Pinned servers sort first, history is unique and bounded, and malformed or
+oversized documents fail closed.
 
-Multiple client instances will be supported. Each instance has its own server
+The selected profile drives both the character HTTP API and the world WebSocket
+endpoint. Remote servers require `wss://` and `https://`; plain `ws://` and
+`http://` are used only for `localhost`, loopback, and private-network
+addresses. The environment variables remain available as a fallback when no
+profile is selected.
+
+Multiple client instances are supported: each process has its own server
 connection, so several instances may connect to the same server and account
 subject to that server's session policy. Servers may choose whether to limit
 concurrent sessions per character or per account. Under the per-character
 policy, different characters on the same account can be played from separate
 instances; under the per-account policy, only one character from that account
 can be connected at a time. A duplicate connection receives an error rather
-than disconnecting or replacing the existing session. This is a planned flow,
-not a feature of the current demo; the current gateway policy is per-character.
+than disconnecting or replacing the existing session.
 
 The development CLI remembers account identity and rotating refresh tokens per
 Nakama server in the operating system's secure credential store. Passwords are
-prompted without echo when required and are never saved. A server browser,
-connection history, and pins remain planned. Remote world servers
-must use `wss://`; plain `ws://` is for trusted local networks only. Public server
-discovery is not specified.
+prompted without echo when required and are never saved. Credential scoping
+currently follows the configured Nakama server rather than each world profile;
+per-world-server isolation remains future work. Public server discovery is not
+specified.
 
 ## Development-only login and online demo
 

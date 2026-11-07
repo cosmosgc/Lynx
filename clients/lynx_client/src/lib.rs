@@ -11,7 +11,6 @@ pub mod fonts;
 pub mod interaction;
 #[cfg(feature = "window")]
 pub mod lock_panel;
-#[cfg(feature = "window")]
 pub mod nakama_credentials;
 pub mod offline;
 pub mod online;

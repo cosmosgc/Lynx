@@ -655,6 +655,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One end-to-end realtime session fixture.
     async fn realtime_session_routes_chat_and_party_requests_over_one_socket() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();

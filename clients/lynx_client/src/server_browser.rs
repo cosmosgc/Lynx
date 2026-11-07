@@ -3,15 +3,18 @@
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
+    env,
     fs::{self, OpenOptions},
     io::{self, Read, Write},
     net::IpAddr,
-    path::Path,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 pub const MAX_PROFILES: usize = 64;
 pub const MAX_RECENT: usize = 20;
+/// Environment override for the secret-free server profile document.
+pub const CONFIG_PATH_ENV: &str = "LYNX_SERVER_BROWSER_PATH";
 const MAX_PROFILE_FILE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,10 +52,113 @@ impl ServerProfile {
         Ok(())
     }
 
-    /// Stable key used for history and per-server credential-store isolation.
+    /// Stable key used for profile identity, history, and future per-server
+    /// credential isolation.
     pub fn key(&self) -> String {
         format!("{}:{}", self.host.to_ascii_lowercase(), self.port)
     }
+
+    /// Whether this address is a loopback or private-network host that may use
+    /// the plaintext development transports.
+    #[must_use]
+    pub fn is_local_network(&self) -> bool {
+        if self.host.eq_ignore_ascii_case("localhost") {
+            return true;
+        }
+        match self.host.parse::<IpAddr>() {
+            Ok(IpAddr::V4(address)) => {
+                address.is_loopback() || address.is_private() || address.is_link_local()
+            }
+            Ok(IpAddr::V6(address)) => {
+                address.is_loopback()
+                    || address.is_unique_local()
+                    || address.is_unicast_link_local()
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Browser-safe `host:port` authority, including IPv6 brackets.
+    #[must_use]
+    pub fn authority(&self) -> String {
+        if self.host.contains(':') {
+            format!("[{}]:{}", self.host, self.port)
+        } else {
+            format!("{}:{}", self.host, self.port)
+        }
+    }
+
+    /// World WebSocket endpoint. Remote servers must use TLS; plaintext is
+    /// allowed only for loopback and private-network development.
+    #[must_use]
+    pub fn world_url(&self) -> String {
+        let scheme = if self.is_local_network() { "ws" } else { "wss" };
+        format!("{scheme}://{}/world", self.authority())
+    }
+
+    /// World HTTP API endpoint, following the same local/remote transport rule.
+    #[must_use]
+    pub fn api_url(&self) -> String {
+        let scheme = if self.is_local_network() {
+            "http"
+        } else {
+            "https"
+        };
+        format!("{scheme}://{}", self.authority())
+    }
+}
+
+/// Default secret-free profile document location.
+///
+/// `LYNX_SERVER_BROWSER_PATH` overrides the OS-specific configuration path so
+/// developers and tests can use an isolated file.
+#[must_use]
+pub fn default_config_path() -> Option<PathBuf> {
+    config_path(env::var_os(CONFIG_PATH_ENV), platform_config_dir())
+}
+
+fn config_path(
+    override_path: Option<std::ffi::OsString>,
+    platform: Option<PathBuf>,
+) -> Option<PathBuf> {
+    override_path
+        .map(PathBuf::from)
+        .or_else(|| platform.map(|directory| directory.join("lynx").join("servers.json")))
+}
+
+#[cfg(windows)]
+fn platform_config_dir() -> Option<PathBuf> {
+    env::var_os("APPDATA")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+#[cfg(target_os = "macos")]
+fn platform_config_dir() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(|home| {
+            PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+        })
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn platform_config_dir() -> Option<PathBuf> {
+    env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            env::var_os("HOME")
+                .filter(|value| !value.is_empty())
+                .map(|home| PathBuf::from(home).join(".config"))
+        })
+}
+
+#[cfg(not(any(windows, unix)))]
+fn platform_config_dir() -> Option<PathBuf> {
+    None
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +224,12 @@ impl ServerBrowser {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent)?;
+        }
         let mut temporary = path.as_os_str().to_owned();
         temporary.push(format!(".{}.{}.tmp", std::process::id(), stamp));
         let temporary = std::path::PathBuf::from(temporary);
@@ -305,5 +417,105 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn transport_policy_uses_tls_only_for_remote_servers() {
+        for host in ["localhost", "127.0.0.1", "::1", "192.168.1.10", "10.0.0.2"] {
+            let profile = ServerProfile::new("Local", host, 8090).unwrap();
+            assert!(profile.is_local_network(), "{host} is local");
+            assert!(profile.world_url().starts_with("ws://"), "{host}");
+            assert!(profile.api_url().starts_with("http://"), "{host}");
+        }
+        let remote = ServerProfile::new("Remote", "play.example.org", 443).unwrap();
+        assert!(!remote.is_local_network());
+        assert_eq!(remote.world_url(), "wss://play.example.org:443/world");
+        assert_eq!(remote.api_url(), "https://play.example.org:443");
+
+        let ipv6 = ServerProfile::new("V6", "2001:db8::1", 8090).unwrap();
+        assert_eq!(ipv6.authority(), "[2001:db8::1]:8090");
+        assert!(
+            ipv6.world_url()
+                .starts_with("wss://[2001:db8::1]:8090/world")
+        );
+    }
+
+    #[test]
+    fn profile_document_round_trips_through_a_new_parent_directory() {
+        let directory = temporary_path("round-trip");
+        let path = directory.join("nested").join("servers.json");
+        let mut browser = ServerBrowser::default();
+        browser
+            .add(ServerProfile::new("Home", "localhost", 8090).unwrap())
+            .unwrap();
+        browser
+            .add(ServerProfile::new("Friends", "192.168.1.20", 8091).unwrap())
+            .unwrap();
+        browser.set_pinned("192.168.1.20:8091", true).unwrap();
+        browser.record_connected("localhost:8090").unwrap();
+        browser.save(&path).unwrap();
+
+        let loaded = ServerBrowser::load(&path).unwrap();
+        assert_eq!(loaded, browser);
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("password"));
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temporary profile file remained");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn missing_file_starts_empty_and_corrupt_or_oversized_files_fail_closed() {
+        let directory = temporary_path("invalid");
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("servers.json");
+        assert_eq!(
+            ServerBrowser::load(&path).unwrap(),
+            ServerBrowser::default()
+        );
+
+        std::fs::write(&path, "{not json").unwrap();
+        assert_eq!(
+            ServerBrowser::load(&path).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+
+        std::fs::write(&path, vec![b' '; MAX_PROFILE_FILE_BYTES + 1]).unwrap();
+        assert_eq!(
+            ServerBrowser::load(&path).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn default_config_path_prefers_the_override_then_the_platform_directory() {
+        let platform = temporary_path("config");
+        assert_eq!(
+            config_path(
+                Some(std::ffi::OsString::from("custom.json")),
+                Some(platform.clone())
+            ),
+            Some(std::path::PathBuf::from("custom.json"))
+        );
+        assert_eq!(
+            config_path(None, Some(platform.clone())),
+            Some(platform.join("lynx").join("servers.json"))
+        );
+        assert_eq!(config_path(None, None), None);
+    }
+
+    fn temporary_path(label: &str) -> std::path::PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "lynx-server-browser-{label}-{}-{stamp}",
+            std::process::id()
+        ))
     }
 }

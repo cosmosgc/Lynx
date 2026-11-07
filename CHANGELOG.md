@@ -6,8 +6,20 @@ semantic versioning for engine releases and content bundles.
 
 ## [Unreleased]
 
+### Fixed
+
+- `lynx_client`: the no-default-features headless build again compiles the
+  secure Nakama credential module required by reconnect-time token refresh, so
+  the GPU-free CI build/test path works instead of failing on a window-gated
+  module import.
+
 ### Added
 
+- `lynx_client`: account-screen server browser with validated host/IP and port
+  profiles, pinning, bounded recent history, atomic OS-config persistence, and
+  an explicit local/remote transport policy (`ws://`/`http://` only for loopback
+  and private networks, `wss://`/`https://` otherwise). The selected profile
+  drives the character API and world endpoints (`CLT-002`).
 - `lynx_client`: reusable immediate-mode floating-window chrome and a chat window
   with draggable/resizable/closable behavior, remembered geometry, dynamic
   zone/whisper/group/party tabs, unread counts, presence, and bounded history

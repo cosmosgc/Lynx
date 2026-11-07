@@ -34,12 +34,12 @@ fn main() {
         if !exit.is_success() {
             std::process::exit(1);
         }
-        if let Some((bearer, character)) = account_app
+        if let Some(launch) = account_app
             .world_mut()
             .resource_mut::<lynx_client::account_ui::AccountWorldLaunch>()
             .take()
         {
-            run_account_world(bearer, character);
+            run_account_world(launch);
         }
         return;
     }
@@ -206,12 +206,15 @@ fn report_scene(scene: &lynx_client::zone_scene::ZoneScene, describe: bool) {
 }
 
 #[cfg(feature = "window")]
-fn run_account_world(bearer: String, character: String) {
+fn run_account_world(launch: lynx_client::account_ui::WorldLaunch) {
     use bevy::prelude::*;
     use lynx_client::{LynxClientPlugin, online::OnlineClient, windowed::OnlineWindowPlugin};
 
-    let url =
-        std::env::var("LYNX_WORLD_URL").unwrap_or_else(|_| "ws://127.0.0.1:8090/world".into());
+    let lynx_client::account_ui::WorldLaunch {
+        bearer,
+        character,
+        world_url,
+    } = launch;
     let version = semver::Version::parse(env!("CARGO_PKG_VERSION")).expect("valid package version");
     let Ok(runtime) = tokio::runtime::Runtime::new() else {
         eprintln!("Could not initialize the world network runtime.");
@@ -226,7 +229,7 @@ fn run_account_world(bearer: String, character: String) {
         let _guard = runtime.enter();
         if client
             .connect(lynx_client_net::Config {
-                url,
+                url: world_url,
                 bearer,
                 character: Some(character),
                 handshake: engine_net::protocol::Handshake::new(version.clone(), version),
