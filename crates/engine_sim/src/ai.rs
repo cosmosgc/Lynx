@@ -8,6 +8,7 @@ use engine_core::math::Vec3;
 use engine_core::time::{Millis, Tick};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::ops::Bound;
 
 use crate::action::{ActionRequest, ActionResult, Verb};
 use crate::entity::EntityRecord;
@@ -28,6 +29,10 @@ pub struct AiTickPolicy {
     /// Per-guard perception limits.
     pub perception: PerceptionBudget,
     /// Maximum entity records scanned for controllers each tick.
+    ///
+    /// Scans start after the previous tick's last inspected record and wrap
+    /// around in stable-ID order, so a low limit cannot permanently starve
+    /// controllers that sort later.
     pub max_controller_candidates: usize,
     /// Simulation epoch for reputation expiry.
     pub epoch: Millis,
@@ -67,7 +72,7 @@ pub struct AiTickReport {
     pub tick: Tick,
     /// Entity records scanned for controllers.
     pub controller_candidates: usize,
-    /// Controllers evaluated in entity-ID order.
+    /// Controllers evaluated in rotating stable-ID order.
     pub decisions: Vec<AiDecision>,
     /// Number of action attempts, including rejections.
     pub action_attempts: usize,
@@ -173,27 +178,65 @@ impl Zone {
         };
         self.ai_diagnostics.ticks = self.ai_diagnostics.ticks.saturating_add(1);
         // Bound selection work independently of the number of non-AI entities.
+        // The scan starts after the previous tick's last inspected record and
+        // wraps in stable-ID order, so low candidate or update limits cannot
+        // permanently starve controllers that sort later.
+        let update_limit = self.config.budget.max_ai_updates;
+        let scan_limit = if update_limit == 0 {
+            0
+        } else {
+            policy.max_controller_candidates
+        };
         let mut controllers = Vec::new();
-        for entity in self
-            .entities
-            .values()
-            .take(if self.config.budget.max_ai_updates == 0 {
-                0
+        let mut last_scanned = None;
+        if scan_limit > 0 {
+            let cursor = self.ai_scan_cursor;
+            let mut scanned = 0;
+            let mut consider = |entity: &EntityRecord| {
+                scanned += 1;
+                last_scanned = Some(entity.id);
+                if let Some(crate::mind::Mind {
+                    controller: Controller::Ai { behavior },
+                    ..
+                }) = &entity.mind
+                {
+                    controllers.push((entity.id, behavior.clone()));
+                    if controllers.len() >= update_limit {
+                        return false;
+                    }
+                }
+                scanned < scan_limit
+            };
+            let mut stopped = false;
+            if let Some(cursor) = cursor {
+                for entity in self.entities.range(cursor..) {
+                    if !consider(entity.1) {
+                        stopped = true;
+                        break;
+                    }
+                }
+                if !stopped {
+                    for entity in self.entities.range(..cursor) {
+                        if !consider(entity.1) {
+                            break;
+                        }
+                    }
+                }
             } else {
-                policy.max_controller_candidates
-            })
-        {
-            report.controller_candidates += 1;
-            if let Some(crate::mind::Mind {
-                controller: Controller::Ai { behavior },
-                ..
-            }) = &entity.mind
-            {
-                controllers.push((entity.id, behavior.clone()));
-                if controllers.len() == self.config.budget.max_ai_updates {
-                    break;
+                for entity in self.entities.values() {
+                    if !consider(entity) {
+                        break;
+                    }
                 }
             }
+            report.controller_candidates = scanned;
+            self.ai_scan_cursor = last_scanned.and_then(|last| {
+                self.entities
+                    .range((Bound::Excluded(last), Bound::Unbounded))
+                    .next()
+                    .map(|(id, _)| *id)
+                    .or_else(|| self.entities.keys().next().copied())
+            });
         }
         if report.controller_candidates < self.entities.len() {
             if controllers.len() == self.config.budget.max_ai_updates {
@@ -1225,6 +1268,53 @@ mod tests {
         zone.advance_tick();
         assert_eq!(zone.ai_tick_report().controller_candidates, 1);
         assert_eq!(zone.ai_tick_report().decisions, [] as [AiDecision; 0]);
+    }
+
+    #[test]
+    fn bounded_controller_scan_rotates_across_all_ai_controllers() {
+        let mut zone = tick_zone(0, 1);
+        let mut policy = zone.ai_policy.as_ref().unwrap().as_ref().clone();
+        policy.max_controller_candidates = 1;
+        zone.set_ai_tick_policy(Some(policy));
+        for (seed, z) in [(1, 2.5), (2, 3.5), (3, 4.5)] {
+            zone.spawn(ai_at(seed, "faction.guards", 1.5, z)).unwrap();
+        }
+
+        let mut served = BTreeSet::new();
+        for _ in 0..6 {
+            zone.advance_tick();
+            let report = zone.ai_tick_report();
+            assert_eq!(report.decisions.len(), 1);
+            assert_eq!(report.controller_candidates, 1);
+            served.insert(report.decisions[0].actor);
+        }
+        assert_eq!(served, BTreeSet::from([id(1), id(2), id(3)]));
+    }
+
+    #[test]
+    fn rotated_controller_scan_replays_deterministically() {
+        let setup = || {
+            let mut zone = tick_zone(0, 1);
+            let mut policy = zone.ai_policy.as_ref().unwrap().as_ref().clone();
+            policy.max_controller_candidates = 2;
+            zone.set_ai_tick_policy(Some(policy));
+            for (seed, z) in [(1, 2.5), (2, 3.5), (3, 4.5), (4, 5.5)] {
+                zone.spawn(ai_at(seed, "faction.guards", 1.5, z)).unwrap();
+            }
+            zone
+        };
+        let mut left = setup();
+        let mut right = setup();
+        for tick in 0..9 {
+            left.advance_tick();
+            right.advance_tick();
+            assert_eq!(
+                left.ai_tick_report(),
+                right.ai_tick_report(),
+                "tick {tick} diverged"
+            );
+            assert_eq!(left.ai_diagnostics(), right.ai_diagnostics());
+        }
     }
 
     #[test]

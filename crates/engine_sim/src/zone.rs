@@ -241,6 +241,9 @@ pub struct Zone {
     pub(crate) ai_report: AiTickReport,
     pub(crate) ai_diagnostics: AiDiagnostics,
     pub(crate) ai_navigation: BTreeMap<StableId, AiNavigationState>,
+    /// Stable ID after which the next AI controller scan starts. Runtime-only:
+    /// snapshots reset it because it is scheduling state, not simulation state.
+    pub(crate) ai_scan_cursor: Option<StableId>,
 }
 
 impl fmt::Debug for Zone {
@@ -316,6 +319,7 @@ impl Zone {
             ai_report: AiTickReport::default(),
             ai_diagnostics: AiDiagnostics::default(),
             ai_navigation: BTreeMap::new(),
+            ai_scan_cursor: None,
         })
     }
 

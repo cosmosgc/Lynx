@@ -335,7 +335,7 @@ the bounded audit ring remains the current operator-visible record.
 ## SIM-006 — AI behaviors, schedules, and perception budgets
 
 - **Priority:** P1
-- **Status:** In progress — bounded guard primitives, typed behavior authoring, and content-to-runtime binding are implemented; scheduling and graph execution remain
+- **Status:** In progress — bounded Guard/GuardChase primitives, typed content bindings, and fair rotating AI scheduling are implemented; behavior graphs, schedules, group aggro, persistent inspection, and a shared action budget remain
 - **Depends on:** `SIM-001`
 - **References:** `crates/engine_sim/src/ai.rs`, `mind.rs`,
   [world simulation](../world-simulation.md)
@@ -357,10 +357,10 @@ groups without code changes.
 **Acceptance criteria**
 
 - [ ] A content-only AI definition changes behavior without an engine fork.
-- [ ] AI cannot exceed perception/action budgets or act while controlled by a
+- [x] AI cannot exceed perception/action budgets or act while controlled by a
       player.
-- [ ] Deterministic replay produces identical AI decisions for the same inputs.
-- [ ] Behavior failures emit diagnostics instead of silently idling.
+- [x] Deterministic replay produces identical AI decisions for the same inputs.
+- [x] Behavior failures emit diagnostics instead of silently idling.
 
 **Foundation:** `perceive_hostiles_bounded` provides server-supplied limits on
 candidate records, line-of-sight checks, and returned targets, with counts and
@@ -382,8 +382,12 @@ and AI action attempts (including rejected actions) have deterministic caps.
 The last tick's server-side report includes decisions, perception counts and
 status, targets, and action rejections. Unknown behaviors are reported and do
 not act. Faction reputation expiry uses the policy's explicit simulation epoch
-and tick duration. Selection and perception inspect stable ID prefixes, so
-low limits can starve later entities; this is not yet a fair scheduler.
+and tick duration. Controller selection rotates a runtime-only stable-ID cursor:
+each tick starts after the previous tick's last inspected record and wraps
+around, so low `max_controller_candidates` or `max_ai_updates` limits eventually
+serve every AI controller instead of starving later IDs. The cursor is
+deterministic scheduling state; snapshots deliberately reset it on restore and
+never expose it to clients.
 
 This is opt-in: the running world must install the policy and restore it after
 snapshot reload; the demo installs a bounded GuardChase policy and training
@@ -392,7 +396,7 @@ attempts here, **not** all player plus AI actions: player actions are currently
 applied immediately without a shared tick counter. The policy epoch must match
 the authoritative reputation timebase. Existing unbounded perception/helper
 APIs are unchanged. Content-defined behavior graphs, scheduling, group aggro,
-fair scheduling, persistent inspection, and a shared action budget remain. AI
+persistent inspection, and a shared action budget remain. AI
 policy now accepts server-approved `AiBehaviorDefinition` bindings, allowing a
 content behavior ID to select the bounded Guard or GuardChase primitive and its
 perception range; a test verifies a custom ID and constrained range.
@@ -405,9 +409,11 @@ through the same server-side collision and dynamic-obstacle checks as other
 authoritative movement. `cargo test -p engine_sim
 policy_binds_content_behavior_ids_to_bounded_guard_semantics` passes.
 Only the Guard and GuardChase primitives exist, so content-only behavior graphs,
-schedules, group aggro, fair scheduling, persistent inspection, and a shared
-action budget remain open. Movement authority is implemented in `SIM-001`;
-visual client reconciliation remains in `SIM-002`.
+schedules, group aggro, persistent inspection, and a shared action budget remain
+open. Tests `bounded_controller_scan_rotates_across_all_ai_controllers` and
+`rotated_controller_scan_replays_deterministically` prove bounded limits serve
+every AI controller and replay identically. Movement authority is implemented in
+`SIM-001`; visual client reconciliation remains in `SIM-002`.
 
 ---
 
