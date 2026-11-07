@@ -203,6 +203,10 @@ format, validation rules, and formatting policy are specified in
   cooldowns and temporary modifiers, and produces `TickStats`.
 - Simulation is deterministic given the same inputs, IDs, and tick sequence.
   Time-dependent features take an explicit `now_ms` argument.
+- A release benchmark measures idle, movement, combat, and bounded AI workloads;
+  CI fails when any scenario's p99 exceeds the 50 ms authoritative tick deadline.
+  Per-phase timings are runtime diagnostics only and never affect simulation
+  state.
 - Entity removal is a tombstone transition so links and audit records never
   dangle silently. Missing link endpoints are reported as diagnostics.
 
