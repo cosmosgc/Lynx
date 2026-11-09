@@ -7,6 +7,8 @@ pub mod account_ui;
 pub mod chat;
 pub mod cli;
 #[cfg(feature = "window")]
+pub mod content_panel;
+#[cfg(feature = "window")]
 pub mod fonts;
 pub mod interaction;
 #[cfg(feature = "window")]

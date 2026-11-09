@@ -234,6 +234,12 @@ pub enum ActionEffect {
         schema: DefinitionId,
         /// Panel title.
         title: String,
+        /// Read-only fields the client may render.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        fields: Vec<crate::entity::UiField>,
+        /// Actions the client may offer.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        actions: Vec<crate::entity::UiAction>,
     },
     /// An entity-provided interface should close.
     UiClosed {
@@ -550,6 +556,8 @@ impl Zone {
                     target: context.target_id,
                     schema: ui.schema,
                     title: ui.title,
+                    fields: ui.fields,
+                    actions: ui.actions,
                 }]
             }
             Verb::Take => self.apply_take(request, context.target_id, context.target_inventory)?,
@@ -792,6 +800,8 @@ impl Zone {
                         target: target_id,
                         schema: ui.schema,
                         title: ui.title,
+                        fields: ui.fields,
+                        actions: ui.actions,
                     }]);
                 }
                 if request.verb == Verb::Activate
@@ -840,6 +850,8 @@ impl Zone {
                 target: target_id,
                 schema: ui.schema,
                 title: ui.title,
+                fields: ui.fields,
+                actions: ui.actions,
             },
             ActionEffect::MinigameStarted {
                 target: target_id,

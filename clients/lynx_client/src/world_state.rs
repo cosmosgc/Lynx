@@ -4,7 +4,7 @@
 //! returned by `begin_connection`. Never retry a movement after ambiguous
 //! delivery: disconnect and obtain a new private snapshot baseline instead.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use engine_core::id::{DefinitionId, StableId};
 use engine_core::inventory::{Inventory, UniformItemRules};
@@ -17,6 +17,29 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::reconciliation::{self, Position, Reconciliation, SessionDomain};
+
+/// How many movement attempts are retained for desync diagnostics.
+pub const MOVEMENT_LOG_LIMIT: usize = 32;
+
+/// One bounded movement attempt and its authoritative resolution.
+///
+/// The log contains only protocol identifiers and world positions. Credentials,
+/// tokens, and private owner state are never copied into it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MovementTrace {
+    /// Client-issued sequence number.
+    pub sequence: u64,
+    /// Destination the client predicted locally.
+    pub predicted: Position,
+    /// Authoritative position before the attempt.
+    pub authoritative_before: Option<Position>,
+    /// Server tick that resolved the attempt, once processed.
+    pub server_tick: Option<u64>,
+    /// Authoritative position after the attempt, once processed.
+    pub authoritative_after: Option<Position>,
+    /// Whether the server applied (`true`) or rejected (`false`) the attempt.
+    pub applied: Option<bool>,
+}
 
 /// Public presentation fields only; arbitrary replication payloads are not retained.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -158,6 +181,7 @@ pub struct WorldState {
     owner_inventory: Option<OwnedInventory>,
     pending: Option<(MessageId, u64)>,
     last_movement_applied: Option<bool>,
+    movement_log: VecDeque<MovementTrace>,
     slow_multiplier: Option<f32>,
     reconciliation: Reconciliation,
 }
@@ -175,6 +199,7 @@ impl WorldState {
             owner_inventory: None,
             pending: None,
             last_movement_applied: None,
+            movement_log: VecDeque::with_capacity(MOVEMENT_LOG_LIMIT),
             slow_multiplier: None,
             reconciliation: Reconciliation::new(max_prediction_distance)?,
         })
@@ -204,6 +229,7 @@ impl WorldState {
         self.owner_inventory = None;
         self.pending = None;
         self.last_movement_applied = None;
+        self.movement_log.clear();
         self.slow_multiplier = None;
         self.reconciliation.disconnect();
     }
@@ -252,6 +278,46 @@ impl WorldState {
     pub fn reconciliation(&self) -> &Reconciliation {
         &self.reconciliation
     }
+    /// Bounded movement attempts, oldest first, for desync reproduction.
+    ///
+    /// Entries are cleared when the connection is invalidated, so they always
+    /// belong to the current control session.
+    pub fn movement_log(&self) -> impl DoubleEndedIterator<Item = &MovementTrace> {
+        self.movement_log.iter()
+    }
+    fn record_movement_request(&mut self, sequence: u64, predicted: Position) {
+        if self.movement_log.len() == MOVEMENT_LOG_LIMIT {
+            self.movement_log.pop_front();
+        }
+        self.movement_log.push_back(MovementTrace {
+            sequence,
+            predicted,
+            authoritative_before: self.reconciliation.authoritative_position(),
+            server_tick: None,
+            authoritative_after: None,
+            applied: None,
+        });
+    }
+    fn record_movement_result(
+        &mut self,
+        sequence: u64,
+        predicted: Position,
+        authoritative: Position,
+        server_tick: u64,
+        applied: bool,
+    ) {
+        if let Some(trace) = self
+            .movement_log
+            .iter_mut()
+            .rev()
+            .find(|trace| trace.sequence == sequence)
+        {
+            trace.predicted = predicted;
+            trace.server_tick = Some(server_tick);
+            trace.authoritative_after = Some(authoritative);
+            trace.applied = Some(applied);
+        }
+    }
     pub(crate) fn reconciliation_mut(&mut self) -> &mut Reconciliation {
         &mut self.reconciliation
     }
@@ -269,6 +335,7 @@ impl WorldState {
             return Err(Error::UnexpectedMessage);
         }
         let request = self.reconciliation.predict(destination)?;
+        self.record_movement_request(request.sequence, destination);
         let id = MessageId::parse(&format!("move-{}-{}", self.generation, request.sequence))
             .expect("bounded numeric id");
         self.pending = Some((id.clone(), request.sequence));
@@ -480,12 +547,24 @@ impl WorldState {
                     && m.last_consumed_sequence.is_some()
                     && valid_slow_multiplier(m.slow_multiplier) =>
             {
+                let sequence = m.last_consumed_sequence.unwrap();
+                let predicted = self
+                    .reconciliation
+                    .predicted_position()
+                    .unwrap_or_else(|| m.position.into());
                 self.reconciliation.processed(
-                    m.last_consumed_sequence.unwrap(),
+                    sequence,
                     m.tick,
                     m.position.into(),
                     m.applied.unwrap(),
                 )?;
+                self.record_movement_result(
+                    sequence,
+                    predicted,
+                    m.position.into(),
+                    m.tick,
+                    m.applied.unwrap(),
+                );
                 self.last_movement_applied = m.applied;
                 self.slow_multiplier = m.slow_multiplier;
                 self.pending = None;
@@ -814,6 +893,63 @@ mod tests {
         assert_eq!(state.entities().count(), 1);
         assert_eq!(state.reconciliation().predicted_position(), Some(pos(0.25)));
         assert_eq!(state.receive(g, &delta), Err(Error::StaleTick));
+    }
+
+    #[test]
+    fn movement_log_records_prediction_and_authoritative_correction() {
+        let (mut state, g) = start();
+        let request = state.movement_request(pos(1.0)).unwrap();
+        assert_eq!(state.movement_log().count(), 1);
+        let entry = state.movement_log().next().unwrap();
+        assert_eq!(entry.sequence, 1);
+        assert_eq!(entry.predicted, pos(1.0));
+        assert_eq!(entry.authoritative_before, Some(pos(0.0)));
+        assert_eq!(entry.server_tick, None);
+        assert_eq!(entry.applied, None);
+
+        let queued =
+            message("movement.queued", json!({"sequence": 1})).with_correlation(request.id);
+        state.receive(g, &queued).unwrap();
+        let delta = world(
+            "world.delta",
+            11,
+            &[actor(1)],
+            &json!([public(actor(1), 11, 2, 0.25)]),
+            &movement(11, 0.25, Some(1), Some(false)),
+        );
+        state.receive(g, &delta).unwrap();
+
+        let entry = state.movement_log().next_back().unwrap();
+        assert_eq!(entry.sequence, 1);
+        assert_eq!(entry.predicted, pos(1.0));
+        assert_eq!(entry.authoritative_before, Some(pos(0.0)));
+        assert_eq!(entry.server_tick, Some(11));
+        assert_eq!(entry.authoritative_after, Some(pos(0.25)));
+        assert_eq!(entry.applied, Some(false));
+        assert!(!format!("{state:?}").contains("secret"));
+    }
+
+    #[test]
+    fn movement_log_is_bounded_and_cleared_with_the_connection() {
+        let (mut state, g) = start();
+        for step in 0..(MOVEMENT_LOG_LIMIT + 8) {
+            let request = state.movement_request(pos(1.0)).unwrap();
+            let sequence = request.body["sequence"].as_u64().unwrap();
+            let queued = message("movement.queued", json!({"sequence": sequence}))
+                .with_correlation(request.id.clone());
+            state.receive(g, &queued).unwrap();
+            let delta = world(
+                "world.delta",
+                11 + step as u64,
+                &[actor(1)],
+                &json!([public(actor(1), 11 + step as u64, 2, 0.25)]),
+                &movement(11 + step as u64, 0.25, Some(sequence), Some(true)),
+            );
+            state.receive(g, &delta).unwrap();
+        }
+        assert_eq!(state.movement_log().count(), MOVEMENT_LOG_LIMIT);
+        state.disconnect(g).unwrap();
+        assert_eq!(state.movement_log().count(), 0);
     }
 
     #[test]

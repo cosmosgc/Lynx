@@ -154,6 +154,33 @@ impl Interactable {
     }
 }
 
+/// Read-only data shown by an entity-provided panel.
+///
+/// Both strings are server-resolved display text; they never contain owner-only
+/// or credential data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiField {
+    /// Short field label, for example `Condition`.
+    pub label: String,
+    /// Rendered field value.
+    pub value: String,
+}
+
+/// One action an entity-provided panel advertises.
+///
+/// `name` is the implementation verb the client may send back; `label` is the
+/// player-facing text. Clients only offer actions the server lists here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiAction {
+    /// Action or verb name accepted by the panel.
+    pub name: String,
+    /// Player-facing action label.
+    pub label: String,
+    /// Fixed, server-authored parameters for this action.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, String>,
+}
+
 /// An entity-provided interface, described declaratively.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UiProvider {
@@ -161,6 +188,12 @@ pub struct UiProvider {
     pub schema: DefinitionId,
     /// Title shown in the panel header.
     pub title: String,
+    /// Read-only fields rendered in the panel body.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<UiField>,
+    /// Actions the client may offer for this panel.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<UiAction>,
 }
 
 impl UiProvider {
@@ -170,7 +203,23 @@ impl UiProvider {
         Self {
             schema,
             title: title.into(),
+            fields: Vec::new(),
+            actions: Vec::new(),
         }
+    }
+
+    /// Attach read-only display fields.
+    #[must_use]
+    pub fn with_fields(mut self, fields: impl IntoIterator<Item = UiField>) -> Self {
+        self.fields = fields.into_iter().collect();
+        self
+    }
+
+    /// Attach the actions this panel advertises.
+    #[must_use]
+    pub fn with_actions(mut self, actions: impl IntoIterator<Item = UiAction>) -> Self {
+        self.actions = actions.into_iter().collect();
+        self
     }
 }
 

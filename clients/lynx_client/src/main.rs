@@ -119,6 +119,7 @@ fn main() {
             OnlineWindowPlugin,
             lynx_client::inventory_panel::InventoryPanelPlugin,
             lynx_client::lock_panel::LockPanelPlugin,
+            lynx_client::content_panel::ContentPanelPlugin,
             lynx_client::ui::chat::ChatPanelPlugin,
         ));
         Some(runtime)
@@ -253,6 +254,7 @@ fn run_account_world(launch: lynx_client::account_ui::WorldLaunch) {
             OnlineWindowPlugin,
             lynx_client::inventory_panel::InventoryPanelPlugin,
             lynx_client::lock_panel::LockPanelPlugin,
+            lynx_client::content_panel::ContentPanelPlugin,
             lynx_client::ui::chat::ChatPanelPlugin,
         ));
     let _runtime = runtime;
@@ -514,9 +516,16 @@ fn logout_device() {
 }
 
 #[cfg(feature = "window")]
-fn authenticate_device(character: &str, email: Option<String>) -> (String, Option<String>) {
+fn authenticate_device(
+    character: &str,
+    email: Option<String>,
+) -> (
+    String,
+    Option<String>,
+    lynx_client::nakama_credentials::CredentialScope,
+) {
     use lynx_client::nakama_credentials::{
-        NakamaLoginError, OsNakamaCredentialStore, authenticate_email_or_resume,
+        CredentialScope, NakamaLoginError, OsNakamaCredentialStore, authenticate_email_or_resume,
         authenticate_or_resume,
     };
     use lynx_client_net::{CharacterApiClient, NakamaAuthClient, NakamaAuthConfig};
@@ -539,16 +548,19 @@ fn authenticate_device(character: &str, email: Option<String>) -> (String, Optio
     let result = std::thread::spawn(move || -> Result<_, String> {
         let auth = NakamaAuthClient::new(NakamaAuthConfig::new(base_url, server_key))
             .map_err(|error| format!("{error:?}"))?;
+        let scope = CredentialScope::for_nakama(&credential_server_url);
         let session = if let Some(email) = email {
-            authenticate_email_or_resume(&auth, &credential_server_url, &OsNakamaCredentialStore, &email, || {
+            authenticate_email_or_resume(&auth, &scope, &OsNakamaCredentialStore, &email, || {
                 rpassword::prompt_password("Password: ").map_err(|_| NakamaLoginError::PasswordInput)
             })
-        } else { authenticate_or_resume(
-            &auth,
-            &credential_server_url,
-            &OsNakamaCredentialStore,
-            engine_core::Locale::default(),
-        ) }
+        } else {
+            authenticate_or_resume(
+                &auth,
+                &scope,
+                &OsNakamaCredentialStore,
+                engine_core::Locale::default(),
+            )
+        }
         .map_err(|error| format!("{error:?}"))?;
         let character_api =
             CharacterApiClient::new(character_api_url).map_err(|error| format!("{error:?}"))?;
@@ -558,13 +570,14 @@ fn authenticate_device(character: &str, email: Option<String>) -> (String, Optio
             .select_character(&token, &character_id)
             .map_err(|error| format!("{error:?}"))?;
         eprintln!("Character ownership verified. World admission requires a corresponding live actor; account creation does not provision one.");
-        Ok(session)
+        Ok((session, scope))
     })
     .join();
     match result {
-        Ok(Ok(session)) => (
+        Ok(Ok((session, scope))) => (
             session.access_token().to_owned(),
             Some(character.to_owned()),
+            scope,
         ),
         Ok(Err(error)) => {
             eprintln!(

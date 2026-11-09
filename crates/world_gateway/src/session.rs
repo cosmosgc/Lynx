@@ -151,6 +151,12 @@ pub struct OpenPanel {
     pub schema: DefinitionId,
     /// Server-provided panel title.
     pub title: String,
+    /// Read-only fields the client may render.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<engine_sim::entity::UiField>,
+    /// Actions the client may offer for this panel.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<engine_sim::entity::UiAction>,
 }
 
 /// A read-only view of one world session.

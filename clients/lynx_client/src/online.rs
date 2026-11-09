@@ -409,6 +409,30 @@ impl OnlineClient {
         self.send_interaction("ui.close", json!({}))
     }
 
+    /// Submit an action advertised by the exact panel it was composed for.
+    /// The server revalidates range, permission, and the open panel schema.
+    pub fn submit_panel_action(
+        &mut self,
+        panel: &crate::interaction::Panel,
+        action: &crate::interaction::PanelAction,
+    ) -> Result<(), OnlineError> {
+        if self.interaction.panel() != Some(panel)
+            || !panel.actions.contains(action)
+            || action.params.len() > crate::interaction::MAX_PANEL_ITEMS
+        {
+            return Err(OnlineError::Protocol);
+        }
+        self.send_interaction(
+            "ui.action",
+            json!({
+                "schema": panel.schema,
+                "action": action.name,
+                "params": action.params,
+                "client_tick": self.world.tick()
+            }),
+        )
+    }
+
     /// Echo only the schema of the exact panel the input was composed for.
     /// Target and outcome remain server-owned; stale UI cannot retarget input.
     pub fn submit_lock_guess(

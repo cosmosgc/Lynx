@@ -174,6 +174,13 @@ A panel with no actions is a read-only view and must declare a
 keys, action names, and field keys are validated at load. Duplicate action
 names and field keys are errors.
 
+At runtime, an entity's `UiProvider` can send resolved read-only fields and
+server-advertised actions (including fixed server-authored parameters) through
+`ui.state`. The online client renders the generic fields and buttons with
+`bevy_immediate`; clicks only submit intents, and the server still validates the
+action. Directly resolving `UiPanelDefinition` bindings and localized message
+keys into runtime providers remains client/content integration work.
+
 ```ron
 (
   id: "minigame.lockpick",

@@ -34,7 +34,7 @@ use engine_sim::action::Verb;
 use engine_sim::ai::{AiBehaviorDefinition, AiBehaviorKind, AiTickPolicy, PerceptionBudget};
 use engine_sim::combat::CombatStats;
 use engine_sim::entity::{
-    Door, EntityRecord, FactionMembership, Interactable, TimedSlow, UiProvider,
+    Door, EntityRecord, FactionMembership, Interactable, TimedSlow, UiAction, UiField, UiProvider,
 };
 use engine_sim::mind::Mind;
 use engine_sim::minigame::Minigame;
@@ -332,6 +332,44 @@ struct DemoDefinitions {
     lockpick_minigame: DefinitionId,
 }
 
+fn barrel_inventory() -> Result<Inventory, EngineError> {
+    let mut inventory = Inventory::with_capacity(4)?;
+    inventory.try_add(
+        ItemStack::new(definition("item.coin")?, 5),
+        &UniformItemRules::new(99),
+    )?;
+    Ok(inventory)
+}
+
+fn barrel_ui(schema: DefinitionId) -> UiProvider {
+    UiProvider::new(schema, "Barrel Display")
+        .with_fields([
+            UiField {
+                label: "Tipo".to_string(),
+                value: "Recipiente".to_string(),
+            },
+            UiField {
+                label: "Material".to_string(),
+                value: "Madeira".to_string(),
+            },
+        ])
+        .with_actions([
+            UiAction {
+                name: "take".to_string(),
+                label: "Pegar 2 moedas".to_string(),
+                params: std::collections::BTreeMap::from([
+                    ("slot".to_string(), "0".to_string()),
+                    ("quantity".to_string(), "2".to_string()),
+                ]),
+            },
+            UiAction {
+                name: "inspect".to_string(),
+                label: "Inspecionar".to_string(),
+                params: std::collections::BTreeMap::new(),
+            },
+        ])
+}
+
 /// Spawn one player's character and nearby props.
 fn spawn_grant(
     zone: &mut Zone,
@@ -369,13 +407,11 @@ fn spawn_grant(
         )
         .with_health(100)
         .with_interactable(
-            Interactable::new(4.0, [Verb::Inspect, Verb::Attack, Verb::Use])
+            Interactable::new(4.0, [Verb::Inspect, Verb::Attack, Verb::Use, Verb::Take])
                 .without_line_of_sight(),
         )
-        .with_ui(UiProvider::new(
-            definitions.display_schema.clone(),
-            "Barrel Display",
-        ))
+        .with_inventory(barrel_inventory()?)
+        .with_ui(barrel_ui(definitions.display_schema.clone()))
         .with_persistence(PersistencePolicy::PersistentEntity),
     )?;
 

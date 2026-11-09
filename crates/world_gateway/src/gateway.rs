@@ -1898,10 +1898,14 @@ fn opened_panel(effects: &[ActionEffect]) -> Option<OpenPanel> {
             target,
             schema,
             title,
+            fields,
+            actions,
         } => Some(OpenPanel {
             target: *target,
             schema: schema.clone(),
             title: title.clone(),
+            fields: fields.clone(),
+            actions: actions.clone(),
         }),
         _ => None,
     })

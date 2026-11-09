@@ -44,13 +44,16 @@ semantic versioning for engine releases and content bundles.
 - `scripts/backup-restore-smoke.sh`: guarded loopback PostgreSQL backup/restore
   verification, including world snapshot replay checks, audit trigger checks,
   restored-service readiness, and a disposable CI database (`PST-009`).
-- `lynx_client` and `lynx_world`: read-only owner inventory presentation. The
+- `lynx_client` and `lynx_world`: owner inventory presentation and the first
+  server-validated container transfer. The
   client retains session-private `owner_only` inventory only for the controlled
   actor, validates and orders it, clears it on disconnect and fresh snapshots,
   and redacts its contents from diagnostics. A toggleable `bevy_immediate`
   window shows slots, derived item names, quantities, and unique items, while
-  the demo actor starts with deterministic items. Moves, equip, split/merge, and
-  container transfers remain server-protocol work (`CLT-008`).
+  the demo actor starts with deterministic items. `bevy_immediate` also renders
+  server-described panel fields/actions; a real-socket demo action takes items
+  and verifies the replicated inventory after resume. Equip, split/merge,
+  localization, and richer authored layouts remain (`CLT-008`).
 - `lynx_client`: account-screen server browser with validated host/IP and port
   profiles, pinning, bounded recent history, atomic OS-config persistence, and
   an explicit local/remote transport policy (`ws://`/`http://` only for loopback
@@ -68,7 +71,9 @@ semantic versioning for engine releases and content bundles.
   `delayed_private_corrections_remain_bounded_over_websocket` delays
   `movement.queued` and the private movement result by 100 ms and 200 ms,
   proving one-in-flight prediction stays bounded and presentation converges to
-  authority without mutating it (`SIM-002`).
+  authority without mutating it. It asserts measured round-trip delay and
+  credential-free movement trace data for controlled server rejection
+  (`CLT-007`, `CLT-016`, `CLT-017`).
 - `engine_sim`: server-owned timed stun. `EntityRecord::stun_until` persists in
   snapshots, `Zone::apply_stun` keeps the later expiry instead of adding
   durations, and `cleanse_stun` removes only the timed stun. Expiry happens on

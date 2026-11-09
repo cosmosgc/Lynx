@@ -466,7 +466,7 @@ moved to the future `CLT-020` task.
 ## CLT-007 — Local movement and prediction
 
 - **Priority:** P0
-- **Status:** In progress — WASD movement visually confirmed; latency tuning and rejection evidence remain
+- **Status:** In progress — deterministic 100/200 ms latency and real-authority rejection evidence are covered; graphical latency tuning remains
 - **Depends on:** `SIM-001`, `SIM-002`, `CLT-005`
 - **References:** `SIM-001`, `SIM-002`, [CLT-016](#clt-016--movement-latency-validation), [CLT-017](#clt-017--rejected-movement-and-desync-evidence)
 
@@ -484,14 +484,15 @@ moved to the future `CLT-020` task.
 
 - [x] The client converges to the server position after corrections.
 
-The following validation cannot be established by the current local tests/demo;
-they are tracked as dependent follow-up tasks that require a suitable impairment
-harness or controlled authoritative rejection fixture:
-[CLT-016](#clt-016--movement-latency-validation) covers 100–200 ms simulated
-latency, and [CLT-017](#clt-017--rejected-movement-and-desync-evidence) covers
-server-rejected movement and sequence/tick desync evidence. Both depend on this
-movement foundation (`CLT-007`); neither is a prerequisite for the current local
-movement implementation.
+Automated follow-up coverage now exists: [CLT-016](#clt-016--movement-latency-validation)
+injects 100/200 ms response delays and verifies bounded prediction/convergence;
+[CLT-017](#clt-017--rejected-movement-and-desync-evidence) uses a real authority
+to reject a queued endpoint and records bounded, credential-free correction
+evidence. Graphical tuning under impairment remains separate.
+
+`WorldState::movement_log()` retains the latest 32 attempts, with sequence,
+predicted endpoint, authoritative before/after positions, result tick, and applied
+status. It contains no credentials/private inventory and clears on disconnect.
 
 **Progress:** WASD issues normalized, height-preserving requests at at most 20 Hz,
 with one request in flight and no ambiguous-delivery replay. Chat composition
@@ -503,15 +504,16 @@ tests. Windows visual confirmation additionally showed `last move accepted`,
 server tick progression, a 66 ms movement round trip, and equal authoritative
 and rendered coordinates while idle. This is a live local demo with a static
 development token; it does not validate Nakama account admission. The localhost
-demo does not inject latency or cause a server-side rejection, so those cases are
-deferred to CLT-016/017 rather than claimed as visually verified here.
+demo does not visually validate impairment or server rejection. Deterministic
+latency and authority behavior are covered by headless WebSocket fixtures, but
+have not been visually tuned in the Windows demo.
 
 ---
 
 ## CLT-008 — Interaction, inventory, and UI panels
 
 - **Priority:** P1
-- **Status:** In progress — server-authoritative actions, distinct generic/lockpick panels, and read-only owner inventory presentation are covered; inventory operations and content-defined widgets remain
+- **Status:** In progress — `bevy_immediate` now renders server-described fields/actions and a validated container take; equip/split/merge, localization, and broader content-authored layouts remain
 - **Depends on:** `CLT-006`, `SIM-008`
 - **References:** ADR 0015, [content authoring §UI panels](../content-authoring.md#ui-panels)
 
@@ -530,7 +532,7 @@ deferred to CLT-016/017 rather than claimed as visually verified here.
 
 - [x] Different entity types open different panels through one protocol.
 - [x] A panel action rejected by the server does not change local state.
-- [ ] Inventory moves match server results after reconnect.
+- [x] Inventory moves match server results after reconnect.
 - [x] Stale/closed panels cannot send actions for a different target.
 
 **Progress (2026-11-05):** The online HUD lists supported, server-advertised
@@ -604,6 +606,16 @@ and focus loss and is installed on both online launch paths. This is
 presentation only: moves, equip, split/merge, and container transfers still need
 a server-validated protocol, so the reconnect-inventory acceptance criterion
 remains open.
+
+**Declarative panel and transfer slice (2026-11-08):** `UiProvider` now carries
+bounded read-only fields and server-advertised actions through `ui.state`; the
+client validates these payloads and renders a generic floating panel with
+`bevy_immediate`. The demo barrel advertises a server-validated take action for
+two coins. GPU-free pointer integration opens the panel and activates the button
+through the real socket; the client inventory changes only after owner-only
+replication, and the updated count remains correct after session resume. Equip,
+split/merge, localized message-key resolution, and richer authored layouts remain
+open.
 
 ---
 
@@ -835,15 +847,15 @@ client test command.
 ## CLT-016 — Movement latency validation
 
 - **Priority:** P1
-- **Status:** Blocked — `CLT-007`
+- **Status:** In progress — 100/200 ms delayed-response coverage and bounded convergence are automated; Windows visual tuning remains
 - **Depends on:** `CLT-007`, `CLT-014`
 - **References:** [CLT-007](#clt-007--local-movement-and-prediction), [CLT-014](#clt-014--client-integration-and-protocol-tests), `SIM-002`
 
 **Why:** Localhost movement is responsive, but does not establish the feel of
 movement under representative network delay. Keep this separate from the basic
 movement implementation so the validation can use deterministic latency
-injection and record an actual result. The current local test/demo setup does not
-provide that latency injection; these criteria are not claimed as locally proven.
+injection and record an actual result. The headless harness now provides that
+injection; graphical tuning remains necessary before calling the feel acceptable.
 
 **Scope**
 
@@ -856,34 +868,37 @@ provide that latency injection; these criteria are not claimed as locally proven
 
 **Acceptance criteria**
 
-- [ ] Repeatable automated runs cover both 100 ms and 200 ms simulated latency.
-- [ ] The client remains responsive without exceeding the bounded prediction
+- [x] Repeatable automated runs cover both 100 ms and 200 ms simulated latency.
+- [x] The client remains responsive without exceeding the bounded prediction
       contract, and converges to server state after each result.
 - [ ] A Windows graphical run confirms the tuned behavior is acceptably smooth;
       record the environment and evidence location.
+
+**Automated progress (2026-11-08):** The real-WebSocket fixture delays both queue
+acknowledgement and authority result by 100 ms and 200 ms. It asserts the measured
+round trip includes both delays, input remains one-in-flight and bounded, and the
+presentation converges without mutating authority. Windows visual tuning is not
+claimed.
 
 ---
 
 ## CLT-017 — Rejected movement and desync evidence
 
 - **Priority:** P1
-- **Status:** Blocked — `CLT-007`
+- **Status:** Done
 - **Depends on:** `CLT-007`, `CLT-014`
 - **References:** [CLT-007](#clt-007--local-movement-and-prediction), [CLT-014](#clt-014--client-integration-and-protocol-tests), `SIM-001`, `SIM-002`
 
-**Why:** The normal localhost demo currently exercises accepted movement and
-cannot prove how the client handles a deliberate server rejection or a desync.
-Test those paths with a controlled authoritative fixture instead of inferring
-them from successful movement. The current local test/demo setup does not force
-this server-side rejection or produce a desync report, so these criteria require
-the future fixture and diagnostic work in this task.
+**Why:** Accepted movement alone does not establish correction behavior. This
+task uses a queued endpoint that the real authority rejects during processing,
+and verifies the client does not present it as accepted.
 
 **Scope**
 
 - Add a deterministic server/test fixture that accepts a movement request into
   the queue but rejects it during authoritative processing (for example, a
   blocked destination or an over-budget endpoint).
-- Verify the local prediction visibly returns to the authoritative position;
+- Verify the local presentation returns to the authoritative position;
   server rejection must never be presented as accepted movement.
 - Capture bounded desync evidence containing movement sequence, server tick,
   predicted position, and authoritative correction, with no credentials or
@@ -891,12 +906,17 @@ the future fixture and diagnostic work in this task.
 
 **Acceptance criteria**
 
-- [ ] A test drives a queued movement through server-side rejection and proves
+- [x] A test drives a queued movement through server-side rejection and proves
       the authoritative position is unchanged.
-- [ ] A graphical or deterministic presentation test proves the correction is
+- [x] A graphical or deterministic presentation test proves the correction is
       visible and the final rendered position converges to authority.
-- [ ] A desync diagnostic includes the input sequence and server tick (plus
+- [x] A desync diagnostic includes the input sequence and server tick (plus
       predicted/corrected positions) and is verified to redact credentials.
+
+**Completion (2026-11-08):** The real-authority online integration test asserts
+rejection, unchanged authoritative position, presentation correction/convergence,
+and a bounded movement trace containing sequence, server tick, predicted and
+corrected positions. The trace is credential-free and is cleared on disconnect.
 
 ---
 

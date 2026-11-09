@@ -14,7 +14,41 @@ pub struct Panel {
     pub target: StableId,
     pub schema: DefinitionId,
     pub title: String,
+    /// Server-resolved read-only fields for content-defined panels.
+    #[serde(default)]
+    pub fields: Vec<PanelField>,
+    /// Server-advertised actions for content-defined panels.
+    #[serde(default)]
+    pub actions: Vec<PanelAction>,
 }
+
+/// One server-resolved read-only field in a content-defined panel.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PanelField {
+    pub label: String,
+    pub value: String,
+}
+
+/// One server-advertised action in a content-defined panel.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PanelAction {
+    /// Implementation verb sent back in `ui.action`.
+    pub name: String,
+    /// Player-facing label.
+    pub label: String,
+    /// Server-authored parameters sent with the action.
+    #[serde(default)]
+    pub params: std::collections::BTreeMap<String, String>,
+}
+
+/// Maximum fields or actions rendered from one panel.
+pub const MAX_PANEL_ITEMS: usize = 16;
+/// Maximum label or value length in bytes accepted from a panel.
+pub const MAX_PANEL_TEXT: usize = 128;
+/// Maximum action name length, matching the engine's verb bound.
+pub const MAX_PANEL_ACTION: usize = 64;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -91,9 +125,10 @@ impl InteractionState {
         if message.kind.as_str() == "ui.state" {
             let state: PanelState = serde_json::from_value(message.body.clone()).map_err(|_| ())?;
             if self.tick.is_some_and(|tick| state.tick < tick)
-                || state.panel.as_ref().is_some_and(|panel| {
-                    panel.title.len() > 512 || panel.title.chars().any(char::is_control)
-                })
+                || state
+                    .panel
+                    .as_ref()
+                    .is_some_and(|panel| !valid_panel(panel))
             {
                 return Err(());
             }
@@ -180,6 +215,45 @@ impl InteractionState {
     }
 }
 
+fn valid_panel(panel: &Panel) -> bool {
+    if panel.title.len() > 512 || panel.title.chars().any(char::is_control) {
+        return false;
+    }
+    if panel.fields.len() > MAX_PANEL_ITEMS || panel.actions.len() > MAX_PANEL_ITEMS {
+        return false;
+    }
+    if panel.fields.iter().any(|field| {
+        field.label.len() > MAX_PANEL_TEXT
+            || field.value.len() > MAX_PANEL_TEXT
+            || field.label.chars().any(char::is_control)
+            || field.value.chars().any(char::is_control)
+    }) {
+        return false;
+    }
+    let mut identities = std::collections::BTreeSet::new();
+    panel.actions.iter().all(|action| {
+        let params_are_safe = action.params.len() <= 16
+            && action.params.iter().all(|(key, value)| {
+                !key.is_empty()
+                    && key.len() <= MAX_PANEL_ACTION
+                    && value.len() <= MAX_PANEL_TEXT
+                    && !key.chars().any(char::is_control)
+                    && !value.chars().any(char::is_control)
+            });
+        !action.name.is_empty()
+            && action.name.len() <= MAX_PANEL_ACTION
+            && !action
+                .name
+                .chars()
+                .any(|character| character.is_whitespace() || character.is_control())
+            && !action.label.is_empty()
+            && action.label.len() <= MAX_PANEL_TEXT
+            && !action.label.chars().any(char::is_control)
+            && params_are_safe
+            && identities.insert((action.name.as_str(), &action.params))
+    })
+}
+
 fn rejection(code: Option<&str>) -> &'static str {
     match code {
         Some("out_of_range") => "Aproxime-se do alvo e tente novamente.",
@@ -261,6 +335,36 @@ mod tests {
 
         assert_eq!(state.panel(), Some(&before));
         assert!(!state.pending());
+    }
+
+    #[test]
+    fn content_panel_fields_and_actions_are_bounded_and_atomic() {
+        let mut state = InteractionState::default();
+        let target = StableId::from_parts(IdKind::Entity, 1, 9);
+        let valid = json!({
+            "tick": 1,
+            "panel": {
+                "target": target,
+                "schema": "ui.display",
+                "title": "Display",
+                "fields": [{"label":"Status", "value":"Ready"}],
+                "actions": [{"name":"take", "label":"Take", "params":{"slot":"0"}}]
+            }
+        });
+        assert!(state.receive(&reply("ui.state", valid, "open")).unwrap());
+        let before = state.panel().cloned().unwrap();
+        let invalid = json!({
+            "tick": 2,
+            "panel": {
+                "target": target,
+                "schema": "ui.display",
+                "title": "Display",
+                "fields": [{"label":"Status", "value":"x".repeat(MAX_PANEL_TEXT + 1)}],
+                "actions": []
+            }
+        });
+        assert!(state.receive(&reply("ui.state", invalid, "bad")).is_err());
+        assert_eq!(state.panel(), Some(&before));
     }
 
     #[test]

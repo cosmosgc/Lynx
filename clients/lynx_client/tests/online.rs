@@ -133,6 +133,16 @@ async fn delayed_private_corrections_remain_bounded_over_websocket() {
         .await
         .unwrap();
         assert_eq!(client.last_movement_applied(), Some(false));
+        assert!(
+            client.last_round_trip().unwrap() >= Duration::from_millis(delay_ms * 2),
+            "the delayed fixture must expose both queue and result latency"
+        );
+        let trace = client.world().movement_log().next_back().unwrap();
+        assert_eq!(trace.server_tick, Some(11));
+        assert_eq!(trace.predicted, destination);
+        assert_eq!(trace.authoritative_before, Some(origin));
+        assert_eq!(trace.authoritative_after, Some(origin));
+        assert_eq!(trace.applied, Some(false));
         client.smooth_presentation(0.5);
         assert_eq!(
             client
@@ -398,6 +408,7 @@ async fn headless_schedule_connects_moves_and_disconnects() {
                 lynx_client::windowed::OnlineWindowPlugin,
                 lynx_client::inventory_panel::InventoryPanelPlugin,
                 lynx_client::lock_panel::LockPanelPlugin,
+                lynx_client::content_panel::ContentPanelPlugin,
                 lynx_client::ui::chat::ChatPanelPlugin,
             ));
         app.world_mut().spawn((Window::default(), PrimaryWindow));
@@ -425,6 +436,92 @@ async fn headless_schedule_connects_moves_and_disconnects() {
         inventory.total_quantity(&DefinitionId::new("item.torch").unwrap()),
         3
     );
+    let coin = DefinitionId::new("item.coin").unwrap();
+    let barrel = app
+        .world()
+        .resource::<OnlineClient>()
+        .world()
+        .entities()
+        .find(|entity| entity.prototype.as_str() == "prop.barrel")
+        .unwrap()
+        .entity;
+    {
+        let mut client = app.world_mut().resource_mut::<OnlineClient>();
+        assert_eq!(
+            client.world().inventory().unwrap().total_quantity(&coin),
+            25
+        );
+        client.interact(barrel, "use").unwrap();
+        wait_for_interaction(&mut client).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while client.interaction().panel().is_none() {
+                client.poll();
+                assert_eq!(client.status(), OnlineStatus::Active);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+    let panel = app
+        .world()
+        .resource::<OnlineClient>()
+        .interaction()
+        .panel()
+        .cloned()
+        .unwrap();
+    assert_eq!(panel.schema.as_str(), "ui.display");
+    assert_eq!(panel.fields.len(), 2);
+    assert_eq!(panel.actions[0].name, "take");
+    #[cfg(feature = "window")]
+    {
+        app.update();
+        app.update();
+        assert!(has_named_entity(&mut app, "content-action-0-take"));
+        assert!(
+            app.world_mut()
+                .query::<&bevy::prelude::Text>()
+                .iter(app.world())
+                .any(|text| text.0.contains("Tipo: Recipiente"))
+        );
+        click_content_action(&mut app, "content-action-0-take");
+    }
+    #[cfg(not(feature = "window"))]
+    app.world_mut()
+        .resource_mut::<OnlineClient>()
+        .submit_panel_action(&panel, &panel.actions[0])
+        .unwrap();
+    {
+        let mut client = app.world_mut().resource_mut::<OnlineClient>();
+        wait_for_interaction(&mut client).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while client.world().inventory().unwrap().total_quantity(&coin) != 27 {
+                client.poll();
+                assert_eq!(client.status(), OnlineStatus::Active);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            client.world().inventory().unwrap().total_quantity(&coin),
+            27
+        );
+        client.reconnect().unwrap();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while client.status() != OnlineStatus::Active || !client.resumed() {
+                client.poll();
+                assert!(!matches!(client.status(), OnlineStatus::Failed(_)));
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            client.world().inventory().unwrap().total_quantity(&coin),
+            27
+        );
+    }
     #[cfg(feature = "window")]
     {
         use bevy::prelude::*;
@@ -574,6 +671,20 @@ async fn headless_schedule_connects_moves_and_disconnects() {
         assert_eq!(
             client.world().reconciliation().authoritative_position(),
             Some(authority)
+        );
+        let trace = client
+            .world()
+            .movement_log()
+            .next_back()
+            .expect("the rejected movement is logged");
+        assert_eq!(trace.applied, Some(false));
+        assert!(trace.server_tick.is_some());
+        assert_eq!(trace.authoritative_before, Some(authority));
+        assert_eq!(trace.authoritative_after, Some(authority));
+        assert_eq!(trace.predicted.x, authority.x + 0.9);
+        assert!(trace.sequence >= 1);
+        assert!(
+            !format!("{:?}", client.world().movement_log().collect::<Vec<_>>()).contains(TOKEN)
         );
         client.smooth_presentation(0.5);
         assert_ne!(
@@ -1251,6 +1362,55 @@ fn click_lock_button(app: &mut bevy::prelude::App, id: &str) {
     };
     use bevy::prelude::*;
     let name = format!("lock-button-{id}");
+    let button = app
+        .world_mut()
+        .query::<(Entity, &Name)>()
+        .iter(app.world())
+        .find(|(_, candidate)| candidate.as_str() == name)
+        .unwrap()
+        .0;
+    let window = app
+        .world_mut()
+        .query_filtered::<Entity, With<bevy::window::PrimaryWindow>>()
+        .single(app.world())
+        .unwrap();
+    let event = PointerClick {
+        entity: button,
+        pointer: Pointer::new(
+            PointerId::Mouse,
+            Location {
+                target: bevy::camera::RenderTarget::Window(bevy::window::WindowRef::Primary)
+                    .normalize(Some(window))
+                    .unwrap(),
+                position: Vec2::ZERO,
+            },
+        ),
+        button: PointerButton::Primary,
+        hit: HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
+        duration: Duration::from_millis(20),
+        count: 1,
+    };
+    app.add_systems(
+        PreUpdate,
+        move |mut commands: Commands, mut sent: Local<bool>| {
+            if !*sent {
+                commands.trigger(event.clone());
+                *sent = true;
+            }
+        },
+    );
+    app.update();
+    app.update();
+}
+
+#[cfg(feature = "window")]
+fn click_content_action(app: &mut bevy::prelude::App, name: &str) {
+    use bevy::picking::{
+        backend::HitData,
+        events::{Pointer, PointerClick},
+        pointer::{Location, PointerButton, PointerId},
+    };
+    use bevy::prelude::*;
     let button = app
         .world_mut()
         .query::<(Entity, &Name)>()

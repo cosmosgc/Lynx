@@ -3006,6 +3006,8 @@ fn opening_a_panel_emits_server_resolved_ui_state() {
         target: fixture.alice_terminal,
         schema: text("ui.terminal"),
         title: "Terminal".to_string(),
+        fields: Vec::new(),
+        actions: Vec::new(),
     };
     assert_eq!(state.tick, fixture.gateway.zone().tick());
     assert_eq!(state.panel, Some(expected.clone()));
