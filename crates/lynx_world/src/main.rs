@@ -211,6 +211,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .context("invalid --allow-origin configuration")?;
     let gateway_config = args.gateway_config()?;
     let rate_limits = args.rate_limit_config()?;
+    let outbound_queue = args.outbound_queue().context("invalid outbound queue")?;
     let authenticator = (args.auth_mode == AuthMode::Demo)
         .then(|| Authenticator::new(&args.token_hashes()?).map(|auth| auth.with_staff(args.staff)))
         .transpose()?;
@@ -419,7 +420,8 @@ async fn serve(args: ServeArgs) -> Result<()> {
         state
             .with_metrics(Arc::clone(&metrics))
             .with_origin_policy(origins)
-            .with_rate_limits(rate_limits),
+            .with_rate_limits(rate_limits)
+            .with_outbound_queue(outbound_queue),
     );
 
     // Renewal runs outside the authority loop so a slow database round trip

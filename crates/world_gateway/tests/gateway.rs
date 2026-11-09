@@ -17,11 +17,11 @@ use engine_sim::entity::{
     Door, EntityRecord, FactionMembership, Interactable, InteractionPermission, MovementProfile,
     MovementStatus, RespawnPolicy, UiProvider,
 };
-use engine_sim::mind::{ControlCapability, Mind};
+use engine_sim::mind::{ControlCapability, Controller, Mind};
 use engine_sim::minigame::Minigame;
 use engine_sim::movement::MovementIntent;
 use engine_sim::nav::NavGrid;
-use engine_sim::zone::{Zone, ZoneConfig};
+use engine_sim::zone::{TickBudget, Zone, ZoneConfig};
 use game_api::AccountId;
 use serde_json::json;
 use world_gateway::{
@@ -322,14 +322,39 @@ fn fixture_with_seed(seed: u64) -> Fixture {
 }
 
 fn fixture_with_combat_and_seed(combat: CombatRules, token_seed: u64) -> Fixture {
+    fixture_with_tick_budget(combat, token_seed, TickBudget::default())
+}
+
+fn fixture_with_action_budget(max_actions: usize) -> Fixture {
+    fixture_with_tick_budget(
+        CombatRules::default(),
+        1,
+        TickBudget {
+            max_actions,
+            ..TickBudget::default()
+        },
+    )
+}
+
+fn fixture_with_tick_budget(combat: CombatRules, token_seed: u64, budget: TickBudget) -> Fixture {
+    fixture_with_tick_budget_and_bounds(combat, token_seed, budget, Vec3::new(200.0, 4.0, 200.0))
+}
+
+fn fixture_with_tick_budget_and_bounds(
+    combat: CombatRules,
+    token_seed: u64,
+    budget: TickBudget,
+    max: Vec3,
+) -> Fixture {
     let config = ZoneConfig::new(
         text("zone.gateway_test"),
         id(IdKind::Zone, 1),
         Vec3::ZERO,
-        Vec3::new(200.0, 4.0, 200.0),
+        max,
     )
     .unwrap()
-    .with_combat(combat);
+    .with_combat(combat)
+    .with_budget(budget);
     let nav = NavGrid::new(200, 200, 1.0, Vec3::ZERO).unwrap();
     let mut zone = Zone::new(config, nav, Arc::new(UniformItemRules::new(99))).unwrap();
 
@@ -853,6 +878,58 @@ fn gateway_revalidates_stunned_and_zero_speed_movement() {
 }
 
 #[test]
+fn gateway_rejects_pending_movement_if_actor_dies_before_processing() {
+    let mut f = fixture();
+    let alice = connect(&mut f.gateway, "alice", f.alice_principal);
+    let request = move_request(1, 10.1, 10.0);
+    assert_eq!(
+        f.gateway
+            .handle(&alice.session, &request, Millis::new(1_001))
+            .unwrap()[0]
+            .kind
+            .as_str(),
+        "movement.queued"
+    );
+
+    f.gateway
+        .zone_mut()
+        .entity_mut(alice.actor)
+        .unwrap()
+        .health
+        .as_mut()
+        .unwrap()
+        .current = 0;
+    assert!(matches!(
+        &f.gateway
+            .zone()
+            .entity(alice.actor)
+            .unwrap()
+            .mind
+            .as_ref()
+            .unwrap()
+            .controller,
+        Controller::Player { character, session }
+            if *character == f.alice_principal && session == alice.session.as_str()
+    ));
+
+    let updates = f
+        .gateway
+        .tick_with_interval(Millis::new(1_002), 100)
+        .unwrap();
+    let result = delivery(&updates, &alice.session)
+        .movement
+        .as_ref()
+        .expect("the accepted request reports its processing result");
+    assert_eq!(result.applied, Some(false));
+    assert_eq!(result.last_consumed_sequence, Some(1));
+    assert_eq!(result.position, Vec3::new(10.0, 0.0, 10.0));
+    assert_eq!(
+        f.gateway.zone().entity(alice.actor).unwrap().position(),
+        Vec3::new(10.0, 0.0, 10.0)
+    );
+}
+
+#[test]
 fn timed_slow_factor_is_private_to_the_controlled_session() {
     let mut f = fixture();
     let alice = connect(&mut f.gateway, "alice", f.alice_principal);
@@ -1000,6 +1077,89 @@ fn gateway_enforces_speed_budget_and_dead_actor_combat_authority() {
             .unwrap()
             .current,
         100
+    );
+}
+
+#[test]
+fn gateway_rejects_vertical_movement_without_mutating_position() {
+    let mut f = fixture();
+    let alice = connect(&mut f.gateway, "alice", f.alice_principal);
+    let request = envelope(
+        "vertical-move",
+        "movement.request",
+        json!({"sequence": 1, "destination": {"x": 10.1, "y": 1.0, "z": 10.0}}),
+    );
+
+    assert_eq!(
+        f.gateway
+            .handle(&alice.session, &request, Millis::new(1_001))
+            .unwrap()[0]
+            .kind
+            .as_str(),
+        "movement.queued"
+    );
+    let updates = f
+        .gateway
+        .tick_with_interval(Millis::new(1_002), 100)
+        .unwrap();
+    let result = delivery(&updates, &alice.session)
+        .movement
+        .as_ref()
+        .expect("queued movement reports its authoritative processing result");
+
+    assert_eq!(result.applied, Some(false));
+    assert_eq!(result.last_consumed_sequence, Some(1));
+    assert_eq!(result.position, Vec3::new(10.0, 0.0, 10.0));
+    assert_eq!(
+        f.gateway.zone().entity(alice.actor).unwrap().position(),
+        Vec3::new(10.0, 0.0, 10.0)
+    );
+}
+
+#[test]
+fn gateway_rejects_movement_past_configured_zone_bounds() {
+    let mut f = fixture_with_tick_budget_and_bounds(
+        CombatRules::default(),
+        1,
+        TickBudget::default(),
+        Vec3::new(199.5, 4.0, 200.0),
+    );
+    let alice = connect(&mut f.gateway, "alice", f.alice_principal);
+    f.gateway
+        .zone_mut()
+        .entity_mut(alice.actor)
+        .unwrap()
+        .transform
+        .position = Vec3::new(199.0, 0.0, 10.0);
+    let request = envelope(
+        "zone-boundary-move",
+        "movement.request",
+        json!({"sequence": 1, "destination": {"x": 199.6, "y": 0.0, "z": 10.0}}),
+    );
+
+    assert_eq!(
+        f.gateway
+            .handle(&alice.session, &request, Millis::new(1_001))
+            .unwrap()[0]
+            .kind
+            .as_str(),
+        "movement.queued"
+    );
+    let updates = f
+        .gateway
+        .tick_with_interval(Millis::new(1_002), 1_000)
+        .unwrap();
+    let result = delivery(&updates, &alice.session)
+        .movement
+        .as_ref()
+        .expect("queued movement reports its authoritative processing result");
+
+    assert_eq!(result.applied, Some(false));
+    assert_eq!(result.last_consumed_sequence, Some(1));
+    assert_eq!(result.position, Vec3::new(199.0, 0.0, 10.0));
+    assert_eq!(
+        f.gateway.zone().entity(alice.actor).unwrap().position(),
+        Vec3::new(199.0, 0.0, 10.0)
     );
 }
 
@@ -1241,6 +1401,110 @@ fn gateway_queue_rejection_does_not_consume_newer_sequence() {
     assert_eq!(result.last_consumed_sequence, Some(7));
     assert_eq!(result.applied, Some(true));
     assert_eq!(result.position, Vec3::new(10.2, 0.0, 10.0));
+}
+
+#[test]
+fn gateway_zero_movement_budget_rejects_without_consuming_sequence() {
+    let mut f = fixture_with_action_budget(0);
+    let alice = connect(&mut f.gateway, "alice", f.alice_principal);
+    let request = envelope(
+        "zero-budget-move",
+        "movement.request",
+        json!({"sequence": 1, "destination": {"x": 10.1, "y": 0.0, "z": 10.0}}),
+    );
+
+    let reply = f
+        .gateway
+        .handle(&alice.session, &request, Millis::new(1_001))
+        .unwrap();
+    assert_eq!(reply[0].kind.as_str(), "protocol.error");
+    assert_eq!(
+        f.gateway.zone().last_movement_sequence(
+            alice.actor,
+            f.alice_principal,
+            alice.session.as_str(),
+        ),
+        None,
+        "a zero-budget rejection must not consume a sequence"
+    );
+    assert_eq!(
+        f.gateway.zone().entity(alice.actor).unwrap().position(),
+        Vec3::new(10.0, 0.0, 10.0)
+    );
+}
+
+#[test]
+fn gateway_movement_queue_limit_is_global_and_resets_each_tick() {
+    let mut f = fixture_with_action_budget(1);
+    let alice = connect(&mut f.gateway, "alice", f.alice_principal);
+    let bob = connect(&mut f.gateway, "bob", f.bob_principal);
+    let alice_move = envelope(
+        "alice-budget-move",
+        "movement.request",
+        json!({"sequence": 1, "destination": {"x": 10.1, "y": 0.0, "z": 10.0}}),
+    );
+    let bob_move = envelope(
+        "bob-budget-move",
+        "movement.request",
+        json!({"sequence": 1, "destination": {"x": 150.1, "y": 0.0, "z": 150.0}}),
+    );
+
+    assert_eq!(
+        f.gateway
+            .handle(&alice.session, &alice_move, Millis::new(1_001))
+            .unwrap()[0]
+            .kind
+            .as_str(),
+        "movement.queued"
+    );
+    assert_eq!(
+        f.gateway
+            .handle(&bob.session, &bob_move, Millis::new(1_001))
+            .unwrap()[0]
+            .kind
+            .as_str(),
+        "protocol.error",
+        "the per-tick queue limit applies across actors"
+    );
+    assert_eq!(
+        f.gateway
+            .zone()
+            .last_movement_sequence(bob.actor, f.bob_principal, bob.session.as_str()),
+        None,
+        "a full-queue rejection must not consume Bob's sequence"
+    );
+
+    let first_tick = f
+        .gateway
+        .tick_with_interval(Millis::new(1_050), 100)
+        .unwrap();
+    let alice_result = delivery(&first_tick, &alice.session)
+        .movement
+        .as_ref()
+        .expect("Alice's accepted request is processed");
+    assert_eq!(alice_result.applied, Some(true));
+    assert_eq!(alice_result.last_consumed_sequence, Some(1));
+
+    assert_eq!(
+        f.gateway
+            .handle(&bob.session, &bob_move, Millis::new(1_051))
+            .unwrap()[0]
+            .kind
+            .as_str(),
+        "movement.queued",
+        "the queue budget resets at the next tick"
+    );
+    let second_tick = f
+        .gateway
+        .tick_with_interval(Millis::new(1_100), 100)
+        .unwrap();
+    let bob_result = delivery(&second_tick, &bob.session)
+        .movement
+        .as_ref()
+        .expect("Bob's retried request is processed after the budget resets");
+    assert_eq!(bob_result.applied, Some(true));
+    assert_eq!(bob_result.last_consumed_sequence, Some(1));
+    assert_eq!(bob_result.position, Vec3::new(150.1, 0.0, 150.0));
 }
 
 #[test]
@@ -2017,6 +2281,50 @@ fn action_actor_and_principal_come_from_the_session() {
             .as_ref()
             .unwrap()
             .open
+    );
+}
+
+#[test]
+fn gateway_rejects_combat_after_actor_controller_changes() {
+    let mut f = fixture();
+    let alice = connect(&mut f.gateway, "alice", f.alice_principal);
+    connect(&mut f.gateway, "bob", f.bob_principal);
+    f.gateway
+        .zone_mut()
+        .entity_mut(alice.actor)
+        .unwrap()
+        .mind
+        .as_mut()
+        .unwrap()
+        .controller = Controller::Player {
+        character: f.bob_principal,
+        session: "bob-current-session".to_owned(),
+    };
+
+    let result = result_of(
+        &f.gateway
+            .handle(
+                &alice.session,
+                &action(
+                    "wrong-controller-attack",
+                    json!({"verb":"attack","target":f.alice_barrel.to_string()}),
+                ),
+                Millis::new(2_000),
+            )
+            .unwrap(),
+    );
+
+    assert_eq!(result.error().unwrap().code(), ErrorCode::PermissionDenied);
+    assert_eq!(
+        f.gateway
+            .zone()
+            .entity(f.alice_barrel)
+            .unwrap()
+            .health
+            .unwrap()
+            .current,
+        100,
+        "a stale session must not apply combat after server-side control changes"
     );
 }
 

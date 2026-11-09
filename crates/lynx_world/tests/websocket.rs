@@ -16,7 +16,7 @@ use game_api::AccountId;
 use lynx_world::auth::{Authenticator, Grant, IdentityBackend, IdentityError, digest};
 use lynx_world::demo;
 use lynx_world::rate_limit::{RateLimitConfig, TokenBucketConfig};
-use lynx_world::service::{HELLO_KIND, Hello, Service, TOKEN_KIND};
+use lynx_world::service::{HELLO_KIND, Hello, Metrics, ServerEvent, Service, TOKEN_KIND};
 use lynx_world::transport::{self, AppState, CHARACTER_HEADER, OriginPolicy};
 use serde_json::json;
 use tokio::sync::{oneshot, watch};
@@ -130,12 +130,104 @@ async fn origin_allowlist_rejects_before_websocket_upgrade() {
         .unwrap();
 }
 
+#[tokio::test]
+async fn malformed_handshake_frame_is_rejected_without_authority_side_effects() {
+    let authenticator = Authenticator::new(&[digest(TOKEN)]).unwrap();
+    let (service, metrics) = websocket_service(&authenticator);
+    let (events, receiver) = transport::event_channel();
+    let (shutdown, shutdown_rx) = watch::channel(false);
+    let state = Arc::new(metrics_app_state(
+        events,
+        authenticator,
+        Arc::clone(&metrics),
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let service_task = tokio::spawn(service.run(receiver, shutdown_rx));
+    let (server_shutdown, server_shutdown_rx) = oneshot::channel();
+    let server_task = tokio::spawn(transport::serve_with_shutdown(
+        listener,
+        state,
+        async move {
+            let _ = server_shutdown_rx.await;
+        },
+    ));
+
+    let mut request = format!("ws://{address}/world")
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {TOKEN}")).unwrap(),
+    );
+    let (mut socket, _) = connect_async(request).await.unwrap();
+    socket
+        .send(Message::Binary(vec![0, 0, 0].into()))
+        .await
+        .unwrap();
+
+    let error = next_envelope(&mut socket).await;
+    assert_eq!(error.kind.as_str(), "protocol.error");
+    assert_eq!(error.body["code"], json!("invalid_request"));
+    assert!(
+        !serde_json::to_string(&error.body).unwrap().contains(TOKEN),
+        "malformed-frame errors must not disclose the bearer credential"
+    );
+    assert!(matches!(
+        socket.next().await.unwrap().unwrap(),
+        Message::Close(_)
+    ));
+    let rendered = metrics.render();
+    assert!(rendered.contains("lynx_world_session_attaches_total 0\n"));
+    assert!(rendered.contains("lynx_world_actions_applied_total 0\n"));
+
+    drop(socket);
+    let _ = shutdown.send(true);
+    let _ = server_shutdown.send(());
+    tokio::time::timeout(Duration::from_secs(2), service_task)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), server_task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
 fn envelope(id: &str, kind: &str, body: serde_json::Value) -> Envelope {
     Envelope::new(
         MessageId::parse(id).unwrap(),
         MessageKind::parse(kind).unwrap(),
         body,
     )
+}
+
+fn websocket_service(authenticator: &Authenticator) -> (Service, Arc<Metrics>) {
+    let grants: Vec<_> = authenticator.grants().cloned().collect();
+    let zone = demo::build_zone(&grants).unwrap();
+    let gateway = WorldGateway::new(
+        zone,
+        demo::handshake().unwrap(),
+        GatewayConfig::default(),
+        SystemResumeTokens::new(),
+    )
+    .unwrap();
+    let service = Service::new(WorldServer::new(gateway), Duration::from_millis(20));
+    let metrics = service.metrics();
+    (service, metrics)
+}
+
+fn metrics_app_state(
+    events: tokio::sync::mpsc::Sender<ServerEvent>,
+    authenticator: Authenticator,
+    metrics: Arc<Metrics>,
+) -> AppState {
+    AppState::new(events, authenticator)
+        .with_metrics(metrics)
+        .with_rate_limits(
+            RateLimitConfig::default().with_session_total(TokenBucketConfig::new(2, 1).unwrap()),
+        )
 }
 
 async fn next_envelope<S>(socket: &mut WebSocketStream<S>) -> Envelope
@@ -157,6 +249,17 @@ where
     }
 }
 
+fn assert_snapshot_socket_write_metrics(metrics: &lynx_world::service::Metrics) {
+    let rendered = metrics.render();
+    assert!(rendered.contains(
+        "lynx_world_replication_socket_write_frames_total{kind=\"snapshot\",outcome=\"success\"} 1\n"
+    ));
+    assert!(
+        !rendered
+            .contains("lynx_world_replication_socket_written_bytes_total{kind=\"snapshot\"} 0\n")
+    );
+}
+
 async fn send_envelope<S>(socket: &mut WebSocketStream<S>, envelope: &Envelope)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -171,21 +274,14 @@ where
 async fn a_client_can_authenticate_play_and_receive_correlated_errors() {
     tokio::time::timeout(Duration::from_secs(15), async {
         let authenticator = Authenticator::new(&[digest(TOKEN)]).unwrap();
-        let grants: Vec<_> = authenticator.grants().cloned().collect();
-        let zone = demo::build_zone(&grants).unwrap();
-        let gateway = WorldGateway::new(
-            zone,
-            demo::handshake().unwrap(),
-            GatewayConfig::default(),
-            SystemResumeTokens::new(),
-        )
-        .unwrap();
-        let service = Service::new(WorldServer::new(gateway), Duration::from_millis(20));
+        let (service, metrics) = websocket_service(&authenticator);
 
         let (events, receivers) = transport::event_channel();
         let (shutdown, shutdown_rx) = watch::channel(false);
-        let state = Arc::new(AppState::new(events, authenticator).with_rate_limits(
-            RateLimitConfig::default().with_session_total(TokenBucketConfig::new(2, 1).unwrap()),
+        let state = Arc::new(metrics_app_state(
+            events,
+            authenticator,
+            Arc::clone(&metrics),
         ));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -234,10 +330,53 @@ async fn a_client_can_authenticate_play_and_receive_correlated_errors() {
         let snapshot = next_envelope(&mut socket).await;
         assert_eq!(snapshot.kind.as_str(), SNAPSHOT_KIND);
         assert!(snapshot.body["interest"]["set"].as_array().is_some());
+        assert_snapshot_socket_write_metrics(&metrics);
 
         let token = next_envelope(&mut socket).await;
         assert_eq!(token.kind.as_str(), TOKEN_KIND);
         assert!(token.body["resume"].as_str().is_some());
+
+        // The active credential cannot attach a second gateway session or
+        // displace the original connection.
+        let mut duplicate_request = format!("ws://{address}/world")
+            .into_client_request()
+            .unwrap();
+        duplicate_request.headers_mut().insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {TOKEN}")).unwrap(),
+        );
+        let (mut duplicate, duplicate_response) = connect_async(duplicate_request).await.unwrap();
+        assert_eq!(duplicate_response.status(), 101);
+        send_envelope(
+            &mut duplicate,
+            &envelope(
+                "req_duplicate_0001",
+                HELLO_KIND,
+                serde_json::to_value(Hello {
+                    handshake: demo::handshake().unwrap(),
+                    last_ack_tick: Tick::ZERO,
+                })
+                .unwrap(),
+            ),
+        )
+        .await;
+        let denied = next_envelope(&mut duplicate).await;
+        assert_eq!(denied.kind.as_str(), "protocol.error");
+        assert_eq!(denied.body["code"], json!("conflict"));
+        assert!(
+            !serde_json::to_string(&denied.body).unwrap().contains(TOKEN),
+            "duplicate-session rejection must not disclose credentials"
+        );
+        assert!(matches!(
+            duplicate.next().await.unwrap().unwrap(),
+            Message::Close(_)
+        ));
+        drop(duplicate);
+        assert!(
+            metrics
+                .render()
+                .contains("lynx_world_session_attaches_total 1\n")
+        );
 
         let unsupported = envelope("req_bad_0001", "bogus.kind", json!({}));
         send_envelope(&mut socket, &unsupported).await;
@@ -300,6 +439,7 @@ async fn production_admission_verifies_identity_ownership_and_existing_actor() {
     )
     .unwrap();
     let service = Service::new(WorldServer::new(gateway), Duration::from_millis(20));
+    let metrics = service.metrics();
     let (events, receiver) = transport::event_channel();
     let (shutdown, shutdown_rx) = watch::channel(false);
     let state = Arc::new(AppState::with_identity_backend(
@@ -358,6 +498,39 @@ async fn production_admission_verifies_identity_ownership_and_existing_actor() {
                 .any(|value| value == token.as_bytes())
         );
     }
+    for (status, code) in [
+        (401, "invalid_session"),
+        (401, "invalid_session"),
+        (429, "rate_limited"),
+    ] {
+        let error = connect_async(request("expired-session", Some(owned)))
+            .await
+            .unwrap_err();
+        let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
+            panic!("guessed credentials must be rejected before websocket upgrade");
+        };
+        assert_eq!(response.status().as_u16(), status);
+        let body = response.body().as_deref().unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(body).unwrap()["error"],
+            code
+        );
+        assert!(
+            !body
+                .windows("expired-session".len())
+                .any(|value| value == b"expired-session"),
+            "failed-auth responses must not echo the guessed credential"
+        );
+    }
+    let rendered = metrics.render();
+    assert!(
+        rendered.contains("lynx_world_session_attaches_total 0\n"),
+        "rejected identity admissions must not create gateway sessions"
+    );
+    assert!(
+        rendered.contains("lynx_world_actions_applied_total 0\n"),
+        "rejected identity admissions must not apply gameplay actions"
+    );
 
     let (mut socket, response) = connect_async(request("valid-session", Some(owned)))
         .await

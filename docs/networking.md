@@ -187,9 +187,9 @@ configured browser origins must match exactly.
 A rate rejection returns HTTP 429 before an upgrade or a `protocol.error` with
 `code: "rate_limited"` after admission, then closes the WebSocket. It includes
 `retry_after_ms`; it never includes a credential. Each connection's outbound
-queue is capped at 64 frames. A full queue detaches that slow client with the
-`slow_client_outbound_queue_full` reason rather than blocking the authoritative
-tick; a resume uses a fresh snapshot. A connection closes after 120 seconds
+queue is bounded by `--outbound-queue` (8–256 frames, default 64). A full queue
+detaches that slow client with the `slow_client_outbound_queue_full` reason
+rather than blocking the authoritative tick; a resume uses a fresh snapshot. A connection closes after 120 seconds
 without an incoming WebSocket message. Socket writes and waits to enqueue an
 inbound frame to the authority are each bounded to five seconds; a timed-out
 authority enqueue closes that connection. Draining rejects new upgrades while
@@ -198,14 +198,17 @@ limits.
 
 ### Replication delivery target and overload policy
 
-The current measurable target is **tick-side enqueue**, not client receipt:
-the authority schedules a 50 ms tick and records overruns/deadline misses, while
-the transport reports encoded snapshot/delta bytes and successfully enqueued
-frame counts. Each encoded envelope is capped at 64 KiB and each connection's
-outbound queue is fixed at 64 frames (not runtime-configurable). Queue depth and
-capacity are sampled as process-wide sums; frame/byte counters are process-wide
-counters and do not identify individual sessions. They must not be interpreted
-as socket delivery acknowledgements or end-to-end latency measurements.
+The current measurable target is **tick-side enqueue plus completed local
+socket writes**, not client receipt: the authority schedules a 50 ms tick and
+records overruns/deadline misses, while the transport reports encoded
+snapshot/delta bytes and successfully enqueued frame counts, bounded
+snapshot/delta WebSocket write outcomes, and completed local write bytes. Each
+encoded envelope is capped at 64 KiB and each connection's outbound queue is
+bounded by `--outbound-queue` (8–256 frames, default 64). Queue depth and
+capacity are sampled as process-wide sums, with observed aggregate and
+single-queue high-water gauges. Frame/byte counters are process-wide counters and
+do not identify individual sessions. A completed local write is not a client
+acknowledgement, application, or end-to-end latency measurement.
 
 When a queue fills, the server drops that connection instead of waiting on it;
 it does not silently discard/coalesce a delta or reorder critical updates. The
@@ -213,12 +216,12 @@ detached session can resume only through a newly generated full snapshot, which
 resynchronizes interest and replicated state. Thus the current policy preserves
 the tick and isolates the slow consumer, but deliberately sacrifices that
 connection's availability. `lynx_world_outbound_queue_full_total`, session
-detach counters, queue gauges, encoded byte totals, per-kind successful enqueue
-counts, and tick timing counters expose the relevant process-level signals.
-Per-session queue/outcome metrics, configurable queue sizing, a measured
-end-to-end delivery SLO, and a representative target-entity-count load test
-remain follow-up work; the present fixed limits are guardrails, not a validated
-capacity claim.
+detach counters, queue gauges and high-water marks, encoded and completed-write
+byte totals, per-kind frame counters, and tick timing counters expose the
+relevant process-level signals. Per-session queue/outcome metrics, a measured
+end-to-end delivery SLO, critical-update prioritization/coalescing, and a
+representative target-entity-count load test remain follow-up work; the
+configured bounds are guardrails, not a validated capacity claim.
 
 ## World service wire messages
 

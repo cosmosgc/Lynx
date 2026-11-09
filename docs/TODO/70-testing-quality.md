@@ -66,12 +66,41 @@ particular, integrated coverage still needs broader queue/budget boundaries.
 Zone transfer is not yet available. Simulation unit
 tests cover some of these separately, but do not substitute for this suite.
 
+**Queue-budget boundary slice (2026-11-07):** Added real-gateway tests with
+`max_actions` set to zero and one. A zero-budget request is rejected without
+consuming its sequence; with a one-intent budget, a second session is rejected
+while the global pending queue is full, then succeeds with the same sequence
+after the next tick drains the queue. The broader authority/invariant matrix
+remains open.
+
+**Controller-change boundary slice (2026-11-07):** Added a real-gateway combat
+regression where Alice's authenticated session remains active after the server
+changes her actor's controller to Bob. Alice's attack is denied by simulation
+authority and leaves target health unchanged. This covers the wrong-controller
+case beyond rejecting client-forged actor/principal fields.
+
+**Movement geometry boundary slice (2026-11-08):** Added a real-gateway request
+that changes only the destination height. It is accepted into the queue but
+rejected during authoritative processing; the result consumes the accepted
+sequence and reports the unchanged server position.
+
+**Configured zone-boundary slice (2026-11-08):** Added a gateway case where the
+configured world bound is narrower than the navigation grid. A short same-cell
+move is nav-valid but crosses the world bound, so authoritative processing
+rejects it without changing position.
+
+**Processing-time liveness slice (2026-11-08):** Added a gateway case that
+queues a valid move, then makes the actor dead while leaving the controller and
+session unchanged. Processing rejects the intent, consumes its accepted
+sequence, and preserves the authoritative position, isolating the liveness
+recheck from controller-release behavior.
+
 ---
 
 ## QUA-002 — Determinism and property-based tests
 
 - **Priority:** P1
-- **Status:** Ready
+- **Status:** In progress — inventory conservation and snapshot-style JSON round trips have property coverage with shrinking; faction, calendar, and cross-machine replay evidence remain
 - **Depends on:** —
 - **References:** [architecture §Simulation model](../architecture.md#simulation-model),
   `SIM-018`
@@ -88,8 +117,20 @@ tests cover some of these separately, but do not substitute for this suite.
 
 - [ ] Core invariants have property tests with generators for edge cases.
 - [ ] Replay tests are deterministic across runs and machines.
-- [ ] A failure produces a minimal, reproducible seed/case.
+- [x] A failure produces a minimal, reproducible seed/case.
 - [ ] New persistent aggregates add invariants to the suite.
+
+**Progress:** `engine_core::inventory` now has `proptest` properties over random
+inventories and transfer attempts. They assert that a successful transfer
+conserves every item definition across both inventories, a failed transfer
+leaves both inventories byte-for-byte unchanged, and a replayed key returns the
+original receipt without touching either inventory. Generated inventories mix
+stackable and unique items and round-trip through JSON with validation, matching
+the snapshot restore path. Proptest shrinks any failing case to a minimal
+inventory/transfer pair and prints the seed. Territory ownership already has a
+deterministic generated sequence loop; converting faction treasury/territory and
+calendar lifecycle coverage to shrinking properties, and collecting
+cross-machine replay evidence, remain open.
 
 ---
 
@@ -131,7 +172,7 @@ versioned fixture set.
 ## QUA-004 — PostgreSQL integration matrix
 
 - **Priority:** P1
-- **Status:** Ready
+- **Status:** Done
 - **Depends on:** `PST-001`
 - **References:** `PST-001`, `PST-008`, `OPS-006`
 
@@ -153,10 +194,21 @@ non-flaky matrix.
 **Acceptance criteria**
 
 - [x] Live persistence tests run in CI, not only locally.
-- [ ] A configured-but-unreachable database fails loudly.
-- [ ] Tests are isolated and parallel-safe or explicitly serialized.
+- [x] A configured-but-unreachable database fails loudly.
+- [x] Tests are isolated and parallel-safe or explicitly serialized.
 - [x] Migration/schema failures produce actionable diagnostics.
 - [x] No test depends on Docker for local execution.
+
+**Progress:** `crates/lynx_world/tests/postgres_snapshot.rs` includes a
+database-free regression that connects a snapshot store to a released loopback
+port and asserts an internal error without echoing the password; a configured
+but unreachable database therefore fails instead of skipping. Every writing test
+uses per-run world/zone IDs incorporating a process ID and atomic sequence. A
+scoped cleanup guard transactionally removes snapshots, events, leases, zone
+snapshots, and quarantine rows on normal completion and during unwinding. A live
+PostgreSQL regression catches a simulated assertion panic and verifies its
+snapshot, event, and lease rows were removed. The full live test binary passed
+with `LYNX_REQUIRE_POSTGRES_TEST=1` and its default parallel test execution.
 
 ---
 
@@ -188,7 +240,7 @@ non-flaky matrix.
 ## QUA-006 — Security abuse test suite
 
 - **Priority:** P1
-- **Status:** In progress — duplicate-Origin rejection regression added; abuse matrix remains incomplete
+- **Status:** In progress — duplicate-Origin, malformed-handshake, failed-identity, token-guessing, and duplicate-session rejections cover pre-admission side effects; abuse matrix remains incomplete
 - **Depends on:** —
 - **References:** [security](../security.md), `NET-002`, `NET-007`, `NET-011`
 
@@ -213,6 +265,21 @@ response and never reaches gateway admission. This covers the documented
 origin-violation case where one header is allowlisted and another is hostile.
 The broader abuse matrix, state-side-effect checks for other rejection paths,
 and comprehensive secret-redaction assertions remain open.
+
+**Malformed-frame slice (2026-11-08):** Added an authenticated WebSocket case
+that sends a truncated binary frame before `session.hello`. The server returns a
+stable `invalid_request`, closes the socket, does not attach a gateway session or
+apply an action, and does not echo the bearer token in its error response.
+
+**Identity-rejection slice (2026-11-08):** Production-admission coverage now
+asserts that invalid credentials and foreign/missing character selections leave
+session-attach and applied-action metrics at zero before the valid control case.
+Repeated invalid credentials also exhaust the configured per-IP failed-auth
+bucket, return `rate_limited`, and never echo the guessed token.
+
+**Duplicate-session slice (2026-11-08):** A second WebSocket using an active
+credential receives `conflict` without increasing session attachments; the
+original connection remains usable after the rejected attempt.
 
 ---
 

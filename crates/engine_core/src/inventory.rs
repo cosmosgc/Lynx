@@ -545,6 +545,7 @@ impl TransferLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn item(name: &str) -> DefinitionId {
         DefinitionId::new(name).unwrap()
@@ -552,6 +553,46 @@ mod tests {
 
     fn inventory(capacity: usize) -> Inventory {
         Inventory::with_capacity(capacity).unwrap()
+    }
+
+    fn definition_strategy() -> impl Strategy<Value = DefinitionId> {
+        prop_oneof![Just(item("item.torch")), Just(item("item.rock"))]
+    }
+
+    fn inventory_strategy() -> impl Strategy<Value = Inventory> {
+        prop::collection::vec(
+            prop_oneof![
+                Just(None),
+                (definition_strategy(), 1u32..=10).prop_map(|(definition, quantity)| {
+                    Some(ItemStack::new(definition, quantity))
+                }),
+                (definition_strategy(), 0u128..64).prop_map(|(definition, seed)| {
+                    Some(ItemStack::unique(
+                        definition,
+                        StableId::from_parts(IdKind::Item, 1, seed),
+                    ))
+                }),
+            ],
+            1..=4,
+        )
+        .prop_map(|slots| {
+            let slots = slots
+                .into_iter()
+                .enumerate()
+                .map(|(index, slot)| match slot {
+                    Some(stack) if stack.is_unique() => Some(ItemStack::unique(
+                        stack.definition,
+                        StableId::from_parts(
+                            IdKind::Item,
+                            1,
+                            u128::try_from(index).expect("a slot index fits in u128"),
+                        ),
+                    )),
+                    other => other,
+                })
+                .collect();
+            Inventory::from_slots(slots, &UniformItemRules::new(10)).unwrap()
+        })
     }
 
     #[test]
@@ -814,5 +855,94 @@ mod tests {
         let valid =
             Inventory::from_slots(vec![None, Some(ItemStack::new(torch, 5))], &rules).unwrap();
         assert_eq!(valid.occupied_slots(), 1);
+    }
+
+    proptest! {
+        #[test]
+        fn random_transfers_conserve_totals_and_are_atomic_and_idempotent(
+            source in inventory_strategy(),
+            destination in inventory_strategy(),
+            source_slot in 0usize..8,
+            quantity in 1u32..=10,
+        ) {
+            let rules = UniformItemRules::new(10);
+            let mut source = source;
+            let mut destination = destination;
+            let source_before = source.clone();
+            let destination_before = destination.clone();
+            let source_id = StableId::from_parts(IdKind::Entity, 1, 1);
+            let destination_id = StableId::from_parts(IdKind::Entity, 1, 2);
+            let definitions = [item("item.torch"), item("item.rock")];
+            let totals_before: Vec<u64> = definitions
+                .iter()
+                .map(|definition| {
+                    source.total_quantity(definition) + destination.total_quantity(definition)
+                })
+                .collect();
+            let mut ledger = TransferLedger::new();
+
+            match ledger.transfer(
+                "property-transfer",
+                &mut source,
+                source_id,
+                source_slot,
+                &mut destination,
+                destination_id,
+                quantity,
+                &rules,
+            ) {
+                Ok(receipt) => {
+                    for (definition, total_before) in definitions.iter().zip(totals_before) {
+                        prop_assert_eq!(
+                            source.total_quantity(definition)
+                                + destination.total_quantity(definition),
+                            total_before,
+                            "a successful transfer conserves each definition"
+                        );
+                    }
+                    prop_assert_eq!(receipt.quantity, quantity);
+
+                    let source_after = source.clone();
+                    let destination_after = destination.clone();
+                    let replay = ledger
+                        .transfer(
+                            "property-transfer",
+                            &mut source,
+                            source_id,
+                            source_slot,
+                            &mut destination,
+                            destination_id,
+                            quantity,
+                            &rules,
+                        )
+                        .unwrap();
+                    prop_assert_eq!(replay, receipt);
+                    prop_assert_eq!(source, source_after);
+                    prop_assert_eq!(destination, destination_after);
+                }
+                Err(error) => {
+                    prop_assert!(matches!(
+                        error.code(),
+                        ErrorCode::NotFound
+                            | ErrorCode::InvalidRequest
+                            | ErrorCode::CapacityExceeded
+                    ));
+                    prop_assert_eq!(source, source_before);
+                    prop_assert_eq!(destination, destination_before);
+                    prop_assert_eq!(ledger.applied_count(), 0);
+                }
+            }
+        }
+
+        #[test]
+        fn random_inventories_round_trip_through_json_and_revalidate(
+            inventory in inventory_strategy()
+        ) {
+            let rules = UniformItemRules::new(10);
+            let encoded = serde_json::to_string(&inventory).unwrap();
+            let decoded: Inventory = serde_json::from_str(&encoded).unwrap();
+            prop_assert_eq!(&decoded, &inventory);
+            decoded.validate(&rules).unwrap();
+        }
     }
 }

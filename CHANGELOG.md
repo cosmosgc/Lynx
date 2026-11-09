@@ -15,6 +15,35 @@ semantic versioning for engine releases and content bundles.
 
 ### Added
 
+- `engine_core`: `proptest` coverage for inventory transfers and JSON round trips.
+  Generated stackable and unique inventories verify per-definition conservation,
+  all-or-nothing failure, idempotent replay, and snapshot-style deserialization
+  validation, with shrinking to a minimal failing case (`QUA-002`).
+- `lynx_world`: PostgreSQL integration tests now use collision-resistant per-run
+  IDs and a scoped cleanup guard that removes test rows on success or panic; a
+  live regression verifies cleanup during unwinding (`QUA-004`).
+- `lynx_world`: malformed pre-hello WebSocket frames are covered end to end;
+  rejection closes before gateway admission or action side effects and does not
+  echo the bearer token. Failed identity/ownership admission also asserts zero
+  session attaches and applied actions; a failed-auth burst is rate-limited
+  without echoing the guessed credential, and duplicate sessions cannot displace
+  the active connection (`QUA-006`).
+- `world_gateway`: real-gateway movement budget boundary tests verify that a
+  zero budget rejects without consuming sequence state and that a saturated
+  cross-session queue accepts the rejected intent after the next tick; a
+  controller-change regression denies stale-session combat without health
+  mutation; vertical movement and a nav-valid move beyond configured zone bounds
+  are rejected without moving the actor, as is a pending move after the actor
+  dies while its controller remains bound (`QUA-001`).
+- `lynx_world`: configurable per-connection `--outbound-queue` capacity (8–256
+  frames, default 64) with startup validation, replacing the fixed internal
+  limit (`NET-006`).
+- `lynx_world`: observed outbound queue high-water gauges and bounded snapshot/
+  delta WebSocket write outcome and completed-byte metrics; slow-peer isolation
+  and reconnect snapshot recovery are covered (`NET-006`).
+- `scripts/backup-restore-smoke.sh`: guarded loopback PostgreSQL backup/restore
+  verification, including world snapshot replay checks, audit trigger checks,
+  restored-service readiness, and a disposable CI database (`PST-009`).
 - `lynx_client` and `lynx_world`: read-only owner inventory presentation. The
   client retains session-private `owner_only` inventory only for the controlled
   actor, validates and orders it, clears it on disconnect and fresh snapshots,

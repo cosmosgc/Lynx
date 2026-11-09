@@ -6,6 +6,7 @@
 //! still passes on an offline workstation or in CI without PostgreSQL. Set
 //! `LYNX_REQUIRE_POSTGRES_TEST=1` to fail instead of skipping when unconfigured.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use backend_nakama::postgres_pool::pool as postgres_pool;
@@ -28,6 +29,32 @@ use lynx_world::persistence::{
 use lynx_world::startup;
 use world_gateway::{GatewayConfig, SystemResumeTokens, WorldGateway};
 use world_server::WorldServer;
+
+#[test]
+fn configured_but_unreachable_database_fails_loudly() {
+    // Reserve and release an ephemeral port so the connection attempt is
+    // refused instead of hanging. This test does not need a database and never
+    // skips: a configured-but-unreachable store must surface an error.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let mut config = postgres::Config::new();
+    config
+        .host("127.0.0.1")
+        .port(port)
+        .dbname("lynx")
+        .user("lynx")
+        .password("unreachable-sentinel-secret");
+
+    let error = PostgresSnapshotStore::connect(&config, test_world_id()).unwrap_err();
+    let rendered = format!("{error:?} {error}");
+    assert_eq!(error.code(), engine_core::error::ErrorCode::Internal);
+    assert!(
+        !rendered.contains("unreachable-sentinel-secret"),
+        "connection errors must not echo the password"
+    );
+}
 
 #[test]
 fn schema_inspection_does_not_change_history() -> anyhow::Result<()> {
@@ -106,20 +133,117 @@ fn characters(count: usize) -> Vec<Grant> {
         .collect()
 }
 
-fn test_world_id() -> String {
+static TEST_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn test_run_id() -> u128 {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    format!("test-{nanos}")
+    let process = u128::from(std::process::id());
+    let sequence =
+        u128::from(TEST_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed) & u64::from(u32::MAX));
+    (nanos << 64) | (process << 32) | sequence
+}
+
+fn test_world_id() -> String {
+    format!("test-{}", test_run_id())
 }
 
 fn test_zone_id() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    format!("zone_{nanos:026}")
+    const BASE32: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    let mut value = test_run_id();
+    let mut encoded = [b'0'; 26];
+    for digit in encoded.iter_mut().rev() {
+        let index = usize::try_from(value & 0x1f).expect("base32 digit fits in usize");
+        *digit = BASE32[index];
+        value >>= 5;
+    }
+    format!(
+        "zone_{}",
+        String::from_utf8(encoded.to_vec()).expect("base32 test ID is valid UTF-8")
+    )
+}
+
+#[derive(Default)]
+struct PostgresTestScope {
+    world_ids: Vec<String>,
+    zone_ids: Vec<String>,
+    cleaned: bool,
+}
+
+impl PostgresTestScope {
+    fn world_id(&mut self) -> String {
+        let id = test_world_id();
+        self.world_ids.push(id.clone());
+        id
+    }
+
+    fn zone_id(&mut self) -> String {
+        let id = test_zone_id();
+        self.zone_ids.push(id.clone());
+        id
+    }
+
+    fn cleanup(&mut self) -> anyhow::Result<()> {
+        if self.cleaned {
+            return Ok(());
+        }
+        if self.world_ids.is_empty() && self.zone_ids.is_empty() {
+            self.cleaned = true;
+            return Ok(());
+        }
+
+        let config = lynx_world::persistence::postgres_config_from_env()?;
+        let mut client = config
+            .connect(postgres::NoTls)
+            .map_err(|_| anyhow::anyhow!("PostgreSQL test cleanup connection failed"))?;
+        let mut transaction = client.transaction()?;
+        transaction.batch_execute("SET LOCAL lynx.allow_append_only_purge = 'on'")?;
+        for zone_id in &self.zone_ids {
+            transaction.execute(
+                "DELETE FROM lynx.zone_events WHERE zone_id = $1",
+                &[zone_id],
+            )?;
+            transaction.execute(
+                "DELETE FROM lynx.zone_snapshots WHERE zone_id = $1",
+                &[zone_id],
+            )?;
+            transaction.execute(
+                "DELETE FROM lynx.zone_leases WHERE zone_id = $1",
+                &[zone_id],
+            )?;
+            transaction.execute(
+                "DELETE FROM lynx.recovery_quarantine WHERE zone_id = $1",
+                &[zone_id],
+            )?;
+        }
+        for world_id in &self.world_ids {
+            transaction.execute(
+                "DELETE FROM lynx.world_snapshots WHERE world_id = $1",
+                &[world_id],
+            )?;
+            transaction.execute(
+                "DELETE FROM lynx.recovery_quarantine WHERE world_id = $1",
+                &[world_id],
+            )?;
+        }
+        transaction.commit()?;
+        self.cleaned = true;
+        Ok(())
+    }
+
+    fn finish(mut self) -> anyhow::Result<()> {
+        self.cleanup()
+    }
+}
+
+impl Drop for PostgresTestScope {
+    fn drop(&mut self) {
+        if !self.cleaned && self.cleanup().is_err() {
+            eprintln!("PostgreSQL integration-test row cleanup failed");
+        }
+    }
 }
 
 fn authored_snapshot() -> anyhow::Result<WorldSnapshot> {
@@ -220,6 +344,64 @@ fn assert_event_batch_appends_contiguously(
 }
 
 #[test]
+#[allow(clippy::panic)] // A caught panic proves the scope guard cleans up during unwinding.
+fn postgres_test_scope_cleans_rows_during_unwind() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+    if std::env::var("LYNX_PG_PASSWORD").is_err() {
+        anyhow::ensure!(
+            std::env::var_os("LYNX_REQUIRE_POSTGRES_TEST").is_none(),
+            "PostgreSQL test required but not configured"
+        );
+        eprintln!("skipping PostgreSQL cleanup test: LYNX_PG_PASSWORD is not configured");
+        return Ok(());
+    }
+
+    let mut scope = PostgresTestScope::default();
+    let world_id = scope.world_id();
+    let zone_id = scope.zone_id();
+    let check_world_id = world_id.clone();
+    let check_zone_id = zone_id.clone();
+    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _scope = scope;
+        let leases = PostgresZoneLeaseStore::from_env()
+            .expect("lease store connects for the configured PostgreSQL test");
+        let lease = leases
+            .acquire(&zone_id, "cleanup-unwind-test", Duration::from_secs(30))
+            .expect("the lease store acquires the isolated zone")
+            .expect("the isolated test zone lease is available");
+        let store = PostgresSnapshotStore::from_env(&world_id)
+            .expect("snapshot store connects for the configured PostgreSQL test");
+        store
+            .bind_zone_lease(&zone_id, "cleanup-unwind-test", lease.fencing_token)
+            .expect("the snapshot store binds to the isolated lease");
+        let mut snapshot = authored_snapshot().expect("the authored fixture is valid");
+        snapshot.zone.tick.0 = 1;
+        store
+            .save_at_tick(&snapshot, 1)
+            .expect("the fixture snapshot is persisted before unwinding");
+        panic!("simulate an assertion failure after writing PostgreSQL test rows");
+    }));
+    assert!(
+        unwind.is_err(),
+        "the test fixture must unwind after inserting its rows"
+    );
+
+    let config = lynx_world::persistence::postgres_config_from_env()?;
+    let mut client = config.connect(postgres::NoTls)?;
+    let leftovers: bool = client
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM lynx.world_snapshots WHERE world_id = $1) OR EXISTS (SELECT 1 FROM lynx.zone_events WHERE zone_id = $2) OR EXISTS (SELECT 1 FROM lynx.zone_leases WHERE zone_id = $2)",
+            &[&check_world_id, &check_zone_id],
+        )?
+        .get(0);
+    assert!(
+        !leftovers,
+        "the scope guard must delete snapshot, event, and lease rows during unwind"
+    );
+    Ok(())
+}
+
+#[test]
 fn postgres_zone_lease_takeover_fences_old_owner_writes() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     if std::env::var("LYNX_PG_PASSWORD").is_err() {
@@ -230,8 +412,9 @@ fn postgres_zone_lease_takeover_fences_old_owner_writes() -> anyhow::Result<()> 
         eprintln!("skipping PostgreSQL zone lease test: LYNX_PG_PASSWORD is not configured");
         return Ok(());
     }
+    let mut scope = PostgresTestScope::default();
+    let zone = scope.zone_id();
     let store = PostgresZoneLeaseStore::from_env()?;
-    let zone = test_zone_id();
     let first = store
         .acquire(&zone, "owner-a", std::time::Duration::from_secs(10))?
         .unwrap();
@@ -244,7 +427,7 @@ fn postgres_zone_lease_takeover_fences_old_owner_writes() -> anyhow::Result<()> 
     );
 
     // A snapshot written under the live lease is accepted.
-    let world_id = test_world_id();
+    let world_id = scope.world_id();
     let snapshots = PostgresSnapshotStore::from_env(&world_id)?;
     snapshots.bind_zone_lease(&zone, "owner-a", first.fencing_token)?;
     let snapshot = authored_snapshot()?;
@@ -324,6 +507,7 @@ fn postgres_zone_lease_takeover_fences_old_owner_writes() -> anyhow::Result<()> 
     );
     assert!(store.release(&zone, "owner-b", second.fencing_token)?);
     snapshots.delete()?;
+    scope.finish()?;
     Ok(())
 }
 
@@ -340,8 +524,9 @@ fn fenced_recovery_rejects_missing_checkpoint_rows_and_events() -> anyhow::Resul
         return Ok(());
     }
 
-    let zone = test_zone_id();
-    let world_id = test_world_id();
+    let mut scope = PostgresTestScope::default();
+    let zone = scope.zone_id();
+    let world_id = scope.world_id();
     let leases = PostgresZoneLeaseStore::from_env()?;
     let lease = leases
         .acquire(&zone, "checkpoint-test", std::time::Duration::from_secs(30))?
@@ -420,8 +605,8 @@ fn fenced_recovery_rejects_missing_checkpoint_rows_and_events() -> anyhow::Resul
     assert!(leases.release(&zone, "checkpoint-test", lease.fencing_token)?);
     client.execute("DELETE FROM lynx.zone_leases WHERE zone_id = $1", &[&zone])?;
 
-    let legacy_zone = test_zone_id();
-    let legacy_world = test_world_id();
+    let legacy_zone = scope.zone_id();
+    let legacy_world = scope.world_id();
     let legacy_lease = leases
         .acquire(
             &legacy_zone,
@@ -454,6 +639,7 @@ fn fenced_recovery_rejects_missing_checkpoint_rows_and_events() -> anyhow::Resul
         "DELETE FROM lynx.zone_leases WHERE zone_id = $1",
         &[&legacy_zone],
     )?;
+    scope.finish()?;
     Ok(())
 }
 
@@ -469,8 +655,9 @@ fn postgres_load_replays_entity_deltas_after_the_pinned_checkpoint() -> anyhow::
         return Ok(());
     }
 
-    let zone = test_zone_id();
-    let world_id = test_world_id();
+    let mut scope = PostgresTestScope::default();
+    let zone = scope.zone_id();
+    let world_id = scope.world_id();
     let leases = PostgresZoneLeaseStore::from_env()?;
     let lease = leases
         .acquire(
@@ -545,6 +732,7 @@ fn postgres_load_replays_entity_deltas_after_the_pinned_checkpoint() -> anyhow::
     store.record_quarantine(&zone, &world.quarantined)?;
     let stored = store.quarantine_records(&zone)?;
     assert_eq!(stored, world.quarantined, "the report is durable");
+    scope.finish()?;
     Ok(())
 }
 
@@ -561,8 +749,9 @@ fn postgres_recovers_multi_tick_aggregates_and_prunes_replayed_history() -> anyh
         return Ok(());
     }
 
-    let zone = test_zone_id();
-    let world_id = test_world_id();
+    let mut scope = PostgresTestScope::default();
+    let zone = scope.zone_id();
+    let world_id = scope.world_id();
     let owner = "multi-tick-recovery-test";
     let leases = PostgresZoneLeaseStore::from_env()?;
     let lease = leases
@@ -803,6 +992,7 @@ fn postgres_recovers_multi_tick_aggregates_and_prunes_replayed_history() -> anyh
 
     final_store.delete()?;
     assert!(leases.release(&zone, owner, lease.fencing_token)?);
+    scope.finish()?;
     Ok(())
 }
 
@@ -817,8 +1007,9 @@ fn postgres_zone_lease_expiry_allows_takeover() -> anyhow::Result<()> {
         eprintln!("skipping PostgreSQL zone lease test: LYNX_PG_PASSWORD is not configured");
         return Ok(());
     }
+    let mut scope = PostgresTestScope::default();
+    let zone = scope.zone_id();
     let store = PostgresZoneLeaseStore::from_env()?;
-    let zone = test_zone_id();
     let first = store
         .acquire(&zone, "owner-a", std::time::Duration::from_millis(500))?
         .unwrap();
@@ -834,6 +1025,7 @@ fn postgres_zone_lease_expiry_allows_takeover() -> anyhow::Result<()> {
         .unwrap();
     assert!(second.fencing_token > first.fencing_token);
     assert!(store.release(&zone, "owner-b", second.fencing_token)?);
+    scope.finish()?;
     Ok(())
 }
 
@@ -850,7 +1042,8 @@ fn postgres_store_round_trips_and_fresh_start_resets_it() -> anyhow::Result<()> 
         return Ok(());
     }
 
-    let world_id = test_world_id();
+    let mut scope = PostgresTestScope::default();
+    let world_id = scope.world_id();
     let store = PostgresSnapshotStore::from_env(&world_id)?;
     assert_eq!(store.world_id(), world_id);
     assert!(
@@ -919,5 +1112,6 @@ fn postgres_store_round_trips_and_fresh_start_resets_it() -> anyhow::Result<()> 
     let deleted = store.delete()?;
     assert!(deleted, "the test world owned a row to delete");
     assert!(store.load()?.is_none(), "a deleted snapshot is absent");
+    scope.finish()?;
     Ok(())
 }

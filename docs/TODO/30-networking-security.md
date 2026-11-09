@@ -240,8 +240,9 @@ for every breaking change.
 ## NET-006 — Replication delivery SLO and backpressure
 
 - **Priority:** P1
-- **Status:** Ready
-- **Depends on:** —
+- **Status:** In progress — aggregate queue/write telemetry, configurable queue bounds, and slow-peer isolation are implemented; per-session diagnostics and measured delivery targets remain
+- **Depends on:** `QUA-005` for measured SLO/load validation; the telemetry and
+  isolation slice can proceed independently.
 - **References:** [ADR 0012](../adr/0012-interest-management-and-replication-audiences.md),
   [networking §Transport](../networking.md#transport)
 
@@ -259,10 +260,35 @@ entity counts and movement grow, replication will become the first bottleneck.
 
 **Acceptance criteria**
 
-- [ ] Metrics expose queue depth and delivery outcomes per session.
-- [ ] A slow client cannot increase another session's latency beyond the target.
-- [ ] Overflow triggers a documented resync rather than silent state loss.
-- [ ] A load test validates the byte/tick budget at the target entity count.
+- [x] Metrics expose aggregate queue depth, observed high-water marks, and
+  snapshot/delta WebSocket write outcomes and completed bytes with bounded labels.
+- [ ] Per-session delivery counts/bytes and queue occupancy are available through
+  a bounded, cardinality-safe diagnostic surface.
+- [x] A full slow-peer queue is detached without blocking a healthy peer's queue;
+  the synchronous authority test covers isolation, but not a numeric latency SLO.
+- [x] Overflow recovery is documented and tested: detach the slow peer; on
+  reconnect/resume, send an authoritative snapshot before later deltas.
+- [ ] A load test validates a measured byte/tick budget at the target entity
+  count and establishes the delivery target (`QUA-005`).
+- [x] Queue capacity is configurable within safe server-owned bounds:
+  `--outbound-queue` accepts 8–256 frames (default 64) and rejects values
+  outside that range at startup.
+- [ ] Critical-update priority and delta coalescing are designed and tested.
+
+**Implementation state:** `lynx_world` exports queue-depth samples, aggregate
+and maximum single-connection observed high-water gauges, and bounded
+snapshot/delta socket-write frame outcomes and completed byte counters. The
+per-connection queue is sized by the validated `--outbound-queue` flag (8–256
+frames, default 64), so operators can trade worst-case per-session memory
+against tolerance for scheduler stalls without changing the code. The transport
+integration test observes a completed snapshot send. A service test fills one
+peer's queue, verifies it is detached, and verifies another peer still receives
+its frame. Resume coverage asserts an authoritative snapshot is queued.
+Session-ID-labeled measurements are intentionally not added to Prometheus
+because session churn creates unbounded label cardinality; a bounded diagnostic
+surface must be designed before that acceptance item is closed. Numeric SLOs and
+byte budgets remain unmeasured pending `QUA-005` load work; no target is
+invented.
 
 ---
 

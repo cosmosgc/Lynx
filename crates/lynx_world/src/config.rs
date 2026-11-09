@@ -28,6 +28,18 @@ pub const DEFAULT_SNAPSHOT_MS: u64 = 10_000;
 /// Default zone lease lifetime for `--state-postgres`, in milliseconds.
 pub const DEFAULT_LEASE_MS: u64 = 30_000;
 
+/// Default frames queued per connection before it is considered too slow.
+pub const DEFAULT_OUTBOUND_QUEUE: usize = 64;
+
+/// Smallest supported per-connection outbound queue. A smaller queue turns
+/// ordinary scheduling jitter into disconnects.
+pub const MIN_OUTBOUND_QUEUE: usize = 8;
+
+/// Largest supported per-connection outbound queue. Each queued frame can be
+/// up to the protocol frame limit, so larger queues multiply worst-case
+/// per-session memory.
+pub const MAX_OUTBOUND_QUEUE: usize = 256;
+
 /// Authentication path selected for one world process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum AuthMode {
@@ -93,6 +105,12 @@ pub struct ServeArgs {
     /// Maximum retained sessions, connected or disconnected.
     #[arg(long, default_value_t = 1_024)]
     pub max_sessions: usize,
+
+    /// Frames queued per connection before the client is treated as too slow
+    /// and detached. Must be between 8 and 256; the default tolerates a short
+    /// scheduler stall without multiplying worst-case per-session memory.
+    #[arg(long, default_value_t = DEFAULT_OUTBOUND_QUEUE)]
+    pub outbound_queue: usize,
 
     /// Duplicate-session scope, including disconnected resume windows.
     #[arg(long, value_enum, default_value_t = SessionPolicyArg::PerCharacter)]
@@ -260,6 +278,19 @@ impl ServeArgs {
         Ok(Duration::from_millis(self.lease_ttl_ms))
     }
 
+    /// The validated per-connection outbound queue capacity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error outside [`MIN_OUTBOUND_QUEUE`] to
+    /// [`MAX_OUTBOUND_QUEUE`].
+    pub fn outbound_queue(&self) -> Result<usize> {
+        if !(MIN_OUTBOUND_QUEUE..=MAX_OUTBOUND_QUEUE).contains(&self.outbound_queue) {
+            bail!("--outbound-queue must be between {MIN_OUTBOUND_QUEUE} and {MAX_OUTBOUND_QUEUE}");
+        }
+        Ok(self.outbound_queue)
+    }
+
     /// Combine consistency checks for the snapshot configuration.
     ///
     /// # Errors
@@ -327,6 +358,7 @@ mod tests {
             resume_ttl_ms: 30_000,
             view_radius_m: 60.0,
             max_sessions: 1_024,
+            outbound_queue: DEFAULT_OUTBOUND_QUEUE,
             session_policy: SessionPolicyArg::PerCharacter,
             message_burst: 100,
             message_rate: 100,
@@ -437,6 +469,29 @@ mod tests {
 
         crowded.lease_ttl_ms = 3_000;
         assert!(crowded.lease_ttl().is_ok());
+    }
+
+    #[test]
+    fn outbound_queue_capacity_is_bounded() {
+        let mut args = sample();
+        assert_eq!(args.outbound_queue().unwrap(), DEFAULT_OUTBOUND_QUEUE);
+
+        for capacity in [
+            MIN_OUTBOUND_QUEUE,
+            DEFAULT_OUTBOUND_QUEUE,
+            MAX_OUTBOUND_QUEUE,
+        ] {
+            args.outbound_queue = capacity;
+            assert_eq!(args.outbound_queue().unwrap(), capacity);
+        }
+
+        for capacity in [0, MIN_OUTBOUND_QUEUE - 1, MAX_OUTBOUND_QUEUE + 1] {
+            args.outbound_queue = capacity;
+            assert!(
+                args.outbound_queue().is_err(),
+                "{capacity} must be rejected"
+            );
+        }
     }
 
     #[test]

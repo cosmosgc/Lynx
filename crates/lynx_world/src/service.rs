@@ -111,9 +111,23 @@ pub enum ServerFrame {
     /// Frame and send this envelope.
     Envelope(Envelope),
     /// Already encoded replication frame, reused for byte accounting and sending.
-    Encoded(Vec<u8>),
+    EncodedReplication {
+        /// Encoded frame including the protocol length prefix.
+        bytes: Vec<u8>,
+        /// Replication payload category.
+        kind: ReplicationKind,
+    },
     /// Send a close frame and stop reading.
     Close,
+}
+
+/// Bounded replication frame categories used in transport metrics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplicationKind {
+    /// Full authoritative state snapshot.
+    Snapshot,
+    /// Incremental authoritative state delta.
+    Delta,
 }
 
 /// A successful admission.
@@ -169,9 +183,17 @@ pub struct Metrics {
     session_expired_closes: AtomicU64,
     queue_depth: AtomicU64,
     queue_capacity: AtomicU64,
+    queue_depth_high_water: AtomicU64,
+    queue_session_depth_high_water: AtomicU64,
     replication_enqueued_bytes: AtomicU64,
     replication_snapshots_enqueued: AtomicU64,
     replication_deltas_enqueued: AtomicU64,
+    replication_snapshot_socket_write_frames: AtomicU64,
+    replication_snapshot_socket_write_failures: AtomicU64,
+    replication_snapshot_socket_write_bytes: AtomicU64,
+    replication_delta_socket_write_frames: AtomicU64,
+    replication_delta_socket_write_failures: AtomicU64,
+    replication_delta_socket_write_bytes: AtomicU64,
     ai_ticks: AtomicU64,
     ai_decisions: AtomicU64,
     ai_controller_scan_limit: AtomicU64,
@@ -275,6 +297,12 @@ impl Metrics {
             get(&self.queue_depth),
             get(&self.queue_capacity)
         );
+        let _ = write!(
+            text,
+            "# HELP lynx_world_outbound_queue_depth_high_water Highest total queued frame depth observed in this process.\n# TYPE lynx_world_outbound_queue_depth_high_water gauge\nlynx_world_outbound_queue_depth_high_water {}\n# HELP lynx_world_outbound_queue_session_depth_high_water Highest queued frame depth observed in any one connection queue in this process.\n# TYPE lynx_world_outbound_queue_session_depth_high_water gauge\nlynx_world_outbound_queue_session_depth_high_water {}\n",
+            get(&self.queue_depth_high_water),
+            get(&self.queue_session_depth_high_water)
+        );
         for (code, count) in self.resume_failure_codes.lock().unwrap().iter() {
             let _ = writeln!(
                 text,
@@ -291,6 +319,16 @@ impl Metrics {
             "# HELP lynx_world_replication_enqueued_frames_total Successfully enqueued replication frames by kind.\n# TYPE lynx_world_replication_enqueued_frames_total counter\nlynx_world_replication_enqueued_frames_total{{kind=\"snapshot\"}} {}\nlynx_world_replication_enqueued_frames_total{{kind=\"delta\"}} {}\n",
             get(&self.replication_snapshots_enqueued),
             get(&self.replication_deltas_enqueued)
+        );
+        let _ = write!(
+            text,
+            "# HELP lynx_world_replication_socket_write_frames_total Replication frames whose WebSocket send completed or failed, by bounded kind and outcome.\n# TYPE lynx_world_replication_socket_write_frames_total counter\nlynx_world_replication_socket_write_frames_total{{kind=\"snapshot\",outcome=\"success\"}} {}\nlynx_world_replication_socket_write_frames_total{{kind=\"snapshot\",outcome=\"failure\"}} {}\nlynx_world_replication_socket_write_frames_total{{kind=\"delta\",outcome=\"success\"}} {}\nlynx_world_replication_socket_write_frames_total{{kind=\"delta\",outcome=\"failure\"}} {}\n# HELP lynx_world_replication_socket_written_bytes_total Encoded replication bytes whose WebSocket send completed, by bounded frame kind; this is not a client acknowledgement.\n# TYPE lynx_world_replication_socket_written_bytes_total counter\nlynx_world_replication_socket_written_bytes_total{{kind=\"snapshot\"}} {}\nlynx_world_replication_socket_written_bytes_total{{kind=\"delta\"}} {}\n",
+            get(&self.replication_snapshot_socket_write_frames),
+            get(&self.replication_snapshot_socket_write_failures),
+            get(&self.replication_delta_socket_write_frames),
+            get(&self.replication_delta_socket_write_failures),
+            get(&self.replication_snapshot_socket_write_bytes),
+            get(&self.replication_delta_socket_write_bytes),
         );
         let _ = writeln!(
             text,
@@ -389,6 +427,35 @@ impl Metrics {
         };
         counter.fetch_add(1, Ordering::Relaxed);
     }
+
+    /// Record the result of sending one encoded replication frame to its
+    /// WebSocket. Successful bytes mean the local WebSocket send completed,
+    /// not that the remote client acknowledged the frame.
+    pub fn record_replication_socket_write(
+        &self,
+        kind: ReplicationKind,
+        bytes: usize,
+        success: bool,
+    ) {
+        let (frames, failures, written_bytes) = match kind {
+            ReplicationKind::Snapshot => (
+                &self.replication_snapshot_socket_write_frames,
+                &self.replication_snapshot_socket_write_failures,
+                &self.replication_snapshot_socket_write_bytes,
+            ),
+            ReplicationKind::Delta => (
+                &self.replication_delta_socket_write_frames,
+                &self.replication_delta_socket_write_failures,
+                &self.replication_delta_socket_write_bytes,
+            ),
+        };
+        if success {
+            frames.fetch_add(1, Ordering::Relaxed);
+            written_bytes.fetch_add(u64::try_from(bytes).unwrap_or(u64::MAX), Ordering::Relaxed);
+        } else {
+            failures.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 /// How and when the service writes durable world snapshots.
@@ -438,19 +505,27 @@ impl Service {
     }
 
     fn update_gauges(&self) {
-        let (depth, capacity) =
-            self.writers
-                .values()
-                .fold((0u64, 0u64), |(depth, capacity), writer| {
-                    (
-                        depth.saturating_add((writer.max_capacity() - writer.capacity()) as u64),
-                        capacity.saturating_add(writer.max_capacity() as u64),
-                    )
-                });
+        let (depth, capacity, session_depth) = self.writers.values().fold(
+            (0u64, 0u64, 0u64),
+            |(depth, capacity, high_water), writer| {
+                let writer_depth = (writer.max_capacity() - writer.capacity()) as u64;
+                (
+                    depth.saturating_add(writer_depth),
+                    capacity.saturating_add(writer.max_capacity() as u64),
+                    high_water.max(writer_depth),
+                )
+            },
+        );
         self.metrics.queue_depth.store(depth, Ordering::Relaxed);
         self.metrics
             .queue_capacity
             .store(capacity, Ordering::Relaxed);
+        self.metrics
+            .queue_depth_high_water
+            .fetch_max(depth, Ordering::Relaxed);
+        self.metrics
+            .queue_session_depth_high_water
+            .fetch_max(session_depth, Ordering::Relaxed);
         self.metrics.entities.store(
             self.server.gateway().zone().entity_count() as u64,
             Ordering::Relaxed,
@@ -1077,12 +1152,12 @@ impl Service {
             ServerFrame::Envelope(envelope)
                 if envelope.kind.as_str() == world_server::SNAPSHOT_KIND =>
             {
-                Some("snapshot")
+                Some(ReplicationKind::Snapshot)
             }
             ServerFrame::Envelope(envelope)
                 if envelope.kind.as_str() == world_server::DELTA_KIND =>
             {
-                Some("delta")
+                Some(ReplicationKind::Delta)
             }
             _ => None,
         };
@@ -1094,15 +1169,18 @@ impl Service {
                 ) =>
             {
                 match engine_net::framing::encode_frame(&envelope) {
-                    Ok(bytes) => ServerFrame::Encoded(bytes),
+                    Ok(bytes) => ServerFrame::EncodedReplication {
+                        bytes,
+                        kind: replication_kind.expect("replication kind was matched above"),
+                    },
                     // Preserve the transport's existing encode-failure handling.
                     Err(_) => ServerFrame::Envelope(envelope),
                 }
             }
             frame => frame,
         };
-        let replication_bytes = match (&frame, replication_kind) {
-            (ServerFrame::Encoded(bytes), Some(kind)) => Some((bytes.len() as u64, kind)),
+        let replication_bytes = match &frame {
+            ServerFrame::EncodedReplication { bytes, kind } => Some((bytes.len() as u64, *kind)),
             _ => None,
         };
         match writer.try_send(frame) {
@@ -1111,16 +1189,23 @@ impl Service {
                     self.metrics
                         .replication_enqueued_bytes
                         .fetch_add(bytes, Ordering::Relaxed);
-                    let counter = if kind == "snapshot" {
+                    let counter = if kind == ReplicationKind::Snapshot {
                         &self.metrics.replication_snapshots_enqueued
                     } else {
                         &self.metrics.replication_deltas_enqueued
                     };
                     counter.fetch_add(1, Ordering::Relaxed);
                 }
+                let writer_depth = (writer.max_capacity() - writer.capacity()) as u64;
+                self.metrics
+                    .queue_session_depth_high_water
+                    .fetch_max(writer_depth, Ordering::Relaxed);
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
                 self.metrics.outbound_full.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .queue_session_depth_high_water
+                    .fetch_max(writer.max_capacity() as u64, Ordering::Relaxed);
                 tracing::warn!(
                     connection = %connection,
                     reason = "slow_client_outbound_queue_full",
@@ -1385,6 +1470,8 @@ mod tests {
         assert!(initial.contains("lynx_world_session_attaches_total 1\n"));
         assert!(initial.contains("lynx_world_outbound_queue_depth 3\n"));
         assert!(initial.contains("lynx_world_outbound_queue_capacity 16\n"));
+        assert!(initial.contains("lynx_world_outbound_queue_depth_high_water 3\n"));
+        assert!(initial.contains("lynx_world_outbound_queue_session_depth_high_water 3\n"));
         assert!(
             initial.contains("lynx_world_replication_enqueued_frames_total{kind=\"snapshot\"} 1\n")
         );
@@ -1394,7 +1481,7 @@ mod tests {
         assert!(metrics.replication_enqueued_bytes.load(Ordering::Relaxed) > 0);
         let mut queued_bytes = 0;
         while let Ok(frame) = receiver.try_recv() {
-            if let ServerFrame::Encoded(bytes) = frame {
+            if let ServerFrame::EncodedReplication { bytes, .. } = frame {
                 let envelope = engine_net::framing::decode_frame(&bytes).unwrap();
                 assert_eq!(envelope.kind.as_str(), world_server::SNAPSHOT_KIND);
                 queued_bytes += bytes.len() as u64;
@@ -1441,6 +1528,29 @@ mod tests {
             metrics
                 .render()
                 .contains("lynx_world_retained_sessions 1\n")
+        );
+    }
+
+    #[test]
+    fn replication_socket_metrics_distinguish_completed_and_failed_writes() {
+        let metrics = Metrics::default();
+        metrics.record_replication_socket_write(ReplicationKind::Snapshot, 100, true);
+        metrics.record_replication_socket_write(ReplicationKind::Snapshot, 40, false);
+        metrics.record_replication_socket_write(ReplicationKind::Delta, 25, true);
+
+        let rendered = metrics.render();
+        assert!(rendered.contains(
+            "lynx_world_replication_socket_write_frames_total{kind=\"snapshot\",outcome=\"success\"} 1\n"
+        ));
+        assert!(rendered.contains(
+            "lynx_world_replication_socket_write_frames_total{kind=\"snapshot\",outcome=\"failure\"} 1\n"
+        ));
+        assert!(rendered.contains(
+            "lynx_world_replication_socket_written_bytes_total{kind=\"snapshot\"} 100\n"
+        ));
+        assert!(
+            rendered
+                .contains("lynx_world_replication_socket_written_bytes_total{kind=\"delta\"} 25\n")
         );
     }
 
@@ -1696,6 +1806,56 @@ mod tests {
     }
 
     #[test]
+    fn a_full_slow_peer_queue_does_not_block_a_healthy_peer() {
+        let authenticator =
+            Authenticator::new(&[digest(TOKEN), digest("healthy-peer-token")]).unwrap();
+        let grants: Vec<_> = authenticator.grants().cloned().collect();
+        let zone = demo::build_zone(&grants).unwrap();
+        let gateway = WorldGateway::new(
+            zone,
+            demo::handshake().unwrap(),
+            GatewayConfig::new(DurationMs::new(30_000)),
+            SystemResumeTokens::new(),
+        )
+        .unwrap();
+        let mut service = Service::new(WorldServer::new(gateway), Duration::from_millis(20));
+        let hello = Hello {
+            handshake: demo::handshake().unwrap(),
+            last_ack_tick: Tick::ZERO,
+        };
+
+        // Leave the slow peer's three admission frames queued, filling only
+        // that peer's bounded channel.
+        let (slow_tx, _slow_rx) = mpsc::channel(3);
+        let slow = service
+            .admit(&Credential::Static(grants[0].clone()), &hello, &slow_tx)
+            .unwrap();
+        let (healthy_tx, mut healthy_rx) = mpsc::channel(16);
+        let healthy = service
+            .admit(&Credential::Static(grants[1].clone()), &hello, &healthy_tx)
+            .unwrap();
+        while healthy_rx.try_recv().is_ok() {}
+
+        let message = Envelope::new(
+            MessageId::parse("healthy-peer-probe").unwrap(),
+            message_kind("protocol.error"),
+            serde_json::json!({"code": "unsupported"}),
+        );
+        service.send(slow.connection, ServerFrame::Envelope(message.clone()));
+        service.send(healthy.connection, ServerFrame::Envelope(message.clone()));
+
+        assert!(!service.writers.contains_key(&slow.connection));
+        let delivered = healthy_rx.try_recv().expect("healthy peer is not blocked");
+        let ServerFrame::Envelope(delivered) = delivered else {
+            panic!("healthy peer should receive its own queued frame");
+        };
+        assert_eq!(delivered.id, message.id);
+        let metrics = service.metrics().render();
+        assert!(metrics.contains("lynx_world_outbound_queue_full_total 1\n"));
+        assert!(metrics.contains("lynx_world_outbound_queue_session_depth_high_water 3\n"));
+    }
+
+    #[test]
     fn full_outbound_detaches_and_cancels_movement_before_resume() {
         let (mut service, grant, _) = service();
         let hello = Hello {
@@ -1766,9 +1926,14 @@ mod tests {
         assert_ne!(resumed.connection, admitted.connection);
         // A delayed Leave from the old pump cannot detach the resumed connection.
         service.leave(admitted.connection);
-        for _ in 0..3 {
-            resume_rx.try_recv().unwrap();
-        }
+        let resumed_frames: Vec<_> = (0..3).map(|_| resume_rx.try_recv().unwrap()).collect();
+        assert!(resumed_frames.iter().any(|frame| matches!(
+            frame,
+            ServerFrame::EncodedReplication {
+                kind: ReplicationKind::Snapshot,
+                ..
+            }
+        )));
         service.receive(resumed.connection, &movement(2));
         service.advance();
         assert_eq!(
@@ -1837,7 +2002,9 @@ mod tests {
             .expect("the queue should stay open");
         match frame {
             ServerFrame::Envelope(envelope) => envelope,
-            ServerFrame::Encoded(bytes) => engine_net::framing::decode_frame(&bytes).unwrap(),
+            ServerFrame::EncodedReplication { bytes, .. } => {
+                engine_net::framing::decode_frame(&bytes).unwrap()
+            }
             ServerFrame::Close => panic!("unexpected close frame"),
         }
     }

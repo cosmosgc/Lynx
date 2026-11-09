@@ -120,6 +120,7 @@ flags:
 | `--resume-ttl-ms` | `30000` | reconnect window |
 | `--view-radius-m` | `60` | server-chosen interest radius |
 | `--max-sessions` | `1024` | connected plus retained sessions |
+| `--outbound-queue` | `64` | frames queued per connection before the client is detached as too slow, 8–256 |
 | `--session-policy` | `per-character` | retained-session uniqueness: `per-character` or `per-account` |
 | `--auth-mode` | `demo` | `demo` static development tokens, or `nakama` production identity admission |
 | `--staff` | off | mark every demo grant as staff; enables calendar lifecycle commands (loopback development only) |
@@ -411,8 +412,12 @@ scrape_configs:
 | `lynx_world_resume_failures_total{code}` | failed resume admissions by bounded `ErrorCode`; unknown and expired tokens share the gateway's `session_expired` category |
 | `lynx_world_session_attaches_total` / `lynx_world_session_detaches_total` | authority connection attach and detach events, including resume attach |
 | `lynx_world_session_expired_closes_total` | connections closed after the attached session disappeared or expired; not disconnected-window expiry sweeps |
-| `lynx_world_outbound_queue_depth` / `lynx_world_outbound_queue_capacity` | summed frame depth/capacity sampled during authority work; not a continuous high-water mark |
-| `lynx_world_replication_enqueued_bytes_total` | encoded snapshot/delta bytes accepted by the outbound queue; not confirmed socket delivery bytes |
+| `lynx_world_outbound_queue_depth` / `lynx_world_outbound_queue_capacity` | summed frame depth/capacity sampled during authority work |
+| `lynx_world_outbound_queue_depth_high_water` | highest aggregate frame depth observed at authority-work samples during this process |
+| `lynx_world_outbound_queue_session_depth_high_water` | highest depth observed in any one connection queue during this process; aggregate only, not labeled by session |
+| `lynx_world_replication_enqueued_bytes_total` | encoded snapshot/delta bytes accepted by outbound queues; not confirmed socket delivery bytes |
+| `lynx_world_replication_socket_write_frames_total{kind,outcome}` | snapshot/delta frames whose WebSocket send completed or failed; labels are fixed to two kinds and two outcomes |
+| `lynx_world_replication_socket_written_bytes_total{kind}` | encoded snapshot/delta bytes for completed local WebSocket sends; not client acknowledgements |
 | `lynx_world_ai_ticks_total` / `lynx_world_ai_decisions_total` | enabled AI ticks and evaluated controller decisions |
 | `lynx_world_ai_budget_exhaustions_total{budget}` | AI controller-scan, update, perception and action limits using fixed budget labels |
 | `lynx_world_path_requests_total`, `lynx_world_path_expansions_total`, `lynx_world_path_failures_total`, `lynx_world_path_budget_exhaustions_total`, `lynx_world_path_partial_results_total`, `lynx_world_path_deferred_requests_total` | cumulative path diagnostics sampled from the zone; the demo GuardChase scenario generates path requests and expansions during normal ticks. |
@@ -431,7 +436,8 @@ Unsupported or incomplete requested families (do not interpret their absence as 
 - Tick duration distributions.
 - A separate count of disconnected reconnect windows and resume-window expiry sweeps.
 - End-to-end action latency and action rejections before authority delivery (authority latency, applied actions, and transport rate limits are measured separately).
-- Per-session replication delivery counts, queue high-water marks, and bytes confirmed written to sockets.
+- Per-session replication delivery counts and bytes; queue depth is currently
+  exposed only as an aggregate maximum to avoid unbounded session-ID labels.
 - Pathfinding expansion, failure, partial-result, and budget counters are exposed from zone diagnostics. The current world runtime has no NPC/pathfinding call site, so these remain zero until AI or another runtime consumer calls `Zone::find_path`; this is not evidence of zero pathfinding pressure in a future integration.
 - AI error counters; current AI diagnostics cover decisions and bounded-work limits only.
 - Backend metrics are emitted only in Nakama auth mode and combine database domain/validation errors with infrastructure errors. There are no per-query or pool metrics.
@@ -459,9 +465,13 @@ Unsupported or incomplete requested families (do not interpret their absence as 
 - The production server is intended to configure whether this uniqueness limit
   is per character or per account. The current demo and gateway enforce the
   per-character policy; account-wide enforcement is not implemented yet.
-- A client that cannot drain its bounded outbound queue is detached instead of
-  slowing the authoritative tick. Alert on repeated detaches; they usually mean
-  a stuck client or a network path with insufficient throughput.
+- A client that cannot drain its bounded outbound queue (configured by
+  `--outbound-queue`, 8–256 frames, default 64) is detached
+  instead of slowing the authoritative tick. Overflow does not coalesce or
+  replay queued deltas in place. The client must reconnect/resume and replace
+  replicated state from the authoritative snapshot sent on admission before
+  applying later deltas. Alert on repeated detaches; they usually mean a stuck
+  client or a network path with insufficient throughput.
 - A zone restart invalidates in-memory sessions. Announce expected restarts and
   expect players to log in again until durable session storage exists.
 - Debugging a stuck character starts with its session: connected vs retained,
@@ -472,24 +482,52 @@ Unsupported or incomplete requested families (do not interpret their absence as 
 
 - Nightly full PostgreSQL backup plus continuous WAL archiving where supported.
 - Backups are encrypted, access-controlled, and stored outside the host.
+- Retain daily full backups and their required WAL chain for at least 35 days;
+  delete only after a newer backup is checksummed and restore-verified.
 - Restore drill monthly and before destructive migrations.
-- Recovery objectives: RPO 15 minutes, RTO 1 hour for production; zone recovery
-  after a process restart within 60 seconds from snapshot plus event log.
+- Recovery objectives for durable character, inventory, faction/calendar, audit,
+  and world-snapshot data: RPO 15 minutes with continuous WAL archiving enabled;
+  RTO 1 hour to restore service. Zone recovery after a process restart remains
+  within 60 seconds from snapshot plus event log.
 - Retain audit records according to policy; never let retention delete records
   under active moderation review.
 
+### Automated scratch restore smoke
+
+CI runs a bounded logical-backup restore smoke on its disposable PostgreSQL 17
+service. To repeat it locally on Linux, macOS, or WSL, first migrate an isolated
+loopback database named `lynx_backup_test_*` (or use the CI-only name `lynx_ci`),
+build `lynx-world`, and run:
+
+```bash
+LYNX_PG_DATABASE=lynx_backup_test_local \
+LYNX_BACKUP_TEST_DATABASE=lynx_backup_test_local \
+bash scripts/backup-restore-smoke.sh target/debug/lynx-world
+```
+
+The script refuses other database names and non-loopback hosts. It writes a
+non-secret character and audit marker, starts the service once to create a real
+world snapshot, takes a custom-format dump and checksum in a private temporary
+directory, restores only to a uniquely named `lynx_restore_check_*` database,
+compares migration/data/trigger continuity, exercises the restored audit
+append-only trigger, verifies the snapshot/event checkpoint, and starts the
+service against the restored database before dropping the scratch database.
+CI treats any failure as a failed job. This is a smoke test, not an encrypted,
+off-host production backup; it must never be pointed at production data.
+
 ### Manual logical restore drill (PostgreSQL)
 
-This drill makes a custom-format logical dump of the configured Lynx database,
-restores it into a newly-created scratch database, and checks that representative
-durable data and the append-only audit trigger are present. Run it from a trusted
-operator host with PostgreSQL client tools (`pg_dump`, `pg_restore`, `createdb`,
-`dropdb`, and `psql`) installed. Set `LYNX_PG_*` as for the service (or populate
-the repository-root `.env`); for `pg_dump`/`psql`, `LYNX_PG_PASSWORD` is consumed
-through `PGPASSWORD`, not a command-line argument. Database creation and cleanup
-use the configured libpq superuser authentication (`LYNX_PG_SUPERUSER`, default
-`postgres`), as in `setup-postgres.*`. Do not run this against a production
-host without an approved change window and scratch-database capacity.
+This operator drill makes a custom-format logical dump of the configured Lynx
+database, restores it into a newly-created scratch database, and checks that
+representative durable data and the append-only audit trigger are present. Run it
+from a trusted operator host with PostgreSQL client tools (`pg_dump`, `pg_restore`,
+`createdb`, `dropdb`, and `psql`) installed. Set `LYNX_PG_*` as for the service
+(or populate the repository-root `.env`); for `pg_dump`/`psql`,
+`LYNX_PG_PASSWORD` is consumed through `PGPASSWORD`, not a command-line argument.
+Database creation and cleanup use the configured libpq superuser authentication
+(`LYNX_PG_SUPERUSER`, default `postgres`), as in `setup-postgres.*`. Do not run
+this against a production host without an approved change window and
+scratch-database capacity.
 
 PowerShell example (each invocation is explicit; the generated database name is
 restricted to the `lynx_restore_check_` prefix):
@@ -533,12 +571,12 @@ it. A failed dump/restore/query is a failed drill; the command exits nonzero
 except that cleanup failure emits a warning and needs operator follow-up.
 
 This is a manual logical-dump procedure, not a scheduled backup or a verified
-production recovery: WAL archiving, encrypted off-host copies, retention duration,
-alert routing, restore duration, and the stated RPO/RTO still require an exercised
-target-environment policy. The world snapshot is in `lynx.world_snapshots` when
-`--state-postgres` is used; for `--state-file`, protect and copy that JSON file
-separately. The existing world-service readiness endpoint is not a database or
-character/audit continuity check.
+production recovery: WAL archiving, encrypted off-host copies, retention
+enforcement, alert routing, restore duration, and the stated RPO/RTO still require
+an exercised target-environment policy. The world snapshot is in
+`lynx.world_snapshots` when `--state-postgres` is used; for `--state-file`, protect
+and copy that JSON file separately. The existing world-service readiness
+endpoint is not a database or character/audit continuity check.
 
 ## Deploy and rollback
 

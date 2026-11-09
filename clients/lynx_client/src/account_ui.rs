@@ -1,5 +1,8 @@
 //! Account management screen. All network and credential-store work runs on workers.
-use crate::nakama_credentials::{OsNakamaCredentialStore, authenticate_email_or_resume};
+use crate::nakama_credentials::{
+    CredentialScope, NakamaLogoutOutcome, OsNakamaCredentialStore, authenticate_email_or_resume,
+    logout_saved_account,
+};
 use crate::server_browser::{ServerBrowser, ServerProfile, default_config_path};
 use bevy::{
     app::AppExit,
@@ -28,6 +31,8 @@ pub struct WorldLaunch {
     pub bearer: String,
     pub character: String,
     pub world_url: String,
+    /// Credential namespace used for post-entry token refresh.
+    pub credential_scope: CredentialScope,
 }
 
 impl std::fmt::Debug for WorldLaunch {
@@ -37,6 +42,7 @@ impl std::fmt::Debug for WorldLaunch {
             .field("bearer", &"[REDACTED]")
             .field("character", &self.character)
             .field("world_url", &self.world_url)
+            .field("credential_scope", &"[REDACTED]")
             .finish()
     }
 }
@@ -87,6 +93,7 @@ struct Screen {
     characters: Vec<Character>,
     selected: Option<(String, String)>,
     intent: Option<(String, String)>,
+    credential_scope: Option<CredentialScope>,
     status: String,
     worker: Option<Mutex<mpsc::Receiver<Result<Outcome, String>>>>,
     dirty: bool,
@@ -110,6 +117,7 @@ impl Default for Screen {
             characters: Vec::new(),
             selected: None,
             intent: None,
+            credential_scope: None,
             status: "Sign in to an existing account. New accounts: use account_portal first."
                 .into(),
             worker: None,
@@ -154,6 +162,14 @@ impl Screen {
             .find(|profile| profile.key() == key)
     }
 
+    /// Credentials are isolated per selected world profile and Nakama origin.
+    fn scope_for_nakama(&self, nakama_url: &str) -> CredentialScope {
+        self.selected_profile().map_or_else(
+            || CredentialScope::for_nakama(nakama_url),
+            |profile| CredentialScope::for_world(&profile.key(), nakama_url),
+        )
+    }
+
     fn api_url(&self) -> String {
         self.selected_profile().map_or_else(
             || {
@@ -186,6 +202,7 @@ impl Screen {
 
 enum Outcome {
     SignedIn(String),
+    SignedOut(NakamaLogoutOutcome),
     Listed(Vec<Character>),
     Created,
     Selected { id: String, name: String },
@@ -203,6 +220,7 @@ enum Action {
     UseServer(String),
     TogglePin(String),
     AddServer,
+    SignOut,
 }
 
 fn setup(mut commands: Commands, mut screen: ResMut<Screen>) {
@@ -251,18 +269,25 @@ fn buttons(
                     screen.dirty = true;
                     continue;
                 }
+                let (Ok(url), Ok(key)) = (
+                    std::env::var("LYNX_NAKAMA_URL"),
+                    std::env::var("LYNX_NAKAMA_SERVER_KEY"),
+                ) else {
+                    screen.status =
+                        "Set LYNX_NAKAMA_URL and LYNX_NAKAMA_SERVER_KEY to sign in.".into();
+                    screen.dirty = true;
+                    continue;
+                };
+                let scope = screen.scope_for_nakama(&url);
                 let email = screen.email.clone();
                 let password = std::mem::take(&mut screen.password);
+                screen.credential_scope = Some(scope.clone());
                 start(&mut screen, move || {
-                    let url = std::env::var("LYNX_NAKAMA_URL")
-                        .map_err(|_| "Set LYNX_NAKAMA_URL.".to_owned())?;
-                    let key = std::env::var("LYNX_NAKAMA_SERVER_KEY")
-                        .map_err(|_| "Set LYNX_NAKAMA_SERVER_KEY.".to_owned())?;
                     let auth = NakamaAuthClient::new(NakamaAuthConfig::new(&url, key))
                         .map_err(|e| format!("Authentication configuration: {e:?}"))?;
                     let session = authenticate_email_or_resume(
                         &auth,
-                        &url,
+                        &scope,
                         &OsNakamaCredentialStore,
                         &email,
                         || Ok(password),
@@ -273,6 +298,28 @@ fn buttons(
                         )
                     })?;
                     Ok(Outcome::SignedIn(session.access_token().to_owned()))
+                });
+            }
+            Action::SignOut => {
+                let (Ok(url), Ok(key)) = (
+                    std::env::var("LYNX_NAKAMA_URL"),
+                    std::env::var("LYNX_NAKAMA_SERVER_KEY"),
+                ) else {
+                    screen.status =
+                        "Set LYNX_NAKAMA_URL and LYNX_NAKAMA_SERVER_KEY to sign out.".into();
+                    screen.dirty = true;
+                    continue;
+                };
+                let scope = screen
+                    .credential_scope
+                    .clone()
+                    .unwrap_or_else(|| screen.scope_for_nakama(&url));
+                start(&mut screen, move || {
+                    let auth = NakamaAuthClient::new(NakamaAuthConfig::new(&url, key))
+                        .map_err(|e| format!("Authentication configuration: {e:?}"))?;
+                    let outcome = logout_saved_account(&auth, &scope, &OsNakamaCredentialStore)
+                        .map_err(|e| format!("Sign out failed: {e:?}."))?;
+                    Ok(Outcome::SignedOut(outcome))
                 });
             }
             Action::List => {
@@ -340,11 +387,13 @@ fn buttons(
             Action::EnterWorld => {
                 if let Some((id, _)) = screen.selected.clone()
                     && let Some(token) = screen.token.take()
+                    && let Some(credential_scope) = screen.credential_scope.clone()
                 {
                     launch.0 = Some(WorldLaunch {
                         bearer: token,
                         character: id,
                         world_url: screen.world_url(),
+                        credential_scope,
                     });
                     exit.write(AppExit::Success);
                 }
@@ -500,6 +549,19 @@ fn poll(mut screen: ResMut<Screen>) {
                 screen.persist_browser();
             }
         }
+        Ok(Outcome::SignedOut(outcome)) => {
+            screen.token = None;
+            screen.characters.clear();
+            screen.selected = None;
+            screen.credential_scope = None;
+            screen.status = match outcome {
+                NakamaLogoutOutcome::Revoked => "Signed out; the saved session was revoked.".into(),
+                NakamaLogoutOutcome::ExpiredCredentialsCleared => {
+                    "Signed out; expired credentials were removed.".into()
+                }
+                NakamaLogoutOutcome::NoSavedCredentials => "Signed out.".into(),
+            };
+        }
         Ok(Outcome::Created) => {
             screen.intent = None;
             screen.name.clear();
@@ -581,6 +643,7 @@ fn render(mut commands: Commands, mut screen: ResMut<Screen>, roots: Query<Entit
             }
             button(parent, format!("{}New character name: {}", marker(screen.focus == Field::Name), screen.name), Action::Focus(Field::Name));
             button(parent, "Create / retry creation".into(), Action::Create);
+            button(parent, "Sign out and remove saved session".into(), Action::SignOut);
             parent.spawn(Text::new("Creation retries reuse the same key during this session. Do not close the client while an outcome is uncertain."));
         }
     });
@@ -630,18 +693,23 @@ mod tests {
 
     #[test]
     fn world_launch_is_single_use_and_redacts_the_access_token() {
+        let scope = CredentialScope::for_world("127.0.0.1:8090", "http://127.0.0.1:7350");
         let mut launch = AccountWorldLaunch(Some(WorldLaunch {
             bearer: "secret-access-token".into(),
             character: "chr-test".into(),
             world_url: "ws://127.0.0.1:8090/world".into(),
+            credential_scope: scope.clone(),
         }));
-        assert!(!format!("{launch:?}").contains("secret-access-token"));
+        let debug = format!("{launch:?}");
+        assert!(!debug.contains("secret-access-token"));
+        assert!(!debug.contains(scope.as_key()));
         assert_eq!(
             launch.take(),
             Some(WorldLaunch {
                 bearer: "secret-access-token".into(),
                 character: "chr-test".into(),
                 world_url: "ws://127.0.0.1:8090/world".into(),
+                credential_scope: scope,
             })
         );
         assert!(launch.take().is_none());
@@ -660,6 +728,36 @@ mod tests {
         };
         assert_eq!(screen.world_url(), "ws://127.0.0.1:8090/world");
         assert_eq!(screen.api_url(), "http://127.0.0.1:8090");
+    }
+
+    #[test]
+    fn credentials_are_scoped_per_selected_server() {
+        let mut browser = ServerBrowser::default();
+        browser
+            .add(ServerProfile::new("Local", "127.0.0.1", 8090).unwrap())
+            .unwrap();
+        browser
+            .add(ServerProfile::new("Friends", "127.0.0.1", 8091).unwrap())
+            .unwrap();
+        let nakama = "http://127.0.0.1:7350";
+        let local = Screen {
+            browser: browser.clone(),
+            active_server: Some("127.0.0.1:8090".into()),
+            ..default()
+        };
+        let friends = Screen {
+            browser,
+            active_server: Some("127.0.0.1:8091".into()),
+            ..default()
+        };
+        assert_ne!(
+            local.scope_for_nakama(nakama),
+            friends.scope_for_nakama(nakama)
+        );
+        assert_eq!(
+            Screen::default().scope_for_nakama(nakama),
+            CredentialScope::for_nakama(nakama)
+        );
     }
 
     #[test]

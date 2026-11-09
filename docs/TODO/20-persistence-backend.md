@@ -508,7 +508,7 @@ CI run was confirmed green on 2026-10-29.
 ## PST-009 — Backup and restore verification
 
 - **Priority:** P1
-- **Status:** Ready
+- **Status:** In progress — guarded scratch restore and CI smoke are implemented; target-environment recovery objectives remain to be exercised
 - **Depends on:** —
 - **References:** [operations §Backups](../operations.md),
   [security §Abuse prevention](../security.md#abuse-prevention)
@@ -535,6 +535,19 @@ world database or snapshots.
 - [ ] Audit and append-only tables survive restore with triggers intact.
 - [ ] RPO/RTO and retention are documented and tested against the target.
 - [ ] Backup failures alert rather than failing silently.
+
+**Implementation state:** `scripts/backup-restore-smoke.sh` is restricted to
+explicitly named loopback test databases. It seeds non-secret character/audit
+markers, writes a real PostgreSQL world snapshot, takes and checksums a
+custom-format logical dump, restores only to a generated `lynx_restore_check_*`
+database, compares migration/data/trigger continuity, exercises the restored
+audit append-only trigger, runs `lynx-world verify-snapshot`, and starts the
+service against the restored database. The PostgreSQL CI job runs this smoke;
+failures fail the job. `docs/operations.md` records the invocation and retains
+the separate operator procedure for a previously retained backup. The production
+RPO/RTO and retention policy still need a measured target-environment drill;
+until that evidence exists this task remains in progress. Hosted CI execution is
+pending for this change.
 
 ---
 

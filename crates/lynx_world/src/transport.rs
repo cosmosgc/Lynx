@@ -46,8 +46,9 @@ use crate::service::{Admitted, Credential, HELLO_KIND, Hello, Metrics, ServerEve
 /// How long a peer has to send `session.hello` after the upgrade.
 pub const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Messages queued for one connection before it is considered too slow.
-const OUTBOUND_QUEUE: usize = 64;
+/// Default messages queued for one connection before it is considered too
+/// slow. The running service uses the validated `--outbound-queue` value.
+const OUTBOUND_QUEUE: usize = crate::config::DEFAULT_OUTBOUND_QUEUE;
 
 /// Events queued from all transports before backpressure reaches sockets.
 const INBOUND_QUEUE: usize = 256;
@@ -212,6 +213,7 @@ pub struct AppState {
     ready: AtomicBool,
     origins: OriginPolicy,
     limits: RateLimits,
+    outbound_queue: usize,
     metrics: Arc<Metrics>,
     backend_telemetry: Option<Arc<dyn Fn() -> BackendTelemetrySnapshot + Send + Sync>>,
     capacity: Arc<Mutex<Capacity>>,
@@ -237,6 +239,7 @@ impl std::fmt::Debug for AppState {
             .field("admission", &self.admission)
             .field("character_management", &self.characters.is_some())
             .field("ready", &self.ready.load(Ordering::Relaxed))
+            .field("outbound_queue", &self.outbound_queue)
             .field("backend_telemetry", &self.backend_telemetry.is_some())
             .finish_non_exhaustive()
     }
@@ -308,6 +311,7 @@ impl AppState {
             ready: AtomicBool::new(true),
             origins: OriginPolicy::default(),
             limits: RateLimits::new(RateLimitConfig::default()),
+            outbound_queue: OUTBOUND_QUEUE,
             metrics: Arc::new(Metrics::default()),
             backend_telemetry: None,
             capacity: Arc::new(Mutex::new(Capacity::default())),
@@ -329,6 +333,7 @@ impl AppState {
             ready: AtomicBool::new(true),
             origins: OriginPolicy::default(),
             limits: RateLimits::new(RateLimitConfig::default()),
+            outbound_queue: OUTBOUND_QUEUE,
             metrics: Arc::new(Metrics::default()),
             backend_telemetry: None,
             capacity: Arc::new(Mutex::new(Capacity::default())),
@@ -384,6 +389,19 @@ impl AppState {
     #[must_use]
     pub fn with_rate_limits(mut self, limits: RateLimitConfig) -> Self {
         self.limits = RateLimits::new(limits);
+        self
+    }
+
+    /// Set the per-connection outbound frame capacity. Callers should pass the
+    /// value validated by [`ServeArgs::outbound_queue`](crate::config::ServeArgs::outbound_queue);
+    /// the server rejects out-of-range configuration before building state.
+    #[must_use]
+    pub fn with_outbound_queue(mut self, capacity: usize) -> Self {
+        debug_assert!(
+            capacity >= 1,
+            "an outbound queue must hold at least one frame"
+        );
+        self.outbound_queue = capacity;
         self
     }
 
@@ -1057,7 +1075,7 @@ async fn connection(mut socket: WebSocket, credential: Credential, state: Arc<Ap
         }
     };
 
-    let (outbound, mut out_rx) = mpsc::channel(OUTBOUND_QUEUE);
+    let (outbound, mut out_rx) = mpsc::channel(state.outbound_queue);
     let (reply, reply_rx) = oneshot::channel();
     if state
         .events
@@ -1195,8 +1213,11 @@ async fn pump(
                             return End::Clean;
                         }
                     }
-                    Some(ServerFrame::Encoded(bytes)) => {
-                        if send_encoded(socket, bytes).await.is_err() {
+                    Some(ServerFrame::EncodedReplication { bytes, kind }) => {
+                        let byte_count = bytes.len();
+                        let sent = send_encoded(socket, bytes).await.is_ok();
+                        state.metrics.record_replication_socket_write(kind, byte_count, sent);
+                        if !sent {
                             return End::Clean;
                         }
                     }
@@ -1302,6 +1323,22 @@ mod tests {
     use game_api::{AccountId, Character, CharacterCreationReceipt, CharacterStatus};
 
     const CHARACTER_TOKEN: &str = "character-api-secret";
+
+    #[test]
+    fn outbound_queue_capacity_defaults_and_follows_configuration() {
+        let authenticator = || Authenticator::new(&[crate::auth::digest("unused")]).unwrap();
+        let (events, _receiver) = event_channel();
+        let default = AppState::new(events, authenticator());
+        assert_eq!(
+            default.outbound_queue,
+            crate::config::DEFAULT_OUTBOUND_QUEUE
+        );
+
+        let (events, _receiver) = event_channel();
+        let configured = AppState::new(events, authenticator())
+            .with_outbound_queue(crate::config::MAX_OUTBOUND_QUEUE);
+        assert_eq!(configured.outbound_queue, crate::config::MAX_OUTBOUND_QUEUE);
+    }
 
     #[tokio::test]
     async fn trusted_revocation_control_uses_authority_event_channel() {

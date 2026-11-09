@@ -78,9 +78,10 @@ fn main() {
                 std::process::exit(2);
             }
         };
-        let (bearer, character) = if login {
+        let (bearer, character, credential_scope) = if login {
             let character = character.unwrap_or_default();
-            authenticate_device(&character, email)
+            let (bearer, character, scope) = authenticate_device(&character, email);
+            (bearer, character, Some(scope))
         } else {
             let Some(bearer) = std::env::var_os("LYNX_DEMO_TOKEN")
                 .and_then(|s| s.into_string().ok())
@@ -90,7 +91,7 @@ fn main() {
                 eprintln!("Set LYNX_DEMO_TOKEN for development-only online mode.");
                 std::process::exit(2);
             };
-            (bearer, None)
+            (bearer, None, None)
         };
         let url = std::env::var("LYNX_WORLD_URL")
             .or_else(|_| std::env::var("LYNX_DEMO_URL"))
@@ -99,8 +100,8 @@ fn main() {
             semver::Version::parse(env!("CARGO_PKG_VERSION")).expect("valid package version");
         let runtime = tokio::runtime::Runtime::new().expect("Tokio runtime");
         let mut client = OnlineClient::new(1.0).expect("valid prediction limit");
-        if login {
-            configure_nakama_refresh(&mut client);
+        if let Some(scope) = credential_scope {
+            configure_nakama_refresh(&mut client, scope);
         }
         {
             let _guard = runtime.enter();
@@ -215,6 +216,7 @@ fn run_account_world(launch: lynx_client::account_ui::WorldLaunch) {
         bearer,
         character,
         world_url,
+        credential_scope,
     } = launch;
     let version = semver::Version::parse(env!("CARGO_PKG_VERSION")).expect("valid package version");
     let Ok(runtime) = tokio::runtime::Runtime::new() else {
@@ -225,7 +227,7 @@ fn run_account_world(launch: lynx_client::account_ui::WorldLaunch) {
         eprintln!("Could not initialize the world client.");
         return;
     };
-    configure_nakama_refresh(&mut client);
+    configure_nakama_refresh(&mut client, credential_scope);
     {
         let _guard = runtime.enter();
         if client
@@ -258,7 +260,10 @@ fn run_account_world(launch: lynx_client::account_ui::WorldLaunch) {
 }
 
 #[cfg(feature = "window")]
-fn configure_nakama_refresh(client: &mut lynx_client::online::OnlineClient) {
+fn configure_nakama_refresh(
+    client: &mut lynx_client::online::OnlineClient,
+    scope: lynx_client::nakama_credentials::CredentialScope,
+) {
     use lynx_client::nakama_credentials::{OsNakamaCredentialStore, SavedNakamaSessionRefresher};
     use std::sync::Arc;
 
@@ -270,6 +275,7 @@ fn configure_nakama_refresh(client: &mut lynx_client::online::OnlineClient) {
     };
     let refresher = Arc::new(SavedNakamaSessionRefresher::new(
         server_url,
+        scope,
         server_key,
         Arc::new(OsNakamaCredentialStore),
     ));
@@ -335,12 +341,13 @@ fn character_command() -> bool {
     let server_key = required("LYNX_NAKAMA_SERVER_KEY");
     let api_url =
         std::env::var("LYNX_WORLD_API_URL").unwrap_or_else(|_| "http://127.0.0.1:8090".into());
+    let scope = lynx_client::nakama_credentials::CredentialScope::for_nakama(&base_url);
     let result = std::thread::spawn(move || -> Result<(), String> {
         let auth = NakamaAuthClient::new(NakamaAuthConfig::new(&base_url, server_key)).map_err(|e| format!("{e:?}"))?;
         let session = if args[0] == "--email-login" {
             authenticate_email_or_resume(
                 &auth,
-                &base_url,
+                &scope,
                 &OsNakamaCredentialStore,
                 &args[1],
                 || {
@@ -351,7 +358,7 @@ fn character_command() -> bool {
         } else {
             authenticate_or_resume(
                 &auth,
-                &base_url,
+                &scope,
                 &OsNakamaCredentialStore,
                 engine_core::Locale::default(),
             )
@@ -443,8 +450,10 @@ fn run_character_api(args: &[String], api_url: String, access_token: &str) -> Re
 #[cfg(feature = "window")]
 fn logout_device() {
     use lynx_client::nakama_credentials::{
-        NakamaLoginError, NakamaLogoutOutcome, OsNakamaCredentialStore, logout_saved_account,
+        CredentialScope, NakamaLoginError, NakamaLogoutOutcome, OsNakamaCredentialStore,
+        logout_saved_account,
     };
+    use lynx_client::server_browser::{ServerBrowser, default_config_path};
     use lynx_client_net::{NakamaAuthClient, NakamaAuthConfig};
 
     let required = |key: &str| {
@@ -455,22 +464,41 @@ fn logout_device() {
     };
     let base_url = required("LYNX_NAKAMA_URL");
     let server_key = required("LYNX_NAKAMA_SERVER_KEY");
-    let credential_server_url = base_url.clone();
-    let result = std::thread::spawn(move || {
+    let mut scopes = vec![CredentialScope::for_nakama(&base_url)];
+    if let Some(path) = default_config_path()
+        && let Ok(browser) = ServerBrowser::load(&path)
+    {
+        scopes.extend(
+            browser
+                .profiles()
+                .iter()
+                .map(|profile| CredentialScope::for_world(&profile.key(), &base_url)),
+        );
+    }
+    scopes.sort_by(|left, right| left.as_key().cmp(right.as_key()));
+    scopes.dedup();
+    let result = std::thread::spawn(move || -> Result<[usize; 3], NakamaLoginError> {
         let auth = NakamaAuthClient::new(NakamaAuthConfig::new(base_url, server_key))
             .map_err(NakamaLoginError::Authentication)?;
-        logout_saved_account(&auth, &credential_server_url, &OsNakamaCredentialStore)
+        let mut counts = [0; 3];
+        for scope in &scopes {
+            match logout_saved_account(&auth, scope, &OsNakamaCredentialStore)? {
+                NakamaLogoutOutcome::NoSavedCredentials => counts[0] += 1,
+                NakamaLogoutOutcome::Revoked => counts[1] += 1,
+                NakamaLogoutOutcome::ExpiredCredentialsCleared => counts[2] += 1,
+            }
+        }
+        Ok(counts)
     })
     .join();
     match result {
-        Ok(Ok(NakamaLogoutOutcome::NoSavedCredentials)) => {
-            println!("No Nakama credentials are saved for this server.");
+        Ok(Ok([none, 0, 0])) if none > 0 => {
+            println!("No Nakama credentials are saved for the configured servers.");
         }
-        Ok(Ok(NakamaLogoutOutcome::Revoked)) => {
-            println!("Nakama session revoked and credentials removed.");
-        }
-        Ok(Ok(NakamaLogoutOutcome::ExpiredCredentialsCleared)) => {
-            println!("Expired Nakama credentials removed; no active session remained.");
+        Ok(Ok([none, revoked, expired])) => {
+            println!(
+                "Nakama credentials removed: {revoked} revoked, {expired} expired; {none} server(s) had no saved session."
+            );
         }
         Ok(Err(error)) => {
             eprintln!(

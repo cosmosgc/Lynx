@@ -10,8 +10,75 @@ use engine_core::Locale;
 use game_api::DeviceLogin;
 use lynx_client_net::{NakamaAuthClient, NakamaAuthFailure, NakamaSession};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 const KEYRING_SERVICE: &str = "com.lynx.client.nakama";
+/// Versioned namespace so a future scoping change cannot silently collide with
+/// records written by an older client.
+const SCOPE_NAMESPACE: &str = "lynx.nakama.credentials.v1";
+
+/// Opaque, secret-free key that isolates stored Nakama credentials.
+///
+/// The account screen scopes credentials to the selected world profile *and*
+/// the Nakama origin. Two profiles therefore never resume each other's
+/// sessions, even when they share one Nakama deployment.
+#[derive(Clone, PartialEq, Eq)]
+pub struct CredentialScope(String);
+
+impl CredentialScope {
+    /// Credentials for one saved world server profile.
+    #[must_use]
+    pub fn for_world(profile_key: &str, nakama_url: &str) -> Self {
+        Self(scope_digest(&[
+            "world",
+            profile_key,
+            normalized_origin(nakama_url),
+        ]))
+    }
+
+    /// Credentials for a Nakama origin with no selected world profile.
+    #[must_use]
+    pub fn for_nakama(nakama_url: &str) -> Self {
+        Self(scope_digest(&["nakama", normalized_origin(nakama_url)]))
+    }
+
+    /// Opaque store key. It never contains a URL, account, or token.
+    #[must_use]
+    pub fn as_key(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for CredentialScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("CredentialScope")
+            .field(&"[redacted]")
+            .finish()
+    }
+}
+
+fn normalized_origin(url: &str) -> &str {
+    let trimmed = url.trim_end_matches('/');
+    if trimmed.is_empty() { url } else { trimmed }
+}
+
+fn scope_digest(parts: &[&str]) -> String {
+    use std::fmt::Write as _;
+
+    let mut hasher = Sha256::new();
+    hasher.update(SCOPE_NAMESPACE.as_bytes());
+    for part in parts {
+        hasher.update([0]);
+        hasher.update(part.as_bytes());
+    }
+    let mut key = String::with_capacity(SCOPE_NAMESPACE.len() + 65);
+    key.push_str(SCOPE_NAMESPACE);
+    key.push('.');
+    for byte in hasher.finalize() {
+        write!(key, "{byte:02x}").expect("writing to a string cannot fail");
+    }
+    key
+}
 
 /// Per-server credentials retained between client launches.
 #[derive(PartialEq, Eq, Clone, Serialize, Deserialize)]
@@ -91,6 +158,7 @@ pub enum NakamaLoginError {
 /// Refresh an existing OS-stored Nakama session without prompting for a password.
 pub struct SavedNakamaSessionRefresher {
     server_url: String,
+    scope: CredentialScope,
     server_key: String,
     store: Arc<dyn NakamaCredentialStore>,
 }
@@ -99,11 +167,13 @@ impl SavedNakamaSessionRefresher {
     #[must_use]
     pub fn new(
         server_url: impl Into<String>,
+        scope: CredentialScope,
         server_key: impl Into<String>,
         store: Arc<dyn NakamaCredentialStore>,
     ) -> Self {
         Self {
             server_url: server_url.into(),
+            scope,
             server_key: server_key.into(),
             store,
         }
@@ -116,7 +186,7 @@ impl SavedNakamaSessionRefresher {
             &self.server_key,
         ))
         .map_err(NakamaLoginError::Authentication)?;
-        let session = refresh_saved_session(&client, &self.server_url, self.store.as_ref())?;
+        let session = refresh_saved_session(&client, &self.scope, self.store.as_ref())?;
         Ok(session.access_token().to_owned())
     }
 }
@@ -125,6 +195,7 @@ impl fmt::Debug for SavedNakamaSessionRefresher {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SavedNakamaSessionRefresher")
             .field("server_url", &"[redacted]")
+            .field("scope", &"[redacted]")
             .field("server_key", &"[redacted]")
             .field("store", &"[redacted]")
             .finish()
@@ -141,18 +212,21 @@ pub enum NakamaLogoutOutcome {
 
 /// Injectable storage boundary for OS credentials and deterministic tests.
 pub trait NakamaCredentialStore: Send + Sync {
-    /// Load credentials for a Nakama base URL; `None` means first login.
-    fn load(&self, server_url: &str) -> Result<Option<NakamaCredential>, CredentialStoreError>;
+    /// Load credentials for one scope; `None` means first login.
+    fn load(
+        &self,
+        scope: &CredentialScope,
+    ) -> Result<Option<NakamaCredential>, CredentialStoreError>;
 
     /// Store the current device ID and refresh token securely.
     fn save(
         &self,
-        server_url: &str,
+        scope: &CredentialScope,
         credential: &NakamaCredential,
     ) -> Result<(), CredentialStoreError>;
 
     /// Delete stored credentials after a successful logout.
-    fn delete(&self, server_url: &str) -> Result<(), CredentialStoreError>;
+    fn delete(&self, scope: &CredentialScope) -> Result<(), CredentialStoreError>;
 }
 
 /// Credential store backed by Windows Credential Manager, macOS Keychain, or
@@ -161,8 +235,11 @@ pub trait NakamaCredentialStore: Send + Sync {
 pub struct OsNakamaCredentialStore;
 
 impl NakamaCredentialStore for OsNakamaCredentialStore {
-    fn load(&self, server_url: &str) -> Result<Option<NakamaCredential>, CredentialStoreError> {
-        let entry = keyring_entry(server_url)?;
+    fn load(
+        &self,
+        scope: &CredentialScope,
+    ) -> Result<Option<NakamaCredential>, CredentialStoreError> {
+        let entry = keyring_entry(scope)?;
         let value = match entry.get_password() {
             Ok(value) => value,
             Err(keyring::Error::NoEntry) => return Ok(None),
@@ -183,18 +260,18 @@ impl NakamaCredentialStore for OsNakamaCredentialStore {
 
     fn save(
         &self,
-        server_url: &str,
+        scope: &CredentialScope,
         credential: &NakamaCredential,
     ) -> Result<(), CredentialStoreError> {
         let value =
             serde_json::to_string(credential).map_err(|_| CredentialStoreError::InvalidRecord)?;
-        keyring_entry(server_url)?
+        keyring_entry(scope)?
             .set_password(&value)
             .map_err(|_| CredentialStoreError::Unavailable)
     }
 
-    fn delete(&self, server_url: &str) -> Result<(), CredentialStoreError> {
-        let entry = keyring_entry(server_url)?;
+    fn delete(&self, scope: &CredentialScope) -> Result<(), CredentialStoreError> {
+        let entry = keyring_entry(scope)?;
         match entry.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(_) => Err(CredentialStoreError::Unavailable),
@@ -202,26 +279,27 @@ impl NakamaCredentialStore for OsNakamaCredentialStore {
     }
 }
 
-fn keyring_entry(server_url: &str) -> Result<keyring::Entry, CredentialStoreError> {
-    keyring::Entry::new(KEYRING_SERVICE, server_url).map_err(|_| CredentialStoreError::Unavailable)
+fn keyring_entry(scope: &CredentialScope) -> Result<keyring::Entry, CredentialStoreError> {
+    keyring::Entry::new(KEYRING_SERVICE, scope.as_key())
+        .map_err(|_| CredentialStoreError::Unavailable)
 }
 
 /// Refresh the saved Nakama credential and persist the rotated token before
 /// returning the replacement access session.
 pub fn refresh_saved_session(
     client: &NakamaAuthClient,
-    server_url: &str,
+    scope: &CredentialScope,
     store: &dyn NakamaCredentialStore,
 ) -> Result<NakamaSession, NakamaLoginError> {
     let previous = store
-        .load(server_url)
+        .load(scope)
         .map_err(NakamaLoginError::CredentialStore)?
         .ok_or(NakamaLoginError::NoSavedCredentials)?;
     let session = client
         .refresh(previous.refresh_token())
         .map_err(NakamaLoginError::Authentication)?;
     store
-        .save(server_url, &previous.rotated(session.refresh_token()))
+        .save(scope, &previous.rotated(session.refresh_token()))
         .map_err(NakamaLoginError::CredentialStore)?;
     Ok(session)
 }
@@ -234,12 +312,12 @@ pub fn refresh_saved_session(
 /// fails closed; there is no plaintext fallback.
 pub fn authenticate_or_resume(
     client: &NakamaAuthClient,
-    server_url: &str,
+    scope: &CredentialScope,
     store: &dyn NakamaCredentialStore,
     locale: Locale,
 ) -> Result<NakamaSession, NakamaLoginError> {
     let previous = store
-        .load(server_url)
+        .load(scope)
         .map_err(NakamaLoginError::CredentialStore)?;
     if let Some(previous) = previous
         .as_ref()
@@ -249,7 +327,7 @@ pub fn authenticate_or_resume(
             .refresh(previous.refresh_token())
             .map_err(NakamaLoginError::Authentication)?;
         store
-            .save(server_url, &previous.rotated(session.refresh_token()))
+            .save(scope, &previous.rotated(session.refresh_token()))
             .map_err(NakamaLoginError::CredentialStore)?;
         return Ok(session);
     }
@@ -282,7 +360,7 @@ pub fn authenticate_or_resume(
 
     store
         .save(
-            server_url,
+            scope,
             &NakamaCredential::new(device_id, session.refresh_token().to_owned()),
         )
         .map_err(NakamaLoginError::CredentialStore)?;
@@ -292,13 +370,13 @@ pub fn authenticate_or_resume(
 /// Resume only the explicitly requested email account, or prompt to authenticate it.
 pub fn authenticate_email_or_resume(
     client: &NakamaAuthClient,
-    server_url: &str,
+    scope: &CredentialScope,
     store: &dyn NakamaCredentialStore,
     email: &str,
     prompt: impl FnOnce() -> Result<String, NakamaLoginError>,
 ) -> Result<NakamaSession, NakamaLoginError> {
     let previous = store
-        .load(server_url)
+        .load(scope)
         .map_err(NakamaLoginError::CredentialStore)?;
     let session = if let Some(previous) = previous
         .as_ref()
@@ -322,7 +400,7 @@ pub fn authenticate_email_or_resume(
     };
     store
         .save(
-            server_url,
+            scope,
             &NakamaCredential::email(email, session.refresh_token()),
         )
         .map_err(NakamaLoginError::CredentialStore)?;
@@ -334,11 +412,11 @@ pub fn authenticate_email_or_resume(
 /// in the credential store.
 pub fn logout_saved_account(
     client: &NakamaAuthClient,
-    server_url: &str,
+    scope: &CredentialScope,
     store: &dyn NakamaCredentialStore,
 ) -> Result<NakamaLogoutOutcome, NakamaLoginError> {
     let Some(credential) = store
-        .load(server_url)
+        .load(scope)
         .map_err(NakamaLoginError::CredentialStore)?
     else {
         return Ok(NakamaLogoutOutcome::NoSavedCredentials);
@@ -347,20 +425,20 @@ pub fn logout_saved_account(
         Ok(session) => session,
         Err(NakamaAuthFailure::Authentication) => {
             store
-                .delete(server_url)
+                .delete(scope)
                 .map_err(NakamaLoginError::CredentialStore)?;
             return Ok(NakamaLogoutOutcome::ExpiredCredentialsCleared);
         }
         Err(error) => return Err(NakamaLoginError::Authentication(error)),
     };
     store
-        .save(server_url, &credential.rotated(session.refresh_token()))
+        .save(scope, &credential.rotated(session.refresh_token()))
         .map_err(NakamaLoginError::CredentialStore)?;
     client
         .logout(&session)
         .map_err(NakamaLoginError::Authentication)?;
     store
-        .delete(server_url)
+        .delete(scope)
         .map_err(NakamaLoginError::CredentialStore)?;
     Ok(NakamaLogoutOutcome::Revoked)
 }
@@ -406,29 +484,36 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct MemoryStore(Mutex<Option<NakamaCredential>>);
+    struct MemoryStore(Mutex<std::collections::BTreeMap<String, NakamaCredential>>);
 
     impl NakamaCredentialStore for MemoryStore {
         fn load(
             &self,
-            _server_url: &str,
+            scope: &CredentialScope,
         ) -> Result<Option<NakamaCredential>, CredentialStoreError> {
-            Ok(self.0.lock().unwrap().as_ref().cloned())
+            Ok(self.0.lock().unwrap().get(scope.as_key()).cloned())
         }
 
         fn save(
             &self,
-            _server_url: &str,
+            scope: &CredentialScope,
             credential: &NakamaCredential,
         ) -> Result<(), CredentialStoreError> {
-            *self.0.lock().unwrap() = Some(credential.clone());
+            self.0
+                .lock()
+                .unwrap()
+                .insert(scope.as_key().to_owned(), credential.clone());
             Ok(())
         }
 
-        fn delete(&self, _server_url: &str) -> Result<(), CredentialStoreError> {
-            *self.0.lock().unwrap() = None;
+        fn delete(&self, scope: &CredentialScope) -> Result<(), CredentialStoreError> {
+            self.0.lock().unwrap().remove(scope.as_key());
             Ok(())
         }
+    }
+
+    fn nakama_scope(url: &str) -> CredentialScope {
+        CredentialScope::for_nakama(url)
     }
 
     fn read_http_request(stream: &mut TcpStream) -> String {
@@ -512,25 +597,24 @@ mod tests {
             );
         });
         let store = MemoryStore::default();
+        let scope = nakama_scope(&server_url);
         store
             .save(
-                &server_url,
+                &scope,
                 &NakamaCredential::new("old-device-id", "old-refresh"),
             )
             .unwrap();
         let client =
             NakamaAuthClient::new(NakamaAuthConfig::new(&server_url, "public-key")).unwrap();
         let prompt = || Ok("password-secret".to_owned());
-        authenticate_email_or_resume(&client, &server_url, &store, "new@example.test", prompt)
-            .unwrap();
-        authenticate_email_or_resume(&client, &server_url, &store, "new@example.test", || {
+        authenticate_email_or_resume(&client, &scope, &store, "new@example.test", prompt).unwrap();
+        authenticate_email_or_resume(&client, &scope, &store, "new@example.test", || {
             panic!("unexpected prompt")
         })
         .unwrap();
-        authenticate_email_or_resume(&client, &server_url, &store, "new@example.test", prompt)
-            .unwrap();
+        authenticate_email_or_resume(&client, &scope, &store, "new@example.test", prompt).unwrap();
         worker.join().unwrap();
-        let saved = store.load(&server_url).unwrap().unwrap();
+        let saved = store.load(&scope).unwrap().unwrap();
         assert_eq!(saved.email.as_deref(), Some("new@example.test"));
         assert_eq!(saved.refresh_token(), "refresh-three");
         let encoded = serde_json::to_string(&saved).unwrap();
@@ -570,18 +654,17 @@ mod tests {
         });
 
         let store = MemoryStore::default();
+        let scope = nakama_scope(&server_url);
         let client =
             NakamaAuthClient::new(NakamaAuthConfig::new(&server_url, "public-key")).unwrap();
-        let first =
-            authenticate_or_resume(&client, &server_url, &store, Locale::default()).unwrap();
+        let first = authenticate_or_resume(&client, &scope, &store, Locale::default()).unwrap();
         assert_eq!(first.access_token(), "access-one");
         assert_eq!(first.refresh_token(), "refresh-one");
-        let second =
-            authenticate_or_resume(&client, &server_url, &store, Locale::default()).unwrap();
+        let second = authenticate_or_resume(&client, &scope, &store, Locale::default()).unwrap();
         assert_eq!(second.access_token(), "access-two");
         assert_eq!(second.refresh_token(), "refresh-two");
         let device_id = worker.join().unwrap();
-        let saved = store.load(&server_url).unwrap().unwrap();
+        let saved = store.load(&scope).unwrap().unwrap();
         assert_eq!(saved.device_id(), device_id);
         assert_eq!(saved.refresh_token(), "refresh-two");
     }
@@ -602,17 +685,23 @@ mod tests {
         });
 
         let store = Arc::new(MemoryStore::default());
+        let scope = nakama_scope(&server_url);
         store
             .save(
-                &server_url,
+                &scope,
                 &NakamaCredential::email("account@example.test", "refresh-before"),
             )
             .unwrap();
-        let refresher = SavedNakamaSessionRefresher::new(&server_url, "public-key", store.clone());
+        let refresher = SavedNakamaSessionRefresher::new(
+            &server_url,
+            scope.clone(),
+            "public-key",
+            store.clone(),
+        );
         assert_eq!(refresher.refresh_access_token().unwrap(), "access-after");
         worker.join().unwrap();
 
-        let saved = store.load(&server_url).unwrap().unwrap();
+        let saved = store.load(&scope).unwrap().unwrap();
         assert_eq!(saved.email.as_deref(), Some("account@example.test"));
         assert_eq!(saved.refresh_token(), "refresh-after");
         let debug = format!("{refresher:?}");
@@ -655,19 +744,70 @@ mod tests {
         });
 
         let store = MemoryStore::default();
+        let scope = nakama_scope(&server_url);
         store
             .save(
-                &server_url,
+                &scope,
                 &NakamaCredential::new("known-device-id", "old-refresh"),
             )
             .unwrap();
         let client =
             NakamaAuthClient::new(NakamaAuthConfig::new(&server_url, "public-key")).unwrap();
         assert_eq!(
-            logout_saved_account(&client, &server_url, &store).unwrap(),
+            logout_saved_account(&client, &scope, &store).unwrap(),
             NakamaLogoutOutcome::Revoked
         );
         worker.join().unwrap();
-        assert!(store.load(&server_url).unwrap().is_none());
+        assert!(store.load(&scope).unwrap().is_none());
+    }
+
+    #[test]
+    fn credential_scopes_isolate_world_profiles_and_stay_secret_free() {
+        let nakama = "http://127.0.0.1:7350/";
+        let local = CredentialScope::for_world("127.0.0.1:8090", nakama);
+        let other = CredentialScope::for_world("127.0.0.1:8091", nakama);
+        let again = CredentialScope::for_world("127.0.0.1:8090", "http://127.0.0.1:7350");
+
+        assert_eq!(local, again, "scope keys must be stable");
+        assert_ne!(local, other, "profiles must not share credentials");
+        assert_ne!(
+            local,
+            CredentialScope::for_nakama(nakama),
+            "a profile scope must differ from the profile-less scope"
+        );
+        assert!(!local.as_key().contains("127.0.0.1"));
+        assert!(!local.as_key().contains("7350"));
+        assert!(local.as_key().len() <= 128);
+        assert_eq!(format!("{local:?}"), "CredentialScope(\"[redacted]\")");
+    }
+
+    #[test]
+    fn a_saved_session_is_never_visible_from_another_world_profile() {
+        let nakama = "http://127.0.0.1:7350";
+        let local = CredentialScope::for_world("127.0.0.1:8090", nakama);
+        let other = CredentialScope::for_world("127.0.0.1:8091", nakama);
+        let store = MemoryStore::default();
+        store
+            .save(
+                &local,
+                &NakamaCredential::email("player@example.test", "refresh-local"),
+            )
+            .unwrap();
+
+        assert!(store.load(&other).unwrap().is_none());
+        let saved = store.load(&local).unwrap().unwrap();
+        assert_eq!(saved.refresh_token(), "refresh-local");
+
+        let client = NakamaAuthClient::new(NakamaAuthConfig::new(nakama, "public-key")).unwrap();
+        let refresher =
+            SavedNakamaSessionRefresher::new(nakama, other, "public-key", Arc::new(store));
+        assert_eq!(
+            refresher.refresh_access_token(),
+            Err(NakamaLoginError::NoSavedCredentials)
+        );
+        assert_eq!(
+            refresh_saved_session(&client, &local, &MemoryStore::default()),
+            Err(NakamaLoginError::NoSavedCredentials)
+        );
     }
 }

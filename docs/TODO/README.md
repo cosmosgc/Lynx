@@ -100,7 +100,7 @@ the quick audit; update it when a gap is found or closed.
 | MCP server and external client are planned only | [AI tooling](../ai-tooling.md) | `CNT-009`, `CNT-010` |
 | User content has schemas/moderation requirements but no implementation | [security](../security.md#content-and-user-generated-content) | `CNT-008`, `NET-009` |
 | No staging publish, rollout, rollback, or upgrade workflow | [operations](../operations.md) | `OPS-004`, `OPS-010` |
-| No backup/restore drills | [security](../security.md#abuse-prevention) | `OPS-003` |
+| No scheduled, encrypted off-host backups or target-environment restore drills | [operations](../operations.md#backups-and-recovery) | `PST-009`, `OPS-003` |
 | Linux graphical CI smoke is deferred; Windows has a local account-screen screenshot helper; authenticated character-flow and gameplay rendering are not covered by either smoke | [platforms](../platforms.md), [CI](../../.github/workflows/ci.yml) | `OPS-016` |
 | ADR 0022 (dynamic classes and Treat targeting) is Proposed | [ADR 0022](../adr/0022-dynamic-character-classes-and-combat-targeting.md) | `SIM-004` |
 | Guilds, quests, progression, economy, trading, parties | [README](../../README.md#phase-8--expand-and-stabilize--selected-systems-delivered-early) | `SIM-009`–`SIM-013` |

@@ -382,6 +382,14 @@ jobs:
           test "$before" = "$(psql "${psql_args[@]}" -c "$history_query")"
           psql "${psql_args[@]}" -c "UPDATE lynx.schema_migrations SET checksum = '$original' WHERE version = '0001_core'"
 
+      - name: Build world service for restore smoke
+        run: cargo build -p lynx-world
+
+      - name: Verify PostgreSQL backup restore and service startup
+        env:
+          LYNX_BACKUP_TEST_DATABASE: lynx_ci
+        run: bash scripts/backup-restore-smoke.sh target/debug/lynx-world
+
       - name: Report CI duration
         if: always()
         run: python3 scripts/ci-job-duration.py finish migrations-postgres
