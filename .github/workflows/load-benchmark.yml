@@ -21,7 +21,7 @@ jobs:
         uses: dtolnay/rust-toolchain@1.99.0
 
       - name: Cache Rust dependencies and build artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
