@@ -13,6 +13,11 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
+MIN_SUCCESSFUL_SAMPLES = 10
+REGRESSION_FRACTION = 0.50
+REGRESSION_MIN_SECONDS = 300
+
+
 def github_get(api_url: str, token: str, endpoint: str, query: dict | None = None) -> dict:
     url = f"{api_url.rstrip('/')}/{endpoint}"
     if query:
@@ -60,7 +65,7 @@ def main() -> int:
     parser.add_argument("--run-id", type=int, default=os.environ.get("GITHUB_RUN_ID"))
     parser.add_argument("--token", default=os.environ.get("GITHUB_TOKEN"))
     parser.add_argument("--summary", default=os.environ.get("GITHUB_STEP_SUMMARY"))
-    parser.add_argument("--limit", type=int, default=20)
+    parser.add_argument("--limit", type=int, default=50)
     args = parser.parse_args()
 
     missing = [name for name in ("repository", "branch", "run_id", "token", "summary") if not getattr(args, name)]
@@ -97,15 +102,22 @@ def main() -> int:
             "### CI duration and job outcome trend",
             "",
             f"Compared with the previous {len(history)} completed `{args.branch}` run(s) of this workflow.",
-            "Failure rate is the share of completed job attempts whose conclusion was not `success`; it is not a test-level flakiness measure.",
+            "Non-success rate is the share of completed job attempts whose conclusion was not `success` (including cancellations); it is not a test-level flakiness measure.",
+            f"Duration gate: a current successful job is flagged when it exceeds the successful-run median by more than max({REGRESSION_FRACTION:.0%} of the median, {REGRESSION_MIN_SECONDS // 60} minutes), after {MIN_SUCCESSFUL_SAMPLES} prior successful samples.",
             "",
-            "| Job | Current | Previous median | Change vs median | Previous failures |",
-            "|---|---:|---:|---:|---:|",
+            "| Job | Current | Previous successful median (n) | Gate threshold | Change vs median | Previous non-success |",
+            "|---|---:|---:|---:|---:|---:|",
         ]
+        regressions = []
         for name in tracked:
             current = next((job for job in current_jobs if job.get("name") == name), None)
             prior = [job for _, jobs in history for job in jobs if job.get("name") == name]
-            durations = [value for job in prior if (value := duration_seconds(job)) is not None]
+            durations = [
+                value
+                for job in prior
+                if job.get("conclusion") == "success"
+                and (value := duration_seconds(job)) is not None
+            ]
             median = statistics.median(durations) if durations else None
             current_duration = duration_seconds(current) if current else None
             if current_duration is None or median is None:
@@ -113,20 +125,43 @@ def main() -> int:
             else:
                 delta = current_duration - median
                 change = f"{delta:+.0f}s ({delta / median:+.0%})" if median else f"{delta:+.0f}s"
+            threshold = None
+            if median is not None and len(durations) >= MIN_SUCCESSFUL_SAMPLES:
+                threshold = median + max(median * REGRESSION_FRACTION, REGRESSION_MIN_SECONDS)
+            if threshold is None:
+                gate = f"warming up ({len(durations)}/{MIN_SUCCESSFUL_SAMPLES})"
+            else:
+                gate = format_duration(threshold)
+                if (
+                    current_duration is not None
+                    and current
+                    and current.get("conclusion") == "success"
+                    and current_duration > threshold
+                ):
+                    regressions.append((name, current_duration, threshold))
             finished = [job for job in prior if job.get("conclusion")]
-            failures = sum(job.get("conclusion") != "success" for job in finished)
-            failure_rate = f"{failures}/{len(finished)} ({failures / len(finished):.0%})" if finished else "n/a"
+            non_success = sum(job.get("conclusion") != "success" for job in finished)
+            outcome_rate = f"{non_success}/{len(finished)} ({non_success / len(finished):.0%})" if finished else "n/a"
             lines.append(
-                f"| {name} | {format_duration(current_duration)} | {format_duration(median)} | {change} | {failure_rate} |"
+                f"| {name} | {format_duration(current_duration)} | {format_duration(median)} ({len(durations)}) | {gate} | {change} | {outcome_rate} |"
             )
-        lines.extend(("", "This is observational only: it does not retry tests or change CI pass/fail outcomes."))
+        lines.extend(("", "Job outcome history is observational and does not retry tests. Duration gating applies only to current successful jobs with a mature successful-run baseline."))
+        if regressions:
+            lines.extend(("", "Duration regression(s) exceeded the gate:"))
+            lines.extend(
+                f"- `{name}`: {format_duration(current)} exceeds {format_duration(threshold)}."
+                for name, current, threshold in regressions
+            )
         with Path(args.summary).open("a", encoding="utf-8") as summary:
             summary.write("\n".join(lines) + "\n")
         print("\n".join(lines))
     except (HTTPError, URLError, TimeoutError, OSError, KeyError, ValueError) as error:
-        print(f"Unable to retrieve CI history: {error}", file=sys.stderr)
-        return 1
-    return 0
+        warning = f"CI history unavailable; duration gate skipped: {error}"
+        print(warning, file=sys.stderr)
+        with Path(args.summary).open("a", encoding="utf-8") as summary:
+            summary.write(f"\n> Warning: {warning}\n")
+        return 0
+    return 1 if regressions else 0
 
 
 if __name__ == "__main__":

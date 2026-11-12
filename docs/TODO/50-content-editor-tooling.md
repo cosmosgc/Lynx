@@ -6,10 +6,10 @@ user-content moderation, content migration, and MCP/CLI automation.
 
 **What exists today:** RON definitions and catalogs, world-map atlases with
 explicit routes, UI panel schemas, faction/calendar content, manifests, hashing,
-compatibility-aware diffs, and publish checks. The `lynx` CLI supports
-`new`, `doctor`, `validate`, `content hash`, `content diff`, and
-`content publish-check`. There is no editor, no MCP server, no asset import
-pipeline, and no content-migration tool.
+compatibility-aware diffs, publish checks, a read-only MCP server, and content
+migration tooling. The `lynx` CLI supports `new`, `doctor`, `validate`, content
+hash/diff/publish checks, and migration workflows. The standalone editor shell
+is in progress; asset import remains unimplemented.
 
 **Related design:** [content authoring](../content-authoring.md),
 [world simulation](../world-simulation.md), [AI tooling](../ai-tooling.md),
@@ -23,14 +23,15 @@ pipeline, and no content-migration tool.
 ## CNT-001 — Editor application shell
 
 - **Priority:** P1
-- **Status:** Proposed — editor stack decision (D5)
-- **Depends on:** D5, `CLT-001`
+- **Status:** In progress — standalone Bevy editor opens projects, edits world-map placements, validates through `engine_content`, supports undo/redo and recovery autosave, and launches the offline client for local play preview; end-to-end authoring verification remains
+- **Depends on:** `CLT-001`
 - **References:** [project guide §23](../lightweight_mmorpg_engine_project_guide.md#23-suggested-implementation-roadmap),
-  [content authoring](../content-authoring.md)
+  [content authoring](../content-authoring.md),
+  [ADR 0025](../adr/0025-cli-first-content-authoring.md)
 
 **Why:** Phase 5 requires a creator to build a small zone without editing engine
-source. Whether that is an in-engine Bevy editor, a standalone tool, or a
-CLI-first workflow is an open decision; the shell and undo model depend on it.
+source. ADR 0025 selects CLI-first authoring and a later standalone editor that
+reuses the same validation path.
 
 **Scope**
 
@@ -44,7 +45,7 @@ CLI-first workflow is an open decision; the shell and undo model depend on it.
 
 **Acceptance criteria**
 
-- [ ] D5 is recorded as an ADR before implementation starts.
+- [x] D5 is recorded as ADR 0025 before implementation starts.
 - [ ] A creator can open a generated project, edit, undo/redo, save, and reopen.
 - [ ] Validation errors point to the offending definition and field.
 - [ ] Autosave/recovery never leaves a half-written project.
@@ -93,7 +94,8 @@ CLI-first workflow is an open decision; the shell and undo model depend on it.
   persistence policy, links).
 - Bounds/collision/occupancy validation and placement budgets.
 - Bulk select/move/delete with undo.
-- Property ownership/lease rules once defined (`QUA-017`).
+- Authored placements only; player ownership and leases are deferred by
+  [ADR 0030](../adr/0030-player-property-ownership.md).
 
 **Acceptance criteria**
 
@@ -200,10 +202,11 @@ CLI-first workflow is an open decision; the shell and undo model depend on it.
 ## CNT-008 — User-content schemas and moderation states
 
 - **Priority:** P2
-- **Status:** Proposed — user-content policy decision (D6)
-- **Depends on:** D6
+- **Status:** Ready
+- **Depends on:** —
 - **References:** [security §Content and user-generated content](../security.md#content-and-user-generated-content),
-  migration `0002_content.sql`
+  migration `0002_content.sql`,
+  [ADR 0026](../adr/0026-user-content-publishing-policy.md)
 
 **Why:** The schema already has content bundles and moderation history, but
 ownership, visibility, revision, and revocation rules for player-created content
@@ -230,9 +233,11 @@ are not implemented. This must not be improvised after uploads exist.
 ## CNT-009 — MCP server: read-only tools
 
 - **Priority:** P2
-- **Status:** Ready
+- **Status:** Done
+- **Completed:** 2026-11-12
 - **Depends on:** `CNT-011`
 - **References:** [AI tooling §Planned MCP tools](../ai-tooling.md#planned-mcp-tools)
+- **Completion record:** [CNT-009](completed/cnt-009-readonly-mcp-server.md)
 
 **Scope**
 
@@ -246,10 +251,10 @@ are not implemented. This must not be improvised after uploads exist.
 
 **Acceptance criteria**
 
-- [ ] Tools return the same results as the CLI for the same project.
-- [ ] A tool cannot read outside the configured workspace.
-- [ ] Output size and depth are bounded.
-- [ ] MCP remains optional; no build/test path requires it.
+- [x] Tools return the same results as the CLI for the same project.
+- [x] A tool cannot read outside the configured workspace.
+- [x] Output size and depth are bounded.
+- [x] MCP remains optional; no build/test path requires it.
 
 ---
 
@@ -280,7 +285,8 @@ are not implemented. This must not be improvised after uploads exist.
 ## CNT-011 — CLI expansion
 
 - **Priority:** P1
-- **Status:** In progress — command handlers are modularized; automation contracts incomplete
+- **Status:** Done
+- **Completion record:** [cnt-011-cli-expansion.md](completed/cnt-011-cli-expansion.md)
 - **Depends on:** —
 - **References:** `tools/project_cli/src/main.rs`,
   [AI tooling](../ai-tooling.md)
@@ -305,22 +311,21 @@ contracts are still needed.
 
 - [x] A generated project can be built, validated, run, and tested from the CLI
       while its generated path dependencies remain available.
-- [ ] Every command has `--json` output with a documented schema.
+- [x] Every command has `--json` output with a documented schema, including
+      invalid-argument failures.
 - [x] Exit codes distinguish validation failure, incompatibility, and internal
       error (2, 3, and 1 respectively; success is 0).
 - [x] Hosted CI exercises the generated-project build, validation, run, and
       test commands.
+- [x] Shell completions and the command reference are generated from the
+      registered command tree, with CI enforcing reference freshness.
 
 The Ubuntu CI workflow exercises these commands and completed green in the
 hosted CI run confirmed on 2026-10-29.
 
-The CLI includes `exit_code` in command reports and uses a common JSON failure
-shape when command dispatch fails before a command-specific report can be
-built. JSON report shapes and the exit-code contract are documented in [AI
-tooling](../ai-tooling.md). Clap argument parse failures still happen before
-dispatch and are not JSON reports. Re-verified locally on 2026-10-30 with
-`cargo test -p project_cli` (15 tests passed across unit and integration
-targets); generated command reference and shell completion remain unimplemented.
+**Completion (2026-11-12):** All acceptance criteria are complete. Project
+migrations remain in CNT-014; this task delivered the CLI automation and help
+contracts that CNT-009 and CNT-014 build on.
 
 ---
 
@@ -355,7 +360,8 @@ targets); generated command reference and shell completion remain unimplemented.
 - **Priority:** P2
 - **Status:** Ready
 - **Depends on:** `CNT-005`
-- **References:** [content authoring §Required fields and validation](../content-authoring.md#required-fields-and-validation)
+- **References:** [content authoring §Required fields and validation](../content-authoring.md#required-fields-and-validation),
+  [ADR 0023](../adr/0023-asset-formats-and-import-pipeline.md)
 
 **Scope**
 
@@ -377,9 +383,11 @@ targets); generated command reference and shell completion remain unimplemented.
 ## CNT-014 — Content migration and upgrade tooling
 
 - **Priority:** P2
-- **Status:** Ready
+- **Status:** Done
+- **Completed:** 2026-11-12
 - **Depends on:** `CNT-011`
-- **References:** ADR 0017, `PST-013`
+- **Completion record:** [CNT-014](completed/cnt-014-content-migration-tooling.md)
+- **References:** ADR 0017, [ADR 0031](../adr/0031-content-migration-artifact-and-rollback.md), `PST-013`
 
 **Scope**
 
@@ -387,15 +395,32 @@ targets); generated command reference and shell completion remain unimplemented.
   rollback.
 - Version-aware upgrade from a deployed bundle to a candidate.
 - Report entities/instances affected and incompatible cases.
-- Apply migrations to content files and, where required, persisted instances.
+- Apply migrations to authored content files. Persisted-instance transitions
+  are transactional backend work tracked separately in `PST-013`.
 - Integrate with `lynx migrate` and publish checks.
+
+**Progress (2026-11-12):** ADR 0031 defines reviewed declarative plans,
+whole-project staging/validation, exact-byte rollback snapshots, and the
+separate transactional instance-migration boundary in PST-013. The CLI checks
+the source manifest hash and content version, applies expected-value JSON
+Pointer operations to definitions/catalogs, validates the candidate against
+the schema registry and manifest diff policy, and supports dry-run, apply, and
+exact-byte rollback. Generated-project integration coverage exercises preview,
+failure atomicity, apply, and rollback. Persisted instance migration is not
+claimed here and remains in PST-013.
 
 **Acceptance criteria**
 
-- [ ] A dry run lists every affected definition/instance without writing.
-- [ ] A failed migration leaves the project unchanged.
-- [ ] Rollback restores the previous compatible content.
-- [ ] CI validates migrations against a fixture project.
+- [x] A dry run lists every affected definition, catalog, and file without
+      changing the project.
+- [x] A failed migration leaves the project unchanged.
+- [x] Rollback restores the previous compatible content exactly and refuses
+      to overwrite edits made after migration.
+- [x] CI validates migrations against a generated fixture project.
+
+Persisted instance transitions are tracked separately in
+[PST-013](20-persistence-backend.md#pst-013--content-version-pinning-and-migration),
+which is now unblocked.
 
 ---
 

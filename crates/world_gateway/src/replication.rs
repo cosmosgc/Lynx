@@ -222,6 +222,7 @@ pub fn visibility_tags() -> BTreeSet<&'static str> {
     ])
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

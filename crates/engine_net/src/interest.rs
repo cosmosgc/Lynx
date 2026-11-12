@@ -570,6 +570,7 @@ fn owned_by(entity: &InterestEntity, principal: Option<StableId>) -> bool {
     entity.owner.is_some_and(|owner| principal == Some(owner))
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

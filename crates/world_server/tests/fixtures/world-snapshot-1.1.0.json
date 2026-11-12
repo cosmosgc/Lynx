@@ -1,0 +1,1 @@
+{"v":"1.1.0","id":"srv_snapshot","kind":"world.snapshot","body":{"batch":{"tick":0,"updates":[]},"interest":{"added":[],"removed":[],"set":[]},"movement":{"applied":null,"last_consumed_sequence":null,"position":{"x":0.0,"y":0.0,"z":0.0},"tick":0},"tick":0}}

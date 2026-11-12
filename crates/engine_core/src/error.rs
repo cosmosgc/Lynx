@@ -46,6 +46,29 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
+    /// All stable wire error categories, in catalog order.
+    ///
+    /// Update this list whenever a variant is added so catalog and boundary
+    /// audits can check every code without duplicating the enum definition.
+    pub const ALL: [Self; 16] = [
+        Self::InvalidRequest,
+        Self::NotFound,
+        Self::OutOfRange,
+        Self::NotVisible,
+        Self::PermissionDenied,
+        Self::InvalidState,
+        Self::SessionExpired,
+        Self::Cooldown,
+        Self::CapacityExceeded,
+        Self::VersionMismatch,
+        Self::ContentInvalid,
+        Self::Conflict,
+        Self::BudgetExhausted,
+        Self::RateLimited,
+        Self::Unsupported,
+        Self::Internal,
+    ];
+
     /// The canonical wire representation.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -204,6 +227,7 @@ impl From<serde_json::Error> for EngineError {
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

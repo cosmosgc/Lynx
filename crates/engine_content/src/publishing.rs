@@ -476,6 +476,7 @@ pub fn check_publish(
     report
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use engine_core::i18n::Locale;

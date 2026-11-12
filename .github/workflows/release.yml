@@ -8,9 +8,20 @@ permissions:
   contents: write
 
 jobs:
+  release-notes:
+    name: Validate release notes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Require versioned changelog and migration notes
+        run: python3 scripts/check_release_notes.py "$GITHUB_REF_NAME"
+
   package:
     name: Package ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    needs: release-notes
     strategy:
       fail-fast: false
       matrix:
@@ -18,9 +29,11 @@ jobs:
           - name: linux-x86_64
             os: ubuntu-24.04
             archive: lynx-world-linux-x86_64.tar.gz
+            target: x86_64-unknown-linux-gnu
           - name: windows-x86_64
             os: windows-latest
             archive: lynx-world-windows-x86_64.zip
+            target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -33,6 +46,16 @@ jobs:
           test "$tag" = "$version"
       - name: Build server
         run: cargo build --release -p lynx-world
+      - name: Install pinned CycloneDX generator
+        run: cargo install cargo-cyclonedx --version 0.5.9 --locked
+      - name: Generate binary dependency SBOM
+        run: >-
+          cargo cyclonedx
+          --manifest-path crates/lynx_world/Cargo.toml
+          --describe crate
+          --target ${{ matrix.target }}
+          --spec-version 1.5
+          --format json
       - name: Assemble archive (Linux)
         if: runner.os == 'Linux'
         shell: bash
@@ -40,6 +63,8 @@ jobs:
           stage="lynx-world-${GITHUB_REF_NAME}-linux-x86_64"
           mkdir "$stage"
           cp target/release/lynx-world "$stage/"
+          cp crates/lynx_world/lynx-world.cdx.json "$stage/SBOM.cdx.json"
+          cp crates/lynx_world/lynx-world.cdx.json "${{ matrix.name }}-sbom.json"
           cat > "$stage/BUILD-INFO.txt" <<EOF
           release_tag=${GITHUB_REF_NAME}
           engine_version=${GITHUB_REF_NAME#v}
@@ -56,6 +81,8 @@ jobs:
           $stage = "lynx-world-$env:GITHUB_REF_NAME-windows-x86_64"
           New-Item -ItemType Directory -Force $stage | Out-Null
           Copy-Item target/release/lynx-world.exe "$stage/"
+          Copy-Item crates/lynx_world/lynx-world.cdx.json "$stage/SBOM.cdx.json"
+          Copy-Item crates/lynx_world/lynx-world.cdx.json "${{ matrix.name }}-sbom.json"
           @"
           release_tag=$env:GITHUB_REF_NAME
           engine_version=$($env:GITHUB_REF_NAME.TrimStart('v'))
@@ -71,9 +98,11 @@ jobs:
           path: |
             ${{ matrix.archive }}
             ${{ matrix.archive }}.sha256
+            ${{ matrix.name }}-sbom.json
   publish:
     needs: package
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/download-artifact@v4
         with:

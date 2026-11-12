@@ -25,6 +25,7 @@ surface.
 
 - **Priority:** P0
 - **Status:** Done
+- **Completion record:** [net-001-production-authentication-at-the-world-edge.md](completed/net-001-production-authentication-at-the-world-edge.md)
 - **Depends on:** —
 - **References:** [networking §Transport](../networking.md#transport),
   [architecture §What is deliberately not here yet](../architecture.md#what-is-deliberately-not-here-yet),
@@ -89,6 +90,7 @@ live actor, and the client has no character onboarding UI.
 
 - **Priority:** P0
 - **Status:** Done
+- **Completion record:** [net-002-rate-limiting-and-message-budgets.md](completed/net-002-rate-limiting-and-message-budgets.md)
 - **Depends on:** —
 - **References:** [security §Abuse prevention](../security.md#abuse-prevention),
   `crates/engine_net/src/envelope.rs`
@@ -123,7 +125,7 @@ movement requests and starve the authority loop.
 ## NET-003 — TLS and reverse-proxy boundary
 
 - **Priority:** P1
-- **Status:** In progress
+- **Status:** In progress — the reference Nginx config passes local syntax validation and is CI-gated; certificate-backed staging validation remains
 - **Depends on:** —
 - **References:** [networking §Transport](../networking.md#transport),
   [operations](../operations.md), `PST-007`
@@ -161,16 +163,18 @@ reference with WebSocket upgrade, Authorization and character-header pass-throug
 bounded header handling, and explicit timeouts. The service uses the socket peer
 IP and does not trust forwarding headers; proxy-origin client IP support is not
 implemented. HSTS/redirect and bearer-token handling guidance is documented.
-Native TLS is deliberately not added. Proxy syntax/runtime validation and
-certificate-backed deployment verification remain outstanding, so this item
-stays in progress.
+Native TLS is deliberately not added. CI runs `nginx -t` with a generated
+short-lived certificate, and local Nginx 1.31.8 accepted the configuration with
+the same isolated certificate substitution. A real certificate-backed staging
+deployment and WebSocket upgrade check remain outstanding.
 
 ---
 
 ## NET-004 — Protocol compatibility lifecycle
 
 - **Priority:** P1
-- **Status:** In progress
+- **Status:** Done
+- **Completion record:** [net-004-protocol-compatibility-lifecycle.md](completed/net-004-protocol-compatibility-lifecycle.md)
 - **Depends on:** —
 - **References:** [networking](../networking.md), `engine_net::protocol`,
   [ADR 0006](../adr/0006-content-and-protocol-formats.md)
@@ -193,27 +197,41 @@ degrade, and how breaking changes are staged.
 
 **Acceptance criteria**
 
-- [ ] Old/new client combinations have documented and tested outcomes.
-- [ ] A breaking wire change cannot merge without a protocol version bump and
+- [x] Old/new client combinations have documented and tested outcomes.
+- [x] A breaking wire change cannot merge without a protocol version bump and
       changelog entry.
-- [ ] Golden fixtures catch accidental wire changes.
-- [ ] Downgrade/rollback behavior is documented.
+- [x] Golden fixtures are compared with production serialization or parsing
+      paths for every live wire kind; the CI catalog asserts all 27 kinds are
+      covered, and the bearer fixture uses only a synthetic token.
+- [x] Downgrade/rollback behavior is documented.
 
-**Progress:** The networking policy documents current negotiation and rollback
-limits. `engine_net` tests cover a version/content matrix, feature degradation,
-unknown feature rejection, and golden hello, mismatch error, and negotiated
-parameters. Full world-message fixtures, automated version/changelog enforcement,
-and end-to-end compatibility verification remain outstanding. A test verifies
-that the declared version matches the protocol constants and has a changelog
-entry, but it does not compare wire changes to the merge base or require a bump
-for every breaking change.
+**Progress:** The networking policy documents current major/minor/content
+negotiation, feature degradation, deprecation, and rollback limits. Protocol
+tests cover the version/content matrix, unknown feature rejection, and golden
+hello, mismatch error, negotiated parameters, and world messages. The CI
+pull-request gate now compares the merge base and requires a protocol version
+increase plus a changelog entry when client request/decoding, envelope,
+handshake, replication, or world-server contract sources change. A safe golden
+for the credential-bearing `world.token` envelope uses the explicit
+`FAKE_LYNX_TEST_TOKEN_DO_NOT_AUTHENTICATE` sentinel and verifies debug redaction.
+The fixture is in `crates/world_server/tests/protocol_golden.rs` and CI runs it;
+no real bearer token is checked in. Protocol and content major mismatches are
+rejected at negotiation; minor versions within the active major remain
+accepted, and a major cutover has no overlap window.
+`crates/world_server/tests/fixtures/wire-kinds-1.1.0.json` now catalogs all 27
+live message kinds, including chat results, `session.ack`, and the synthetic
+token envelope. Versioned goldens now flow through the protocol, gateway,
+calendar, world-server, and world-service production paths. The service token
+test substitutes only the fixture sentinel into the actual token envelope and
+compares its encoded form, preserving secret redaction. NET-004's acceptance
+criteria are complete.
 
 ---
 
 ## NET-005 — Multi-zone gateway routing
 
 - **Priority:** P2
-- **Status:** Blocked — `SIM-014`, `PST-004`
+- **Status:** In progress — authored-map zone ownership, capacities, identity routing, and zone-scoped resume routing are wired; live handoff still depends on an authored in-zone trigger contract
 - **Depends on:** `SIM-014`, `PST-004`
 - **References:** [architecture §Simulation model](../architecture.md#simulation-model),
   `SIM-014`, ADR 0002
@@ -229,11 +247,14 @@ for every breaking change.
 
 **Acceptance criteria**
 
-- [ ] A client cannot join a zone it is not routed to.
+- [x] A client cannot join a zone it is not routed to: existing characters
+      and durable resumes are resolved to their owning zone, and new
+      characters enter only through the map's default zone.
 - [ ] Travel between zones is atomic from the client's perspective: one
       character exists in exactly one zone.
 - [ ] Zone failure produces a recoverable error and does not strand sessions.
-- [ ] Routing decisions and handoffs are observable in metrics/logs.
+- [x] Admission routing and zone-local authority decisions include the zone ID
+      in structured logs; handoff-specific observability remains with travel.
 
 ---
 
@@ -262,7 +283,7 @@ entity counts and movement grow, replication will become the first bottleneck.
 
 - [x] Metrics expose aggregate queue depth, observed high-water marks, and
   snapshot/delta WebSocket write outcomes and completed bytes with bounded labels.
-- [ ] Per-session delivery counts/bytes and queue occupancy are available through
+- [x] Per-session delivery counts/bytes and queue occupancy are available through
   a bounded, cardinality-safe diagnostic surface.
 - [x] A full slow-peer queue is detached without blocking a healthy peer's queue;
   the synchronous authority test covers isolation, but not a numeric latency SLO.
@@ -285,20 +306,35 @@ integration test observes a completed snapshot send. A service test fills one
 peer's queue, verifies it is detached, and verifies another peer still receives
 its frame. Resume coverage asserts an authoritative snapshot is queued.
 Session-ID-labeled measurements are intentionally not added to Prometheus
-because session churn creates unbounded label cardinality; a bounded diagnostic
-surface must be designed before that acceptance item is closed. Numeric SLOs and
-byte budgets remain unmeasured pending `QUA-005` load work; no target is
-invented.
+because session churn creates unbounded label cardinality. The private admin
+listener now serves `/diagnostics/replication`, a fixed 256-entry recency view
+with opaque session IDs, per-session enqueue/write frame and byte counts, queue
+occupancy/capacity, and an eviction count. It excludes account, character, IP,
+and credential data. Numeric SLOs and byte budgets remain unmeasured pending
+`QUA-005` load work; no target is invented.
 
 ---
 
 ## NET-007 — Session and token abuse defenses
 
 - **Priority:** P1
-- **Status:** Ready
+- **Status:** In progress — resume-token attempts have an independent bounded per-IP bucket and safe audit records; duplicate-session conflict and immediate trusted revocation are covered; PromQL thresholds are documented, with a staging alert exercise remaining
 - **Depends on:** `NET-002`
 - **References:** [networking §Reconnect and recovery](../networking.md#reconnect-and-recovery),
   ADR 0013
+
+**Progress (2026-11-10):** Syntactically valid resume credentials now consume a
+separate per-peer-IP token bucket before the gateway is asked to resolve the
+token. It has bounded defaults (10 attempts, refilling at 2/s), emits the
+normalized `resume_attempt`/`rate_limited` counter, and does not log or expose the
+credential. Unit and WebSocket integration tests verify bucket independence and
+that a second guessed token is denied before upgrade. Failed credentials and
+resume admissions now emit structured records containing only peer IP and a
+stable reason; attempts beyond the authentication budget remain aggregated in
+bounded metrics. Existing gateway/service tests cover duplicate-session
+conflicts and trusted immediate revocation, including invalidating retained
+resume claims. PromQL alert examples are documented in `docs/operations.md`; a
+staging alert exercise remains.
 
 **Scope**
 
@@ -313,20 +349,23 @@ invented.
 
 **Acceptance criteria**
 
-- [ ] Brute-force and replay attempts are rate-limited and audited.
-- [ ] Two clients cannot hold the same session; the loser receives the
+- [x] Brute-force and replay attempts are rate-limited and audited without
+      recording bearer credentials.
+- [x] Two clients cannot hold the same session; the loser receives the
       documented conflict error.
-- [ ] Revocation takes effect without waiting for the resume window.
-- [ ] Alerts distinguish attack-like patterns from ordinary reconnects.
+- [x] Revocation takes effect without waiting for the resume window.
+- [x] Example alerts distinguish failed/throttled resume attempts from successful reconnects.
+- [ ] Alert thresholds are exercised and tuned against staging traffic.
 
 ---
 
 ## NET-008 — Admin and moderation actions
 
 - **Priority:** P2
-- **Status:** Ready
+- **Status:** Blocked — production OIDC issuer, role-claims mapping, MFA policy, and callback/origin settings are not configured
 - **Depends on:** `NET-001`
-- **References:** [security §Moderation](../security.md), ADR 0002
+- **References:** [security §Moderation](../security.md), ADR 0002,
+  [ADR 0029](../adr/0029-admin-identity-and-roles.md)
 
 **Scope**
 
@@ -378,10 +417,29 @@ invented.
 ## NET-010 — Secret management and rotation
 
 - **Priority:** P1
-- **Status:** Ready
+- **Status:** In progress — environment injection, mounted secret-file injection, sanitized database/provider errors, CLI debug redaction, and an operational rotation procedure are covered; provider-specific integration and production rotation drills remain
 - **Depends on:** —
 - **References:** [operations](../operations.md),
   [security §Threat model](../security.md#threat-model)
+
+**Progress (2026-11-10):** `ServeArgs` debug output now reports only the number
+of configured token hashes, and a sentinel test guards against exposing their
+values. The existing unreachable-PostgreSQL and Nakama error tests cover
+password/provider-error redaction. `docs/operations.md` now describes environment
+injection and staged/rolling rotation for database roles, Nakama keys, and
+overlapping development-token hashes. Managed secret-store integration and
+production rotation drills remain open.
+
+**Mounted secret files (2026-11-12):** The Rust service accepts `_FILE` forms
+for PostgreSQL password, demo token hashes, and Nakama HTTP key. The shared
+PowerShell and Bash setup helpers also support PostgreSQL application and
+migration passwords, and `run-nakama.*` reads every Nakama credential from a
+mounted file. A non-empty direct value cannot be combined with its file form;
+blank template values count as unset. Read failures avoid secret values, and
+terminal line endings are removed. The runner still writes its protected
+Nakama overlay because Nakama consumes YAML configuration. Provider SDK
+integration remains deployment-specific and is intentionally not selected by
+the repository.
 
 **Scope**
 
@@ -395,18 +453,25 @@ invented.
 
 **Acceptance criteria**
 
-- [ ] No plaintext secret is required on the command line for production.
-- [ ] Rotating a database credential does not require a code change.
-- [ ] Logs and errors redact tokens, passwords, and DSNs.
-- [ ] Weak/default development secrets are refused outside development mode.
+- [x] No plaintext secret is required on the command line for production;
+      production identity and database credentials are injected through the
+      environment, while the token-hash CLI accepts only digests.
+- [x] Rotating a database credential does not require a code change; the
+      documented role rotation switches injected credentials during rollout.
+- [x] Logs and errors redact tokens, passwords, and DSNs; sentinel tests cover
+      CLI debug output and representative authentication, provider, and storage
+      error paths.
+- [x] Weak/default development secrets are refused outside development mode;
+      static demo authentication is loopback-only unless the explicit
+      dangerous development flag is supplied.
 
 ---
 
 ## NET-011 — Anti-cheat and anomaly detection
 
 - **Priority:** P2
-- **Status:** Ready
-- **Depends on:** `NET-002`, `SIM-001`, `SIM-003`
+- **Status:** Blocked — `NET-008` review and moderation surface is not implemented
+- **Depends on:** `NET-002`, `SIM-001`, `SIM-003`, `NET-008`
 - **References:** [security §Authority invariants](../security.md#authority-invariants),
   `SIM-001`, `SIM-003`
 
@@ -423,19 +488,29 @@ behavior rather than only rejecting individual malformed messages.
 - Risk scoring and review queue; avoid automatic bans without evidence.
 - Privacy-aware retention of evidence and appeal path.
 
+**Progress (2026-11-12):** Simulation now retains a bounded server-only record
+for rejected client actions and movement inputs. Movement evidence distinguishes
+unauthorized control, replayed sequence, pending-input, budget, and position
+validation rejections without retaining coordinates or request payloads. Action
+evidence records the actor and stable error code. The 256-entry ring and tests
+cover forged damage and replayed movement. It is diagnostic evidence only; a
+staff review surface, configurable risk threshold, time-based retention, and
+appeal path depend on NET-008 and remain open.
+
 **Acceptance criteria**
 
-- [ ] Replayed or forged inputs are rejected or flagged with evidence.
+- [x] Replayed or forged inputs are rejected or flagged with bounded,
+      server-only evidence.
 - [ ] Detection thresholds are configurable and documented.
 - [ ] False-positive handling and manual review exist before punitive action.
-- [ ] Tests simulate representative cheats and assert the outcome.
+- [x] Tests simulate representative cheats and assert the outcome.
 
 ---
 
 ## NET-012 — Connection admission and origin policy
 
 - **Priority:** P1
-- **Status:** In progress — bounded TCP/HTTP and WebSocket admission; slow-read timeout remains
+- **Status:** Done — bounded admission, origin enforcement, HTTP header and WebSocket idle deadlines, and bounded writes are implemented and tested
 - **Depends on:** —
 - **References:** [networking §Transport](../networking.md#transport),
   `crates/lynx_world/src/transport.rs`
@@ -453,6 +528,15 @@ origin boundary before a client is published.
 - Readiness/draining behavior: stop accepting, finish or reject in-flight
   handshakes, and close cleanly.
 
+**Completion (2026-11-12):** `LimitedStream` enforces an absolute 10-second raw
+HTTP header deadline before Hyper parses a request. A WebSocket 101 response
+disables that HTTP timer so upgraded connections use their separate idle
+policy. An admitted-client integration test completes the handshake, receives
+ready/snapshot/token, then observes closure after the configured idle deadline.
+The shared WebSocket write-timeout path has a deterministic stalled-write
+regression. The current `lynx-world` library suite passes (122 passed, one
+ignored) and the WebSocket integration test passes (8 tests).
+
 **Implemented slice:** `lynx-world serve --allow-origin https://example.com`
 enables an exact-match Origin allowlist; repeat the option for additional
 origins. Unlisted, malformed, and multiple Origin headers receive HTTP 403
@@ -463,12 +547,14 @@ before a request is parsed, so a slow-header flood receives listener-backlog
 backpressure instead of consuming unbounded file descriptors. The service caps
 live/pending upgraded connections at 1,024 total
 and 16 per peer IP, rejects admission once draining begins, bounds aggregate
-world-route headers at 16 KiB, closes idle connections after 120 seconds, and
+world-route headers at 16 KiB, and enforces an absolute 10-second raw HTTP
+header-read deadline before the request is parsed. HTTP keep-alive reads get a
+fresh deadline after each response; a WebSocket 101 upgrade disables the HTTP
+timer and retains the 120-second WebSocket idle timeout. The service also
 limits socket writes and authority-queue waits to five seconds. Rejections are
-exposed through bounded-cardinality metrics. Idle and slow-write behavior still
-lack deterministic end-to-end tests; raw HTTP slow-read timeout remains open,
-and an authority-queue timeout closes cleanly but does not emit a distinct
-metric.
+exposed through bounded-cardinality metrics. The slow-write timeout is tested
+at the exact helper used for socket writes; an authority-queue timeout closes
+cleanly but does not emit a distinct metric.
 
 **Acceptance criteria**
 
@@ -481,13 +567,15 @@ metric.
       closure, idle timeout, transport failure, or process shutdown.
 - [x] Capacity and draining admission rejections have stable reasons and
       bounded-cardinality metrics; rate-limit rejections retain stable codes.
+- [x] An incomplete raw HTTP header is closed after an absolute read deadline;
+      WebSocket upgrades use the separate WebSocket idle timeout.
 
 ---
 
 ## NET-013 — Security audit logging and alerting
 
 - **Priority:** P2
-- **Status:** Ready
+- **Status:** In progress — structured denial, rate-limit, principal-revocation, and correlated authority-rejection records exist; durable collection, admin-action coverage, and staging alert exercise remain.
 - **Depends on:** `NET-001`, `NET-002`
 - **References:** [security §Audit](../security.md),
   [operations §Metrics and logs](../operations.md#metrics-and-logs)
@@ -506,4 +594,18 @@ metric.
 - [ ] Security-relevant events are queryable by actor, IP, session, and time.
 - [ ] Secrets and private content are redacted.
 - [ ] Alerts fire on the documented thresholds in a staging exercise.
-- [ ] Log retention and access are documented.
+- [x] Log retention and access requirements are documented.
+
+**Progress (2026-11-12):** The transport writes bounded-field structured
+events for admission denials, pre-authentication and session rate limits,
+principal revocation, and protocol/action-result rejections. Authority
+rejections include source IP, server-issued session, server-resolved actor,
+request correlation ID, and stable error code. A missing bearer credential now
+has its own stable `credential_missing` reason. Pre-authentication rate-limit
+events record only source IP, a fixed bucket class (`handshake`, `failed_auth`,
+`resume_attempt`, or `connection_churn`), and `rate_limited`; secret values and
+backend details are excluded. Existing sentinel regressions cover redaction.
+`docs/operations.md` lists the event schema and collector requirements. Durable
+collector extraction/retention, admin action events (NET-008), and staging
+alert exercise remain; see the local completion blocker in
+[issue-tracker.md](../agents/issue-tracker.md).

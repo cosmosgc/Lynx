@@ -192,6 +192,7 @@ pub trait AdminService {
     fn audit_log(&self, claims: &AdminClaims, query: &AuditQuery) -> Result<AuditPage, ApiError>;
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

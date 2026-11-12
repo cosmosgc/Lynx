@@ -61,6 +61,10 @@ pub enum Verb {
     Take,
     /// Insert an item.
     Insert,
+    /// Split a stack into an empty slot in the acting entity's inventory.
+    Split,
+    /// Merge part of a stack into another compatible slot in the acting entity's inventory.
+    Merge,
     /// Equip an item.
     Equip,
     /// Start a conversation.
@@ -90,6 +94,8 @@ impl Verb {
             Self::Close => "close",
             Self::Take => "take",
             Self::Insert => "insert",
+            Self::Split => "split",
+            Self::Merge => "merge",
             Self::Equip => "equip",
             Self::Talk => "talk",
             Self::Repair => "repair",
@@ -116,6 +122,8 @@ impl Verb {
             "close" => Self::Close,
             "take" => Self::Take,
             "insert" => Self::Insert,
+            "split" => Self::Split,
+            "merge" => Self::Merge,
             "equip" => Self::Equip,
             "talk" => Self::Talk,
             "repair" => Self::Repair,
@@ -150,6 +158,9 @@ impl fmt::Display for Verb {
 pub struct ActionRequest {
     /// Sender-generated ID used for deduplication and replies.
     pub request_id: String,
+    /// Validated wire request ID used to correlate logs with durable state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
     /// Acting entity, resolved by the gateway from the session.
     pub actor: StableId,
     /// Target entity, when the verb requires one.
@@ -170,6 +181,7 @@ impl ActionRequest {
     pub fn new(request_id: impl Into<String>, actor: StableId, verb: Verb) -> Self {
         Self {
             request_id: request_id.into(),
+            correlation_id: None,
             actor,
             target: None,
             verb,
@@ -299,6 +311,43 @@ pub enum ActionEffect {
         /// Item definition.
         definition: DefinitionId,
         /// Quantity moved.
+        quantity: u32,
+    },
+    /// Items moved from the actor into a target inventory.
+    ItemInserted {
+        /// Source actor inventory.
+        source: StableId,
+        /// Destination entity inventory.
+        destination: StableId,
+        /// Item definition.
+        definition: DefinitionId,
+        /// Quantity moved.
+        quantity: u32,
+    },
+    /// A stack was split within the actor's inventory.
+    InventoryStackSplit {
+        /// Inventory owner.
+        actor: StableId,
+        /// Slot the quantity came from.
+        source_slot: usize,
+        /// Empty slot that received the new stack.
+        destination_slot: usize,
+        /// Item definition.
+        definition: DefinitionId,
+        /// Quantity placed in the destination slot.
+        quantity: u32,
+    },
+    /// Items were merged between compatible stacks in the actor's inventory.
+    InventoryStacksMerged {
+        /// Inventory owner.
+        actor: StableId,
+        /// Slot the quantity came from.
+        source_slot: usize,
+        /// Slot that received the quantity.
+        destination_slot: usize,
+        /// Item definition.
+        definition: DefinitionId,
+        /// Quantity moved into the destination stack.
         quantity: u32,
     },
     /// A target lost hit points.
@@ -478,18 +527,34 @@ impl Zone {
     /// Validate and apply an action.
     ///
     /// A repeated `request_id` returns the original result and never applies
-    /// the action twice.
+    /// the action twice or consumes another budget slot. Unique requests,
+    /// including validation rejections, share the zone's player/AI action cap.
     pub fn apply_action(&mut self, request: &ActionRequest, _now: Millis) -> ActionResult {
         if let Some(previous) = self.action_results.get(&request.request_id) {
             return previous.clone();
         }
 
-        let outcome = match self.apply_action_inner(request) {
+        let outcome = match if self.action_budget_remaining() == 0 {
+            Err(EngineError::new(
+                ErrorCode::CapacityExceeded,
+                "the tick action budget is exhausted",
+            ))
+        } else {
+            self.action_attempts_this_tick = self.action_attempts_this_tick.saturating_add(1);
+            self.apply_action_inner(request)
+        } {
             Ok(effects) => {
                 self.stats.applied_actions = self.stats.applied_actions.saturating_add(1);
                 ActionOutcome::Applied { effects }
             }
-            Err(error) => ActionOutcome::Rejected { error },
+            Err(error) => {
+                self.record_input_rejection(
+                    format!("action.rejected.{}", error.code().as_str()),
+                    request.actor,
+                    "client action was rejected by server validation",
+                );
+                ActionOutcome::Rejected { error }
+            }
         };
         let result = ActionResult {
             request_id: request.request_id.clone(),
@@ -498,17 +563,22 @@ impl Zone {
             server_tick: self.tick,
             outcome,
         };
-        self.remember_action(&result);
+        self.remember_action(&result, request.correlation_id.as_deref());
         result
     }
 
-    fn remember_action(&mut self, result: &ActionResult) {
+    fn remember_action(&mut self, result: &ActionResult, correlation_id: Option<&str>) {
         self.action_results
             .insert(result.request_id.clone(), result.clone());
+        if let Some(correlation_id) = correlation_id {
+            self.action_correlations
+                .insert(result.request_id.clone(), correlation_id.to_owned());
+        }
         self.action_order.push_back(result.request_id.clone());
         while self.action_order.len() > ACTION_CACHE_LIMIT {
             if let Some(oldest) = self.action_order.pop_front() {
                 self.action_results.remove(&oldest);
+                self.action_correlations.remove(&oldest);
             }
         }
     }
@@ -517,6 +587,9 @@ impl Zone {
         &mut self,
         request: &ActionRequest,
     ) -> Result<Vec<ActionEffect>, EngineError> {
+        if matches!(&request.verb, Verb::Split | Verb::Merge) {
+            return self.apply_inventory_stack_action(request);
+        }
         let context = self.validate_action(request)?;
 
         let effects = match &request.verb {
@@ -561,6 +634,10 @@ impl Zone {
                 }]
             }
             Verb::Take => self.apply_take(request, context.target_id, context.target_inventory)?,
+            Verb::Insert => {
+                self.apply_insert(request, context.target_id, context.target_inventory)?
+            }
+            Verb::Split | Verb::Merge => unreachable!("handled before target validation"),
             Verb::Play => self.apply_play(request, context.target_id)?,
             Verb::Attack => self.apply_attack(
                 request,
@@ -568,7 +645,7 @@ impl Zone {
                 context.target_health,
                 context.target_combat,
             )?,
-            Verb::Insert | Verb::Equip | Verb::Repair | Verb::Hack | Verb::Custom(_) => {
+            Verb::Equip | Verb::Repair | Verb::Hack | Verb::Custom(_) => {
                 return Err(EngineError::new(
                     ErrorCode::Unsupported,
                     "verb is not implemented by this engine build",
@@ -587,6 +664,74 @@ impl Zone {
             self.cooldowns.insert(context.cooldown_key, until);
         }
         Ok(effects)
+    }
+
+    fn apply_inventory_stack_action(
+        &mut self,
+        request: &ActionRequest,
+    ) -> Result<Vec<ActionEffect>, EngineError> {
+        let (actor_id, _) = self.validate_actor(request)?;
+        if request.target.is_some() {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "inventory stack actions cannot target another entity",
+            ));
+        }
+        if request.params.len() != 3
+            || !["source_slot", "destination_slot", "quantity"]
+                .into_iter()
+                .all(|key| request.params.contains_key(key))
+        {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "inventory stack action requires source_slot, destination_slot, and quantity",
+            ));
+        }
+        let source_slot = required_param_usize(request, "source_slot")?;
+        let destination_slot = required_param_usize(request, "destination_slot")?;
+        let quantity = required_param_u32(request, "quantity")?;
+        let mut inventory = self
+            .entities
+            .get(&actor_id)
+            .and_then(|entity| entity.inventory.clone())
+            .ok_or_else(|| {
+                EngineError::new(ErrorCode::InvalidState, "actor has no inventory")
+                    .with_detail("actor", actor_id.to_string())
+            })?;
+
+        let stack = match &request.verb {
+            Verb::Split => inventory.split_into_slot(source_slot, destination_slot, quantity)?,
+            Verb::Merge => inventory.merge_into_slot(
+                source_slot,
+                destination_slot,
+                quantity,
+                self.rules.as_ref(),
+            )?,
+            _ => unreachable!("only stack operations are routed here"),
+        };
+        self.entities
+            .get_mut(&actor_id)
+            .expect("validated actor still exists")
+            .inventory = Some(inventory);
+
+        let effect = match &request.verb {
+            Verb::Split => ActionEffect::InventoryStackSplit {
+                actor: actor_id,
+                source_slot,
+                destination_slot,
+                definition: stack.definition,
+                quantity,
+            },
+            Verb::Merge => ActionEffect::InventoryStacksMerged {
+                actor: actor_id,
+                source_slot,
+                destination_slot,
+                definition: stack.definition,
+                quantity,
+            },
+            _ => unreachable!("only stack operations are routed here"),
+        };
+        Ok(vec![effect])
     }
 
     /// Validate the acting entity, its controller, and its capabilities.
@@ -786,10 +931,25 @@ impl Zone {
                 {
                     state.open = open;
                 }
-                Ok(vec![ActionEffect::DoorToggled {
+                let mut effects = vec![ActionEffect::DoorToggled {
                     target: target_id,
                     open,
-                }])
+                }];
+                let event = if open {
+                    LinkEvent::Opened
+                } else {
+                    LinkEvent::Closed
+                };
+                if self
+                    .entities
+                    .get(&target_id)
+                    .is_some_and(EntityRecord::is_alive)
+                    && !self.links.targets(target_id, event).is_empty()
+                {
+                    let link_request = format!("{}:links:{}", request.request_id, event.as_str());
+                    effects.extend(self.activate_links(&link_request, target_id, event)?);
+                }
+                Ok(effects)
             }
             (Verb::Use | Verb::Activate, None) => {
                 if let Some(ui) = ui {
@@ -964,6 +1124,54 @@ impl Zone {
         }])
     }
 
+    fn apply_insert(
+        &mut self,
+        request: &ActionRequest,
+        target_id: StableId,
+        target_inventory: Option<Inventory>,
+    ) -> Result<Vec<ActionEffect>, EngineError> {
+        let slot = param_usize(request, "slot", 0)?;
+        let quantity = param_u32(request, "quantity", 1)?;
+        let mut source = self
+            .entities
+            .get(&request.actor)
+            .and_then(|entity| entity.inventory.clone())
+            .ok_or_else(|| {
+                EngineError::new(ErrorCode::InvalidState, "actor has no inventory")
+                    .with_detail("actor", request.actor.to_string())
+            })?;
+        let mut destination = target_inventory.ok_or_else(|| {
+            EngineError::new(ErrorCode::InvalidState, "target has no inventory")
+                .with_detail("target", target_id.to_string())
+        })?;
+
+        let key = format!("action:{}", request.request_id);
+        let receipt = self.transfers.transfer(
+            &key,
+            &mut source,
+            request.actor,
+            slot,
+            &mut destination,
+            target_id,
+            quantity,
+            self.rules.as_ref(),
+        )?;
+
+        if let Some(entity) = self.entities.get_mut(&request.actor) {
+            entity.inventory = Some(source);
+        }
+        if let Some(entity) = self.entities.get_mut(&target_id) {
+            entity.inventory = Some(destination);
+        }
+
+        Ok(vec![ActionEffect::ItemInserted {
+            source: request.actor,
+            destination: target_id,
+            definition: receipt.definition,
+            quantity: receipt.quantity,
+        }])
+    }
+
     fn apply_attack(
         &mut self,
         request: &ActionRequest,
@@ -1093,7 +1301,9 @@ fn required_capability(verb: &Verb) -> ControlCapability {
     match verb {
         Verb::Attack => ControlCapability::Attack,
         Verb::Talk => ControlCapability::Speak,
-        Verb::Take | Verb::Insert | Verb::Equip => ControlCapability::Inventory,
+        Verb::Take | Verb::Insert | Verb::Split | Verb::Merge | Verb::Equip => {
+            ControlCapability::Inventory
+        }
         Verb::Inspect
         | Verb::Use
         | Verb::Open
@@ -1131,12 +1341,46 @@ fn param_usize(request: &ActionRequest, key: &str, default: usize) -> Result<usi
     }
 }
 
+fn required_param_u32(request: &ActionRequest, key: &str) -> Result<u32, EngineError> {
+    let value = request.params.get(key).ok_or_else(|| {
+        EngineError::new(
+            ErrorCode::InvalidRequest,
+            "required action parameter is missing",
+        )
+        .with_detail("parameter", key)
+    })?;
+    value.parse::<u32>().map_err(|_| {
+        EngineError::new(
+            ErrorCode::InvalidRequest,
+            "parameter must be an unsigned integer",
+        )
+        .with_detail("parameter", key)
+        .with_detail("value", value)
+    })
+}
+
+fn required_param_usize(request: &ActionRequest, key: &str) -> Result<usize, EngineError> {
+    let value = request.params.get(key).ok_or_else(|| {
+        EngineError::new(
+            ErrorCode::InvalidRequest,
+            "required action parameter is missing",
+        )
+        .with_detail("parameter", key)
+    })?;
+    value.parse::<usize>().map_err(|_| {
+        EngineError::new(ErrorCode::InvalidRequest, "parameter must be an index")
+            .with_detail("parameter", key)
+            .with_detail("value", value)
+    })
+}
+
 /// Distance helper used by tests and tooling.
 #[must_use]
 pub fn distance_between(a: Vec3, b: Vec3) -> f32 {
     a.distance_xz(b)
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1150,6 +1394,8 @@ mod tests {
             Verb::Close,
             Verb::Take,
             Verb::Insert,
+            Verb::Split,
+            Verb::Merge,
             Verb::Equip,
             Verb::Talk,
             Verb::Repair,

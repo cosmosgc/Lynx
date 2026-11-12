@@ -296,6 +296,7 @@ const fn splitmix64(state: u64) -> u64 {
     value ^ (value >> 31)
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

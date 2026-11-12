@@ -1,3 +1,6 @@
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, allow(unused_features))]
+
 //! Headless authoritative zone simulation for Lynx.
 
 pub mod action;

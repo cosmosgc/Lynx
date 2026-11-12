@@ -8,11 +8,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use engine_core::i18n::MessageKey;
 use engine_core::id::DefinitionId;
+use engine_core::math::Vec3;
 use engine_core::schema::{ComponentData, ComponentKey, SchemaVersion, ValidationIssue};
+use engine_core::time::DailySchedule;
 use serde::{Deserialize, Serialize};
 
 /// The maximum accepted tag length.
 pub const MAX_TAG_LEN: usize = 32;
+/// Maximum route triggers authored in one zone definition.
+pub const MAX_TRAVEL_TRIGGERS_PER_ZONE: usize = 64;
 
 /// The kind of definition, inferred from its ID namespace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -32,6 +36,8 @@ pub enum ContentKind {
     Ui,
     /// A minigame definition.
     Minigame,
+    /// A typed link definition.
+    Link,
 }
 
 impl ContentKind {
@@ -46,6 +52,7 @@ impl ContentKind {
             Self::Behavior => "behavior",
             Self::Ui => "ui",
             Self::Minigame => "minigame",
+            Self::Link => "link",
         }
     }
 
@@ -59,6 +66,7 @@ impl ContentKind {
             Some("behavior" | "ai") => Self::Behavior,
             Some("ui" | "panel") => Self::Ui,
             Some("minigame") => Self::Minigame,
+            Some("link") => Self::Link,
             _ => Self::Entity,
         }
     }
@@ -652,6 +660,107 @@ pub struct ContentDefinition {
     /// Bounded simulation behavior for `behavior.*` definitions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub behavior: Option<BehaviorDefinition>,
+    /// Zone-local activation points for authored map routes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub travel_triggers: Vec<ZoneTravelTrigger>,
+    /// Static entity instances authored in this zone definition.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entity_placements: Vec<ZoneEntityPlacement>,
+    /// Directed links between placements in this zone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entity_links: Vec<ZoneEntityLink>,
+    /// Typed endpoint and action contract for `link.*` definitions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<LinkDefinition>,
+}
+
+/// Compatibility and simulation contract for one typed link definition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkDefinition {
+    /// Required component on every source entity.
+    pub source_component: ComponentKey,
+    /// Required component on every target entity.
+    pub target_component: ComponentKey,
+    /// Events accepted by links of this type.
+    pub supported_events: Vec<ZoneLinkEvent>,
+    /// Server-side operation performed for a supported event.
+    pub action: LinkAction,
+}
+
+/// Operations implemented by the authoritative entity-link dispatcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkAction {
+    /// Toggle an unlocked target door.
+    ToggleDoor,
+    /// Set the target door to open.
+    OpenDoor,
+    /// Set the target door to closed.
+    CloseDoor,
+}
+
+/// One stable placement of an entity definition in a zone's local coordinates.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ZoneEntityPlacement {
+    /// Stable placement key, unique within its zone definition.
+    pub id: String,
+    /// Entity definition used as the instance prototype.
+    pub definition: DefinitionId,
+    /// Zone-local world position in meters.
+    pub position: Vec3,
+    /// Facing angle in degrees, clockwise from north.
+    #[serde(default)]
+    pub yaw_degrees: f32,
+}
+
+/// One directed, typed link between two placement IDs in the same zone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ZoneEntityLink {
+    /// Link type, for example `link.lever_to_door`.
+    pub link_type: DefinitionId,
+    /// Source placement ID that emits the event.
+    pub source: String,
+    /// Target placement ID that receives the event.
+    pub target: String,
+    /// Events carried by this link.
+    pub events: Vec<ZoneLinkEvent>,
+    /// Whether the authored link starts enabled.
+    #[serde(default = "authored_link_enabled")]
+    pub enabled: bool,
+    /// Server ticks before the link may fire again.
+    #[serde(default)]
+    pub cooldown_ticks: u64,
+}
+
+const fn authored_link_enabled() -> bool {
+    true
+}
+
+/// Event carried by an authored zone entity link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ZoneLinkEvent {
+    /// A general activation, such as a lever pull.
+    Activated,
+    /// A door was opened by an authoritative action.
+    Opened,
+    /// A door was closed by an authoritative action.
+    Closed,
+    /// An actor entered a server-authored trigger area.
+    Triggered,
+}
+
+/// A bounded, zone-owned activation point for one explicitly authored map route.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ZoneTravelTrigger {
+    /// Stable trigger key, unique within its zone definition.
+    pub id: String,
+    /// Destination zone definition on the same world map.
+    pub destination: DefinitionId,
+    /// Center of the activation area in this zone's local world coordinates.
+    pub position: Vec3,
+    /// Activation radius in meters.
+    pub radius_m: f32,
 }
 
 /// Declarative inputs for the bounded built-in AI behavior primitives.
@@ -661,6 +770,91 @@ pub struct BehaviorDefinition {
     pub kind: BehaviorKind,
     /// Maximum perception and engagement range in meters.
     pub range_m: f32,
+    /// Optional recurring UTC window. Omission keeps the behavior active all day.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<DailySchedule>,
+    /// Optional stable group key for allied AI target sharing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggro_group: Option<DefinitionId>,
+    /// Optional bounded instruction graph. Omission selects the legacy primitive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<BehaviorGraph>,
+    /// Ordered patrol points used by `patrol`; the route loops after its last point.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub patrol_route: Vec<Vec3>,
+}
+
+/// Maximum authored nodes in one behavior graph.
+pub const MAX_BEHAVIOR_GRAPH_NODES: usize = 64;
+/// Maximum authored points in one patrol route.
+pub const MAX_BEHAVIOR_PATROL_POINTS: usize = 64;
+
+/// A directed behavior graph evaluated from its entry for each AI decision.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BehaviorGraph {
+    /// First node evaluated each tick.
+    pub entry: DefinitionId,
+    /// Bounded set of reachable or reserved nodes.
+    pub nodes: Vec<BehaviorNode>,
+}
+
+impl BehaviorGraph {
+    /// Whether node IDs and transition references form a valid bounded graph.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        if self.nodes.is_empty() || self.nodes.len() > MAX_BEHAVIOR_GRAPH_NODES {
+            return false;
+        }
+        let ids: BTreeSet<_> = self.nodes.iter().map(|node| node.id.clone()).collect();
+        ids.len() == self.nodes.len()
+            && ids.contains(&self.entry)
+            && self.nodes.iter().all(|node| {
+                node.on_success
+                    .as_ref()
+                    .is_none_or(|next| ids.contains(next))
+                    && node
+                        .on_failure
+                        .as_ref()
+                        .is_none_or(|next| ids.contains(next))
+                    && (node.instruction != BehaviorInstruction::Wait
+                        || (node.on_success.is_none() && node.on_failure.is_none()))
+            })
+    }
+}
+
+/// One bounded instruction in a behavior graph.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BehaviorNode {
+    /// Stable identifier used by graph transitions.
+    pub id: DefinitionId,
+    /// Operation evaluated at this node.
+    pub instruction: BehaviorInstruction,
+    /// Next node when the operation succeeds; `None` ends this decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_success: Option<DefinitionId>,
+    /// Next node when the operation fails; `None` ends this decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_failure: Option<DefinitionId>,
+}
+
+/// Operations supported by the bounded behavior graph interpreter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BehaviorInstruction {
+    /// Find the nearest visible hostile within the behavior's authored range.
+    PerceiveHostiles,
+    /// Attack the target selected earlier in this graph decision.
+    AttackTarget,
+    /// Follow the selected target using zone path and movement budgets.
+    ChaseTarget,
+    /// Move away from the selected target using authoritative movement checks.
+    FleeTarget,
+    /// Use the selected target through the authoritative interaction pipeline.
+    InteractTarget,
+    /// Move toward the next point in the behavior's looping patrol route.
+    Patrol,
+    /// End the current decision without acting.
+    Wait,
 }
 
 /// Simulation behavior primitives that content may select without code.
@@ -687,6 +881,223 @@ impl ContentDefinition {
     #[must_use]
     pub fn validate_shape(&self) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
+        let mut placement_ids = BTreeSet::new();
+        for (index, placement) in self.entity_placements.iter().enumerate() {
+            let path = format!("entity_placements[{index}]");
+            if self.kind() != ContentKind::Zone {
+                issues.push(ValidationIssue::new(
+                    "world.entity_placement_on_non_zone",
+                    &path,
+                    "entity placements may only be declared by zone definitions",
+                ));
+            }
+            if !is_valid_tag(&placement.id) || !placement_ids.insert(&placement.id) {
+                issues.push(ValidationIssue::new(
+                    "world.invalid_entity_placement_id",
+                    format!("{path}.id"),
+                    "placement IDs must be unique lowercase tags within the zone",
+                ));
+            }
+            if !placement.definition.is_in("entity") {
+                issues.push(ValidationIssue::new(
+                    "world.invalid_placed_entity_definition",
+                    format!("{path}.definition"),
+                    "placed entity definitions must use the entity namespace",
+                ));
+            }
+            if !placement.position.x.is_finite()
+                || !placement.position.y.is_finite()
+                || !placement.position.z.is_finite()
+            {
+                issues.push(ValidationIssue::new(
+                    "world.invalid_entity_placement_position",
+                    format!("{path}.position"),
+                    "entity placement positions must be finite",
+                ));
+            }
+            if !placement.yaw_degrees.is_finite() {
+                issues.push(ValidationIssue::new(
+                    "world.invalid_entity_placement_yaw",
+                    format!("{path}.yaw_degrees"),
+                    "entity placement facing must be finite",
+                ));
+            }
+        }
+        let placement_ids: BTreeSet<&str> = self
+            .entity_placements
+            .iter()
+            .map(|placement| placement.id.as_str())
+            .collect();
+        let mut link_keys = BTreeSet::new();
+        let mut endpoint_events = BTreeSet::new();
+        for (index, link) in self.entity_links.iter().enumerate() {
+            let path = format!("entity_links[{index}]");
+            if self.kind() != ContentKind::Zone {
+                issues.push(ValidationIssue::new(
+                    "world.entity_link_on_non_zone",
+                    &path,
+                    "entity links may only be declared by zone definitions",
+                ));
+            }
+            if !link.link_type.is_in("link") {
+                issues.push(ValidationIssue::new(
+                    "world.invalid_entity_link_type",
+                    format!("{path}.link_type"),
+                    "entity link types must use the link namespace",
+                ));
+            }
+            if !placement_ids.contains(link.source.as_str()) {
+                issues.push(ValidationIssue::new(
+                    "world.unknown_link_source",
+                    format!("{path}.source"),
+                    "entity link source must name a placement in this zone",
+                ));
+            }
+            if !placement_ids.contains(link.target.as_str()) {
+                issues.push(ValidationIssue::new(
+                    "world.unknown_link_target",
+                    format!("{path}.target"),
+                    "entity link target must name a placement in this zone",
+                ));
+            }
+            if link.source == link.target {
+                issues.push(ValidationIssue::new(
+                    "world.entity_link_self_reference",
+                    &path,
+                    "entity links cannot target their own source",
+                ));
+            }
+            if link.events.is_empty()
+                || link.events.iter().copied().collect::<BTreeSet<_>>().len() != link.events.len()
+            {
+                issues.push(ValidationIssue::new(
+                    "world.invalid_entity_link_events",
+                    format!("{path}.events"),
+                    "entity links must declare a non-empty set of unique events",
+                ));
+            }
+            if link.cooldown_ticks > 1_000_000 {
+                issues.push(ValidationIssue::new(
+                    "world.invalid_entity_link_cooldown",
+                    format!("{path}.cooldown_ticks"),
+                    "entity link cooldown cannot exceed 1,000,000 ticks",
+                ));
+            }
+            if !link_keys.insert((
+                link.link_type.clone(),
+                link.source.as_str(),
+                link.target.as_str(),
+            )) {
+                issues.push(ValidationIssue::new(
+                    "world.duplicate_entity_link",
+                    &path,
+                    "entity links cannot repeat the same type and endpoints",
+                ));
+            }
+            for event in &link.events {
+                if !endpoint_events.insert((link.source.as_str(), link.target.as_str(), *event)) {
+                    issues.push(ValidationIssue::new(
+                        "world.duplicate_entity_link_event",
+                        &path,
+                        "a source and target cannot receive the same event through multiple links",
+                    ));
+                }
+            }
+        }
+        let mut in_degrees: BTreeMap<&str, usize> =
+            placement_ids.iter().map(|id| (*id, 0)).collect();
+        let mut outgoing: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for link in &self.entity_links {
+            if link.events.iter().any(|event| {
+                matches!(
+                    event,
+                    ZoneLinkEvent::Activated
+                        | ZoneLinkEvent::Opened
+                        | ZoneLinkEvent::Closed
+                        | ZoneLinkEvent::Triggered
+                )
+            }) && in_degrees.contains_key(link.source.as_str())
+                && in_degrees.contains_key(link.target.as_str())
+            {
+                outgoing
+                    .entry(link.source.as_str())
+                    .or_default()
+                    .push(link.target.as_str());
+                *in_degrees.entry(link.target.as_str()).or_default() += 1;
+            }
+        }
+        let mut ready: Vec<&str> = in_degrees
+            .iter()
+            .filter_map(|(id, degree)| (*degree == 0).then_some(*id))
+            .collect();
+        let mut visited = 0;
+        while let Some(source) = ready.pop() {
+            visited += 1;
+            for target in outgoing.get(source).into_iter().flatten() {
+                if let Some(degree) = in_degrees.get_mut(target) {
+                    *degree -= 1;
+                    if *degree == 0 {
+                        ready.push(target);
+                    }
+                }
+            }
+        }
+        if visited < in_degrees.len() {
+            issues.push(ValidationIssue::new(
+                "world.entity_link_cycle",
+                "entity_links",
+                "activation links cannot form a cycle",
+            ));
+        }
+        let mut trigger_ids = BTreeSet::new();
+        if self.travel_triggers.len() > MAX_TRAVEL_TRIGGERS_PER_ZONE {
+            issues.push(ValidationIssue::new(
+                "world.travel_trigger_limit",
+                "travel_triggers",
+                "a zone may declare at most 64 travel triggers",
+            ));
+        }
+        for (index, trigger) in self.travel_triggers.iter().enumerate() {
+            let path = format!("travel_triggers[{index}]");
+            if self.kind() != ContentKind::Zone {
+                issues.push(ValidationIssue::new(
+                    "world.travel_trigger_on_non_zone",
+                    &path,
+                    "travel triggers may only be declared by zone definitions",
+                ));
+            }
+            if !is_valid_tag(&trigger.id) || !trigger_ids.insert(&trigger.id) {
+                issues.push(ValidationIssue::new(
+                    "world.invalid_travel_trigger_id",
+                    format!("{path}.id"),
+                    "trigger IDs must be unique lowercase tags within the zone",
+                ));
+            }
+            if !trigger.destination.is_in("zone") {
+                issues.push(ValidationIssue::new(
+                    "world.invalid_travel_destination",
+                    format!("{path}.destination"),
+                    "travel trigger destinations must use the zone namespace",
+                ));
+            }
+            if !trigger.position.x.is_finite()
+                || !trigger.position.y.is_finite()
+                || !trigger.position.z.is_finite()
+            {
+                issues.push(ValidationIssue::new(
+                    "world.invalid_travel_trigger_position",
+                    format!("{path}.position"),
+                    "travel trigger positions must be finite",
+                ));
+            }
+            if !trigger.radius_m.is_finite() || trigger.radius_m <= 0.0 || trigger.radius_m > 32.0 {
+                issues.push(ValidationIssue::new(
+                    "world.invalid_travel_trigger_radius",
+                    format!("{path}.radius_m"),
+                    "travel trigger radius must be finite and within (0, 32] meters",
+                ));
+            }
+        }
         if self.version.major == 0 {
             issues.push(ValidationIssue::new(
                 "content.invalid_version",
@@ -695,12 +1106,58 @@ impl ContentDefinition {
             ));
         }
         validate_display(&self.display, &mut issues);
-        if self.components.is_empty() {
+        if self.components.is_empty() && self.kind() != ContentKind::Link {
             issues.push(ValidationIssue::new(
                 "content.empty_components",
                 "components",
                 "definition declares no components",
             ));
+        }
+        match (self.kind(), &self.link) {
+            (ContentKind::Link, None) => issues.push(ValidationIssue::new(
+                "content.missing_link",
+                "link",
+                "link definitions must declare endpoint compatibility and an action",
+            )),
+            (ContentKind::Link, Some(link)) => {
+                let source_matches_events = link.supported_events.iter().all(|event| match event {
+                    ZoneLinkEvent::Activated => {
+                        link.source_component.as_str() == "core.interactable"
+                    }
+                    ZoneLinkEvent::Opened | ZoneLinkEvent::Closed => {
+                        link.source_component.as_str() == "core.door"
+                    }
+                    ZoneLinkEvent::Triggered => link.source_component.as_str() == "core.trigger",
+                });
+                if !source_matches_events || link.target_component.as_str() != "core.door" {
+                    issues.push(ValidationIssue::new(
+                        "content.unsupported_link_contract",
+                        "link",
+                        "activated links require core.interactable sources; opened/closed links require core.door sources; triggered links require core.trigger sources; all supported actions require core.door targets",
+                    ));
+                }
+                if link.supported_events.is_empty()
+                    || link
+                        .supported_events
+                        .iter()
+                        .copied()
+                        .collect::<BTreeSet<_>>()
+                        .len()
+                        != link.supported_events.len()
+                {
+                    issues.push(ValidationIssue::new(
+                        "content.invalid_link_events",
+                        "link.supported_events",
+                        "link definitions must declare a non-empty set of unique supported events",
+                    ));
+                }
+            }
+            (_, Some(_)) => issues.push(ValidationIssue::new(
+                "content.unexpected_link",
+                "link",
+                "only link definitions may declare a link contract",
+            )),
+            _ => {}
         }
         match (self.kind(), &self.behavior) {
             (ContentKind::Behavior, None) => issues.push(ValidationIssue::new(
@@ -724,6 +1181,51 @@ impl ContentDefinition {
                 "only behavior definitions may declare simulation behavior",
             )),
             _ => {}
+        }
+        if self.kind() == ContentKind::Behavior
+            && self
+                .behavior
+                .as_ref()
+                .and_then(|behavior| behavior.schedule)
+                .is_some_and(|schedule| !schedule.is_valid())
+        {
+            issues.push(ValidationIssue::new(
+                "content.invalid_behavior_schedule",
+                "behavior.schedule",
+                "daily schedule must use distinct UTC minute bounds within 0..1440",
+            ));
+        }
+        if self
+            .behavior
+            .as_ref()
+            .and_then(|behavior| behavior.graph.as_ref())
+            .is_some_and(|graph| !graph.is_valid())
+        {
+            issues.push(ValidationIssue::new(
+                "content.invalid_behavior_graph",
+                "behavior.graph",
+                "behavior graph must have unique nodes, a valid entry, and valid transitions within the node limit",
+            ));
+        }
+        if let Some(behavior) = self.behavior.as_ref() {
+            let has_patrol_instruction = behavior.graph.as_ref().is_some_and(|graph| {
+                graph
+                    .nodes
+                    .iter()
+                    .any(|node| node.instruction == BehaviorInstruction::Patrol)
+            });
+            let route_invalid = behavior.patrol_route.len() > MAX_BEHAVIOR_PATROL_POINTS
+                || behavior.patrol_route.iter().any(|point| {
+                    !point.x.is_finite() || !point.y.is_finite() || !point.z.is_finite()
+                })
+                || (has_patrol_instruction && behavior.patrol_route.len() < 2);
+            if route_invalid {
+                issues.push(ValidationIssue::new(
+                    "content.invalid_behavior_patrol_route",
+                    "behavior.patrol_route",
+                    "patrol routes must contain 2..64 finite points when used by a patrol instruction",
+                ));
+            }
         }
         if let Some(presentation) = &self.presentation {
             issues.extend(presentation.validate("presentation"));
@@ -763,6 +1265,7 @@ pub fn is_safe_asset_path(path: &str) -> bool {
             .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -789,6 +1292,10 @@ mod tests {
             }),
             tags: BTreeSet::new(),
             behavior: None,
+            travel_triggers: Vec::new(),
+            entity_placements: Vec::new(),
+            entity_links: Vec::new(),
+            link: None,
         }
     }
 
@@ -826,6 +1333,10 @@ mod tests {
         definition.behavior = Some(BehaviorDefinition {
             kind: BehaviorKind::GuardChase,
             range_m: 12.0,
+            schedule: None,
+            aggro_group: None,
+            graph: None,
+            patrol_route: Vec::new(),
         });
         let authored = ron::to_string(&definition).unwrap();
         let parsed: ContentDefinition = ron::from_str(&authored).unwrap();
@@ -850,6 +1361,10 @@ mod tests {
         definition.behavior = Some(BehaviorDefinition {
             kind: BehaviorKind::Guard,
             range_m: 12.0,
+            schedule: None,
+            aggro_group: None,
+            graph: None,
+            patrol_route: Vec::new(),
         });
         assert!(
             definition

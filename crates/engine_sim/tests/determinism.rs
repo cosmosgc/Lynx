@@ -6,6 +6,7 @@
 //! tick result byte-identical.
 
 use std::sync::Arc;
+use std::{fmt::Write as _, string::String};
 
 use engine_core::faction::{Alignment, FactionCatalog, Thresholds};
 use engine_core::id::{DefinitionId, IdKind, StableId};
@@ -20,6 +21,7 @@ use engine_sim::mind::Mind;
 use engine_sim::movement::MovementIntent;
 use engine_sim::nav::{NavGrid, ReplanPolicy};
 use engine_sim::zone::{TickBudget, Zone, ZoneConfig};
+use sha2::{Digest, Sha256};
 
 const TICKS: u64 = 48;
 
@@ -107,12 +109,17 @@ fn setup(reverse_spawn: bool) -> Zone {
             max_targets: 1,
         },
         max_controller_candidates: 16,
+        max_group_aggro_shares: 16,
         epoch: Millis::new(0),
         tick_ms: 500,
         behaviors: vec![AiBehaviorDefinition {
             id: text("behavior.guard"),
             kind: AiBehaviorKind::Guard,
             range_m: 8.0,
+            schedule: None,
+            aggro_group: None,
+            graph: None,
+            patrol_route: Vec::new(),
         }],
         navigation_speed_m_per_s: 2.0,
         navigation_replan: ReplanPolicy::default(),
@@ -207,6 +214,17 @@ fn seeded_combat_and_ai_replay_is_byte_identical() {
             "tick {tick} snapshot diverged"
         );
     }
+
+    let snapshot = serde_json::to_vec(&forward.snapshot()).unwrap();
+    let digest = Sha256::digest(snapshot);
+    let mut fingerprint = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut fingerprint, "{byte:02x}").unwrap();
+    }
+    assert_eq!(
+        fingerprint, "a55947cc6f2ae87aca8d124bb14d1d7e36606a6cea07cbe1a39138621e5c322e",
+        "the seeded replay snapshot is the cross-platform golden"
+    );
 }
 
 #[test]

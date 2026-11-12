@@ -7,8 +7,9 @@ use engine_core::time::Tick;
 use std::time::Instant;
 
 use crate::entity::{EntityRecord, MovementProfile};
+use crate::link::LinkEvent;
 use crate::mind::{ControlCapability, Controller};
-use crate::zone::{Diagnostic, MOVEMENT_DIAGNOSTIC_LIMIT, TickStats, Zone};
+use crate::zone::{TickStats, Zone};
 
 /// A proposed absolute horizontal endpoint, not an authoritative transform.
 /// The principal and session must be resolved by a trusted caller.
@@ -26,6 +27,7 @@ pub struct MovementIntent {
     pub destination: Vec3,
 }
 
+#[derive(Clone)]
 pub(crate) struct MovementSequence {
     principal: StableId,
     session: String,
@@ -118,6 +120,7 @@ impl Zone {
         if let Some(entity) = self.entities.get_mut(&actor) {
             update_facing(entity, proposed);
             entity.transform.position = proposed;
+            self.fire_trigger_events(actor, from, proposed);
             true
         } else {
             false
@@ -170,11 +173,23 @@ impl Zone {
                     && last.session == intent.session
                     && intent.sequence <= last.sequence
             });
-        if !allowed
-            || stale
-            || self.movement_pending.contains_key(&intent.actor)
-            || self.movement_pending.len() >= self.config.budget.max_actions
-        {
+        let rejection = if !allowed {
+            Some("movement.rejected.unauthorized")
+        } else if stale {
+            Some("movement.rejected.replayed_sequence")
+        } else if self.movement_pending.contains_key(&intent.actor) {
+            Some("movement.rejected.pending_input")
+        } else if self.movement_pending.len() >= self.config.budget.max_actions {
+            Some("movement.rejected.input_budget")
+        } else {
+            None
+        };
+        if let Some(reason) = rejection {
+            self.record_input_rejection(
+                reason.into(),
+                intent.actor,
+                "movement input was rejected by server authority checks",
+            );
             return Err(EngineError::new(
                 ErrorCode::InvalidRequest,
                 "movement intent rejected",
@@ -233,8 +248,10 @@ impl Zone {
                     )
             });
             if applied && let Some(entity) = self.entities.get_mut(&actor) {
+                let from = entity.position();
                 update_facing(entity, intent.destination);
                 entity.transform.position = intent.destination;
+                self.fire_trigger_events(actor, from, intent.destination);
             } else {
                 self.record_movement_rejection(actor);
             }
@@ -303,15 +320,75 @@ impl Zone {
     }
 
     fn record_movement_rejection(&mut self, actor: StableId) {
-        if self.movement_diagnostics.len() >= MOVEMENT_DIAGNOSTIC_LIMIT {
-            let _ = self.movement_diagnostics.pop_front();
-        }
-        self.movement_diagnostics.push_back(Diagnostic {
-            code: "movement.rejected".into(),
-            entity: Some(actor),
-            message: "a queued movement intent was rejected by server validation".into(),
-        });
+        self.record_input_rejection(
+            "movement.rejected.position_validation".into(),
+            actor,
+            "queued movement input failed server position validation",
+        );
     }
+
+    /// Dispatch pressure plate events when accepted movement enters a sensor.
+    fn fire_trigger_events(&mut self, actor: StableId, from: Vec3, to: Vec3) {
+        let actor_radius = self
+            .entities
+            .get(&actor)
+            .and_then(EntityRecord::movement_profile)
+            .map_or(0.0, |profile| profile.radius_m);
+        let triggers: Vec<(StableId, Vec3, f32)> = self
+            .entities
+            .values()
+            .filter_map(|entity| {
+                let component = entity
+                    .components
+                    .values()
+                    .find(|component| component.key.as_str() == "core.trigger")?;
+                let radius = component.data.get("radius_m")?.as_f64()?;
+                let radius = radius as f32;
+                (radius.is_finite() && radius > 0.0).then_some((
+                    entity.id,
+                    entity.position(),
+                    radius,
+                ))
+            })
+            .collect();
+
+        for (trigger, center, radius) in triggers {
+            if trigger == actor || self.links.targets(trigger, LinkEvent::Triggered).is_empty() {
+                continue;
+            }
+            let radius = radius + actor_radius;
+            if distance_xz_squared(from, center) <= radius * radius
+                || distance_to_segment_xz_squared(from, to, center) > radius * radius
+            {
+                continue;
+            }
+            let request_id = format!("trigger:{}:{actor}:{trigger}", self.tick.0);
+            let _ = self.activate_links(&request_id, trigger, LinkEvent::Triggered);
+        }
+    }
+}
+
+fn distance_xz_squared(left: Vec3, right: Vec3) -> f32 {
+    let dx = left.x - right.x;
+    let dz = left.z - right.z;
+    dx * dx + dz * dz
+}
+
+fn distance_to_segment_xz_squared(from: Vec3, to: Vec3, point: Vec3) -> f32 {
+    let dx = f64::from(to.x) - f64::from(from.x);
+    let dz = f64::from(to.z) - f64::from(from.z);
+    let length_squared = dx * dx + dz * dz;
+    let projection = if length_squared == 0.0 {
+        0.0
+    } else {
+        ((f64::from(point.x) - f64::from(from.x)) * dx
+            + (f64::from(point.z) - f64::from(from.z)) * dz)
+            / length_squared
+    }
+    .clamp(0.0, 1.0);
+    let offset_x = f64::from(point.x) - (f64::from(from.x) + projection * dx);
+    let offset_z = f64::from(point.z) - (f64::from(from.z) + projection * dz);
+    (offset_x * offset_x + offset_z * offset_z) as f32
 }
 
 /// Authoritative horizontal facing: zero along +Z, 90 degrees along +X.

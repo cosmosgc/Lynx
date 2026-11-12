@@ -606,6 +606,7 @@ fn validate_member_id(id: StableId) -> Result<(), EngineError> {
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

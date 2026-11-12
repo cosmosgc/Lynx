@@ -11,9 +11,55 @@ permissions:
   actions: read
 
 jobs:
+  nginx-proxy-config:
+    name: Nginx proxy configuration (Ubuntu)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Install Nginx and OpenSSL
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends nginx openssl
+
+      - name: Validate reference proxy configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_dir="$RUNNER_TEMP/lynx-nginx-check"
+          mkdir -p "$test_dir/logs"
+          openssl req -x509 -nodes -newkey rsa:2048 -days 1 \
+            -keyout "$test_dir/privkey.pem" \
+            -out "$test_dir/fullchain.pem" \
+            -subj '/CN=world.example.com'
+          sed \
+            -e "s|/etc/letsencrypt/live/world.example.com/fullchain.pem|$test_dir/fullchain.pem|g" \
+            -e "s|/etc/letsencrypt/live/world.example.com/privkey.pem|$test_dir/privkey.pem|g" \
+            deploy/nginx/lynx-world.conf > "$test_dir/lynx-world.conf"
+          sudo nginx -t -p "$test_dir/" -c "$test_dir/lynx-world.conf"
+
+  prometheus-rules:
+    name: Prometheus alert rules (Ubuntu)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Install Prometheus tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends prometheus
+
+      - name: Validate alert rule syntax
+        run: promtool check rules deploy/prometheus/lynx-world.rules.yml
+
   shellcheck:
     name: Operations shell scripts (Ubuntu)
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - name: Check out repository
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -29,17 +75,42 @@ jobs:
   markdown:
     name: Markdown links
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - name: Check out repository
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
       - name: Test Markdown link checker
         run: python3 scripts/test_check_markdown_links.py
+      - name: Test README metadata checker
+        run: python3 scripts/test_check_readme_metadata.py
+      - name: Check README metadata counts
+        run: python3 scripts/check_readme_metadata.py
+      - name: Test release-note gate
+        run: python3 scripts/test_check_release_notes.py
       - name: Check local Markdown links
         run: python3 scripts/check_markdown_links.py
+
+  protocol-compatibility:
+    name: Protocol compatibility gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Check out full history for the PR diff
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Require a protocol version and changelog update for wire changes
+        run: >-
+          python3 scripts/check_protocol_changes.py
+          "${{ github.event.pull_request.base.sha }}"
+          "${{ github.event.pull_request.head.sha }}"
 
   dependency-audit:
     name: Dependency and license audit (Ubuntu)
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - name: Check out repository
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -150,6 +221,12 @@ jobs:
 
       - name: Build workspace
         run: cargo build --workspace
+
+      - name: Check generated CLI reference
+        shell: bash
+        run: |
+          cargo run --quiet -p project_cli -- --json reference --output "$RUNNER_TEMP/lynx-cli-reference.md"
+          diff -u docs/cli-reference.md "$RUNNER_TEMP/lynx-cli-reference.md"
 
       - name: Exercise generated project creator workflow
         shell: bash
@@ -397,7 +474,7 @@ jobs:
   ci-history:
     name: CI duration and outcome trend
     runs-on: ubuntu-24.04
-    continue-on-error: true
+    timeout-minutes: 10
     needs: [rust, windows, macos, migrations]
     if: always()
     permissions:
@@ -410,5 +487,5 @@ jobs:
       - name: Report recent Rust job duration and outcome history
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          CI_HISTORY_BRANCH: ${{ github.head_ref || github.ref_name }}
+          CI_HISTORY_BRANCH: ${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
         run: python3 scripts/ci-history.py

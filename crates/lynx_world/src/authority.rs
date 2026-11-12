@@ -296,6 +296,7 @@ fn release_best_effort(authorities: impl IntoIterator<Item = ZoneAuthority>) {
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

@@ -597,6 +597,7 @@ fn valid_slow_multiplier(multiplier: Option<f32>) -> bool {
     multiplier.is_none_or(|value| value.is_finite() && (0.0..1.0).contains(&value))
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

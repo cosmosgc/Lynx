@@ -1,5 +1,7 @@
 # Platforms
 
+See [ADR 0028](adr/0028-platform-support-policy.md) for the support policy.
+
 The supported matrix is deliberately small. A target is listed as supported only
 after its build, tests, and smoke test run in CI.
 

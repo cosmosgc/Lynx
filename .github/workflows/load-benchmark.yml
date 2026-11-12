@@ -1,0 +1,70 @@
+name: Load benchmark
+
+on:
+  schedule:
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scenarios:
+    name: In-process multi-client scenarios (Ubuntu)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.99.0
+
+      - name: Cache Rust dependencies and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-load-rust-1.99.0-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-load-rust-1.99.0-
+
+      - name: Build release load harness
+        run: cargo build --release -p lynx_load_harness
+
+      - name: Run benchmark scenarios
+        shell: bash
+        run: |
+          mkdir -p benchmark-results
+          first=true
+          for scenario in idle movement chat action reconnect; do
+            output="$(cargo run --quiet --release -p lynx_load_harness -- \
+              --clients 16 --duration-seconds 10 --operations-per-second 100 \
+              --scenario "$scenario" \
+              --samples-csv "benchmark-results/${scenario}-samples.csv")"
+            if [[ "$first" == true ]]; then
+              printf '%s\n' "$output" > benchmark-results/scenarios.csv
+              first=false
+            else
+              printf '%s\n' "$output" | tail -n 1 >> benchmark-results/scenarios.csv
+            fi
+          done
+          {
+            printf 'commit,%s\n' "$GITHUB_SHA"
+            printf 'runner,%s\n' "$ImageOS/$ImageVersion"
+            printf 'rustc,'
+            rustc --version
+            printf 'kernel,'
+            uname -srv
+          } > benchmark-results/environment.txt
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: load-benchmark-${{ github.run_id }}
+          path: benchmark-results/
+          if-no-files-found: warn
+          retention-days: 90

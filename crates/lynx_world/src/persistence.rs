@@ -32,9 +32,11 @@ use engine_sim::snapshot::{QuarantinedRecord, ZoneSnapshot};
 
 mod postgres;
 mod resume_sessions;
+mod zone_snapshots;
 
 pub use postgres::{PostgresSnapshotStore, PostgresZoneLeaseStore, postgres_config_from_env};
 pub use resume_sessions::PostgresResumeSessionStore;
+pub use zone_snapshots::{FileZoneSnapshotStore, PostgresZoneSnapshotStore};
 
 /// Point-in-time result of an operator's read-only checkpoint verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -594,7 +596,37 @@ fn apply_action_results_replace(
             ));
         }
     }
+    // Correlations were added as an optional field to this event so older
+    // event kinds remain replayable by builds that predate the field.
+    let correlations: BTreeMap<String, String> = event
+        .payload
+        .get("action_correlations")
+        .map(|value| {
+            serde_json::from_value(value.clone()).map_err(|_| {
+                replay_error("the action-results-replace event contains invalid correlations")
+            })
+        })
+        .transpose()?
+        .unwrap_or_default();
+    if correlations.iter().any(|(request, correlation)| {
+        !requests.contains(request)
+            || correlation.is_empty()
+            || correlation.len() > 64
+            || !correlation.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+            })
+            || !correlation
+                .chars()
+                .next()
+                .is_some_and(|first| first.is_ascii_alphabetic())
+            || correlation.ends_with(['_', '-'])
+    }) {
+        return Err(replay_error(
+            "the action-results-replace event contains invalid correlations",
+        ));
+    }
     snapshot.zone.action_results = results;
+    snapshot.zone.action_correlations = correlations;
     snapshot.zone.tick.0 = tick;
     Ok(())
 }
@@ -725,6 +757,12 @@ pub trait ZoneLeaseStore: std::fmt::Debug + Send + Sync {
 pub struct WorldSnapshot {
     /// Version written when the snapshot was created.
     pub schema_version: SchemaVersion,
+    /// Content bundle version required to interpret authored instances.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_version: Option<String>,
+    /// SHA-256 of the exact content manifest required to interpret this world.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_manifest_sha256: Option<String>,
     /// Wall-clock time of the snapshot, in epoch milliseconds.
     pub saved_at_ms: i64,
     /// Authoritative zone state.
@@ -733,6 +771,33 @@ pub struct WorldSnapshot {
     pub calendar: Option<CalendarSnapshot>,
     /// Faction aggregate, always paired with `calendar`.
     pub factions: Option<FactionSnapshot>,
+    /// One bounded rollback checkpoint for the latest unapplied gameplay
+    /// migration. The archived source snapshot retains quarantined entity data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration_checkpoint: Option<Box<ContentMigrationCheckpoint>>,
+}
+
+/// Atomic rollback evidence for a persisted-instance content migration.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ContentMigrationCheckpoint {
+    /// Reviewed plan identifier.
+    pub plan_id: String,
+    /// Source bundle content version.
+    pub source_content_version: String,
+    /// Exact source bundle manifest hash.
+    pub source_manifest_sha256: String,
+    /// Target bundle content version.
+    pub target_content_version: String,
+    /// Exact target bundle manifest hash.
+    pub target_manifest_sha256: String,
+    /// Snapshot from before migration, including all quarantined entity data.
+    pub source_snapshot: Box<WorldSnapshot>,
+    /// Report for records isolated from the active target world.
+    pub quarantined: Vec<QuarantinedRecord>,
+    /// Number of entities with at least one migrated component.
+    pub migrated_entities: usize,
+    /// Fingerprint of the candidate state before gameplay resumes.
+    pub target_state_sha256: String,
 }
 
 impl WorldSnapshot {
@@ -748,11 +813,124 @@ impl WorldSnapshot {
         };
         Self {
             schema_version: WORLD_SNAPSHOT_VERSION,
+            content_version: None,
+            content_manifest_sha256: None,
             saved_at_ms: now_ms,
             zone: inputs.zone.clone(),
             calendar,
             factions,
+            migration_checkpoint: None,
         }
+    }
+
+    /// Attach one rollback checkpoint while preserving the complete source
+    /// snapshot and a fingerprint of this candidate's authoritative state.
+    ///
+    /// A previous checkpoint is removed from the archived source, keeping
+    /// rollback storage bounded to one prior snapshot.
+    ///
+    /// # Errors
+    /// Returns an error when either snapshot is invalid or the target identity
+    /// is incomplete.
+    pub fn attach_content_migration_checkpoint(
+        &mut self,
+        source: &WorldSnapshot,
+        plan_id: impl Into<String>,
+        quarantined: Vec<QuarantinedRecord>,
+        migrated_entities: usize,
+    ) -> Result<(), EngineError> {
+        let plan_id = plan_id.into();
+        if plan_id.is_empty() || plan_id.len() > 96 {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "content migration checkpoint has an invalid plan ID",
+            ));
+        }
+        let source_content_version = source.content_version.clone().ok_or_else(|| {
+            EngineError::new(
+                ErrorCode::VersionMismatch,
+                "content migration checkpoint source has no content version",
+            )
+        })?;
+        let source_manifest_sha256 = source.content_manifest_sha256.clone().ok_or_else(|| {
+            EngineError::new(
+                ErrorCode::VersionMismatch,
+                "content migration checkpoint source has no manifest identity",
+            )
+        })?;
+        let target_content_version = self.content_version.clone().ok_or_else(|| {
+            EngineError::new(
+                ErrorCode::VersionMismatch,
+                "content migration checkpoint target has no content version",
+            )
+        })?;
+        let target_manifest_sha256 = self.content_manifest_sha256.clone().ok_or_else(|| {
+            EngineError::new(
+                ErrorCode::VersionMismatch,
+                "content migration checkpoint target has no manifest identity",
+            )
+        })?;
+        let mut source_snapshot = source.clone();
+        source_snapshot.migration_checkpoint = None;
+        let target_state_sha256 = self.migration_state_sha256()?;
+        self.migration_checkpoint = Some(Box::new(ContentMigrationCheckpoint {
+            plan_id,
+            source_content_version,
+            source_manifest_sha256,
+            target_content_version,
+            target_manifest_sha256,
+            source_snapshot: Box::new(source_snapshot),
+            quarantined,
+            migrated_entities,
+            target_state_sha256,
+        }));
+        self.validate()
+    }
+
+    /// Recover the source snapshot only while the migrated world is unchanged.
+    ///
+    /// The fingerprint includes all persisted world state, so a tick, action,
+    /// or changed calendar/faction record makes rollback fail closed.
+    ///
+    /// # Errors
+    /// Returns [`ErrorCode::Conflict`] when no checkpoint exists or gameplay
+    /// state changed after migration.
+    pub fn rollback_content_migration(&self) -> Result<WorldSnapshot, EngineError> {
+        let checkpoint = self.migration_checkpoint.as_deref().ok_or_else(|| {
+            EngineError::new(
+                ErrorCode::NotFound,
+                "the world has no content migration rollback checkpoint",
+            )
+        })?;
+        if self.content_version.as_deref() != Some(checkpoint.target_content_version.as_str())
+            || self.content_manifest_sha256.as_deref()
+                != Some(checkpoint.target_manifest_sha256.as_str())
+            || self.migration_state_sha256()? != checkpoint.target_state_sha256
+        {
+            return Err(EngineError::new(
+                ErrorCode::Conflict,
+                "content migration rollback is unavailable after target state changed",
+            ));
+        }
+        Ok(checkpoint.source_snapshot.as_ref().clone())
+    }
+
+    fn migration_state_sha256(&self) -> Result<String, EngineError> {
+        let bytes = serde_json::to_vec(&(
+            &self.content_version,
+            &self.content_manifest_sha256,
+            &self.zone,
+            &self.calendar,
+            &self.factions,
+        ))
+        .map_err(|error| {
+            EngineError::new(
+                ErrorCode::Internal,
+                "the content migration state fingerprint could not be encoded",
+            )
+            .with_detail("error", error.to_string())
+        })?;
+        Ok(engine_content::sha256_hex(&bytes))
     }
 
     /// Validate structural invariants before the gateway sees the state.
@@ -775,6 +953,58 @@ impl WorldSnapshot {
                 ErrorCode::InvalidRequest,
                 "calendar and faction snapshots must be written together",
             ));
+        }
+        if self
+            .content_version
+            .as_ref()
+            .is_some_and(|version| version.len() > 128 || semver::Version::parse(version).is_err())
+        {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "world snapshot content version is invalid",
+            ));
+        }
+        if self.content_manifest_sha256.as_ref().is_some_and(|hash| {
+            hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        }) {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "world snapshot content manifest hash is invalid",
+            ));
+        }
+        if let Some(checkpoint) = self.migration_checkpoint.as_deref() {
+            if checkpoint.plan_id.is_empty()
+                || checkpoint.plan_id.len() > 96
+                || !engine_content::is_sha256_hex(&checkpoint.source_manifest_sha256)
+                || !engine_content::is_sha256_hex(&checkpoint.target_manifest_sha256)
+                || !engine_content::is_sha256_hex(&checkpoint.target_state_sha256)
+                || checkpoint.source_content_version == checkpoint.target_content_version
+                || checkpoint.source_manifest_sha256 == checkpoint.target_manifest_sha256
+                || self.content_version.as_deref()
+                    != Some(checkpoint.target_content_version.as_str())
+                || self.content_manifest_sha256.as_deref()
+                    != Some(checkpoint.target_manifest_sha256.as_str())
+            {
+                return Err(EngineError::new(
+                    ErrorCode::InvalidRequest,
+                    "world snapshot contains an invalid content migration checkpoint",
+                ));
+            }
+            checkpoint.source_snapshot.validate()?;
+            if checkpoint.source_snapshot.migration_checkpoint.is_some()
+                || checkpoint.source_snapshot.content_version.as_deref()
+                    != Some(checkpoint.source_content_version.as_str())
+                || checkpoint
+                    .source_snapshot
+                    .content_manifest_sha256
+                    .as_deref()
+                    != Some(checkpoint.source_manifest_sha256.as_str())
+            {
+                return Err(EngineError::new(
+                    ErrorCode::InvalidRequest,
+                    "content migration checkpoint source does not match its snapshot",
+                ));
+            }
         }
         Ok(())
     }
@@ -846,6 +1076,27 @@ pub trait SnapshotStore: std::fmt::Debug {
     fn quarantine_records(&self, _zone_id: &str) -> Result<Vec<QuarantinedRecord>, EngineError> {
         Ok(Vec::new())
     }
+}
+
+/// Persist the latest recovery checkpoint for each zone independently.
+///
+/// This seam stores only zone-owned simulation state. World-wide calendar and
+/// faction aggregates remain in [`SnapshotStore`] until their ownership is
+/// moved to a separately coordinated world-level store.
+pub trait ZoneSnapshotStore: std::fmt::Debug + Send + Sync {
+    /// Load the newest checkpoint for one zone instance.
+    ///
+    /// # Errors
+    /// Returns an engine error when the stored payload is unreadable, invalid,
+    /// or does not belong to `zone_id`.
+    fn load_zone(&self, zone_id: &str) -> Result<Option<ZoneSnapshot>, EngineError>;
+
+    /// Persist a checkpoint for its zone instance.
+    ///
+    /// # Errors
+    /// Returns an engine error when the snapshot is invalid or cannot be
+    /// durably written under the zone's current authority.
+    fn save_zone(&self, snapshot: &ZoneSnapshot) -> Result<(), EngineError>;
 }
 
 /// A single-file snapshot store.
@@ -989,6 +1240,7 @@ fn io_error(error: &io::Error, path: &Path) -> EngineError {
     .with_detail("error", error.to_string())
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1017,10 +1269,13 @@ mod tests {
         let calendar = demo::build_calendar(&mut factions, 0).unwrap();
         WorldSnapshot {
             schema_version: WORLD_SNAPSHOT_VERSION,
+            content_version: None,
+            content_manifest_sha256: None,
             saved_at_ms: 1_000,
             zone: zone().snapshot(),
             calendar: Some(calendar.snapshot()),
             factions: Some(factions.snapshot()),
+            migration_checkpoint: None,
         }
     }
 
@@ -1279,7 +1534,10 @@ mod tests {
                 6,
                 7,
                 EVENT_ACTION_RESULTS_REPLACE,
-                serde_json::json!({ "action_results": action_results }),
+                serde_json::json!({
+                    "action_results": action_results,
+                    "action_correlations": { "action-replay": "wire-action-42" },
+                }),
             ),
             event(
                 7,
@@ -1330,6 +1588,10 @@ mod tests {
             serde_json::from_value(events[7].payload["link_results"].clone()).unwrap();
         expected.zone.applied_actions = events[8].payload["applied_actions"].as_u64().unwrap();
         expected.zone.link_activations = events[8].payload["link_activations"].as_u64().unwrap();
+        expected
+            .zone
+            .action_correlations
+            .insert("action-replay".to_owned(), "wire-action-42".to_owned());
         expected.zone.tick.0 = 9;
 
         assert_eq!(

@@ -10,13 +10,13 @@ use engine_core::i18n::{Locale, MessageKey};
 use serde::{Deserialize, Serialize};
 
 /// The protocol semantic version owned by this crate.
-pub const PROTOCOL_VERSION: &str = "1.0.0";
+pub const PROTOCOL_VERSION: &str = "1.1.0";
 
 /// The protocol major version. A mismatch is rejected.
 pub const PROTOCOL_MAJOR: u16 = 1;
 
 /// The protocol minor version. A mismatch is accepted with degradation.
-pub const PROTOCOL_MINOR: u16 = 0;
+pub const PROTOCOL_MINOR: u16 = 1;
 
 /// The protocol patch version. Informational only.
 pub const PROTOCOL_PATCH: u16 = 0;
@@ -273,6 +273,9 @@ impl LocalizedNotice {
 pub struct ErrorPayload {
     /// Stable error category.
     pub code: ErrorCode,
+    /// Whether retrying the same operation later may succeed.
+    #[serde(default)]
+    pub retryable: bool,
     /// Safe typed parameters for the client message.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub params: BTreeMap<String, String>,
@@ -285,7 +288,8 @@ impl From<&EngineError> for ErrorPayload {
     fn from(error: &EngineError) -> Self {
         Self {
             code: error.code(),
-            params: error.details().clone(),
+            retryable: error.retryable(),
+            params: player_error_params(error),
             diagnostic: Some(error.message().to_string()),
         }
     }
@@ -297,6 +301,49 @@ impl From<EngineError> for ErrorPayload {
     }
 }
 
+const MAX_PLAYER_ERROR_PARAMS: usize = 8;
+const MAX_PLAYER_ERROR_PARAM_BYTES: usize = 128;
+
+/// Select only known display parameters for the stable error message.
+/// `EngineError::details` also holds internal context such as actor IDs,
+/// rejected values, and nested errors, so it must not be copied wholesale to
+/// an untrusted client.
+fn player_error_params(error: &EngineError) -> BTreeMap<String, String> {
+    error
+        .details()
+        .iter()
+        .filter(|(key, value)| {
+            public_error_param(error.code(), key)
+                && value.len() <= MAX_PLAYER_ERROR_PARAM_BYTES
+                && !value.chars().any(char::is_control)
+        })
+        .take(MAX_PLAYER_ERROR_PARAMS)
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
+fn public_error_param(code: ErrorCode, key: &str) -> bool {
+    match code {
+        ErrorCode::InvalidRequest => matches!(key, "kind"),
+        ErrorCode::OutOfRange => matches!(key, "distance_m" | "max_range_m"),
+        ErrorCode::VersionMismatch => matches!(key, "kind" | "client" | "server"),
+        ErrorCode::Cooldown | ErrorCode::BudgetExhausted | ErrorCode::RateLimited => {
+            matches!(key, "retry_after_ms")
+        }
+        ErrorCode::NotFound
+        | ErrorCode::NotVisible
+        | ErrorCode::PermissionDenied
+        | ErrorCode::InvalidState
+        | ErrorCode::SessionExpired
+        | ErrorCode::CapacityExceeded
+        | ErrorCode::ContentInvalid
+        | ErrorCode::Conflict
+        | ErrorCode::Unsupported
+        | ErrorCode::Internal => false,
+    }
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,8 +358,30 @@ mod tests {
 
     #[test]
     fn protocol_constants_are_consistent() {
-        assert_eq!(PROTOCOL_VERSION, "1.0.0");
-        assert_eq!(protocol_version(), semver::Version::new(1, 0, 0));
+        assert_eq!(PROTOCOL_VERSION, "1.1.0");
+        assert_eq!(protocol_version(), semver::Version::new(1, 1, 0));
+    }
+
+    #[test]
+    fn every_stable_error_code_has_retry_and_locale_catalog_entries() {
+        let diagnostics = include_str!("../../../docs/error-catalog.md");
+        let english = include_str!("../../../content/localization/en.ron");
+        let portuguese = include_str!("../../../content/localization/pt-BR.ron");
+        let mut wire_codes = std::collections::BTreeSet::new();
+
+        for code in ErrorCode::ALL {
+            let retryable = if code.is_retryable() { "Yes" } else { "No" };
+            assert!(
+                diagnostics.contains(&format!("| `{}` | {retryable} |", code.as_str())),
+                "error catalog is missing `{}` or its retryability default is stale",
+                code.as_str()
+            );
+            let key = format!("\"error.{}\"", code.as_str());
+            assert!(english.contains(&key), "English catalog is missing {key}");
+            assert!(portuguese.contains(&key), "pt-BR catalog is missing {key}");
+            assert!(wire_codes.insert(code.as_str()));
+        }
+        assert_eq!(wire_codes.len(), ErrorCode::ALL.len());
     }
 
     #[test]
@@ -377,5 +446,25 @@ mod tests {
         assert_eq!(payload.code, ErrorCode::OutOfRange);
         assert_eq!(payload.params["distance_m"], "12.5");
         assert!(payload.diagnostic.is_some());
+    }
+
+    #[test]
+    fn error_payload_serialization_filters_private_and_unsafe_details() {
+        let oversized = "x".repeat(MAX_PLAYER_ERROR_PARAM_BYTES + 1);
+        let error = EngineError::new(ErrorCode::OutOfRange, "target is too far")
+            .with_detail("distance_m", "12.5")
+            .with_detail("max_range_m", "10")
+            .with_detail("actor_id", "character-private-id")
+            .with_detail("access_token", "synthetic-secret-value")
+            .with_detail("distance_m_debug", oversized)
+            .with_detail("distance_m_control", "12.5\nunsafe");
+
+        let serialized = serde_json::to_string(&ErrorPayload::from(&error)).unwrap();
+        assert!(serialized.contains("12.5"));
+        assert!(serialized.contains("10"));
+        assert!(!serialized.contains("character-private-id"));
+        assert!(!serialized.contains("synthetic-secret-value"));
+        assert!(!serialized.contains(&"x".repeat(MAX_PLAYER_ERROR_PARAM_BYTES + 1)));
+        assert!(!serialized.contains("unsafe"));
     }
 }

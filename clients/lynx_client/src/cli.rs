@@ -76,6 +76,7 @@ fn next_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<Str
         .ok_or_else(|| format!("{flag} requires a value\n{}", offline_usage()))
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

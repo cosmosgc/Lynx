@@ -71,6 +71,44 @@ impl Millis {
     }
 }
 
+/// A recurring daily window in UTC simulation time.
+///
+/// The interval is start-inclusive and end-exclusive. Windows may cross
+/// midnight; equal endpoints and minutes outside `0..1440` are invalid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DailySchedule {
+    /// UTC minute at which the window begins (`0..1440`).
+    pub start_minute_utc: u16,
+    /// UTC minute at which the window ends (`0..1440`).
+    pub end_minute_utc: u16,
+}
+
+impl DailySchedule {
+    /// Whether this window has valid, non-empty UTC minute bounds.
+    #[must_use]
+    pub const fn is_valid(self) -> bool {
+        self.start_minute_utc < 1440
+            && self.end_minute_utc < 1440
+            && self.start_minute_utc != self.end_minute_utc
+    }
+
+    /// Whether `at` falls within this recurring window.
+    #[must_use]
+    pub fn contains(self, at: Millis) -> bool {
+        if !self.is_valid() {
+            return false;
+        }
+        let minute = at.0.rem_euclid(86_400_000) / 60_000;
+        let start = i64::from(self.start_minute_utc);
+        let end = i64::from(self.end_minute_utc);
+        if start < end {
+            minute >= start && minute < end
+        } else {
+            minute >= start || minute < end
+        }
+    }
+}
+
 /// A duration in whole milliseconds.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
@@ -92,6 +130,7 @@ impl DurationMs {
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

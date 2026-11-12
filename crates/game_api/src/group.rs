@@ -266,6 +266,7 @@ pub fn validate_group_page(limit: u16, cursor: Option<&str>) -> Result<(), ApiEr
     Ok(())
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

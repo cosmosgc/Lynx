@@ -15,6 +15,10 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
+[dev-dependencies]
+proptest = { workspace = true }
+sha2 = { workspace = true }
+
 [[bench]]
 name = "tick"
 harness = false

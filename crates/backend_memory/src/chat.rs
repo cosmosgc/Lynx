@@ -86,6 +86,7 @@ impl ChatService for MemoryBackend {
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use game_api::AuthService;

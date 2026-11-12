@@ -1,3 +1,6 @@
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, allow(unused_features))]
+
 //! Transport-agnostic authoritative world gateway for Lynx.
 //!
 //! The gateway composes the existing crates without adding a transport or a

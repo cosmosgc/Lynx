@@ -1,0 +1,10 @@
+apiVersion: 1
+providers:
+  - name: Lynx operations
+    orgId: 1
+    folder: Lynx
+    type: file
+    disableDeletion: false
+    editable: false
+    options:
+      path: /var/lib/grafana/dashboards/lynx

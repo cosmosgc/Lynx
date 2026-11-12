@@ -1,0 +1,92 @@
+name: Coverage report
+
+on:
+  schedule:
+    - cron: '41 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    name: Workspace line coverage (Ubuntu)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci-postgres-password
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      LYNX_PG_HOST: 127.0.0.1
+      LYNX_PG_PORT: 5432
+      LYNX_PG_DATABASE: lynx_ci
+      LYNX_PG_TEST_DATABASE: lynx_ci_test
+      LYNX_PG_USER: lynx_ci
+      LYNX_PG_PASSWORD: ci-application-password
+      LYNX_PG_ALLOW_INSECURE_LOOPBACK: 'true'
+      LYNX_REQUIRE_POSTGRES_TEST: '1'
+      LYNX_PG_SUPERUSER: postgres
+      LYNX_PG_MAINTENANCE_DB: postgres
+      PGPASSWORD: ci-postgres-password
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Install nightly Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache Rust dependencies and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-coverage-nightly-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-coverage-nightly-
+
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends postgresql-client
+
+      - name: Create application role and schema
+        run: ./scripts/setup-postgres.sh
+
+      - name: Apply migrations
+        run: ./scripts/db-migrate.sh
+
+      - name: Create and migrate isolated integration database
+        shell: bash
+        run: |
+          LYNX_PG_DATABASE="$LYNX_PG_TEST_DATABASE" ./scripts/setup-postgres.sh
+          LYNX_PG_DATABASE="$LYNX_PG_TEST_DATABASE" ./scripts/db-migrate.sh
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate workspace HTML coverage
+        run: cargo llvm-cov --workspace --html
+
+      - name: Upload per-crate coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: workspace-coverage-${{ github.run_id }}
+          path: target/llvm-cov/html/
+          if-no-files-found: warn
+          retention-days: 90

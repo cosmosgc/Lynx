@@ -197,6 +197,7 @@ impl CharacterWorldService for MemoryBackend {
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use backend_contract_tests::{CharacterContract, assert_character_contract};

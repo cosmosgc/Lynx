@@ -27,6 +27,7 @@ use crate::online::OnlineClient;
 use crate::ui::window::{
     CHAT_WINDOW_ID, ImmediateWindowPlugin, WindowMemory, WindowSpec, show_window,
 };
+use game_api::ChatChannelTarget;
 
 const CHAT_DEFAULT_SIZE: Vec2 = Vec2::new(470.0, 380.0);
 const CHAT_MIN_SIZE: Vec2 = Vec2::new(310.0, 220.0);
@@ -44,6 +45,8 @@ pub enum ChatTab {
     Zone,
     /// The inbox for one-to-one direct messages.
     Whisper,
+    /// One-to-one channel with an authorized friend.
+    Direct(String),
     /// A group-scoped channel; the id is empty for a generic group feed.
     Group(String),
     /// A party channel; the id is empty for the local party feed.
@@ -77,6 +80,7 @@ impl ChatTab {
         match self {
             Self::Zone => "zone".to_owned(),
             Self::Whisper => "whisper".to_owned(),
+            Self::Direct(id) => format!("direct:{id}"),
             Self::Group(id) if id.is_empty() => "group".to_owned(),
             Self::Group(id) => format!("group:{id}"),
             Self::Party(id) if id.is_empty() => "party".to_owned(),
@@ -90,6 +94,7 @@ impl ChatTab {
         match self {
             Self::Zone => "Zona".to_owned(),
             Self::Whisper => "Sussurros".to_owned(),
+            Self::Direct(id) => format!("Direto · {id}"),
             Self::Group(id) if id.is_empty() => "Grupo".to_owned(),
             Self::Group(id) => format!("Grupo · {id}"),
             Self::Party(id) if id.is_empty() => "Party".to_owned(),
@@ -103,6 +108,7 @@ impl ChatTab {
         match self {
             Self::Zone => channel_id == "zone" || channel_id == "global",
             Self::Whisper => is_whisper_id(channel_id),
+            Self::Direct(id) => channel_id == format!("direct:{id}") || channel_id == id,
             Self::Group(id) => matches_scope(channel_id, "group", id),
             Self::Party(id) => matches_scope(channel_id, "party", id),
             Self::Other(id) => channel_id == id,
@@ -166,13 +172,24 @@ impl Default for ChatPanel {
 impl ChatPanel {
     /// Rebuild the tab list from explicit membership and observed channels.
     pub fn tabs(&self, client: &OnlineClient) -> Vec<ChatTab> {
-        tabs_from_channels(
+        let mut tabs = tabs_from_channels(
             client
                 .chat()
                 .messages()
                 .map(|message| message.channel_id.as_str()),
             self,
-        )
+        );
+        for target in client.chat_targets() {
+            let tab = match target {
+                ChatChannelTarget::Direct(id) => ChatTab::Direct(id.to_string()),
+                ChatChannelTarget::Group(id) => ChatTab::Group(id.to_string()),
+                ChatChannelTarget::Room(_) => continue,
+            };
+            if !tabs.contains(&tab) {
+                tabs.push(tab);
+            }
+        }
+        tabs
     }
 
     fn mark_read(&mut self, client: &OnlineClient, tab: &ChatTab) {
@@ -478,6 +495,14 @@ fn chat_body(
                 if clicked {
                     panel.active = tab.clone();
                     composer.history_offset = 0;
+                    if let Some(target) = client
+                        .chat_targets()
+                        .iter()
+                        .find(|target| crate::online::chat_target_alias(target) == tab.channel_id())
+                        .cloned()
+                    {
+                        let _ = client.join_chat_target(&target);
+                    }
                     if composer.active {
                         composer.channel = tab.channel_id();
                     }
@@ -702,6 +727,7 @@ fn max_visible_lines(window_height: f32) -> usize {
     lines.clamp(3, 30)
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::{ChatPanel, ChatTab, max_visible_lines, tabs_from_channels};

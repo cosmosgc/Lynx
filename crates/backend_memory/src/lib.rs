@@ -1,3 +1,6 @@
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, allow(unused_features))]
+
 //! In-memory backend adapter for tests and offline development.
 //!
 //! This adapter is deliberately not a production identity provider. It has no
@@ -464,6 +467,7 @@ impl WorldService for MemoryBackend {
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 pub(crate) mod test_support {
     use engine_core::Locale;
@@ -479,6 +483,7 @@ pub(crate) mod test_support {
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

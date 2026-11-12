@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use engine_core::error::ErrorCode;
 use engine_core::id::{DefinitionId, IdKind, StableId};
 use engine_core::inventory::UniformItemRules;
 use engine_core::math::Vec3;
@@ -368,6 +369,25 @@ fn cancellation_is_session_scoped_and_keeps_sequence_consumed() {
 }
 
 #[test]
+fn replayed_movement_sequence_is_rejected_with_bounded_safe_evidence() {
+    let mut zone = clear_setup();
+    let actor = id(IdKind::Entity, 1);
+    let request = intent(7, pos(1.0, 0.5));
+    zone.queue_movement(request.clone()).unwrap();
+
+    let error = zone.queue_movement(request).unwrap_err();
+    assert_eq!(error.code(), ErrorCode::InvalidRequest);
+    let evidence = zone
+        .diagnostics()
+        .into_iter()
+        .find(|diagnostic| diagnostic.code == "movement.rejected.replayed_sequence")
+        .expect("a replayed sequence should leave review evidence");
+    assert_eq!(evidence.entity, Some(actor));
+    assert!(!evidence.message.contains("1.0"));
+    assert!(!evidence.message.contains("sequence"));
+}
+
+#[test]
 fn outcomes_and_exhausted_sequences_are_session_scoped() {
     let mut z = setup();
     let actor = id(IdKind::Entity, 1);
@@ -637,7 +657,7 @@ fn movement_diagnostics_are_bounded_and_destination_free() {
     let diagnostics: Vec<_> = z
         .diagnostics()
         .into_iter()
-        .filter(|diagnostic| diagnostic.code == "movement.rejected")
+        .filter(|diagnostic| diagnostic.code == "movement.rejected.position_validation")
         .collect();
     assert_eq!(diagnostics.len(), MOVEMENT_DIAGNOSTIC_LIMIT);
     assert!(

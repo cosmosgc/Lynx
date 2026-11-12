@@ -1,20 +1,10 @@
 //! Two independent clients sharing the real gateway, simulation, and sockets.
-use engine_core::{
-    id::{IdKind, StableId},
-    time::Tick,
-};
+use engine_core::time::Tick;
 use lynx_client::online::{OnlineClient, OnlineStatus};
 use lynx_client_net::Config;
-use lynx_world::{
-    auth::{Authenticator, digest},
-    demo,
-    service::Service,
-    transport::{self, AppState},
-};
-use std::{sync::Arc, time::Duration};
-use tokio::sync::{oneshot, watch};
-use world_gateway::{GatewayConfig, SystemResumeTokens, WorldGateway};
-use world_server::WorldServer;
+use lynx_test_harness::{TestServer, demo_actor_id};
+use lynx_world::demo;
+use std::time::Duration;
 
 async fn until(clients: &mut [OnlineClient; 2], ready: impl Fn(&[OnlineClient; 2]) -> bool) {
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -37,39 +27,15 @@ async fn until(clients: &mut [OnlineClient; 2], ready: impl Fn(&[OnlineClient; 2
 #[allow(clippy::too_many_lines)]
 async fn two_clients_observe_combat_exchange_chat_and_resume_without_duplicates() {
     let tokens = ["multiplayer-first", "multiplayer-second"];
-    let auth = Authenticator::new(&tokens.map(digest)).unwrap();
-    let grants: Vec<_> = auth.grants().cloned().collect();
-    let mut zone = demo::build_zone(&grants).unwrap();
-    // Keep both players in one interest set; production demo spaces them apart.
-    let actors: Vec<_> = grants
-        .iter()
-        .map(|grant| StableId::from_parts(IdKind::Entity, 1, grant.principal.random_bits()))
-        .collect();
-    let position = zone.entity(actors[0]).unwrap().position();
-    zone.entity_mut(actors[1]).unwrap().transform.position = position;
-    let gateway = WorldGateway::new(
-        zone,
-        demo::handshake().unwrap(),
-        GatewayConfig::default(),
-        SystemResumeTokens::new(),
-    )
+    let server = TestServer::start_with_zone(&tokens, |grants, zone| {
+        // Keep both players in one interest set; production demo spaces them apart.
+        let actors: Vec<_> = grants.iter().map(demo_actor_id).collect();
+        let position = zone.entity(actors[0]).unwrap().position();
+        zone.entity_mut(actors[1]).unwrap().transform.position = position;
+    })
+    .await
     .unwrap();
-    let (events, receiver) = transport::event_channel();
-    let (shutdown, shutdown_rx) = watch::channel(false);
-    let service = tokio::spawn(
-        Service::new(WorldServer::new(gateway), Duration::from_millis(50))
-            .run(receiver, shutdown_rx),
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("ws://{}/world", listener.local_addr().unwrap());
-    let (stop, stopped) = oneshot::channel();
-    let server = tokio::spawn(transport::serve_with_shutdown(
-        listener,
-        Arc::new(AppState::new(events, auth)),
-        async {
-            let _ = stopped.await;
-        },
-    ));
+    let url = server.url().to_owned();
     let mut clients = tokens.map(|token| {
         let mut client = OnlineClient::new(1.0).unwrap();
         client
@@ -168,8 +134,5 @@ async fn two_clients_observe_combat_exchange_chat_and_resume_without_duplicates(
     .await
     .unwrap();
     clients[0].disconnect();
-    let _ = shutdown.send(true);
-    let _ = stop.send(());
-    service.await.unwrap();
-    server.await.unwrap().unwrap();
+    server.shutdown().await.unwrap();
 }

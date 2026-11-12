@@ -212,6 +212,7 @@ fn set_relationship(state: &mut State, owner: &AccountId, other: &AccountId, sta
         .insert(other.clone(), status);
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use game_api::AuthService;

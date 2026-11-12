@@ -9,7 +9,7 @@ use engine_core::i18n::{
 use engine_core::id::DefinitionId;
 use engine_core::schema::{
     ComponentInstance, ComponentKey, ComponentRegistry, ComponentSchema, FieldSchema, FieldType,
-    PersistencePolicy, SchemaVersion, Visibility,
+    Migration, PersistencePolicy, SchemaVersion, Visibility,
 };
 use engine_core::{EngineError, ErrorCode};
 use serde::de::DeserializeOwned;
@@ -260,6 +260,7 @@ impl ContentSet {
 
         for (id, map) in &self.maps {
             let path = self.map_sources.get(id).map_or("", String::as_str);
+            let placed: BTreeSet<&DefinitionId> = map.zones.iter().map(|zone| &zone.zone).collect();
             for issue in map.validate_shape() {
                 report.push(Diagnostic::from_issue(path, issue));
             }
@@ -283,6 +284,187 @@ impl ContentSet {
                             placement.zone
                         ),
                     );
+                }
+            }
+            for source in &placed {
+                let Some(definition) = self.definitions.get(*source) else {
+                    continue;
+                };
+                for (index, placement) in definition.entity_placements.iter().enumerate() {
+                    let placement_path = format!(
+                        "{}:entity_placements[{index}]",
+                        self.sources.get(*source).map_or(path, String::as_str)
+                    );
+                    match self.definitions.get(&placement.definition) {
+                        Some(entity) if entity.kind() == ContentKind::Entity => {}
+                        Some(_) => report.error(
+                            "world.placed_definition_not_entity",
+                            format!("{placement_path}.definition"),
+                            format!(
+                                "placement {} references non-entity definition {}",
+                                placement.id, placement.definition
+                            ),
+                        ),
+                        None => report.error(
+                            "world.unknown_placed_entity",
+                            format!("{placement_path}.definition"),
+                            format!(
+                                "entity definition {} from zone {} does not resolve",
+                                placement.definition, source
+                            ),
+                        ),
+                    }
+                }
+                for (index, trigger) in definition.travel_triggers.iter().enumerate() {
+                    let trigger_path = format!(
+                        "{}:travel_triggers[{index}]",
+                        self.sources.get(*source).map_or(path, String::as_str)
+                    );
+                    if !self.definitions.contains_key(&trigger.destination) {
+                        report.error(
+                            "world.unknown_travel_destination",
+                            format!("{trigger_path}.destination"),
+                            format!(
+                                "travel destination {} from {} does not resolve",
+                                trigger.destination, source
+                            ),
+                        );
+                    }
+                    if !placed.contains(&trigger.destination) {
+                        report.error(
+                            "world.travel_destination_not_placed",
+                            format!("{trigger_path}.destination"),
+                            format!(
+                                "travel destination {} is not placed on map {}",
+                                trigger.destination, map.id
+                            ),
+                        );
+                    }
+                    if map.route_kind(source, &trigger.destination).is_none() {
+                        report.error(
+                            "world.travel_route_missing",
+                            trigger_path,
+                            format!(
+                                "map {} has no route from {} to {}",
+                                map.id, source, trigger.destination
+                            ),
+                        );
+                    }
+                }
+                for (index, authored_link) in definition.entity_links.iter().enumerate() {
+                    let link_path = format!(
+                        "{}:entity_links[{index}]",
+                        self.sources.get(*source).map_or(path, String::as_str)
+                    );
+                    let Some(link_definition) = self.definitions.get(&authored_link.link_type)
+                    else {
+                        report.error(
+                            "world.unknown_link_definition",
+                            format!("{link_path}.link_type"),
+                            format!(
+                                "link definition {} does not resolve",
+                                authored_link.link_type
+                            ),
+                        );
+                        continue;
+                    };
+                    if link_definition.kind() != ContentKind::Link {
+                        report.error(
+                            "world.link_type_not_link_definition",
+                            format!("{link_path}.link_type"),
+                            format!("{} is not a link definition", authored_link.link_type),
+                        );
+                        continue;
+                    }
+                    let Some(contract) = link_definition.link.as_ref() else {
+                        continue;
+                    };
+                    for event in &authored_link.events {
+                        if !contract.supported_events.contains(event) {
+                            report.error(
+                                "world.unsupported_link_event",
+                                format!("{link_path}.events"),
+                                format!(
+                                    "link definition {} does not support event {:?}",
+                                    authored_link.link_type, event
+                                ),
+                            );
+                        }
+                    }
+                    let source_placement = definition
+                        .entity_placements
+                        .iter()
+                        .find(|placement| placement.id == authored_link.source);
+                    let target_placement = definition
+                        .entity_placements
+                        .iter()
+                        .find(|placement| placement.id == authored_link.target);
+                    if let Some(source_placement) = source_placement
+                        && let Some(source_entity) =
+                            self.definitions.get(&source_placement.definition)
+                    {
+                        let source_component =
+                            source_entity.components.get(&contract.source_component);
+                        if source_component.is_none() {
+                            report.error(
+                                "world.link_source_component_mismatch",
+                                format!("{link_path}.source"),
+                                format!(
+                                    "source placement {} requires component {} for link type {}",
+                                    authored_link.source,
+                                    contract.source_component,
+                                    authored_link.link_type
+                                ),
+                            );
+                        } else {
+                            for event in &authored_link.events {
+                                let required_verb = match event {
+                                    crate::definition::ZoneLinkEvent::Activated => "activate",
+                                    crate::definition::ZoneLinkEvent::Opened => "open",
+                                    crate::definition::ZoneLinkEvent::Closed => "close",
+                                    crate::definition::ZoneLinkEvent::Triggered => continue,
+                                };
+                                let advertises_verb = source_entity
+                                    .components
+                                    .get(&ComponentKey::new("core.interactable").unwrap())
+                                    .and_then(|data| data.get("verbs"))
+                                    .and_then(Value::as_array)
+                                    .is_some_and(|verbs| {
+                                        verbs
+                                            .iter()
+                                            .any(|verb| verb.as_str() == Some(required_verb))
+                                    });
+                                if !advertises_verb {
+                                    report.error(
+                                        "world.link_source_event_unavailable",
+                                        format!("{link_path}.source"),
+                                        format!(
+                                            "source placement {} does not advertise the {required_verb} verb",
+                                            authored_link.source
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    if let Some(target_placement) = target_placement
+                        && let Some(target_entity) =
+                            self.definitions.get(&target_placement.definition)
+                        && !target_entity
+                            .components
+                            .contains_key(&contract.target_component)
+                    {
+                        report.error(
+                            "world.link_target_component_mismatch",
+                            format!("{link_path}.target"),
+                            format!(
+                                "target placement {} requires component {} for link type {}",
+                                authored_link.target,
+                                contract.target_component,
+                                authored_link.link_type
+                            ),
+                        );
+                    }
                 }
             }
         }
@@ -586,7 +768,7 @@ pub fn starter_component_registry() -> Result<ComponentRegistry, EngineError> {
     let component_schemas = [
         ComponentSchema::new(
             ComponentKey::new("core.zone")?,
-            SchemaVersion::new(1, 0),
+            SchemaVersion::new(1, 1),
             vec![
                 FieldSchema::required("max_players", FieldType::Int { min: 1, max: 1000 }),
                 FieldSchema::required(
@@ -596,10 +778,91 @@ pub fn starter_component_registry() -> Result<ComponentRegistry, EngineError> {
                         max: 64.0,
                     },
                 ),
+                FieldSchema::optional("width_cells", FieldType::Int { min: 1, max: 512 })
+                    .with_default(serde_json::json!(128)),
+                FieldSchema::optional("height_cells", FieldType::Int { min: 1, max: 512 })
+                    .with_default(serde_json::json!(128)),
+                FieldSchema::optional(
+                    "origin_x_m",
+                    FieldType::Float {
+                        min: -1_000_000.0,
+                        max: 1_000_000.0,
+                    },
+                )
+                .with_default(serde_json::json!(0.0)),
+                FieldSchema::optional(
+                    "origin_z_m",
+                    FieldType::Float {
+                        min: -1_000_000.0,
+                        max: 1_000_000.0,
+                    },
+                )
+                .with_default(serde_json::json!(0.0)),
+                FieldSchema::optional(
+                    "floor_y_m",
+                    FieldType::Float {
+                        min: -10_000.0,
+                        max: 10_000.0,
+                    },
+                )
+                .with_default(serde_json::json!(0.0)),
+                FieldSchema::optional(
+                    "ceiling_y_m",
+                    FieldType::Float {
+                        min: -10_000.0,
+                        max: 10_000.0,
+                    },
+                )
+                .with_default(serde_json::json!(4.0)),
+                FieldSchema::optional(
+                    "entry_x_m",
+                    FieldType::Float {
+                        min: -1_000_000.0,
+                        max: 1_000_000.0,
+                    },
+                ),
+                FieldSchema::optional(
+                    "entry_y_m",
+                    FieldType::Float {
+                        min: -10_000.0,
+                        max: 10_000.0,
+                    },
+                ),
+                FieldSchema::optional(
+                    "entry_z_m",
+                    FieldType::Float {
+                        min: -1_000_000.0,
+                        max: 1_000_000.0,
+                    },
+                ),
+                FieldSchema::optional(
+                    "blocked_cells",
+                    FieldType::List {
+                        item: Box::new(FieldType::Int {
+                            min: 0,
+                            max: 262_143,
+                        }),
+                        max_len: 262_144,
+                    },
+                )
+                .with_default(serde_json::json!([])),
+                FieldSchema::optional(
+                    "max_entities",
+                    FieldType::Int {
+                        min: 1,
+                        max: 1_000_000,
+                    },
+                )
+                .with_default(serde_json::json!(1000)),
             ],
             Visibility::ServerOnly,
             PersistencePolicy::StaticDefinition,
-        ),
+        )
+        .with_migration(Migration::new(
+            SchemaVersion::new(1, 0),
+            SchemaVersion::new(1, 1),
+            Vec::new(),
+        )),
         ComponentSchema::new(
             ComponentKey::new("core.interactable")?,
             SchemaVersion::new(1, 0),
@@ -608,10 +871,12 @@ pub fn starter_component_registry() -> Result<ComponentRegistry, EngineError> {
                     "verbs",
                     FieldType::List {
                         item: Box::new(FieldType::Enum {
-                            values: ["inspect", "talk", "practice"]
-                                .into_iter()
-                                .map(str::to_owned)
-                                .collect(),
+                            values: [
+                                "inspect", "talk", "practice", "open", "close", "use", "activate",
+                            ]
+                            .into_iter()
+                            .map(str::to_owned)
+                            .collect(),
                         }),
                         max_len: 8,
                     },
@@ -626,6 +891,71 @@ pub fn starter_component_registry() -> Result<ComponentRegistry, EngineError> {
                 FieldSchema::required("requires_line_of_sight", FieldType::Bool),
             ],
             Visibility::Client,
+            PersistencePolicy::StaticDefinition,
+        ),
+        ComponentSchema::new(
+            ComponentKey::new("core.door")?,
+            SchemaVersion::new(1, 0),
+            vec![
+                FieldSchema::optional("open", FieldType::Bool)
+                    .with_default(serde_json::json!(false)),
+            ],
+            Visibility::Client,
+            PersistencePolicy::StaticDefinition,
+        ),
+        ComponentSchema::new(
+            ComponentKey::new("core.trigger")?,
+            SchemaVersion::new(1, 0),
+            vec![FieldSchema::required(
+                "radius_m",
+                FieldType::Float {
+                    min: 0.1,
+                    max: 32.0,
+                },
+            )],
+            Visibility::ServerOnly,
+            PersistencePolicy::StaticDefinition,
+        ),
+        ComponentSchema::new(
+            ComponentKey::new("core.health")?,
+            SchemaVersion::new(1, 0),
+            vec![FieldSchema::required(
+                "max",
+                FieldType::Int {
+                    min: 1,
+                    max: 1_000_000,
+                },
+            )],
+            Visibility::Client,
+            PersistencePolicy::StaticDefinition,
+        ),
+        ComponentSchema::new(
+            ComponentKey::new("core.movement")?,
+            SchemaVersion::new(1, 0),
+            vec![
+                FieldSchema::required(
+                    "radius_m",
+                    FieldType::Float {
+                        min: 0.0,
+                        max: 10.0,
+                    },
+                ),
+                FieldSchema::optional("occupies", FieldType::Bool)
+                    .with_default(serde_json::json!(true)),
+            ],
+            Visibility::ServerOnly,
+            PersistencePolicy::StaticDefinition,
+        ),
+        ComponentSchema::new(
+            ComponentKey::new("core.behavior")?,
+            SchemaVersion::new(1, 0),
+            vec![FieldSchema::required(
+                "behavior",
+                FieldType::DefinitionRef {
+                    namespace: Some("behavior".to_owned()),
+                },
+            )],
+            Visibility::ServerOnly,
             PersistencePolicy::StaticDefinition,
         ),
         ComponentSchema::new(
@@ -866,6 +1196,7 @@ fn relative_path(root: &Path, path: &Path) -> String {
         .join("/")
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -924,6 +1255,10 @@ mod tests {
             presentation: None,
             tags: BTreeSet::new(),
             behavior: None,
+            travel_triggers: Vec::new(),
+            entity_placements: Vec::new(),
+            entity_links: Vec::new(),
+            link: None,
         }
     }
 

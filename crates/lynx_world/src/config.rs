@@ -2,8 +2,11 @@
 //!
 //! Every tunable is server-owned, validated before the first connection, and
 //! never accepted from a client. Token hashes may be supplied on the command
-//! line or through `LYNX_WORLD_TOKEN_HASHES` (comma- or whitespace-separated).
+//! line or through `LYNX_WORLD_TOKEN_HASHES` (comma- or whitespace-separated);
+//! prefer the environment for deployment because command-line arguments can be
+//! visible to local process inspection.
 
+use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -68,7 +71,7 @@ impl From<SessionPolicyArg> for ConcurrentSessionPolicy {
 }
 
 /// Arguments for `lynx-world serve`.
-#[derive(Debug, Clone, Args)]
+#[derive(Clone, Args)]
 #[allow(clippy::struct_excessive_bools)] // CLI flags are independent process options.
 pub struct ServeArgs {
     /// Address to listen on.
@@ -153,6 +156,30 @@ pub struct ServeArgs {
     #[arg(long)]
     pub fresh: bool,
 
+    /// Load and validate a versioned content bundle from this directory.
+    /// The directory must contain `manifest.json`.
+    #[arg(long = "content-bundle", value_name = "PATH")]
+    pub content_bundle: Option<PathBuf>,
+
+    /// Serve the zones placed by this map in the configured content bundle.
+    /// Multi-zone serving currently requires PostgreSQL leases/checkpoints.
+    #[arg(long = "world-map", value_name = "DEFINITION_ID")]
+    pub world_map: Option<String>,
+
+    /// Reviewed persisted-instance migration plan to apply when the saved
+    /// snapshot is pinned to another content manifest.
+    #[arg(long = "content-migration-plan", value_name = "PATH")]
+    pub content_migration_plan: Option<PathBuf>,
+
+    /// Prepare and print the migration candidate without writing the snapshot.
+    #[arg(long = "dry-run-content-migration")]
+    pub dry_run_content_migration: bool,
+
+    /// Restore the previous content/snapshot pair if no target-world state has
+    /// changed since the migration checkpoint.
+    #[arg(long = "rollback-content-migration")]
+    pub rollback_content_migration: bool,
+
     /// How often a configured snapshot file is rewritten while the service
     /// runs, in milliseconds.
     #[arg(long, default_value_t = DEFAULT_SNAPSHOT_MS)]
@@ -164,9 +191,48 @@ pub struct ServeArgs {
     #[arg(long, default_value_t = DEFAULT_LEASE_MS)]
     pub lease_ttl_ms: u64,
 
-    /// SHA-256 hash of a bearer token. Repeat once per demo character.
+    /// SHA-256 hash of a bearer token. Repeat once per demo character. Prefer
+    /// `LYNX_WORLD_TOKEN_HASHES` in deployments to avoid process-list exposure.
     #[arg(long = "token-hash", value_name = "SHA256")]
     pub token_hashes: Vec<String>,
+}
+
+impl fmt::Debug for ServeArgs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ServeArgs")
+            .field("bind", &self.bind)
+            .field("admin_bind", &self.admin_bind)
+            .field("auth_mode", &self.auth_mode)
+            .field(
+                "dangerous_allow_non_loopback_demo_auth",
+                &self.dangerous_allow_non_loopback_demo_auth,
+            )
+            .field("tick_ms", &self.tick_ms)
+            .field("resume_ttl_ms", &self.resume_ttl_ms)
+            .field("view_radius_m", &self.view_radius_m)
+            .field("max_sessions", &self.max_sessions)
+            .field("outbound_queue", &self.outbound_queue)
+            .field("session_policy", &self.session_policy)
+            .field("message_burst", &self.message_burst)
+            .field("message_rate", &self.message_rate)
+            .field("allowed_origins", &self.allowed_origins)
+            .field("staff", &self.staff)
+            .field("state_file", &self.state_file)
+            .field("state_postgres", &self.state_postgres)
+            .field("fresh", &self.fresh)
+            .field("content_bundle", &self.content_bundle)
+            .field("world_map", &self.world_map)
+            .field("content_migration_plan", &self.content_migration_plan)
+            .field("dry_run_content_migration", &self.dry_run_content_migration)
+            .field(
+                "rollback_content_migration",
+                &self.rollback_content_migration,
+            )
+            .field("snapshot_ms", &self.snapshot_ms)
+            .field("lease_ttl_ms", &self.lease_ttl_ms)
+            .field("token_hash_count", &self.token_hashes.len())
+            .finish()
+    }
 }
 
 impl ServeArgs {
@@ -298,6 +364,22 @@ impl ServeArgs {
     /// Returns an error when both stores are configured, or when `--fresh` is
     /// set without a store to restore into.
     pub fn validate_snapshot_args(&self) -> Result<()> {
+        if self.world_map.is_some() && self.content_bundle.is_none() {
+            bail!("--world-map requires --content-bundle");
+        }
+        if self.world_map.is_some() && !self.state_postgres {
+            bail!(
+                "--world-map currently requires --state-postgres for zone leases and checkpoints"
+            );
+        }
+        if self.world_map.is_some()
+            && (self.fresh
+                || self.content_migration_plan.is_some()
+                || self.dry_run_content_migration
+                || self.rollback_content_migration)
+        {
+            bail!("--world-map cannot be combined with whole-world reset or migration options");
+        }
         if self.state_file.is_some() && self.state_postgres {
             bail!("--state-file and --state-postgres are mutually exclusive");
         }
@@ -305,6 +387,34 @@ impl ServeArgs {
             bail!(
                 "--fresh requires --state-file or --state-postgres: there is nothing to overwrite"
             );
+        }
+        let has_store = self.state_file.is_some() || self.state_postgres;
+        if self.content_migration_plan.is_some() && !has_store {
+            bail!("--content-migration-plan requires --state-file or --state-postgres");
+        }
+        if self.content_migration_plan.is_some() && self.content_bundle.is_none() {
+            bail!("--content-migration-plan requires --content-bundle");
+        }
+        if self.dry_run_content_migration && self.content_migration_plan.is_none() {
+            bail!("--dry-run-content-migration requires --content-migration-plan");
+        }
+        if self.rollback_content_migration && !has_store {
+            bail!("--rollback-content-migration requires --state-file or --state-postgres");
+        }
+        if self.rollback_content_migration && self.content_bundle.is_none() {
+            bail!("--rollback-content-migration requires the source --content-bundle");
+        }
+        if self.rollback_content_migration
+            && (self.fresh
+                || self.content_migration_plan.is_some()
+                || self.dry_run_content_migration)
+        {
+            bail!(
+                "--rollback-content-migration cannot be combined with --fresh or a migration plan"
+            );
+        }
+        if self.content_migration_plan.is_some() && self.fresh {
+            bail!("--content-migration-plan cannot be combined with --fresh");
         }
         Ok(())
     }
@@ -320,7 +430,7 @@ impl ServeArgs {
             return Ok(Vec::new());
         }
         let mut values = self.token_hashes.clone();
-        if let Ok(environment) = std::env::var(TOKEN_HASH_ENV) {
+        if let Some(environment) = secret_environment(TOKEN_HASH_ENV)? {
             values.extend(
                 environment
                     .split([',', ';'])
@@ -344,6 +454,43 @@ impl ServeArgs {
     }
 }
 
+fn secret_environment(name: &str) -> Result<Option<String>> {
+    let file_name = format!("{name}_FILE");
+    match (std::env::var_os(name), std::env::var_os(&file_name)) {
+        (Some(value), Some(path)) => {
+            let value = value
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("{name} is not valid UTF-8"))?;
+            if !value.is_empty() {
+                bail!("configure either {name} or {file_name}, not both");
+            }
+            let value = std::fs::read_to_string(path)
+                .map_err(|_| anyhow::anyhow!("could not read {file_name}"))?;
+            let value = value.trim_end_matches(['\r', '\n']).to_owned();
+            if value.trim().is_empty() {
+                bail!("{file_name} is empty");
+            }
+            Ok(Some(value))
+        }
+        (Some(value), None) => {
+            Ok(Some(value.into_string().map_err(|_| {
+                anyhow::anyhow!("{name} is not valid UTF-8")
+            })?))
+        }
+        (None, Some(path)) => {
+            let value = std::fs::read_to_string(path)
+                .map_err(|_| anyhow::anyhow!("could not read {file_name}"))?;
+            let value = value.trim_end_matches(['\r', '\n']).to_owned();
+            if value.trim().is_empty() {
+                bail!("{file_name} is empty");
+            }
+            Ok(Some(value))
+        }
+        (None, None) => Ok(None),
+    }
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,6 +514,11 @@ mod tests {
             state_file: None,
             state_postgres: false,
             fresh: false,
+            content_bundle: None,
+            world_map: None,
+            content_migration_plan: None,
+            dry_run_content_migration: false,
+            rollback_content_migration: false,
             snapshot_ms: DEFAULT_SNAPSHOT_MS,
             lease_ttl_ms: DEFAULT_LEASE_MS,
             token_hashes: vec![crate::auth::hash_hex("token")],
@@ -551,6 +703,17 @@ mod tests {
         if std::env::var(TOKEN_HASH_ENV).is_err() {
             assert!(value.token_hashes().is_err());
         }
+    }
+
+    #[test]
+    fn serve_args_debug_reports_hash_count_without_exposing_hashes() {
+        let sentinel = "sensitive-token-hash-sentinel";
+        let mut args = sample();
+        args.token_hashes = vec![sentinel.into()];
+
+        let rendered = format!("{args:?}");
+        assert!(!rendered.contains(sentinel));
+        assert!(rendered.contains("token_hash_count: 1"));
     }
 
     #[test]

@@ -88,10 +88,14 @@ edit applied migration files to resolve a mismatch.
 | `0013_fix_event_result_trigger.sql` | Removes PL/pgSQL column/variable ambiguity in the deferred calendar-result consistency trigger. |
 | `0014_resume_sessions.sql` | Stores hashed resume-token digests and fenced session expiry/revocation metadata. |
 | `0015_resume_session_staff.sql` | Persists the trusted staff claim for durable session restoration. |
+| `0016_player_inventory_value_ledger.sql` | Backfills opening item quantities and adds immutable, idempotent player inventory value events and signed entries. |
+| `0017_atomic_zone_handoffs.sql` | Stores idempotent handoff receipts alongside transactions that commit both zone checkpoints under their lease fences. |
+| `0018_zone_scoped_resume_sessions.sql` | Binds durable resume records and stale-session fencing to their owning zone; revokes pre-zone records rather than guessing their owner. |
 
 ## Audit retention
 
 `lynx.audit_events`, `lynx.content_moderation_events`, `lynx.zone_events`,
+`lynx.inventory_value_events`, `lynx.inventory_value_entries`,
 `lynx.faction_treasury_entries`, `lynx.faction_treasury_transfers`,
 `lynx.faction_territory_history`, `lynx.world_event_transitions`,
 `lynx.world_event_enrollments`, `lynx.world_event_results`, and

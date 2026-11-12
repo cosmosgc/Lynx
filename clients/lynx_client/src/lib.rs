@@ -1,3 +1,6 @@
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, allow(unused_features))]
+
 //! Client application setup, including a display-independent test harness.
 
 use bevy::prelude::*;
@@ -58,6 +61,7 @@ pub fn headless_app() -> App {
     app
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

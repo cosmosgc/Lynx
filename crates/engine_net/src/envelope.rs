@@ -378,6 +378,7 @@ fn value_depth(value: &Value) -> usize {
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,7 +400,7 @@ mod tests {
             json!({ "verb": "inspect", "target": "ent_01J8Z3K4Q7Y2N5V6B8C0D1E2F3" }),
         );
         let text = envelope.encode().unwrap();
-        assert!(text.contains("\"v\":\"1.0.0\""));
+        assert!(text.contains(&format!("\"v\":\"{}\"", protocol_version())));
         assert!(text.contains("\"kind\":\"action.request\""));
 
         let decoded = Envelope::decode(&text).unwrap();

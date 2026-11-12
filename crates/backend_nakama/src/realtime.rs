@@ -10,7 +10,10 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use game_api::{
-    AccountId, ApiError, ChatMessage, GroupId, SessionToken, validate_channel_id, validate_page,
+    AccountId, ApiError, ChatChannel, ChatChannelKind, ChatChannelTarget, ChatMessage,
+    ChatMessagePage, ChatMessageReceipt, ChatPresence, ChatRealtimeEvent,
+    PartyPresence as GamePartyPresence, RealtimeChatSession, RealtimeParty as GameRealtimeParty,
+    RealtimePartySession, SessionToken, validate_channel_id, validate_page,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -22,16 +25,8 @@ static NEXT_SOCKET_ID: AtomicU64 = AtomicU64::new(1);
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-/// Typed destination for a Nakama realtime chat channel.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RealtimeChannelTarget {
-    /// A public or private room name.
-    Room(String),
-    /// A direct conversation with another account.
-    Direct(AccountId),
-    /// A persistent Nakama group.
-    Group(GroupId),
-}
+/// Compatibility name for the provider-neutral channel destination.
+pub use game_api::ChatChannelTarget as RealtimeChannelTarget;
 
 /// Channel details returned by Nakama after joining.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -514,27 +509,207 @@ impl NakamaRealtimeSession {
     }
 }
 
-/// Acknowledgement returned by Nakama after storing a channel message.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ChannelMessageAck {
-    /// Channel ID.
-    pub channel_id: String,
-    /// Nakama message ID.
-    pub message_id: String,
-    /// Optional application message code.
-    pub code: Option<i64>,
+impl RealtimeChatSession for NakamaRealtimeSession {
+    async fn join_channel(
+        &mut self,
+        target: &ChatChannelTarget,
+        persistence: bool,
+        hidden: bool,
+    ) -> Result<ChatChannel, ApiError> {
+        target.validate()?;
+        let joined = NakamaRealtimeSession::join_channel(self, target, persistence, hidden).await?;
+        let kind = match joined.kind {
+            RealtimeChannelKind::Room => ChatChannelKind::Room,
+            RealtimeChannelKind::Direct => ChatChannelKind::Direct,
+            RealtimeChannelKind::Group => ChatChannelKind::Group,
+        };
+        Ok(ChatChannel {
+            id: joined.channel_id,
+            name: match target {
+                ChatChannelTarget::Room(name) => Some(name.clone()),
+                ChatChannelTarget::Direct(_) | ChatChannelTarget::Group(_) => None,
+            },
+            kind,
+            member_count: joined.member_count,
+        })
+    }
+
+    async fn leave_channel(&mut self, channel_id: &str) -> Result<(), ApiError> {
+        NakamaRealtimeSession::leave_channel(self, channel_id).await
+    }
+
+    async fn send_realtime_message(
+        &mut self,
+        channel_id: &str,
+        content: &str,
+    ) -> Result<ChatMessageReceipt, ApiError> {
+        NakamaRealtimeSession::send_channel_message(self, channel_id, content).await
+    }
+
+    async fn realtime_history(
+        &mut self,
+        channel_id: &str,
+        limit: u16,
+        forward: bool,
+        cursor: Option<&str>,
+    ) -> Result<ChatMessagePage, ApiError> {
+        NakamaRealtimeSession::list_channel_messages(self, channel_id, limit, forward, cursor).await
+    }
+
+    async fn next_chat_event(&mut self) -> Result<ChatRealtimeEvent, ApiError> {
+        loop {
+            let event = NakamaRealtimeSession::next_event(self).await?;
+            if let Some(message) = event.get("channelMessage") {
+                let channel_id = string_field(message, "channelId")?;
+                return Ok(ChatRealtimeEvent::Message {
+                    message: realtime_message_from_value(message, channel_id)?,
+                });
+            }
+            if let Some(presence) = event.get("channelPresenceEvent") {
+                let channel_id = string_field(presence, "channelId")?;
+                let joins = presence_list(presence.get("joins"))?;
+                let leaves = presence_list(presence.get("leaves"))?;
+                return Ok(ChatRealtimeEvent::Presence {
+                    channel_id,
+                    joins,
+                    leaves,
+                });
+            }
+        }
+    }
 }
 
-/// A Nakama page of persisted realtime-channel messages.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ChannelMessagePage {
-    /// Messages in the requested page direction.
-    pub messages: Vec<ChatMessage>,
-    /// Cursor for the next page in the same direction.
-    pub next_cursor: Option<String>,
-    /// Cursor for the previous page in the same direction.
-    pub previous_cursor: Option<String>,
+impl RealtimePartySession for NakamaRealtimeSession {
+    async fn create_party(
+        &mut self,
+        open: bool,
+        hidden: bool,
+        max_size: u32,
+        label: Option<&str>,
+    ) -> Result<GameRealtimeParty, ApiError> {
+        let party =
+            NakamaRealtimeSession::create_party(self, open, hidden, max_size, label).await?;
+        Ok(GameRealtimeParty {
+            id: party.id,
+            open: party.open,
+            hidden: party.hidden,
+            max_size: party.max_size,
+            label: party.label,
+        })
+    }
+
+    async fn join_party(&mut self, party_id: &str) -> Result<(), ApiError> {
+        NakamaRealtimeSession::join_party(self, party_id).await
+    }
+
+    async fn leave_party(&mut self, party_id: &str) -> Result<(), ApiError> {
+        NakamaRealtimeSession::leave_party(self, party_id).await
+    }
+
+    async fn close_party(&mut self, party_id: &str) -> Result<(), ApiError> {
+        NakamaRealtimeSession::close_party(self, party_id).await
+    }
+
+    async fn party_join_requests(
+        &mut self,
+        party_id: &str,
+    ) -> Result<Vec<GamePartyPresence>, ApiError> {
+        NakamaRealtimeSession::party_join_requests(self, party_id)
+            .await?
+            .into_iter()
+            .map(|presence| {
+                Ok(GamePartyPresence {
+                    account_id: AccountId::new(presence.user_id)
+                        .map_err(|_| invalid_socket_response("party presence"))?,
+                    session_id: presence.session_id,
+                    username: presence.username,
+                })
+            })
+            .collect()
+    }
+
+    async fn accept_party_join_request(
+        &mut self,
+        party_id: &str,
+        presence: &GamePartyPresence,
+    ) -> Result<(), ApiError> {
+        NakamaRealtimeSession::accept_party_join_request(self, party_id, &nakama_presence(presence))
+            .await
+    }
+
+    async fn remove_party_member(
+        &mut self,
+        party_id: &str,
+        presence: &GamePartyPresence,
+    ) -> Result<(), ApiError> {
+        NakamaRealtimeSession::remove_party_member(self, party_id, &nakama_presence(presence)).await
+    }
+
+    async fn promote_party_member(
+        &mut self,
+        party_id: &str,
+        presence: &GamePartyPresence,
+    ) -> Result<(), ApiError> {
+        NakamaRealtimeSession::promote_party_member(self, party_id, &nakama_presence(presence))
+            .await
+    }
 }
+
+fn nakama_presence(presence: &GamePartyPresence) -> PartyPresence {
+    PartyPresence {
+        user_id: presence.account_id.as_str().to_owned(),
+        session_id: presence.session_id.clone(),
+        username: presence.username.clone(),
+    }
+}
+
+fn realtime_message_from_value(
+    message: &Value,
+    channel_id: String,
+) -> Result<ChatMessage, ApiError> {
+    Ok(ChatMessage {
+        id: string_field(message, "messageId")?,
+        channel_id,
+        sender_id: AccountId::new(string_field(message, "senderId")?)
+            .map_err(|_| invalid_socket_response("message sender"))?,
+        sender_name: message
+            .get("username")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned),
+        content: string_field(message, "content")?,
+        created_at: None,
+    })
+}
+
+fn presence_list(value: Option<&Value>) -> Result<Vec<ChatPresence>, ApiError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let entries = value
+        .as_array()
+        .ok_or_else(|| invalid_socket_response("channel presence"))?;
+    entries
+        .iter()
+        .map(|presence| {
+            Ok(ChatPresence {
+                account_id: AccountId::new(string_field(presence, "userId")?)
+                    .map_err(|_| invalid_socket_response("channel presence"))?,
+                username: presence
+                    .get("username")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned),
+            })
+        })
+        .collect()
+}
+
+/// Compatibility name for a provider-neutral chat send receipt.
+pub type ChannelMessageAck = ChatMessageReceipt;
+
+/// Compatibility name for a provider-neutral realtime chat history page.
+pub type ChannelMessagePage = ChatMessagePage;
 
 #[derive(Deserialize)]
 struct PartyResponse {
@@ -618,6 +793,7 @@ fn invalid_socket_response(context: &str) -> ApiError {
     ))
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -364,6 +364,15 @@ impl SessionRegistry {
         self.sessions.values().map(|record| &record.view)
     }
 
+    /// Whether a retained session conflicts with authenticated `claims` under
+    /// this registry's configured identity policy.
+    pub(crate) fn retains_identity(&self, claims: &SessionClaims) -> bool {
+        self.sessions.values().any(|record| match self.policy {
+            ConcurrentSessionPolicy::PerCharacter => record.view.principal == claims.principal,
+            ConcurrentSessionPolicy::PerAccount => record.view.account == claims.account,
+        })
+    }
+
     /// The negotiated handshake retained for a session's locale and features.
     #[must_use]
     pub fn negotiated(&self, id: &SessionId) -> Option<&Negotiated> {
@@ -570,6 +579,13 @@ impl SessionRegistry {
         self.tokens.contains_key(token)
     }
 
+    pub(crate) fn principal_for_token(&self, token: &ResumeToken) -> Option<StableId> {
+        let session = self.tokens.get(token)?;
+        self.sessions
+            .get(session)
+            .map(|record| record.view.principal)
+    }
+
     /// Whether this process still has the token attached to a connected session.
     pub(crate) fn token_is_connected(&self, token: &ResumeToken) -> bool {
         self.tokens
@@ -728,6 +744,7 @@ fn session_expired() -> EngineError {
     )
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -241,6 +241,7 @@ fn ai_zone(entity_count: usize, chase: bool) -> Zone {
             max_targets: 1,
         },
         max_controller_candidates: entity_count,
+        max_group_aggro_shares: 0,
         epoch: Millis::new(0),
         tick_ms: TICK_MS,
         behaviors: vec![AiBehaviorDefinition {
@@ -251,6 +252,10 @@ fn ai_zone(entity_count: usize, chase: bool) -> Zone {
                 AiBehaviorKind::Guard
             },
             range_m: 8.0,
+            schedule: None,
+            aggro_group: None,
+            graph: None,
+            patrol_route: Vec::new(),
         }],
         navigation_speed_m_per_s: SPEED_M_PER_S,
         navigation_replan: ReplanPolicy::default(),

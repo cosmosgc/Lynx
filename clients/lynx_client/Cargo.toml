@@ -26,6 +26,7 @@ getrandom.workspace = true
 keyring = { version = "4.2.0", default-features = false, features = ["v1"] }
 serde.workspace = true
 serde_json.workspace = true
+ron.workspace = true
 semver.workspace = true
 sha2.workspace = true
 tokio.workspace = true
@@ -33,6 +34,7 @@ rpassword = { version = "7", optional = true }
 
 [dev-dependencies]
 futures-util = "0.3.31"
+lynx_test_harness = { path = "../../tools/test_harness" }
 lynx-world = { path = "../../crates/lynx_world" }
 world_gateway.workspace = true
 world_server.workspace = true

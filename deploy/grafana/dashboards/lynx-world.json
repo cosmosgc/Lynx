@@ -1,0 +1,30 @@
+{
+  "annotations": { "list": [] },
+  "description": "Versioned operations overview for Lynx world service. Metrics are process local and reset on restart.",
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    { "datasource": { "type": "prometheus", "uid": "lynx-prometheus" }, "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }, "gridPos": { "h": 7, "w": 6, "x": 0, "y": 0 }, "id": 1, "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } }, "targets": [{ "expr": "up{job=\"lynx-world\"}", "legendFormat": "metrics scrape", "refId": "A" }], "title": "Scrape availability", "type": "timeseries" },
+    { "datasource": { "type": "prometheus", "uid": "lynx-prometheus" }, "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }, "gridPos": { "h": 7, "w": 6, "x": 6, "y": 0 }, "id": 2, "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } }, "targets": [{ "expr": "sum(rate(lynx_world_tick_deadline_misses_total[5m]))", "legendFormat": "deadline misses/s", "refId": "A" }, { "expr": "sum(rate(lynx_world_tick_overruns_total[5m]))", "legendFormat": "execution overruns/s", "refId": "B" }], "title": "Tick health", "type": "timeseries" },
+    { "datasource": { "type": "prometheus", "uid": "lynx-prometheus" }, "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }, "gridPos": { "h": 7, "w": 6, "x": 12, "y": 0 }, "id": 3, "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } }, "targets": [{ "expr": "lynx_world_connections", "legendFormat": "connections", "refId": "A" }, { "expr": "lynx_world_retained_sessions", "legendFormat": "retained sessions", "refId": "B" }, { "expr": "sum(rate(lynx_world_session_expired_closes_total[5m]))", "legendFormat": "expiry closes/s", "refId": "C" }], "title": "Sessions and reconnects", "type": "timeseries" },
+    { "datasource": { "type": "prometheus", "uid": "lynx-prometheus" }, "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }, "gridPos": { "h": 7, "w": 6, "x": 18, "y": 0 }, "id": 4, "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } }, "targets": [{ "expr": "sum by (code) (rate(lynx_world_action_rejections_total[5m]))", "legendFormat": "{{code}}", "refId": "A" }, { "expr": "sum(rate(lynx_world_actions_applied_total[5m]))", "legendFormat": "applied/s", "refId": "B" }], "title": "Action outcomes", "type": "timeseries" },
+    { "datasource": { "type": "prometheus", "uid": "lynx-prometheus" }, "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] }, "gridPos": { "h": 7, "w": 8, "x": 0, "y": 7 }, "id": 5, "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } }, "targets": [{ "expr": "lynx_world_outbound_queue_depth / clamp_min(lynx_world_outbound_queue_capacity, 1)", "legendFormat": "aggregate queue utilization", "refId": "A" }, { "expr": "lynx_world_outbound_queue_depth_high_water / clamp_min(lynx_world_outbound_queue_capacity, 1)", "legendFormat": "high-water utilization", "refId": "B" }], "title": "Replication queue pressure", "type": "timeseries" },
+    { "datasource": { "type": "prometheus", "uid": "lynx-prometheus" }, "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }, "gridPos": { "h": 7, "w": 8, "x": 8, "y": 7 }, "id": 6, "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } }, "targets": [{ "expr": "sum by (adapter) (rate(lynx_backend_operation_errors_total[5m]))", "legendFormat": "{{adapter}} errors/s", "refId": "A" }, { "expr": "sum by (adapter) (rate(lynx_backend_operations_total[5m]))", "legendFormat": "{{adapter}} ops/s", "refId": "B" }], "title": "Backend operations", "type": "timeseries" },
+    { "datasource": { "type": "prometheus", "uid": "lynx-prometheus" }, "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }, "gridPos": { "h": 7, "w": 8, "x": 16, "y": 7 }, "id": 7, "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } }, "targets": [{ "expr": "lynx_world_content_version_info", "legendFormat": "{{state}} {{version}}", "refId": "A" }], "title": "Content integration version", "type": "timeseries" }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["lynx", "operations"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Lynx World Operations",
+  "uid": "lynx-world-operations",
+  "version": 1,
+  "weekStart": ""
+}

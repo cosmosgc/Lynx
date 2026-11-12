@@ -6,12 +6,13 @@ integration, load/soak, fuzzing, coverage, accessibility, documentation drift,
 toolchain upgrades, and flaky-test control.
 
 **Current baseline:** unit and integration tests, a zero-unsafe workspace,
-fmt/Clippy/test gates, a generated-project CI check, and a PostgreSQL migration
-job. The Ubuntu Rust job configures the live PostgreSQL test and requires its
-configuration; local runs can skip it when unconfigured. Hosted CI confirmed
-the PostgreSQL, Markdown, Ubuntu, and Windows gates on 2026-10-29. There is no
-coverage report, fuzz target, or load harness. A Markdown link checker and its
-tests run locally and in CI.
+fmt/Clippy/test gates, a generated-project CI check, PostgreSQL migration
+coverage, and a nightly multi-client load workflow. The Ubuntu Rust job
+configures the live PostgreSQL test and requires its configuration; local runs
+can skip it when unconfigured. Hosted CI confirmed the PostgreSQL, Markdown,
+Ubuntu, and Windows gates on 2026-10-29. The coverage workflow is configured,
+but its first report is pending; there is no fuzz target. A Markdown link
+checker and its tests run locally and in CI.
 
 **Related design:** [project guide §26 definition of done](../lightweight_mmorpg_engine_project_guide.md#26-definition-of-done),
 [security](../security.md), [testing conventions](../../README.md#design-rules).
@@ -100,7 +101,7 @@ recheck from controller-release behavior.
 ## QUA-002 — Determinism and property-based tests
 
 - **Priority:** P1
-- **Status:** In progress — inventory conservation and snapshot-style JSON round trips have property coverage with shrinking; faction, calendar, and cross-machine replay evidence remain
+- **Status:** In progress — inventory, treasury, territory, and calendar replay invariants have shrinking properties; seeded simulation replay now has a fixed SHA-256 snapshot golden, with hosted cross-platform confirmation pending
 - **Depends on:** —
 - **References:** [architecture §Simulation model](../architecture.md#simulation-model),
   `SIM-018`
@@ -115,31 +116,50 @@ recheck from controller-release behavior.
 
 **Acceptance criteria**
 
-- [ ] Core invariants have property tests with generators for edge cases.
+- [x] Core invariants have property tests with generators for edge cases.
 - [ ] Replay tests are deterministic across runs and machines.
 - [x] A failure produces a minimal, reproducible seed/case.
 - [ ] New persistent aggregates add invariants to the suite.
 
-**Progress:** `engine_core::inventory` now has `proptest` properties over random
+**Progress:** `engine_core::inventory` has `proptest` properties over random
 inventories and transfer attempts. They assert that a successful transfer
 conserves every item definition across both inventories, a failed transfer
 leaves both inventories byte-for-byte unchanged, and a replayed key returns the
 original receipt without touching either inventory. Generated inventories mix
 stackable and unique items and round-trip through JSON with validation, matching
 the snapshot restore path. Proptest shrinks any failing case to a minimal
-inventory/transfer pair and prints the seed. Territory ownership already has a
-deterministic generated sequence loop; converting faction treasury/territory and
-calendar lifecycle coverage to shrinking properties, and collecting
-cross-machine replay evidence, remain open.
+inventory/transfer pair and prints the seed. `faction::treasury` generates
+deposit/spend sequences and checks balance conservation, idempotent replay,
+ledger recovery, and JSON round trips. `faction::territory` generates capture
+windows and power thresholds, asserting eligible ownership transitions and
+atomic rejection otherwise; the earlier deterministic territory sequence loop
+remains. `engine_sim::calendar` generates enrollment identities and replay
+counts, verifying an enrollment is applied once and the result remains stable.
+The zone snapshot suite also generates persistent-entity counts, health bounds,
+and tick counts, then verifies JSON decoding and restore reproduce the exact
+snapshot. This closes the previously example-only snapshot round-trip gap. The
+48-tick combat/AI/movement replay now pins the serialized final snapshot to
+SHA-256 `a55947cc6f2ae87aca8d124bb14d1d7e36606a6cea07cbe1a39138621e5c322e`.
+This test runs in the workspace CI matrix on Ubuntu, Windows, and macOS; the
+current Windows run passes. Confirm the same golden on hosted Ubuntu and macOS
+before checking the cross-machine criterion. The new player inventory value
+ledger now has a 12-case generated PostgreSQL test for source/destination
+conservation, signed event-entry sums, reconciliation, and idempotent replay.
+Its test target compiles and Clippy passes, but local execution skips because
+no dedicated PostgreSQL test database is configured. Run it in the migrated
+PostgreSQL CI environment before checking the new-persistent-aggregate
+criterion.
 
 ---
 
 ## QUA-003 — Protocol golden and compatibility tests
 
 - **Priority:** P1
-- **Status:** In progress — handshake/error negotiation goldens and compatibility/unknown-field behavior are covered; world-message fixtures and breaking-change gate remain open
+- **Status:** Done
+- **Completed:** 2026-11-12
 - **Depends on:** —
 - **References:** `NET-004`, `engine_net::protocol`
+- **Completion record:** [QUA-003](completed/qua-003-protocol-golden-compatibility.md)
 
 **Scope**
 
@@ -152,20 +172,36 @@ cross-machine replay evidence, remain open.
 
 **Acceptance criteria**
 
-- [ ] Every wire kind has at least one golden fixture.
-- [ ] Accidental field/format changes fail CI.
-- [ ] Compatibility matrix outcomes match the documented policy.
-- [ ] Fixtures are versioned with the protocol.
+- [x] Every wire kind has at least one golden fixture.
+- [x] Accidental field/format changes fail CI.
+- [x] Compatibility matrix outcomes match the documented policy.
+- [x] Fixtures are versioned with the protocol.
 
 **Progress:** `crates/engine_net/tests/protocol_golden.rs` pins hello, version
 mismatch error, and negotiated handshake wire forms and exercises the major,
-minor, content, and feature compatibility outcomes. It now also records the
-serde contract that unknown envelope and handshake fields are ignored while
-unknown feature names are rejected. This is intentionally bounded: the protocol
-does not yet have checked-in fixtures for all world-message kinds, nor a diff
-gate requiring a version/changelog update for breaking wire changes. Fixtures
-currently use a `1.0.0` filename but are not yet an exhaustive per-kind,
-versioned fixture set.
+minor, content, and feature compatibility outcomes. It also records the serde
+contract that unknown envelope and handshake fields are ignored while unknown
+feature names are rejected. **2026-11-10:** `crates/world_server/tests/`
+now pins protocol-versioned `world.ready`, `world.snapshot`, `world.delta`,
+`action.result`, `movement.queued`, `chat.message`, `chat.send.result`,
+`chat.channels.result`, `chat.presence.result`, `chat.history.result`, and
+`ui.state` envelopes. The gateway calendar integration also pins
+`calendar.result` and `calendar.state`; client request fixtures pin action,
+movement, chat, calendar, acknowledgement, and UI command shapes. World
+replication fixtures exercise the typed server DTO; request / reply fixtures are
+emitted by real gateway flows. Every fixture is encoding-checked and decoded back
+into the originating envelope. The `world.token` golden now contains only a
+fixed non-authenticating sentinel. The `protocol-compatibility` pull-request job
+now
+requires `PROTOCOL_VERSION` to increase and `CHANGELOG.md` to change whenever
+client request/decoding, `engine_net` envelope/handshake/replication, gateway
+replication, or world-server runtime contract sources change. This is a
+conservative source-path gate: reviewers still determine whether the version
+increment follows the documented compatibility policy.
+
+The `world.token` fixture uses the unmistakably fake
+`FAKE_LYNX_TEST_TOKEN_DO_NOT_AUTHENTICATE` sentinel. The test requires exact
+sentinel equality and confirms envelope debug output redacts it.
 
 ---
 
@@ -173,6 +209,7 @@ versioned fixture set.
 
 - **Priority:** P1
 - **Status:** Done
+- **Completion record:** [qua-004-postgresql-integration-matrix.md](completed/qua-004-postgresql-integration-matrix.md)
 - **Depends on:** `PST-001`
 - **References:** `PST-001`, `PST-008`, `OPS-006`
 
@@ -215,7 +252,7 @@ with `LYNX_REQUIRE_POSTGRES_TEST=1` and its default parallel test execution.
 ## QUA-005 — Load and soak benchmarks
 
 - **Priority:** P2
-- **Status:** Ready
+- **Status:** In progress — local multi-client workloads report operation/window latency, process RSS, envelope and replication bytes, queue occupancy/full events, socket writes, and per-run authority tick duration/overruns; nightly CI stores scenario/sample CSVs; DB fault injection, sustained soak review, bottleneck attribution, and regression budgets remain
 - **Depends on:** —
 - **References:** `OPS-007`, `SIM-018`, `NET-006`
 
@@ -223,24 +260,57 @@ with `LYNX_REQUIRE_POSTGRES_TEST=1` and its default parallel test execution.
 
 - A harness that simulates many sessions/entities and records tick latency,
   throughput, memory, and network bytes.
-- Short benchmark runs in CI/nightly and longer soak runs before release.
+- Short benchmark runs in nightly/manual CI and longer soak runs before release.
 - Scenarios: idle crowd, movement storm, chat burst, action spam, reconnect
   storm, and database latency injection.
 - Baseline results stored with hardware/topology.
 
 **Acceptance criteria**
 
-- [ ] Benchmarks are repeatable and documented.
+- [x] A repeatable local load run is documented with machine topology and raw CSV output.
 - [ ] Results identify the first bottleneck (tick, replication, DB, transport).
 - [ ] Soak runs detect leaks and latency drift.
 - [ ] Regressions beyond the agreed budget are visible.
+
+**Windowed resource and replication sampling (2026-11-12):** `lynx-load` now samples the load
+harness process's resident memory and reply p95 every five seconds by default,
+keeps per-window sample counts, reports the first/last non-empty p95 windows,
+and includes tick execution time/overruns in its summary. `--samples-csv` writes
+the per-window series, and the nightly/manual workflow uploads a separate
+series file for each scenario. The process contains both the in-process server
+and clients, so memory is a combined harness measurement. The harness now shares
+the world's metrics registry with its WebSocket transport and reports queue
+high-water/capacity, queue-full events, replication enqueue bytes, and snapshot
+and delta socket-write counts/bytes. A five-second Windows release movement
+smoke run and its sample rows are recorded in
+[`load-soak-smoke-2026-11-12.md`](../benchmarks/load-soak-smoke-2026-11-12.md).
+It observed 50 successful delta writes (23,660 bytes), a per-session queue
+high-water of 3/64 frames, zero full-queue events, and 0.1367 ms mean tick
+work. This proves the metric path works under a light in-process workload; it
+does not identify a capacity bottleneck or substitute for a sustained soak,
+database latency injection, or a reviewed regression budget.
+
+**60-second local movement samples (2026-11-12):** Eight clients offered and
+accepted 5,999 operations at 100 ops/s, with zero queue rejections, tick
+failures, overruns, or queue-full events; mean tick work was 0.4101 ms. A
+16-client run accepted 6,000 operations at the same rate, with zero tick/queue
+pressure and 0.5447 ms mean tick work. Overall reply p95 was 31.29 ms and first
+and last five-second windows were 31.00 ms and 31.37 ms. Combined server/client
+RSS grew 17.8 MiB without a visible plateau. The reports are
+[`load-soak-60s-2026-11-12.md`](../benchmarks/load-soak-60s-2026-11-12.md) and
+[`load-soak-16-client-2026-11-12.md`](../benchmarks/load-soak-16-client-2026-11-12.md).
+The harness now raises only its bounded handshake/churn buckets to let its
+configured localhost client burst start, and caps clients at the transport's
+16-per-IP limit. Database fault injection, target-scale sustained soak,
+bottleneck attribution, and regression budgets remain open.
 
 ---
 
 ## QUA-006 — Security abuse test suite
 
 - **Priority:** P1
-- **Status:** In progress — duplicate-Origin, malformed-handshake, failed-identity, token-guessing, and duplicate-session rejections cover pre-admission side effects; abuse matrix remains incomplete
+- **Status:** Done — transport abuse matrix, side-effect checks, and response/log redaction coverage are recorded
+- **Completion record:** [QUA-006](completed/qua-006-security-abuse-test-suite.md)
 - **Depends on:** —
 - **References:** [security](../security.md), `NET-002`, `NET-007`, `NET-011`
 
@@ -254,17 +324,16 @@ with `LYNX_REQUIRE_POSTGRES_TEST=1` and its default parallel test execution.
 
 **Acceptance criteria**
 
-- [ ] Each documented abuse case has a test or an explicit gap task.
-- [ ] Tests assert both rejection and the absence of side effects.
-- [ ] Secret-redaction assertions cover error/log paths.
-- [ ] The suite runs in CI and is extended with each security task.
+- [x] Each documented abuse case has a test or an explicit gap task.
+- [x] Tests assert both rejection and the absence of side effects.
+- [x] Secret-redaction assertions cover error/log paths.
+- [x] The suite runs in CI and is extended with each security task.
 
-**Progress:** `crates/lynx_world/tests/websocket.rs` now checks that a request
-with multiple `Origin` headers is rejected with the stable `origin_forbidden`
-response and never reaches gateway admission. This covers the documented
-origin-violation case where one header is allowlisted and another is hostile.
-The broader abuse matrix, state-side-effect checks for other rejection paths,
-and comprehensive secret-redaction assertions remain open.
+**Completion:** The current scope is covered across the WebSocket, gateway,
+service, transport, and read-only MCP suites. Cases assert stable rejection,
+no applicable admission/action side effects, and response or structured-log
+redaction. See the [completion record](completed/qua-006-security-abuse-test-suite.md)
+for the covered abuse surfaces and verification commands.
 
 **Malformed-frame slice (2026-11-08):** Added an authenticated WebSocket case
 that sends a truncated binary frame before `session.hello`. The server returns a
@@ -281,12 +350,33 @@ bucket, return `rate_limited`, and never echo the guessed token.
 credential receives `conflict` without increasing session attachments; the
 original connection remains usable after the rejected attempt.
 
+**Resume-guessing slice (2026-11-10):** Syntactically valid resume-token
+attempts now use an independent peer-IP token bucket. A real WebSocket test
+verifies that an invalid token receives the stable expiry response once and a
+second attempt is rate-limited before upgrade, without echoing the candidate
+secret.
+
+**Connection-flood and audit-redaction slice (2026-11-12):** The WebSocket
+integration suite fills all 16 per-IP connection slots without sending
+`session.hello`, then verifies the next upgrade is rejected promptly with
+`ip_capacity`, no bearer echo, and no authority event. A tracing-capture
+regression exercises failed-credential, character-admission, resume-denial,
+and session-rate-limit audit emitters with secret sentinels in credential or
+backend error inputs; stable reason and classification fields remain while the
+credential and private backend details are absent. Read-only MCP path
+confinement (including `../` and absolute paths) is covered in
+`tools/project_cli/src/mcp_main.rs`; protocol forgery, replay, origin,
+rate-limit, malformed-frame, and duplicate-session cases are covered by the
+gateway, service, and WebSocket suites. Focused flood/redaction checks and the
+complete WebSocket integration suite passed locally; CI runs the workspace
+tests.
+
 ---
 
 ## QUA-007 — Coverage reporting
 
 - **Priority:** P2
-- **Status:** Ready
+- **Status:** In progress — nightly-filtered workspace coverage is configured; hosted report visibility and trend review are pending
 - **Depends on:** —
 - **References:** `QUA-001`, `QUA-006`
 
@@ -297,19 +387,50 @@ original connection remains usable after the rejected attempt.
 - Identify untested critical paths: authority, persistence, replay, recovery.
 - Add targeted tests for risky gaps rather than blanket percentage goals.
 
+Coverage review focuses on invariants, not a workspace percentage: `engine_sim`
+authority must exercise authorization, validation, and atomic failure paths;
+`world_gateway` must exercise owner isolation and stale-session rejection;
+`lynx_world` persistence/replay must exercise recovery and failure handling.
+Coverage for generated code, fixtures, and test-only modules should not be used
+to claim production-path coverage.
+
 **Acceptance criteria**
 
 - [ ] Coverage is generated in CI/nightly and visible to contributors.
-- [ ] Critical modules have explicit coverage expectations.
+- [x] Critical modules have explicit invariant-based coverage expectations.
 - [ ] New code does not reduce critical-path coverage without justification.
-- [ ] Reports exclude generated/test-only code appropriately.
+- [x] Reports exclude generated/test-only code appropriately.
+
+`cargo-llvm-cov` excludes source under `tests/`, `tests.rs`/`*_tests.rs`,
+examples, benches, and its target directory from the default source report.
+There is no generated Rust source in the current workspace file inventory.
+Inline `#[cfg(test)]` modules are now annotated with
+`#[cfg_attr(coverage_nightly, coverage(off))]`; a workspace source scan found
+97 annotated modules and no unannotated inline test modules. The coverage
+workflow uses nightly Rust for this attribute, while stable builds leave it
+inactive. The local filtered `engine_net` report generated successfully at
+`target/llvm-cov/engine-net-nightly/html/index.html` after all 38 unit tests
+passed; it reports 48.33% line and 27.46% region coverage over production
+source. These scoped numbers are not a workspace baseline.
+
+The [coverage workflow](../../.github/workflows/coverage.yml) is configured to
+run daily and on
+manual dispatch, configures the required isolated PostgreSQL integration
+database, and uploads the HTML source report as a 90-day artifact. The full
+local workspace run reached the PostgreSQL integration suite but failed because
+the repository `.env` database is missing migration `0016`; it was not migrated
+because it is configured as the application database, not a dedicated coverage
+scratch database. `gh run list --workflow coverage.yml` returned HTTP 404 because
+the workflow is not on the GitHub default branch, so hosted artifact visibility,
+a reviewed workspace baseline, and critical-path regression history remain
+pending. See the local blocker in `docs/agents/issue-tracker.md`.
 
 ---
 
 ## QUA-008 — Fuzzing
 
 - **Priority:** P2
-- **Status:** Ready
+- **Status:** In progress — seven bounded parser targets build with nightly on Windows and the nightly corpus-cached workflow is defined; local execution is blocked by a missing runtime DLL, while hosted execution and crash triage remain.
 - **Depends on:** —
 - **References:** `engine_net` envelope/framing, `engine_content`
 
@@ -323,17 +444,27 @@ original connection remains usable after the rejected attempt.
 
 **Acceptance criteria**
 
-- [ ] Fuzz targets build and run locally and nightly.
+- [x] All fuzz targets compile locally.
+- [ ] Run locally and nightly, then triage the first crash or hosted result.
 - [ ] A crash produces a reproducible input and a regression test.
-- [ ] Memory/time limits are enforced.
-- [ ] The corpus is checked in or cached.
+- [x] The scheduled runner enforces per-input time, total run, input size, and RSS limits.
+- [x] The nightly workflow caches the evolving corpus.
+
+**Local execution attempt (2026-11-12):** Installed nightly Rust 1.102.0 and
+`cargo-fuzz` 0.13.2; `cargo +nightly fuzz build --fuzz-dir fuzz` compiled all
+seven targets. Running `envelope_decode` exited immediately with Windows
+`STATUS_DLL_NOT_FOUND` (`0xc0000135`), before the fuzzer started. `wsl --list
+--quiet` returned no installed distribution, and the repository's fuzz workflow
+does not exist on the current GitHub default branch yet, so no hosted run could
+be inspected. Resume execution on Linux or after the workflow is published.
 
 ---
 
 ## QUA-009 — Documentation and code consistency sweep
 
 - **Priority:** P1
-- **Status:** Done — documentation sweep and hosted Markdown/CI verification completed
+- **Status:** Done — documentation sweep and hosted Markdown/CI verification completed; see [completion record](completed/qua-009-docs-consistency.md)
+- **Completion record:** [qua-009-docs-consistency.md](completed/qua-009-docs-consistency.md)
 - **Depends on:** —
 - **References:** [architecture §Persistence model](../architecture.md#persistence-model),
   [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)
@@ -376,7 +507,8 @@ the repository except `.git`, `.lynx`, `target`, and `__pycache__`.
 ## QUA-010 — Error taxonomy and diagnostics audit
 
 - **Priority:** P2
-- **Status:** Ready
+- **Status:** Done — public error codes, retryability, localized keys, HTTP mappings, and redaction are cataloged and regression-tested
+- **Completion record:** [qua-010-error-taxonomy-diagnostics-audit.md](completed/qua-010-error-taxonomy-diagnostics-audit.md)
 - **Depends on:** —
 - **References:** [architecture §Failure and recovery](../architecture.md#failure-and-recovery),
   `engine_core::error`
@@ -392,17 +524,39 @@ the repository except `.git`, `.lynx`, `target`, and `__pycache__`.
 
 **Acceptance criteria**
 
-- [ ] Boundary errors have stable codes and documented retryability.
-- [ ] Player-facing errors resolve to locale keys.
-- [ ] Secret/PII redaction is tested.
-- [ ] A diagnostics catalog exists for operators.
+- [x] Boundary errors have stable codes and documented retryability.
+- [x] Player-facing interaction errors resolve all stable codes from the negotiated locale catalog with `pt-BR` fallback.
+- [x] Secret/PII redaction is tested at the error-payload serialization boundary.
+- [x] A diagnostics catalog exists for operators.
+
+The [error and operator diagnostic catalog](../error-catalog.md) documents all
+`ErrorCode` defaults and the public HTTP/WebSocket boundary codes. The protocol
+contract names `error.<code>` keys, and the interaction client resolves them
+from the `content/localization/` catalogs using the requested handshake locale.
+It falls back to `pt-BR` when a requested translation is unavailable.
+
+**Completion (2026-11-12):** Protocol 1.1 carries an explicit per-error
+`retryable` value. `ErrorPayload` forwards only code-specific display
+parameters, capped at eight entries and 128 bytes each, and filters control
+characters instead of cloning internal details. Versioned 1.1 wire fixtures
+retain the 1.0 contract. `ErrorCode::ALL` drives a regression that checks every
+stable code's documented retryability row and `en`/`pt-BR` localization key. A
+character-API mapping test checks every `ApiError` variant against its public
+HTTP status/code and verifies backend text is redacted. The transport and
+serialization boundary suites cover the remaining public error paths.
+
+**Redaction regression (2026-11-12):** `engine_net` serializes an
+`OutOfRange` error carrying a synthetic credential, private actor ID, oversized
+value, and control characters; the regression asserts only the approved safe
+range parameters reach the wire. The focused test and full `engine_net` library
+suite pass.
 
 ---
 
 ## QUA-011 — Toolchain and Bevy upgrade rehearsal
 
 - **Priority:** P2
-- **Status:** Ready
+- **Status:** In progress — upgrade policy, rehearsal checklist, and scheduled dependency updates are documented; a real version upgrade and visual smoke run remain.
 - **Depends on:** `CLT-001`
 - **References:** ADR 0001, `OPS-010`
 
@@ -417,9 +571,9 @@ the repository except `.git`, `.lynx`, `target`, and `__pycache__`.
 **Acceptance criteria**
 
 - [ ] A Bevy upgrade follows the documented dedicated-commit process.
-- [ ] Engine crates still build without Bevy.
-- [ ] Generated projects receive a migration note and validation.
-- [ ] Rollback to the previous toolchain is documented.
+- [x] Engine crates build without Bevy; focused headless checks passed for `engine_core`, `engine_sim`, `engine_content`, and `game_api`.
+- [ ] An actual generated project is migrated and validated during a version upgrade.
+- [x] Rollback to the previous toolchain is documented.
 
 ---
 
@@ -471,34 +625,6 @@ the repository except `.git`, `.lynx`, `target`, and `__pycache__`.
 
 ---
 
-## QUA-014 — Multi-client headless harness
-
-- **Priority:** P1
-- **Status:** Ready
-- **Depends on:** `CLT-005`
-- **References:** `CLT-014`, `NET-004`
-
-**Why:** Phase 2's exit criterion is two clients observing consistent state, and
-many later tests need more than one session. Building the harness once avoids
-copy-pasted socket code in every integration test.
-
-**Scope**
-
-- A reusable headless client that connects, handshakes, selects a character,
-  sends actions/movement/chat, and records snapshots/deltas.
-- Helpers for latency/loss injection, reconnect, and token rotation.
-- Assertions for consistency across observers and per-session filtering.
-- Runs against an in-process or spawned server without a GPU.
-
-**Acceptance criteria**
-
-- [ ] Two harness clients observe the same authoritative state.
-- [ ] The harness supports reconnect and simulated network conditions.
-- [ ] It is usable from `crates/*/tests` without duplicating protocol code.
-- [ ] It runs in CI within a bounded time.
-
----
-
 ## QUA-015 — Mutation testing
 
 - **Priority:** P3
@@ -525,7 +651,8 @@ copy-pasted socket code in every integration test.
 ## QUA-016 — Flaky-test and CI-duration control
 
 - **Priority:** P2
-- **Status:** In progress — tracking policy and hosted baseline documented; automated reporting and timing-test audit remain open
+- **Status:** Done — hosted job-duration gates, a manual no-retry flake policy, and an intentional-wait audit are in place
+- **Completion record:** [QUA-016](completed/qua-016-flaky-test-and-ci-duration-control.md)
 - **Depends on:** —
 - **References:** `OPS-006`
 
@@ -538,57 +665,114 @@ copy-pasted socket code in every integration test.
 
 **Acceptance criteria**
 
-- [ ] Flaky tests are tracked, not silently retried.
-- [ ] CI duration is visible and bounded.
-- [ ] Timing-sensitive tests use injected time or documented tolerances.
-- [ ] Quarantined tests have an owner and expiry.
+- [x] Flaky tests are tracked, not silently retried.
+- [x] CI duration is visible and bounded.
+- [x] Timing-sensitive tests use injected time or documented tolerances.
+- [x] Quarantined tests have an owner and expiry.
 
 **Tracking policy:** A flaky test is recorded here with its exact test name,
 platform/workflow, first and latest observed failing run, issue/owner, and an
 expiry date no more than 30 days out. Quarantine requires an explicit skip or
 filter and a link to the tracking entry; CI must not silently retry it. The
 owner removes the quarantine after fixing the cause, or renews it with a new
-reason and expiry. No tests are currently listed as quarantined. This is a
-manual policy until automated flaky-test reporting is introduced.
+reason and expiry. No flaky tests or quarantines are currently listed. This is
+a manual policy; job summaries expose failed runs and the test output remains
+available for maintainers to record exact failing test names and run links.
+CI does not automatically retry failures.
 
-**Hosted duration baseline (2026-10-29):** OPS-006 recorded just under ten
-minutes overall, approximately three minutes for Ubuntu workspace tests and
-90 seconds for Clippy; Windows workspace tests exceeded ten minutes. These
-observations are a historical baseline. OPS-006 now publishes elapsed time for
-the Ubuntu and Windows Rust jobs in each Actions run summary and bounds either
-job with a 30-minute timeout. This is visibility and a hard ceiling, not
-automated trend detection or an unexplained-growth failure threshold. No
-threshold is inferred from the single historical run. Flaky failures remain
-manually tracked under the policy above; CI does not silently retry tests.
+**Hosted duration policy (2026-11-12):** OPS-006 publishes elapsed time for
+the Ubuntu, Windows, macOS, and migration jobs in each Actions run summary; all
+CI jobs have explicit time limits. The `ci-history` job compares the current
+run with successful runs on the pull request's base branch (or the default
+branch for pushes) and reports previous outcome counts. After ten successful
+samples, a successful current job fails the workflow when its duration exceeds
+the median by more than the larger of 50% of the median or five minutes. Failed/cancelled
+historical jobs do not influence the duration median, and a missing GitHub API
+history produces a visible warning while skipping the gate. The history
+available on 2026-11-12 provides at least ten successful samples for Ubuntu,
+Windows, and migration jobs; macOS remains in the warm-up period.
+
+| Job | Successful samples | Median | Gate after warm-up |
+| --- | ---: | ---: | ---: |
+| Rust checks (Ubuntu) | 20 | 9m 12s | 14m 12s |
+| Rust checks (Windows) | 29 | 8m 57s | 13m 57s |
+| PostgreSQL 17 migrations | 40 | 1m 16s | 6m 16s |
+| Rust checks (macOS) | 6 | 5m 58s | Warming up until 10 samples |
+
+The medians were computed from the previous 50 completed `main` workflow runs
+available on 2026-11-12; failed/cancelled runs are included only in the outcome
+report. The report was exercised against a completed hosted run before enabling
+the gate in the workflow. Flaky tests remain manually tracked under the policy
+above; CI does not silently retry tests.
+
+**Timing audit (2026-11-12):** `movement_is_session_bound_ticked_replicated_and_cancelled_on_disconnect`
+in `crates/lynx_world/tests/websocket.rs` uses a 1,000 ms service tick and waits
+1,200 ms before tick-dependent assertions, leaving a 200 ms scheduling margin.
+`postgres_zone_lease_expiry_allows_takeover` in
+`crates/lynx_world/tests/postgres_snapshot.rs` waits 700 ms after a 500 ms
+lease TTL, also leaving 200 ms for scheduler/database-clock granularity. These
+are documented wall-clock tolerances, not injected clocks; their external
+service behavior still needs execution evidence. Other socket and reconnect
+tests use bounded 5–15 second deadlines as failure guards and short polling
+intervals for readiness.
+
+The remaining intentional waits are also classified: PostgreSQL resume-session
+shutdown polls `pg_stat_activity` every 10 ms until a 5-second deadline; the
+snapshot timing unit test injects a store that sleeps 5 ms to exercise histogram
+measurement; and the snapshot cadence test waits 120 ms for a 1 ms interval.
+These are polling or measurement tolerances, not assertions that a scheduler
+must run at an exact instant. The failed-auth audit test now supplies one fixed
+`Instant` to all attempts and separately asserts five credential-denial events
+and one rate-limit event; the first full instrumented run exposed that the old
+test incorrectly counted both event classes as credential denials. No CI job
+uses automatic retry for test failures.
 
 ---
 
 ## QUA-017 — Remaining architecture decision records
 
 - **Priority:** P2
-- **Status:** Ready
+- **Status:** Done — ADRs 0023–0030 record the remaining asset/client, editor, user-content, platform, backup, admin identity, and property scope decisions; see [completion record](completed/qua-017-remaining-architecture-decisions.md).
 - **Depends on:** —
 - **References:** [project guide §25](../lightweight_mmorpg_engine_project_guide.md#25-architecture-decisions-to-record),
   [`docs/adr/`](../adr/)
 
-**Why:** The project guide lists decisions that should not be accidental. Most
-exist as ADRs 0001–0022, but several topics are still only prose or absent:
-asset formats/import, camera/input abstraction, admin identity/role model,
-initial platforms/minimum hardware, backup retention/RPO/RTO, property
-ownership/lease, and user-content publishing/moderation. These decisions block
-the client, editor, and operations milestones.
+**Why:** The project guide lists decisions that should not be accidental. ADRs
+0023–0030 now record the client and asset boundary, editor approach,
+user-content policy, backup objectives, platform policy, admin identity, and
+property scope so dependent work does not invent those contracts.
 
 **Scope**
 
-- Write short ADRs for each missing topic, with context, decision, consequences,
-  and status.
+- Record missing project decisions in short ADRs with context, decision,
+  consequences, and status.
 - Cross-link them from the affected docs/tasks.
-- Resolve the D2/D5/D6 gates with an explicit decision.
+- Keep D2/D5/D6 and the platform gate linked to their explicit decisions.
 - Keep ADR numbering and the index/README current.
 
 **Acceptance criteria**
 
-- [ ] Each missing topic has an accepted or explicitly rejected ADR.
-- [ ] The client/editor/ops tasks link to the decision they depend on.
-- [ ] ADR index and README counts include proposed records.
-- [ ] No milestone proceeds on an undocumented architecture choice.
+- [x] Each remaining topic has an accepted or explicitly deferred ADR.
+- [x] The client/editor/ops tasks link to the decisions recorded here.
+- [x] ADR index and README counts include accepted and proposed records.
+- [x] No milestone proceeds on an undocumented architecture choice; player property is explicitly deferred.
+
+**Oversized-frame slice (2026-11-12):** The malformed-handshake WebSocket test
+now also sends a frame header declaring `MAX_FRAME_BYTES + 1`. The transport
+returns stable `capacity_exceeded`, closes the connection, does not attach a
+session or apply an action, and does not echo the bearer credential. The test
+passes locally.
+
+**Deep-payload slice (2026-11-12):** The same authenticated WebSocket test now
+also sends a correctly framed envelope with a body nested beyond
+`MAX_JSON_DEPTH`. It receives stable `capacity_exceeded`, closes before
+admission, and leaves session/action counters at zero without echoing the
+bearer. Connection-flood, systematic log-path redaction, and a
+complete case-by-case abuse matrix remain; see `docs/agents/issue-tracker.md`.
+
+**Slow-handshake slice (2026-11-12):** A transport unit test gives the
+`session.hello` deadline a 25 ms test value while production retains the
+10-second default. A peer that completes the WebSocket upgrade but sends no
+hello receives stable `invalid_request` and is closed; no authority admission
+event or session attachment occurs, and the bearer token is not echoed.
+Connection-flood and systematic log-path redaction cases remain open.

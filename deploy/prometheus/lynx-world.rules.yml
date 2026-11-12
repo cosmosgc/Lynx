@@ -1,0 +1,85 @@
+groups:
+  - name: lynx-world
+    rules:
+      - alert: LynxWorldTickDeadlinesMissed
+        expr: sum(increase(lynx_world_tick_deadline_misses_total[5m])) > 0
+        for: 2m
+        labels:
+          severity: warning
+          service: lynx-world
+          team: operations
+        annotations:
+          summary: Lynx world is missing tick deadlines
+          description: Tick deadlines were missed during the last five minutes while the target is being scraped.
+          runbook_url: https://github.com/cosmosgc/Lynx/blob/main/docs/operations.md#tick-deadline-misses
+
+      - alert: LynxWorldOutboundQueueNearCapacity
+        expr: lynx_world_outbound_queue_depth_high_water / clamp_min(lynx_world_outbound_queue_capacity, 1) >= 0.9
+        for: 5m
+        labels:
+          severity: warning
+          service: lynx-world
+          team: operations
+        annotations:
+          summary: Lynx outbound queues are nearing capacity
+          description: The process high-water queue depth is at least 90% of aggregate configured capacity.
+          runbook_url: https://github.com/cosmosgc/Lynx/blob/main/docs/operations.md#replication-queue-pressure
+
+      - alert: LynxWorldSessionExpirySpike
+        expr: sum(increase(lynx_world_session_expired_closes_total[10m])) >= 10
+        for: 2m
+        labels:
+          severity: warning
+          service: lynx-world
+          team: operations
+        annotations:
+          summary: Lynx closed many sessions after expiry
+          description: At least ten attached connections closed after their session disappeared or expired in ten minutes.
+          runbook_url: https://github.com/cosmosgc/Lynx/blob/main/docs/operations.md#session-expiry
+
+      - alert: LynxWorldAuthenticationRejections
+        expr: sum(increase(lynx_world_rate_limit_rejections_total{class="failed_auth"}[5m])) > 0 or sum(increase(lynx_world_resume_failures_total[5m])) >= 10
+        for: 1m
+        labels:
+          severity: warning
+          service: lynx-world
+          team: operations
+        annotations:
+          summary: Lynx authentication or resume failures increased
+          description: Failed credentials were throttled or at least ten resume attempts failed in five minutes.
+          runbook_url: https://github.com/cosmosgc/Lynx/blob/main/docs/operations.md#authentication-and-resume-failures
+
+      - alert: LynxWorldPostgresOperationErrors
+        expr: sum(increase(lynx_backend_operation_errors_total{adapter="postgres"}[5m])) > 0
+        for: 2m
+        labels:
+          severity: warning
+          service: lynx-world
+          team: operations
+        annotations:
+          summary: Lynx PostgreSQL operations are returning errors
+          description: PostgreSQL adapter errors increased in the last five minutes. This metric is emitted in Nakama authentication mode.
+          runbook_url: https://github.com/cosmosgc/Lynx/blob/main/docs/operations.md#postgresql-operation-errors
+
+      - alert: LynxWorldBackupFailure
+        expr: increase(lynx_backup_failures_total[15m]) > 0
+        labels:
+          severity: critical
+          service: lynx-backup
+          team: operations
+        annotations:
+          summary: A Lynx backup job failed
+          description: The configured backup exporter reported a failed backup during the last fifteen minutes.
+          runbook_url: https://github.com/cosmosgc/Lynx/blob/main/docs/operations.md#backup-failures
+
+      - alert: LynxWorldMetricsTargetUnavailable
+        expr: up{job="lynx-world"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          service: lynx-world
+          team: operations
+        annotations:
+          summary: Lynx world metrics target is unavailable
+          description: Prometheus cannot scrape the world service. Check deployment health and restart events before treating this as a gameplay outage.
+          runbook_url: https://github.com/cosmosgc/Lynx/blob/main/docs/operations.md#metrics-target-unavailable

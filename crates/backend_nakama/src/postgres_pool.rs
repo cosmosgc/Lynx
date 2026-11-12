@@ -232,6 +232,7 @@ pub fn pool(config: Config, maximum: usize, acquisition_timeout: Duration) -> Po
     })
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

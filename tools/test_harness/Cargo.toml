@@ -1,0 +1,24 @@
+[package]
+name = "lynx_test_harness"
+description = "Reusable headless multiplayer integration-test harness for Lynx"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+engine_core.workspace = true
+engine_net.workspace = true
+engine_sim.workspace = true
+lynx_client_net = { path = "../../clients/lynx_client_net" }
+lynx-world = { path = "../../crates/lynx_world" }
+serde_json.workspace = true
+tokio.workspace = true
+world_gateway.workspace = true
+world_server.workspace = true
+
+[lints]
+workspace = true

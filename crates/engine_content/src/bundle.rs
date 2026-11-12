@@ -553,6 +553,7 @@ fn validate_publishing(publishing: &PublishingRecord, report: &mut ValidationRep
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -591,6 +592,10 @@ mod tests {
             }),
             tags: BTreeSet::new(),
             behavior: None,
+            travel_triggers: Vec::new(),
+            entity_placements: Vec::new(),
+            entity_links: Vec::new(),
+            link: None,
         }
     }
 

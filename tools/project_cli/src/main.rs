@@ -1,9 +1,14 @@
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, allow(unused_features))]
+
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind};
+use clap_complete::{Shell, generate};
 
 mod commands;
+mod reference;
 
 #[derive(Parser)]
 #[command(name = "lynx")]
@@ -26,6 +31,12 @@ enum Commands {
     Run(ProjectCommandArgs),
     Test(ProjectCommandArgs),
     Content(ContentArgs),
+    /// Preview, apply, or roll back a content migration.
+    Migrate(MigrateArgs),
+    /// Generate shell completion definitions from the CLI command tree.
+    Completions(CompletionsArgs),
+    /// Write the generated Markdown command reference.
+    Reference(ReferenceArgs),
 }
 
 #[derive(Args)]
@@ -133,6 +144,64 @@ struct PublishCheckArgs {
     license_optional: bool,
 }
 
+#[derive(Args)]
+struct CompletionsArgs {
+    /// Shell to generate completions for.
+    #[arg(value_enum)]
+    shell: Shell,
+
+    /// Output path for the completion definition.
+    #[arg(long, default_value = "lynx-completions")]
+    output: PathBuf,
+}
+
+#[derive(Args)]
+struct ReferenceArgs {
+    /// Output path for the generated Markdown reference.
+    #[arg(long, default_value = "docs/cli-reference.md")]
+    output: PathBuf,
+}
+
+#[derive(Args)]
+struct MigrateArgs {
+    #[command(subcommand)]
+    command: MigrateCommand,
+}
+
+#[derive(Subcommand)]
+enum MigrateCommand {
+    /// Validate and preview a migration; pass --apply to commit it.
+    Apply(MigrationApplyArgs),
+    /// Restore the exact content snapshot retained by a prior apply.
+    Rollback(MigrationRollbackArgs),
+}
+
+#[derive(Args)]
+struct MigrationApplyArgs {
+    /// Project directory containing content/manifest.json and content files.
+    #[arg(long, default_value = ".")]
+    project: PathBuf,
+
+    /// Reviewed RON migration plan.
+    #[arg(long)]
+    plan: PathBuf,
+
+    /// Commit the validated candidate; without this flag the command is a dry run.
+    #[arg(long)]
+    apply: bool,
+}
+
+#[derive(Args)]
+struct MigrationRollbackArgs {
+    /// Project directory containing content/ and .lynx/migrations/.
+    #[arg(long, default_value = ".")]
+    project: PathBuf,
+
+    /// Migration ID whose retained source content should be restored.
+    #[arg(long)]
+    id: String,
+}
+
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Template {
     Minimal,
@@ -148,16 +217,19 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = parse_cli();
     let command_name = command_name(&cli.command);
     let result = match cli.command {
         Commands::New(args) => commands::scaffold::new_project(&args),
         Commands::Doctor(args) => commands::doctor::doctor(&args),
         Commands::Validate(args) => commands::project::validate_project(&args),
         Commands::Content(args) => commands::content::content(&args),
+        Commands::Migrate(args) => commands::migrate::migrate(&args),
         Commands::Build(args) => commands::project::project_command(&args, "build"),
         Commands::Run(args) => commands::project::project_command(&args, "run"),
         Commands::Test(args) => commands::project::project_command(&args, "test"),
+        Commands::Completions(args) => generate_completions(&args),
+        Commands::Reference(args) => generate_reference(&args),
     };
     let mut output = match result {
         Ok(output) => output,
@@ -191,6 +263,33 @@ fn run() -> Result<()> {
     Ok(())
 }
 
+fn parse_cli() -> Cli {
+    match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error)
+            if error.kind() != ErrorKind::DisplayHelp
+                && error.kind() != ErrorKind::DisplayVersion
+                && std::env::args_os()
+                    .any(|argument| argument.as_os_str() == std::ffi::OsStr::new("--json")) =>
+        {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "command": "cli",
+                    "ok": false,
+                    "exit_code": 2,
+                    "error": {
+                        "code": "invalid_arguments",
+                        "message": error.to_string(),
+                    }
+                })
+            );
+            std::process::exit(2);
+        }
+        Err(error) => error.exit(),
+    }
+}
+
 fn command_name(command: &Commands) -> &'static str {
     match command {
         Commands::New(_) => "new",
@@ -199,11 +298,41 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::Build(_) => "build",
         Commands::Run(_) => "run",
         Commands::Test(_) => "test",
+        Commands::Completions(_) => "completions",
+        Commands::Reference(_) => "reference",
         Commands::Content(args) => match &args.command {
             ContentCommand::Build(_) => "content build",
             ContentCommand::Hash(_) => "content hash",
             ContentCommand::Diff(_) => "content diff",
             ContentCommand::PublishCheck(_) => "content publish-check",
         },
+        Commands::Migrate(args) => match &args.command {
+            MigrateCommand::Apply(_) => "migrate apply",
+            MigrateCommand::Rollback(_) => "migrate rollback",
+        },
     }
+}
+
+fn generate_completions(args: &CompletionsArgs) -> Result<serde_json::Value> {
+    let mut command = Cli::command();
+    let mut script = Vec::new();
+    generate(args.shell, &mut command, "lynx", &mut script);
+    let path = commands::absolute_path(&args.output)?;
+    std::fs::write(&path, script)?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "command": "completions",
+        "shell": format!("{:?}", args.shell).to_ascii_lowercase(),
+        "path": path,
+    }))
+}
+
+fn generate_reference(args: &ReferenceArgs) -> Result<serde_json::Value> {
+    let path = commands::absolute_path(&args.output)?;
+    std::fs::write(&path, reference::render(Cli::command().term_width(100)))?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "command": "reference",
+        "path": path,
+    }))
 }

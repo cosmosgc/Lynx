@@ -1,3 +1,6 @@
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, allow(unused_features))]
+
 //! `lynx-world` — the runnable authoritative world service.
 //!
 //! ```text
@@ -28,19 +31,27 @@ use backend_nakama::{
     PostgresFactionCalendarStore, PostgresIdentityStore, PostgresInventoryStore,
 };
 use clap::{Parser, Subcommand};
-use engine_core::time::Tick;
+use engine_content::PersistedInstanceMigrationPlan;
+use engine_core::id::DefinitionId;
+use engine_core::inventory::UniformItemRules;
+use engine_core::time::{Millis, Tick};
 use lynx_world::auth::{self, Authenticator, Grant, NakamaIdentityBackend};
-use lynx_world::authority::{self, ZoneAuthority};
+use lynx_world::authority::{self, ZoneAuthority, ZoneAuthoritySet};
 use lynx_world::backend;
 use lynx_world::config::{AuthMode, ServeArgs};
+use lynx_world::content_runtime;
+use lynx_world::content_runtime::RuntimeContent;
 use lynx_world::demo;
+use lynx_world::multi_zone::MultiZoneRuntime;
 use lynx_world::persistence::{
     FileSnapshotStore, PostgresResumeSessionStore, PostgresSnapshotStore, PostgresZoneLeaseStore,
-    RECOVERY_TARGET, SnapshotStore, SnapshotVerification, ZoneLeaseStore, postgres_config_from_env,
+    PostgresZoneSnapshotStore, RECOVERY_TARGET, SnapshotStore, SnapshotVerification,
+    ZoneLeaseStore, ZoneSnapshotStore, postgres_config_from_env,
 };
-use lynx_world::service::Service;
+use lynx_world::service::{MultiZoneService, Service};
 use lynx_world::startup;
 use lynx_world::transport::{self, AppState, OriginPolicy};
+use lynx_world::travel::ZoneHandoffStore;
 use serde_json::json;
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
@@ -108,6 +119,25 @@ fn init_tracing() {
         .with_env_filter(filter)
         .with_target(false)
         .init();
+}
+
+async fn wait_for_termination_signal() -> Result<()> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .context("failed to register SIGTERM handler")?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result.context("failed to wait for Ctrl-C"),
+            _ = terminate.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .context("failed to wait for Ctrl-C")
+    }
 }
 
 fn token_hash() -> Result<()> {
@@ -252,6 +282,38 @@ async fn serve(args: ServeArgs) -> Result<()> {
     }
 
     let now_ms = demo::now_ms();
+    let runtime_content = args
+        .content_bundle
+        .as_ref()
+        .map(content_runtime::load_bundle)
+        .transpose()
+        .context("failed to load the configured content bundle")?;
+    let migration_plan = args
+        .content_migration_plan
+        .as_ref()
+        .map(|path| {
+            let bytes = std::fs::read(path)
+                .with_context(|| format!("failed to read migration plan {}", path.display()))?;
+            serde_json::from_slice::<PersistedInstanceMigrationPlan>(&bytes)
+                .with_context(|| format!("failed to parse migration plan {}", path.display()))
+        })
+        .transpose()?;
+    if let Some(map_id) = args.world_map.clone() {
+        return serve_authored_map(
+            args,
+            map_id,
+            runtime_content.context("--world-map requires a loaded content bundle")?,
+            gateway_config,
+            rate_limits,
+            origins,
+            outbound_queue,
+            authenticator,
+            identity_backend,
+            grants,
+            stores,
+        )
+        .await;
+    }
     // Take the lease before reading the snapshot, so the state this process
     // restores cannot be written by a superseded owner while it starts. The
     // demo zone ID is fixed, so it is known without loading anything.
@@ -267,6 +329,29 @@ async fn serve(args: ServeArgs) -> Result<()> {
         })?)),
         _ => None,
     };
+    let migration_result = tokio::task::block_in_place(|| {
+        run_content_migration(
+            &args,
+            store.as_deref(),
+            runtime_content.as_ref(),
+            migration_plan.as_ref(),
+        )
+    });
+    match migration_result {
+        Ok(true) => {
+            if let Some(authority) = &authority {
+                let _ = tokio::task::block_in_place(|| authority.release());
+            }
+            return Ok(());
+        }
+        Ok(false) => {}
+        Err(error) => {
+            if let Some(authority) = &authority {
+                let _ = tokio::task::block_in_place(|| authority.release());
+            }
+            return Err(error).context("content migration operation failed");
+        }
+    }
     if let (Some(resumes), Some(authority)) = (&stores.resume_sessions, &authority) {
         let expires = now_ms.saturating_add(gateway_config.resume_ttl.as_i64());
         let lease = authority.lease();
@@ -287,6 +372,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
             return Err(error).context("failed to sweep expired durable sessions at startup");
         }
     }
+
     if let (Some(faction_calendar), Some(authority)) = (&stores.faction_calendar, &authority) {
         let lease = authority.lease();
         if let Err(error) = tokio::task::block_in_place(|| {
@@ -297,15 +383,33 @@ async fn serve(args: ServeArgs) -> Result<()> {
         }
     }
     let recovery_started = std::time::Instant::now();
-    let startup_result = tokio::task::block_in_place(|| {
-        startup::load(
+    let startup_result: Result<startup::StartupWorld> = tokio::task::block_in_place(|| {
+        let mut world = startup::load_with_content_identity(
             store
                 .as_ref()
                 .map(|store| store.as_ref() as &dyn SnapshotStore),
             args.fresh,
             &grants,
             now_ms,
-        )
+            runtime_content
+                .as_ref()
+                .map(|content| content.manifest.content_version.to_string())
+                .as_deref(),
+            runtime_content
+                .as_ref()
+                .map(|content| content.manifest_sha256.as_str()),
+        )?;
+        if let Some(content) = runtime_content.as_ref() {
+            let behavior_bindings = demo::ai_behavior_bindings(&content.set)
+                .context("failed to bind authored AI behaviors")?;
+            if !behavior_bindings.is_empty() {
+                world
+                    .zone
+                    .merge_ai_behavior_bindings(behavior_bindings)
+                    .context("failed to activate authored AI behaviors")?;
+            }
+        }
+        Ok(world)
     });
     let mut startup_world = match startup_result {
         Ok(world) => world,
@@ -332,6 +436,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         calendar,
         factions,
         quarantined,
+        migration_checkpoint,
     } = startup_world;
     let recovery_ms = u64::try_from(recovery_elapsed.as_millis()).unwrap_or(u64::MAX);
     if recovery_elapsed > RECOVERY_TARGET {
@@ -383,11 +488,20 @@ async fn serve(args: ServeArgs) -> Result<()> {
         )))
     };
     let server = WorldServer::new(gateway);
-    let mut service = match &store {
-        Some(store) => Service::new(server, args.tick_interval())
-            .with_persistence(Arc::clone(store), snapshot_interval),
-        None => Service::new(server, args.tick_interval()),
-    };
+    let content_version = runtime_content
+        .as_ref()
+        .map(|content| content.manifest.content_version.to_string());
+    let mut service = Service::new(server, args.tick_interval())
+        .with_content_version(content_version.clone())
+        .with_content_manifest_sha256(
+            runtime_content
+                .as_ref()
+                .map(|content| content.manifest_sha256.clone()),
+        )
+        .with_migration_checkpoint(migration_checkpoint);
+    if let Some(store) = &store {
+        service = service.with_persistence(Arc::clone(store), snapshot_interval);
+    }
     if let Some(authority) = &authority {
         service = service.with_zone_authority(authority.as_ref().clone());
     }
@@ -411,7 +525,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
         (None, Some(backend)) => {
             let telemetry = Arc::clone(&backend);
             AppState::with_identity_backend(events, backend.clone())
-                .with_character_backend(backend)
+                .with_character_backend(backend.clone())
+                .with_social_backend(backend.clone())
+                .with_group_backend(backend.clone())
+                .with_chat_backend(backend)
                 .with_backend_telemetry(move || telemetry.telemetry_snapshot())
         }
         _ => unreachable!("exactly one configured authentication mode is constructed"),
@@ -419,6 +536,13 @@ async fn serve(args: ServeArgs) -> Result<()> {
     let state = Arc::new(
         state
             .with_metrics(Arc::clone(&metrics))
+            .with_content_version(
+                runtime_content
+                    .as_ref()
+                    .map_or_else(engine_content::ContentVersionSnapshot::absent, |content| {
+                        content.version.clone()
+                    }),
+            )
             .with_origin_policy(origins)
             .with_rate_limits(rate_limits)
             .with_outbound_queue(outbound_queue),
@@ -533,7 +657,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
     let mut signal_watch = shutdown.subscribe();
     let shutdown_signal = async move {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => tracing::info!("shutdown requested"),
+            result = wait_for_termination_signal() => match result {
+                Ok(()) => tracing::info!("process termination signal received; shutdown requested"),
+                Err(error) => tracing::error!(%error, "termination signal handler failed; shutting down"),
+            },
             // The renewal task also drives shutdown when authority is lost.
             () = async {
                 while !*signal_watch.borrow() {
@@ -591,13 +718,382 @@ async fn serve(args: ServeArgs) -> Result<()> {
     result
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn serve_authored_map(
+    args: ServeArgs,
+    map_id: String,
+    runtime_content: RuntimeContent,
+    gateway_config: world_gateway::GatewayConfig,
+    rate_limits: lynx_world::rate_limit::RateLimitConfig,
+    origins: OriginPolicy,
+    outbound_queue: usize,
+    authenticator: Option<Authenticator>,
+    identity_backend: Option<Arc<NakamaIdentityBackend>>,
+    grants: Vec<Grant>,
+    stores: DurableStores,
+) -> Result<()> {
+    anyhow::ensure!(
+        args.auth_mode != AuthMode::Nakama || stores.resume_sessions.is_some(),
+        "Nakama multi-zone admission requires durable resume sessions"
+    );
+    let map_id = DefinitionId::new(&map_id).context("invalid --world-map definition ID")?;
+    let authored = content_runtime::build_authored_zones(&runtime_content, &map_id)
+        .context("failed to construct the authored zone set")?;
+    anyhow::ensure!(
+        !authored.is_empty(),
+        "--world-map contains no zone placements"
+    );
+    let travel_atlas = runtime_content
+        .set
+        .maps
+        .get(&map_id)
+        .cloned()
+        .context("--world-map definition is missing from the validated content set")?;
+    let travel_triggers = authored
+        .iter()
+        .map(|zone| (zone.instance.to_string(), zone.travel_triggers.clone()))
+        .collect();
+    let ai_tick_ms = u32::try_from(args.tick_interval().as_millis())
+        .context("configured tick interval exceeds the AI runtime range")?;
+    let faction_store = stores
+        .faction_calendar
+        .as_ref()
+        .context("--world-map requires the PostgreSQL faction relation catalog")?;
+    let stored_factions = tokio::task::block_in_place(|| faction_store.load_world_state())
+        .context("failed to load the faction relation catalog for authored AI")?;
+    let faction_catalog = stored_factions
+        .as_ref()
+        .map(|(_, snapshot)| {
+            engine_core::faction::FactionWorld::from_snapshot(snapshot.clone())
+                .map(|world| world.relation_catalog())
+        })
+        .transpose()
+        .context("stored faction relation catalog failed validation")?
+        .unwrap_or_default();
+    let ai_policy = demo::authored_ai_tick_policy(
+        &runtime_content.set,
+        faction_catalog.clone(),
+        Millis::new(demo::now_ms()),
+        ai_tick_ms,
+    )
+    .context("failed to build authored-map AI policy")?;
+    let snapshots = stores
+        .zone_snapshots
+        .as_ref()
+        .context("--world-map requires the PostgreSQL zone snapshot store")?;
+    let leases = stores
+        .leases
+        .as_ref()
+        .context("--world-map requires the PostgreSQL zone lease store")?;
+    let zone_ids = authored
+        .iter()
+        .map(|zone| zone.instance.to_string())
+        .collect::<Vec<_>>();
+    let listener = tokio::net::TcpListener::bind(args.bind)
+        .await
+        .context("failed to bind world listener")?;
+    let admin_listener = tokio::net::TcpListener::bind(args.admin_bind)
+        .await
+        .context("failed to bind admin listener")?;
+    let lease_store: Arc<dyn ZoneLeaseStore> = leases.clone();
+    let owner = format!("lynx-world-{}-{}", std::process::id(), demo::now_ms());
+    let lease_ttl = args
+        .lease_ttl()
+        .context("invalid zone lease configuration")?;
+    let authorities = tokio::task::block_in_place(|| {
+        ZoneAuthoritySet::acquire(&lease_store, &zone_ids, &owner, lease_ttl)
+    })?
+    .context("one or more authored zones are already owned by another process")?;
+    let build_result = tokio::task::block_in_place(|| -> Result<MultiZoneRuntime> {
+        let checkpoint_store: Arc<dyn ZoneSnapshotStore> = snapshots.clone();
+        for zone_id in authorities.zone_ids() {
+            let authority = authorities.get(zone_id).expect("leased zone exists");
+            snapshots
+                .bind_zone_lease(zone_id, authority.owner(), authority.fencing_token())
+                .map_err(anyhow::Error::from)?;
+        }
+        if let Some(resumes) = &stores.resume_sessions {
+            let now_ms = demo::now_ms();
+            let expires = now_ms.saturating_add(gateway_config.resume_ttl.as_i64());
+            for zone_id in authorities.zone_ids() {
+                let authority = authorities.get(zone_id).expect("leased zone exists");
+                resumes
+                    .detach_stale_connected(
+                        zone_id,
+                        authority.owner(),
+                        authority.fencing_token(),
+                        expires,
+                    )
+                    .map_err(anyhow::Error::from)?;
+            }
+            resumes.sweep_expired(now_ms).map_err(anyhow::Error::from)?;
+        }
+        let mut runtime = MultiZoneRuntime::new(checkpoint_store);
+        for mut zone in authored {
+            let zone_id = zone.instance.to_string();
+            if let Some(snapshot) = snapshots.load_zone(&zone_id).map_err(anyhow::Error::from)? {
+                anyhow::ensure!(
+                    snapshot.config == *zone.zone.config(),
+                    "zone checkpoint configuration differs from its authored map placement: {zone_id}"
+                );
+                let authored_entities = zone
+                    .zone
+                    .entities()
+                    .filter(|entity| {
+                        entity.persistence
+                            == engine_core::schema::PersistencePolicy::StaticDefinition
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let authored_links = zone
+                    .zone
+                    .links()
+                    .links()
+                    .iter()
+                    .filter(|link| {
+                        link.persistence == engine_core::schema::PersistencePolicy::StaticDefinition
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let mut report = engine_sim::zone::Zone::restore_quarantining(
+                    &snapshot,
+                    zone.zone.nav().clone(),
+                    Arc::new(UniformItemRules::default()),
+                )
+                .map_err(anyhow::Error::from)?;
+                for entity in authored_entities {
+                    report.zone.spawn(entity).map_err(anyhow::Error::from)?;
+                }
+                for link in authored_links {
+                    report.zone.add_link(link).map_err(anyhow::Error::from)?;
+                }
+                if !report.quarantined.is_empty() {
+                    tracing::warn!(zone = %zone_id, count = report.quarantined.len(), "zone recovery quarantined invalid records");
+                }
+                zone.zone = report.zone;
+            }
+            zone.zone.set_ai_tick_policy(ai_policy.clone());
+            let mut config = gateway_config.clone();
+            config.max_sessions = zone.max_players;
+            let mut gateway = WorldGateway::new(
+                zone.zone,
+                demo::handshake().context("failed to build the server handshake")?,
+                config,
+                SystemResumeTokens::new(),
+            )
+            .context("failed to create an authored zone gateway")?
+            .with_player_spawn_point(zone.entry_point);
+            if let Some(resume_store) = &stores.resume_sessions {
+                let store: Arc<dyn ResumeSessionStore> = resume_store.clone();
+                gateway = gateway.with_resume_store(store);
+            }
+            runtime
+                .register(WorldServer::new(gateway))
+                .map_err(anyhow::Error::from)?;
+        }
+        runtime.checkpoint_all().map_err(anyhow::Error::from)?;
+        Ok(runtime)
+    });
+    let runtime = match build_result {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let _ = tokio::task::block_in_place(|| authorities.release_all());
+            return Err(error).context("failed to restore authored zone set");
+        }
+    };
+    let default_zone = runtime
+        .zone_ids()
+        .next()
+        .expect("authored zones are non-empty")
+        .to_owned();
+    let handoff_store: Arc<dyn ZoneHandoffStore> = stores
+        .zone_snapshots
+        .as_ref()
+        .context("--world-map requires the PostgreSQL zone handoff store")?
+        .clone();
+    let service = MultiZoneService::new(
+        runtime,
+        default_zone.clone(),
+        args.tick_interval(),
+        args.snapshot_interval()
+            .context("invalid snapshot interval")?,
+    )
+    .map_err(anyhow::Error::from)?
+    .with_travel(
+        travel_atlas,
+        travel_triggers,
+        authorities.clone(),
+        handoff_store,
+        stores.resume_sessions.is_some(),
+    );
+    let (events, receivers) = transport::event_channel();
+    let faction_refresh_events = events.clone();
+    let (shutdown, shutdown_rx) = watch::channel(false);
+    let metrics = service.metrics();
+    let state = match (authenticator, identity_backend.clone()) {
+        (Some(authenticator), None) => AppState::new(events, authenticator),
+        (None, Some(backend)) => {
+            let telemetry = Arc::clone(&backend);
+            AppState::with_identity_backend(events, backend.clone())
+                .with_character_backend(backend.clone())
+                .with_social_backend(backend.clone())
+                .with_group_backend(backend.clone())
+                .with_chat_backend(backend)
+                .with_backend_telemetry(move || telemetry.telemetry_snapshot())
+        }
+        _ => anyhow::bail!("exactly one authentication mode must be configured"),
+    };
+    let state = Arc::new(
+        state
+            .with_metrics(Arc::clone(&metrics))
+            .with_content_version(runtime_content.version.clone())
+            .with_origin_policy(origins)
+            .with_rate_limits(rate_limits)
+            .with_outbound_queue(outbound_queue),
+    );
+    let (service_stopped, service_stopped_rx) = tokio::sync::oneshot::channel();
+    let loop_task = tokio::spawn(async move {
+        service.run(receivers, shutdown_rx).await;
+        let _ = service_stopped.send(());
+    });
+    let faction_refresh = {
+        let store = Arc::clone(faction_store);
+        let policy = ai_policy.clone();
+        let mut active_catalog = faction_catalog;
+        let events = faction_refresh_events;
+        let mut shutdown = shutdown.subscribe();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(5));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            ticker.tick().await;
+            loop {
+                tokio::select! {
+                    changed = shutdown.changed() => {
+                        if changed.is_err() || *shutdown.borrow() {
+                            break;
+                        }
+                    }
+                    _ = ticker.tick() => {
+                        let store = Arc::clone(&store);
+                        let loaded = tokio::task::spawn_blocking(move || store.load_world_state()).await;
+                        let next_catalog = match loaded {
+                            Ok(Ok(snapshot)) => snapshot
+                                .map(|(_, snapshot)| engine_core::faction::FactionWorld::from_snapshot(snapshot)
+                                    .map(|world| world.relation_catalog()))
+                                .transpose(),
+                            Ok(Err(error)) => {
+                                tracing::warn!(%error, "faction relation refresh read failed; keeping the current AI catalog");
+                                continue;
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "faction relation refresh task failed; keeping the current AI catalog");
+                                continue;
+                            }
+                        };
+                        let next_catalog = match next_catalog {
+                            Ok(catalog) => catalog.unwrap_or_default(),
+                            Err(error) => {
+                                tracing::warn!(%error, "stored faction relations failed validation; keeping the current AI catalog");
+                                continue;
+                            }
+                        };
+                        if next_catalog == active_catalog {
+                            continue;
+                        }
+                        let next_policy = policy.clone().map(|mut policy| {
+                            policy.factions = next_catalog.clone();
+                            policy
+                        });
+                        if events.send(lynx_world::service::ServerEvent::RefreshAiPolicy {
+                            policy: next_policy,
+                        }).await.is_err() {
+                            break;
+                        }
+                        active_catalog = next_catalog;
+                        tracing::info!("authored AI faction relation catalog refreshed across all zones");
+                    }
+                }
+            }
+        })
+    };
+    let mut admin_shutdown = shutdown.subscribe();
+    let admin_task = tokio::spawn(
+        axum::serve(admin_listener, transport::admin_router(Arc::clone(&state)))
+            .with_graceful_shutdown(async move {
+                while !*admin_shutdown.borrow() {
+                    if admin_shutdown.changed().await.is_err() {
+                        break;
+                    }
+                }
+            })
+            .into_future(),
+    );
+    let renewal = {
+        let authorities = authorities.clone();
+        let state = Arc::clone(&state);
+        let metrics = Arc::clone(&metrics);
+        let shutdown = shutdown.clone();
+        let renewal_interval = lease_ttl / 3;
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(renewal_interval);
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let renew = authorities.clone();
+                let result = tokio::task::spawn_blocking(move || renew.renew_all()).await;
+                match result {
+                    Ok(Ok(true)) => metrics.record_lease_renewal(true),
+                    _ => {
+                        metrics.record_lease_renewal(false);
+                        state.set_ready(false);
+                        let _ = shutdown.send(true);
+                        break;
+                    }
+                }
+            }
+        })
+    };
+    tracing::info!(map = %map_id, zones = ?zone_ids, default_zone, characters = grants.len(), "authored multi-zone world listening");
+    let signal_state = Arc::clone(&state);
+    let signal_shutdown = shutdown.clone();
+    let mut signal_watch = shutdown.subscribe();
+    let shutdown_signal = async move {
+        tokio::select! {
+            result = wait_for_termination_signal() => if let Err(error) = result { tracing::error!(%error, "termination signal handler failed"); },
+            () = async { while !*signal_watch.borrow() { if signal_watch.changed().await.is_err() { break; } } } => {}
+            _ = service_stopped_rx => tracing::error!("multi-zone authority loop stopped; shutting down listeners"),
+        }
+        signal_state.set_ready(false);
+        let _ = signal_shutdown.send(true);
+    };
+    let result =
+        transport::serve_with_shutdown(listener, Arc::clone(&state), shutdown_signal).await;
+    let _ = shutdown.send(true);
+    admin_task
+        .await
+        .context("admin listener task failed")?
+        .context("admin listener failed")?;
+    let _ = loop_task.await;
+    faction_refresh.abort();
+    renewal.abort();
+    match tokio::task::block_in_place(|| authorities.release_all()) {
+        Ok(true) => tracing::info!(zones = zone_ids.len(), "authored zone leases released"),
+        Ok(false) => tracing::warn!("one or more authored zone leases were lost before release"),
+        Err(error) => {
+            tracing::warn!(code = ?error.code(), details = %error, "authored zone leases could not all be released")
+        }
+    }
+    tokio::task::block_in_place(|| drop((state, identity_backend, stores)));
+    result.context("the authored multi-zone HTTP server stopped with an error")
+}
+
 fn production_identity_backend() -> Result<Arc<NakamaIdentityBackend>> {
     let base_url = std::env::var("LYNX_NAKAMA_URL")
         .or_else(|_| std::env::var("NAKAMA_URL"))
         .or_else(|_| std::env::var("NAKAMA_BASE_URL"))
         .context("Nakama authentication requires LYNX_NAKAMA_URL")?;
     let mut nakama_config = NakamaConfig::new(base_url);
-    nakama_config.http_key = std::env::var("LYNX_NAKAMA_HTTP_KEY").ok();
+    nakama_config.http_key = optional_secret_environment("LYNX_NAKAMA_HTTP_KEY")?;
     nakama_config.timeout = Duration::from_secs(10);
     let nakama = NakamaClient::new(nakama_config)
         .map_err(|_| anyhow::anyhow!("invalid Nakama identity configuration"))?;
@@ -628,6 +1124,40 @@ fn production_identity_backend() -> Result<Arc<NakamaIdentityBackend>> {
     )))
 }
 
+fn optional_secret_environment(name: &str) -> Result<Option<String>> {
+    let file_name = format!("{name}_FILE");
+    match (std::env::var_os(name), std::env::var_os(&file_name)) {
+        (Some(value), Some(path)) => {
+            let value = value
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("{name} is not valid UTF-8"))?;
+            if !value.is_empty() {
+                bail!("configure either {name} or {file_name}, not both");
+            }
+            let value =
+                std::fs::read_to_string(path).context("failed to read the Nakama HTTP key file")?;
+            let value = value.trim_end_matches(['\r', '\n']).to_owned();
+            anyhow::ensure!(!value.trim().is_empty(), "Nakama HTTP key file is empty");
+            Ok(Some(value))
+        }
+        (Some(value), None) => {
+            let value = value
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("Nakama HTTP key is not valid UTF-8"))?;
+            anyhow::ensure!(!value.trim().is_empty(), "Nakama HTTP key is empty");
+            Ok(Some(value))
+        }
+        (None, Some(path)) => {
+            let value =
+                std::fs::read_to_string(path).context("failed to read the Nakama HTTP key file")?;
+            let value = value.trim_end_matches(['\r', '\n']).to_owned();
+            anyhow::ensure!(!value.trim().is_empty(), "Nakama HTTP key file is empty");
+            Ok(Some(value))
+        }
+        (None, None) => Ok(None),
+    }
+}
+
 /// Durable stores selected by the command line.
 struct DurableStores {
     /// Snapshot store handed to the service.
@@ -640,6 +1170,8 @@ struct DurableStores {
     faction_calendar: Option<Arc<PostgresFactionCalendarStore>>,
     /// Durable resume token metadata, enabled with PostgreSQL world state.
     resume_sessions: Option<Arc<PostgresResumeSessionStore>>,
+    /// Independently fenced snapshots for authored zone instances.
+    zone_snapshots: Option<Arc<PostgresZoneSnapshotStore>>,
 }
 
 fn durable_stores(args: &ServeArgs) -> Result<DurableStores> {
@@ -660,8 +1192,12 @@ fn durable_stores(args: &ServeArgs) -> Result<DurableStores> {
         );
         let faction_calendar = Arc::new(PostgresFactionCalendarStore::with_pool(pool.clone()));
         let resume_sessions = Arc::new(
-            PostgresResumeSessionStore::with_pool(pool)
+            PostgresResumeSessionStore::with_pool(pool.clone())
                 .context("failed to open the PostgreSQL resume-session store")?,
+        );
+        let zone_snapshots = Arc::new(
+            PostgresZoneSnapshotStore::with_pool(pool)
+                .context("failed to open the PostgreSQL zone snapshot store")?,
         );
         let snapshot: Arc<dyn SnapshotStore + Send + Sync> = postgres.clone();
         Ok(DurableStores {
@@ -670,6 +1206,7 @@ fn durable_stores(args: &ServeArgs) -> Result<DurableStores> {
             leases: Some(leases),
             faction_calendar: Some(faction_calendar),
             resume_sessions: Some(resume_sessions),
+            zone_snapshots: Some(zone_snapshots),
         })
     } else {
         Ok(DurableStores {
@@ -681,8 +1218,84 @@ fn durable_stores(args: &ServeArgs) -> Result<DurableStores> {
             leases: None,
             faction_calendar: None,
             resume_sessions: None,
+            zone_snapshots: None,
         })
     }
+}
+
+/// Prepare, commit, or roll back one reviewed persisted-instance migration.
+/// Returns `true` for a dry run so the server exits without serving the
+/// candidate or changing durable state.
+fn run_content_migration(
+    args: &ServeArgs,
+    store: Option<&(dyn SnapshotStore + Send + Sync)>,
+    target: Option<&RuntimeContent>,
+    plan: Option<&PersistedInstanceMigrationPlan>,
+) -> Result<bool> {
+    if !args.rollback_content_migration && plan.is_none() {
+        return Ok(false);
+    }
+    let store = store.context("content migration requires a durable snapshot store")?;
+    let current = store
+        .load()
+        .context("failed to load the snapshot for content migration")?
+        .context("content migration requires an existing world snapshot")?;
+    let target = target.context("content migration requires a validated --content-bundle")?;
+
+    if args.rollback_content_migration {
+        let checkpoint = current
+            .migration_checkpoint
+            .as_deref()
+            .context("the world snapshot has no content migration rollback checkpoint")?;
+        anyhow::ensure!(
+            target.manifest.content_version.to_string() == checkpoint.source_content_version
+                && target.manifest_sha256 == checkpoint.source_manifest_sha256,
+            "rollback bundle does not match the checkpoint source content identity"
+        );
+        let restored = current.rollback_content_migration()?;
+        store
+            .save_at_tick(&restored, restored.zone.tick.0 as i64)
+            .context("failed to atomically restore the pre-migration snapshot")?;
+        tracing::info!(
+            plan_id = %checkpoint.plan_id,
+            content_version = %checkpoint.source_content_version,
+            "content migration rolled back"
+        );
+        return Ok(false);
+    }
+
+    let plan = plan.context("content migration requires --content-migration-plan")?;
+    let prepared =
+        content_runtime::prepare_instance_migration(&current, plan, target, demo::now_ms())
+            .context("failed to prepare the persisted-instance migration candidate")?;
+    if args.dry_run_content_migration {
+        println!(
+            "dry run: plan={} migrated_entities={} quarantined_records={} source_entities={} candidate_entities={}",
+            plan.id,
+            prepared.migrated_entities,
+            prepared.quarantined.len(),
+            prepared.source.zone.entities.len(),
+            prepared.candidate.zone.entities.len()
+        );
+        for record in &prepared.quarantined {
+            println!(
+                "quarantine: {} entity={:?}: {}",
+                record.code, record.entity, record.message
+            );
+        }
+        return Ok(true);
+    }
+
+    store
+        .save_at_tick(&prepared.candidate, prepared.candidate.zone.tick.0 as i64)
+        .context("failed to atomically persist the migrated world and rollback checkpoint")?;
+    tracing::info!(
+        plan_id = %plan.id,
+        migrated_entities = prepared.migrated_entities,
+        quarantined_records = prepared.quarantined.len(),
+        "persisted-instance content migration committed"
+    );
+    Ok(false)
 }
 
 /// Establish a verified normalized copy before it becomes a runtime authority.
@@ -703,8 +1316,13 @@ fn initialize_normalized_world(
         .load_world_state()
         .context("failed to load normalized faction/calendar state")?
     {
+        // Relations are database-authoritative under ADR 0009 and were not
+        // represented in older replay snapshots. Hydrate that field from the
+        // normalized store before comparing the remaining aggregate state.
+        let mut replayed_factions = factions.clone();
+        replayed_factions.relations = stored_factions.relations.clone();
         anyhow::ensure!(
-            stored_calendar == calendar && stored_factions == factions,
+            stored_calendar == calendar && stored_factions == replayed_factions,
             "normalized faction/calendar state differs from the replayed world snapshot; reconcile before serving"
         );
         // Rebuild from the normalized copy after equality proves both sources
@@ -784,6 +1402,7 @@ fn start_authority(
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -139,6 +139,7 @@ fn postgres_resume_token_rotation_is_single_use_and_generation_fenced() -> anyho
     let old_digest = TokenDigest::of(original);
     let record = ResumeSessionRecord {
         session_id: session_id.clone(),
+        zone_id: "resume-test-zone".to_owned(),
         account_id: "account-test".to_owned(),
         principal_id: "character-test".to_owned(),
         actor_id: "actor-test".to_owned(),
@@ -372,6 +373,7 @@ fn postgres_resume_rotation_survives_backend_loss_before_commit() -> anyhow::Res
     };
     store.create(&ResumeSessionRecord {
         session_id: session_id.clone(),
+        zone_id: "resume-crash-zone".into(),
         account_id: "crash-test-account".into(),
         principal_id: "crash-test-principal".into(),
         actor_id: "crash-test-actor".into(),
@@ -445,6 +447,7 @@ fn postgres_resume_session_expiry_is_checked_and_swept() -> anyhow::Result<()> {
     store
         .create(&ResumeSessionRecord {
             session_id: session_id.clone(),
+            zone_id: "resume-expiry-zone".into(),
             account_id: "a".into(),
             principal_id: "p".into(),
             actor_id: "e".into(),
@@ -482,7 +485,6 @@ fn postgres_gateway_resumes_session_after_process_restart_with_lease_fencing() -
         return Ok(());
     };
     let suffix = unique_suffix();
-    let zone_id = format!("zone_{:026}", suffix.parse::<u128>()?);
     let owner_a = format!("gateway-resume-a-{suffix}");
     let owner_b = format!("gateway-resume-b-{suffix}");
     let resume_store = Arc::new(
@@ -490,6 +492,10 @@ fn postgres_gateway_resumes_session_after_process_restart_with_lease_fencing() -
             .map_err(|error| anyhow::anyhow!("connecting resume-session store: {error}"))?,
     );
     let lease_store = Arc::new(PostgresZoneLeaseStore::connect(&config)?);
+    let authenticator = Authenticator::new(&[digest("gateway-restart-test-token")])?;
+    let grant = authenticator.grants().next().unwrap().clone();
+    let demo_zone = demo::build_zone(std::slice::from_ref(&grant))?;
+    let zone_id = demo_zone.config().instance.to_string();
     let lease_cleanup = LeaseGuard {
         config: config.clone(),
         zone_id: zone_id.clone(),
@@ -499,10 +505,8 @@ fn postgres_gateway_resumes_session_after_process_restart_with_lease_fencing() -
         .context("first process acquires zone lease")?;
     let first_fence = first_authority.fencing_token();
 
-    let authenticator = Authenticator::new(&[digest("gateway-restart-test-token")])?;
-    let grant = authenticator.grants().next().unwrap().clone();
     let mut first_gateway = WorldGateway::new(
-        demo::build_zone(std::slice::from_ref(&grant))?,
+        demo_zone,
         demo::handshake()?,
         GatewayConfig::new(DurationMs::new(30_000)),
         SystemResumeTokens::new(),
@@ -648,6 +652,7 @@ fn startup_detach_requires_the_current_zone_lease() -> anyhow::Result<()> {
     store
         .create(&ResumeSessionRecord {
             session_id: session_id.clone(),
+            zone_id: zone_id.clone(),
             account_id: "account".into(),
             principal_id: "principal".into(),
             actor_id: "actor".into(),

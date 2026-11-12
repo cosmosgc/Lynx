@@ -89,6 +89,7 @@ fn published_event<'a>(
         .ok_or_else(|| ApiError::NotFound(format!("event: {event}")))
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

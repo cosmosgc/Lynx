@@ -58,10 +58,21 @@ impl ResumeSessionStore for PostgresResumeSessionStore {
         }
         let mut client = self.pool.acquire().map_err(|_| store_poisoned())?;
         client.execute(
-            "INSERT INTO lynx.resume_sessions (session_id, account_id, principal_id, actor_id, token_digest, expires_at_ms, connected, generation, revoked, staff) VALUES ($1, $2, $3, $4, $5, NULL, true, $6, false, $7)",
-            &[&record.session_id, &record.account_id, &record.principal_id, &record.actor_id, &&record.token_digest.as_bytes()[..], &record.generation, &record.staff],
+            "INSERT INTO lynx.resume_sessions (session_id, zone_id, account_id, principal_id, actor_id, token_digest, expires_at_ms, connected, generation, revoked, staff) VALUES ($1, $2, $3, $4, $5, $6, NULL, true, $7, false, $8)",
+            &[&record.session_id, &record.zone_id, &record.account_id, &record.principal_id, &record.actor_id, &&record.token_digest.as_bytes()[..], &record.generation, &record.staff],
         ).map_err(store_error)?;
         Ok(())
+    }
+
+    fn lookup_token(&self, token: TokenDigest) -> Result<Option<ResumeSessionRecord>, EngineError> {
+        let mut client = self.pool.acquire().map_err(|_| store_poisoned())?;
+        let row = client
+            .query_opt(
+                "SELECT session_id, zone_id, account_id, principal_id, actor_id, token_digest, expires_at_ms, connected, generation, revoked, staff FROM lynx.resume_sessions WHERE token_digest = $1",
+                &[&&token.as_bytes()[..]],
+            )
+            .map_err(store_error)?;
+        row.as_ref().map(decode_record).transpose()
     }
 
     fn detach_stale_connected(
@@ -84,8 +95,8 @@ impl ResumeSessionStore for PostgresResumeSessionStore {
             ));
         }
         let changed = tx.execute(
-            "UPDATE lynx.resume_sessions SET connected = false, expires_at_ms = $1, generation = generation + 1 WHERE connected AND NOT revoked",
-            &[&expires_at_ms],
+            "UPDATE lynx.resume_sessions SET connected = false, expires_at_ms = $1, generation = generation + 1 WHERE zone_id = $2 AND connected AND NOT revoked",
+            &[&expires_at_ms, &zone_id],
         ).map_err(store_error)?;
         tx.commit().map_err(store_error)?;
         Ok(changed)
@@ -120,7 +131,7 @@ impl ResumeSessionStore for PostgresResumeSessionStore {
         let mut client = self.pool.acquire().map_err(|_| store_poisoned())?;
         let mut tx = client.transaction().map_err(store_error)?;
         let row = tx.query_opt(
-            "SELECT session_id, account_id, principal_id, actor_id, token_digest, expires_at_ms, connected, generation, revoked, staff FROM lynx.resume_sessions WHERE token_digest = $1 FOR UPDATE",
+            "SELECT session_id, zone_id, account_id, principal_id, actor_id, token_digest, expires_at_ms, connected, generation, revoked, staff FROM lynx.resume_sessions WHERE token_digest = $1 FOR UPDATE",
             &[&&current.as_bytes()[..]],
         ).map_err(store_error)?;
         let Some(row) = row else {
@@ -197,6 +208,7 @@ fn decode_record(row: &Row) -> Result<ResumeSessionRecord, EngineError> {
         .ok_or_else(|| store_invalid("stored token digest has an invalid length"))?;
     Ok(ResumeSessionRecord {
         session_id: row.get("session_id"),
+        zone_id: row.get("zone_id"),
         account_id: row.get("account_id"),
         principal_id: row.get("principal_id"),
         actor_id: row.get("actor_id"),

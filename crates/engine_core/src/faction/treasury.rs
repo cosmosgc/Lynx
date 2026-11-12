@@ -529,9 +529,11 @@ impl TreasuryTransferReceipt {
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn faction(name: &str) -> DefinitionId {
         DefinitionId::new(name).unwrap()
@@ -706,5 +708,68 @@ mod tests {
             rules.validate().unwrap_err().code(),
             ErrorCode::InvalidRequest
         );
+    }
+
+    proptest! {
+        #[test]
+        fn generated_ledger_sequences_conserve_value_and_recover(
+            movements in prop::collection::vec((any::<bool>(), 1_u64..=1_000), 0..64)
+        ) {
+            let mut treasury = Treasury::new();
+            for (index, (deposit, amount)) in movements.into_iter().enumerate() {
+                let key = format!("generated-{index}");
+                let before = treasury.clone();
+                let at = Millis::new(i64::try_from(index).unwrap());
+
+                if deposit {
+                    let entry = treasury
+                        .deposit(&key, amount, "generated movement", at)
+                        .unwrap();
+                    prop_assert_eq!(treasury.balance(), before.balance() + amount);
+                    prop_assert_eq!(treasury.entries().len(), before.entries().len() + 1);
+
+                    let replay = treasury
+                        .deposit(
+                            &key,
+                            amount,
+                            "generated movement",
+                            Millis::new(at.value() + 1),
+                        )
+                        .unwrap();
+                    prop_assert_eq!(replay, entry);
+                    prop_assert_eq!(treasury.balance(), before.balance() + amount);
+                } else if before.balance() >= amount {
+                    let entry = treasury
+                        .spend(&key, amount, "generated movement", at)
+                        .unwrap();
+                    prop_assert_eq!(treasury.balance(), before.balance() - amount);
+                    prop_assert_eq!(treasury.entries().len(), before.entries().len() + 1);
+
+                    let replay = treasury
+                        .spend(
+                            &key,
+                            amount,
+                            "generated movement",
+                            Millis::new(at.value() + 1),
+                        )
+                        .unwrap();
+                    prop_assert_eq!(replay, entry);
+                    prop_assert_eq!(treasury.balance(), before.balance() - amount);
+                } else {
+                    let error = treasury
+                        .spend(&key, amount, "generated movement", at)
+                        .unwrap_err();
+                    prop_assert_eq!(error.code(), ErrorCode::InvalidState);
+                    prop_assert_eq!(&treasury, &before);
+                }
+
+                prop_assert!(treasury.validate().is_ok());
+                let restored = Treasury::from_entries(treasury.entries().to_vec()).unwrap();
+                prop_assert_eq!(&restored, &treasury);
+                let encoded = serde_json::to_string(&treasury).unwrap();
+                let decoded: Treasury = serde_json::from_str(&encoded).unwrap();
+                prop_assert_eq!(&decoded, &treasury);
+            }
+        }
     }
 }

@@ -6,8 +6,18 @@ semantic versioning for engine releases and content bundles.
 
 ## [Unreleased]
 
+### Changed
+
+- Protocol wire changes to client request/decoding, envelope, handshake,
+  replication, or world-server contract sources now require a protocol version
+  increment and changelog entry in pull requests.
+
 ### Fixed
 
+- `lynx-world`: handle Unix SIGTERM as a graceful shutdown request so service
+  managers can stop admission and complete configured final persistence.
+- Docs: repaired six stale local links in completed client, persistence, and
+  simulation task records.
 - `lynx_client`: the no-default-features headless build again compiles the
   secure Nakama credential module required by reconnect-time token refresh, so
   the GPU-free CI build/test path works instead of failing on a window-gated
@@ -15,10 +25,59 @@ semantic versioning for engine releases and content bundles.
 
 ### Added
 
-- `engine_core`: `proptest` coverage for inventory transfers and JSON round trips.
+- `lynx-mcp`: optional read-only stdio MCP tools for workspace inspection,
+  validation, manifest diff, doctor checks, and content hashing; confined paths
+  and bounded results are enforced (`CNT-009`).
+- `lynx migrate`: source-manifest-bound RON plans preview and validate staged
+  definition/catalog changes, apply with exact-byte rollback snapshots, and
+  refuse rollback over content edited after the migration (`CNT-014`).
+- `lynx`: generated Bash/Elvish/Fish/PowerShell/Zsh completions and Markdown
+  command reference from the Clap tree, with JSON output and CI reference drift
+  enforcement (`CNT-011`).
+- Docs/deploy: document the single-world production topology and deployment
+  checklist, with `systemd` and Windows Service Control Manager examples
+  (`OPS-011`).
+- `lynx_client`: scope saved Nakama refresh credentials to the selected world
+  profile and Nakama origin in the operating-system credential store (`CLT-002`).
+- `lynx-load`: a repeatable in-process multi-client workload for idle,
+  movement, chat, action, and reconnect scenarios, reporting operation latency,
+  application-envelope bytes, and authority tick counters (`QUA-005`).
+- `scripts/check_readme_metadata.py`: CI now validates workspace-crate, accepted
+  ADR, and documentation counts against the README. Tagged releases are blocked
+  until the matching changelog section includes an explicit migration note
+  (`- None.` when no migration is required) (`OPS-014`).
+- `lynx_client`: bounded prediction and authoritative rejection are tested when
+  movement replies are delayed and when the queue acknowledgement is lost
+  (`CLT-014`).
+- `lynx_client`: generic content panels expose number-key shortcuts for fixed
+  server-advertised actions and keep those keys from triggering world actions
+  while a panel is open (`CLT-008`).
+- CI: a scheduled/manual PostgreSQL-backed `cargo-llvm-cov` workflow publishes
+  the workspace's per-crate HTML coverage report as an artifact (`QUA-007`).
+- Docs/client: added operator error guidance and `pt-BR`/`en` catalogs that
+  resolve every stable player error code from the negotiated locale; locale
+  preference UI and persistence remain tracked under `QUA-010`/`CLT-010`.
+- Docs: added the Rust/Bevy upgrade and rollback rehearsal, with weekly Cargo
+  and monthly GitHub Actions Dependabot updates.
+- `lynx-world`: emit structured records for failed-auth throttling, session
+  message rate limits, and trusted principal session revocation (`NET-013`).
+- Docs: resolved QUA-017's remaining client, editor, user-content, platform,
+  backup, admin identity, and property-scope decisions in ADRs 0023–0030.
+- CI: add seven bounded parser fuzz targets and a nightly corpus-cached fuzz run
+  (`QUA-008`).
+- CI: compare successful job durations against the recent median, flag large
+  regressions after ten samples, and bound all workflow jobs (`QUA-016`).
+- `engine_net`: protocol 1.1 error payloads carry explicit retryability and
+  bounded, code-specific display parameters; internal error details no longer
+  flow wholesale into client-visible parameters. The 1.1 wire remains readable
+  by 1.0 clients, which ignore the additive error-body fields (`QUA-010`).
+- `engine_core` and `engine_sim`: `proptest` coverage for inventory transfers
+  and JSON round trips.
   Generated stackable and unique inventories verify per-definition conservation,
   all-or-nothing failure, idempotent replay, and snapshot-style deserialization
-  validation, with shrinking to a minimal failing case (`QUA-002`).
+  validation. Treasury ledger sequences, territory capture eligibility/atomicity,
+  and calendar enrollment replay now have shrinking property coverage as well;
+  cross-machine replay evidence remains (`QUA-002`).
 - `lynx_world`: PostgreSQL integration tests now use collision-resistant per-run
   IDs and a scoped cleanup guard that removes test rows on success or panic; a
   live regression verifies cleanup during unwinding (`QUA-004`).
@@ -28,6 +87,25 @@ semantic versioning for engine releases and content bundles.
   session attaches and applied actions; a failed-auth burst is rate-limited
   without echoing the guessed credential, and duplicate sessions cannot displace
   the active connection (`QUA-006`).
+- `lynx_world`: resume-token attempts have an independent bounded per-IP budget
+  and rejection metric, with WebSocket coverage proving a guessed token is denied
+  before upgrade without exposing it (`NET-007`). Config debug output reports
+  only the configured token-hash count, and the operations guide now describes
+  credential rotation (`NET-010`).
+- `lynx_test_harness`: reusable GPU-free in-process server and production-client
+  fixtures record typed world updates, exercise two-observer consistency and
+  session-private movement, and support reconnect plus deterministic envelope
+  latency/loss. The existing client multiplayer test now reuses the server
+  fixture (`QUA-014`).
+- `world_server`: protocol-versioned golden fixtures now pin the typed
+  `world.ready`, `world.snapshot`, and `world.delta` envelopes, plus real-gateway
+  `action.result`, `movement.queued`, zone-chat response/query, and UI state
+  envelopes and action/movement/chat requests. Gateway tests also pin chat,
+  calendar, acknowledgement, and UI requests, along with calendar results/public
+  state, using encoding and decode round-trip assertions (`QUA-003`).
+- `lynx-world`: failed credential attempts and rejected resume admissions now
+  produce structured, credential-free audit events with source IP and stable
+  reasons; log volume is bounded by per-IP authentication budgets (`NET-007`).
 - `world_gateway`: real-gateway movement budget boundary tests verify that a
   zero budget rejects without consuming sequence state and that a saturated
   cross-session queue accepts the rejected intent after the next tick; a
@@ -44,16 +122,19 @@ semantic versioning for engine releases and content bundles.
 - `scripts/backup-restore-smoke.sh`: guarded loopback PostgreSQL backup/restore
   verification, including world snapshot replay checks, audit trigger checks,
   restored-service readiness, and a disposable CI database (`PST-009`).
-- `lynx_client` and `lynx_world`: owner inventory presentation and the first
-  server-validated container transfer. The
+- `lynx_client`, `lynx_world`, and `engine_sim`: owner inventory presentation
+  and server-validated container take/insert transfers. The
   client retains session-private `owner_only` inventory only for the controlled
   actor, validates and orders it, clears it on disconnect and fresh snapshots,
   and redacts its contents from diagnostics. A toggleable `bevy_immediate`
   window shows slots, derived item names, quantities, and unique items, while
   the demo actor starts with deterministic items. `bevy_immediate` also renders
-  server-described panel fields/actions; a real-socket demo action takes items
-  and verifies the replicated inventory after resume. Equip, split/merge,
-  localization, and richer authored layouts remain (`CLT-008`).
+  server-described panel fields/actions; the gateway enforces the open panel's
+  action allowlist, exact fixed parameters, and dynamic parameter-key allowlist.
+  Real-socket demo actions take and insert items; slot controls submit
+  server-authoritative one-item split/merge operations, gated until owner
+  replication arrives. Socket integration verifies the final inventory after
+  resume. Equip, localization, and richer authored layouts remain (`CLT-008`).
 - `lynx_client`: account-screen server browser with validated host/IP and port
   profiles, pinning, bounded recent history, atomic OS-config persistence, and
   an explicit local/remote transport policy (`ws://`/`http://` only for loopback

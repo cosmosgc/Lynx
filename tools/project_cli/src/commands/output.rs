@@ -37,6 +37,13 @@ fn has_validation_failure(value: &Value) -> bool {
 }
 
 pub(crate) fn render_human_output(output: &Value) -> String {
+    if let Some(text) = render_generated_file(output) {
+        return text;
+    }
+    if let Some(text) = render_migration(output) {
+        return text;
+    }
+
     if matches!(output["command"].as_str(), Some("build" | "run" | "test")) {
         let command = output["command"].as_str().unwrap_or("");
         let mut text = format!(
@@ -67,25 +74,7 @@ pub(crate) fn render_human_output(output: &Value) -> String {
         return text;
     }
     if output["command"] == "new" {
-        let ok = output["ok"].as_bool().unwrap_or(false);
-        let path = output["path"].as_str().unwrap_or(".");
-        let template = output["template"].as_str().unwrap_or("unknown");
-        let name = output["name"].as_str().unwrap_or("unknown");
-        let empty_files = Vec::new();
-        let files = output["files"].as_array().unwrap_or(&empty_files);
-        if ok {
-            let mut lines = vec![format!(
-                "Created project '{name}' from template '{template}' at {path}"
-            )];
-            for file in files {
-                lines.push(format!("- {}", file.as_str().unwrap_or("")));
-            }
-            return lines.join("\n");
-        }
-        return format!(
-            "Project creation failed: {}",
-            output["message"].as_str().unwrap_or("unknown error")
-        );
+        return render_new(output);
     }
 
     if output["command"] == "content hash" {
@@ -106,30 +95,7 @@ pub(crate) fn render_human_output(output: &Value) -> String {
     }
 
     if output["command"] == "doctor" {
-        let ok = output["ok"].as_bool().unwrap_or(false);
-        let backend = output["backend"].as_object();
-        let project = output["project"].as_object();
-        let mut lines = vec![format!(
-            "Doctor status: {}",
-            if ok { "ok" } else { "issues found" }
-        )];
-        if let Some(backend) = backend {
-            lines.push(format!(
-                "- backend: {} ({})",
-                backend["healthy"],
-                backend["message"].as_str().unwrap_or("")
-            ));
-            lines.push(format!("- schema: {}", backend["schema"]));
-        }
-        if let Some(project) = project {
-            lines.push(format!(
-                "- project: {} ({} errors, {} warnings)",
-                project["ok"],
-                project["errors"].as_array().map_or(0, Vec::len),
-                project["warnings"].as_array().map_or(0, Vec::len)
-            ));
-        }
-        return lines.join("\n");
+        return render_doctor(output);
     }
 
     if output["ok"].as_bool().unwrap_or(false) {
@@ -139,6 +105,98 @@ pub(crate) fn render_human_output(output: &Value) -> String {
 
     let errors = output["errors"].as_array().map_or(0, Vec::len);
     format!("Validation failed with {errors} error(s)")
+}
+
+fn render_new(output: &Value) -> String {
+    let path = output["path"].as_str().unwrap_or(".");
+    let template = output["template"].as_str().unwrap_or("unknown");
+    let name = output["name"].as_str().unwrap_or("unknown");
+    if output["ok"].as_bool().unwrap_or(false) {
+        let files = output["files"].as_array().map_or_else(Vec::new, |files| {
+            files
+                .iter()
+                .map(|file| format!("- {}", file.as_str().unwrap_or("")))
+                .collect()
+        });
+        let mut lines = vec![format!(
+            "Created project '{name}' from template '{template}' at {path}"
+        )];
+        lines.extend(files);
+        lines.join("\n")
+    } else {
+        format!(
+            "Project creation failed: {}",
+            output["message"].as_str().unwrap_or("unknown error")
+        )
+    }
+}
+
+fn render_doctor(output: &Value) -> String {
+    let mut lines = vec![format!(
+        "Doctor status: {}",
+        if output["ok"].as_bool().unwrap_or(false) {
+            "ok"
+        } else {
+            "issues found"
+        }
+    )];
+    if let Some(backend) = output["backend"].as_object() {
+        lines.push(format!(
+            "- backend: {} ({})",
+            backend["healthy"],
+            backend["message"].as_str().unwrap_or("")
+        ));
+        lines.push(format!("- schema: {}", backend["schema"]));
+    }
+    if let Some(project) = output["project"].as_object() {
+        lines.push(format!(
+            "- project: {} ({} errors, {} warnings)",
+            project["ok"],
+            project["errors"].as_array().map_or(0, Vec::len),
+            project["warnings"].as_array().map_or(0, Vec::len)
+        ));
+    }
+    lines.join("\n")
+}
+
+fn render_generated_file(output: &Value) -> Option<String> {
+    match output["command"].as_str()? {
+        "completions" => Some(format!(
+            "Generated {} shell completions at {}",
+            output["shell"].as_str().unwrap_or("unknown"),
+            output["path"].as_str().unwrap_or("unknown")
+        )),
+        "reference" => Some(format!(
+            "Generated CLI reference at {}",
+            output["path"].as_str().unwrap_or("unknown")
+        )),
+        _ => None,
+    }
+}
+
+fn render_migration(output: &Value) -> Option<String> {
+    match output["command"].as_str()? {
+        "migrate apply" => Some(format!(
+            "Content migration {} {} ({} -> {})\n- {} definition(s), {} catalog(s), {} file(s)",
+            output["migration"].as_str().unwrap_or("unknown"),
+            output["mode"].as_str().unwrap_or("failed"),
+            output["from_content_version"].as_str().unwrap_or("unknown"),
+            output["to_content_version"].as_str().unwrap_or("unknown"),
+            output["affected_definitions"]
+                .as_array()
+                .map_or(0, Vec::len),
+            output["affected_catalogs"].as_array().map_or(0, Vec::len),
+            output["changed_files"].as_array().map_or(0, Vec::len)
+        )),
+        "migrate rollback" => Some(format!(
+            "Restored content for migration {} at {}",
+            output["migration"].as_str().unwrap_or("unknown"),
+            output["restored_content_version"]
+                .as_str()
+                .unwrap_or("unknown")
+        )),
+        _ => None,
+    }
 }
 
 fn render_content_build(output: &Value) -> String {
@@ -210,6 +268,7 @@ fn push_diagnostics(lines: &mut Vec<String>, diagnostics: &Value) {
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::exit_code;

@@ -12,16 +12,31 @@ repository.workspace = true
 name = "lynx"
 path = "src/main.rs"
 
+[[bin]]
+name = "lynx-mcp"
+path = "src/mcp_main.rs"
+required-features = ["mcp-server"]
+
+[features]
+default = []
+mcp-server = ["dep:rmcp", "dep:schemars", "dep:tokio"]
+
 [dependencies]
 anyhow = { workspace = true }
 backend_nakama = { workspace = true }
 clap = { workspace = true }
+clap_complete = { workspace = true }
 engine_content = { workspace = true }
 engine_core = { workspace = true }
 game_api = { workspace = true }
 lynx-world = { path = "../../crates/lynx_world", version = "0.1.0" }
 serde_json = { workspace = true }
 semver = { workspace = true }
+ron = { workspace = true }
+rmcp = { workspace = true, optional = true }
+schemars = { workspace = true, optional = true }
+serde = { workspace = true }
+tokio = { workspace = true, optional = true }
 
 [lints]
 workspace = true

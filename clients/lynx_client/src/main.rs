@@ -1,3 +1,6 @@
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, allow(unused_features))]
+
 #[cfg(feature = "window")]
 #[allow(clippy::too_many_lines)] // The entry point keeps the existing mode dispatch together.
 fn main() {
@@ -217,6 +220,7 @@ fn run_account_world(launch: lynx_client::account_ui::WorldLaunch) {
         bearer,
         character,
         world_url,
+        api_url,
         credential_scope,
     } = launch;
     let version = semver::Version::parse(env!("CARGO_PKG_VERSION")).expect("valid package version");
@@ -229,6 +233,7 @@ fn run_account_world(launch: lynx_client::account_ui::WorldLaunch) {
         return;
     };
     configure_nakama_refresh(&mut client, credential_scope);
+    client.set_chat_api_url(api_url);
     {
         let _guard = runtime.enter();
         if client

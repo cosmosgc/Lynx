@@ -1,0 +1,1 @@
+{"v":"1.0.0","id":"res-0000000000000002","kind":"ui.state","body":{"panel":{"actions":[{"allowed_params":["guess"],"label":"Try","name":"play"}],"schema":"ui.lockpick","target":"ent_00000000010000000000000018","title":"Vault Lock"},"tick":0},"correlation":"golden-ui-open"}

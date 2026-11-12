@@ -64,6 +64,18 @@ const MIGRATIONS: &[(&str, &[u8])] = &[
         "0015_resume_session_staff",
         include_bytes!("../../../server/migrations/0015_resume_session_staff.sql"),
     ),
+    (
+        "0016_player_inventory_value_ledger",
+        include_bytes!("../../../server/migrations/0016_player_inventory_value_ledger.sql"),
+    ),
+    (
+        "0017_atomic_zone_handoffs",
+        include_bytes!("../../../server/migrations/0017_atomic_zone_handoffs.sql"),
+    ),
+    (
+        "0018_zone_scoped_resume_sessions",
+        include_bytes!("../../../server/migrations/0018_zone_scoped_resume_sessions.sql"),
+    ),
 ];
 
 /// Schema compatibility against the migrations embedded in this binary.
@@ -162,6 +174,7 @@ pub fn inspect_env() -> Result<SchemaStatus, String> {
     inspect(&mut client).map_err(str::to_owned)
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,7 +203,10 @@ mod tests {
         assert!(compare(false, &rows).compatible());
         assert!(!compare(true, &[]).compatible());
         rows.pop();
-        assert_eq!(compare(false, &rows).pending, ["0015_resume_session_staff"]);
+        assert_eq!(
+            compare(false, &rows).pending,
+            ["0016_player_inventory_value_ledger"]
+        );
         rows[0].1 = "bad".into();
         rows.push(("0007_future".into(), "secret".into()));
         let status = compare(false, &rows);

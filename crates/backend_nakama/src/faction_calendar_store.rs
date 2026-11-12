@@ -190,16 +190,6 @@ impl PostgresFactionCalendarStore {
             ));
         }
         self.validate_fence(&mut tx)?;
-        let has_relations: bool = tx
-            .query_one("SELECT EXISTS (SELECT 1 FROM lynx.faction_relations)", &[])
-            .map_err(|_| unavailable())?
-            .get(0);
-        if has_relations {
-            return Err(ApiError::Conflict(
-                "cannot fresh-reset faction state while unrepresented faction relations exist"
-                    .into(),
-            ));
-        }
         tx.batch_execute(
             "SET LOCAL lynx.allow_append_only_purge = 'on'; SET CONSTRAINTS ALL DEFERRED",
         )
@@ -391,7 +381,18 @@ fn decode_world_state(
     }
     let territory_history = decode_territory_history(tx)?;
     let transfers = decode_transfers(tx)?;
-    let factions_value = json!({"schema_version": version_json(1), "territory_rules": territory_rules, "factions": factions, "territories": territories, "territory_history": territory_history, "transfers": transfers});
+    let mut relations = Vec::new();
+    for row in tx.query(
+        "SELECT source_faction_id, target_faction_id, alignment FROM lynx.faction_relations ORDER BY source_faction_id, target_faction_id",
+        &[],
+    ).map_err(|_| unavailable())? {
+        relations.push(json!({
+            "source": row.get::<_, String>(0),
+            "target": row.get::<_, String>(1),
+            "points": row.get::<_, i16>(2),
+        }));
+    }
+    let factions_value = json!({"schema_version": version_json(1), "territory_rules": territory_rules, "factions": factions, "relations": relations, "territories": territories, "territory_history": territory_history, "transfers": transfers});
     let factions: FactionSnapshot =
         serde_json::from_value(factions_value).map_err(|_| unavailable())?;
 
@@ -755,6 +756,17 @@ fn write_factions(tx: &mut Transaction<'_>, snapshot: &FactionSnapshot) -> Resul
             let limit = limit.to_string();
             tx.execute("INSERT INTO lynx.faction_spend_limits (faction_id, role, max_amount) VALUES ($1,$2,$3::text::numeric)", &[&id, &role.as_str(), &limit]).map_err(pg_error)?;
         }
+    }
+    tx.execute("DELETE FROM lynx.faction_relations", &[])
+        .map_err(pg_error)?;
+    for relation in &snapshot.relations {
+        let source = relation.source.to_string();
+        let target = relation.target.to_string();
+        tx.execute(
+            "INSERT INTO lynx.faction_relations (source_faction_id, target_faction_id, alignment) VALUES ($1, $2, $3)",
+            &[&source, &target, &relation.points.value()],
+        )
+        .map_err(pg_error)?;
     }
     // A member can move between factions in one valid aggregate replacement.
     // Clear every replaceable roster before reinserting, rather than depending

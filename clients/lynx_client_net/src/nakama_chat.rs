@@ -1,8 +1,12 @@
 //! Small bounded JSON realtime client for Nakama chat rooms.
 
-use std::{collections::VecDeque, fmt};
+use std::{
+    collections::{HashMap, VecDeque},
+    fmt,
+};
 
 use futures_util::{SinkExt, StreamExt};
+use game_api::ChatChannelTarget;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -11,8 +15,16 @@ use tokio_tungstenite::tungstenite::Message;
 const QUEUE_SIZE: usize = 64;
 
 enum Command {
-    Send(String),
-    History { limit: u8, cursor: Option<String> },
+    Join(ChatChannelTarget),
+    Send {
+        channel: String,
+        content: String,
+    },
+    History {
+        channel: String,
+        limit: u8,
+        cursor: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,31 +80,50 @@ impl NakamaChatClient {
         })
     }
 
-    pub fn send(&self, content: &str) -> Result<(), NakamaChatFailure> {
+    pub fn join(&self, target: ChatChannelTarget) -> Result<(), NakamaChatFailure> {
+        self.outgoing
+            .try_send(Command::Join(target))
+            .map_err(map_queue_error)
+    }
+
+    pub fn send(&self, channel: &str, content: &str) -> Result<(), NakamaChatFailure> {
         let message = serde_json::to_string(&json!({"content": content}))
             .map_err(|_| NakamaChatFailure::InvalidConfiguration)?;
         self.outgoing
-            .try_send(Command::Send(message))
-            .map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => NakamaChatFailure::QueueFull,
-                mpsc::error::TrySendError::Closed(_) => NakamaChatFailure::Closed,
+            .try_send(Command::Send {
+                channel: channel.to_owned(),
+                content: message,
             })
+            .map_err(map_queue_error)
     }
 
-    pub fn history(&self, limit: u8, cursor: Option<String>) -> Result<(), NakamaChatFailure> {
+    pub fn history(
+        &self,
+        channel: &str,
+        limit: u8,
+        cursor: Option<String>,
+    ) -> Result<(), NakamaChatFailure> {
         if limit == 0 || limit > 100 || cursor.as_ref().is_some_and(|cursor| cursor.len() > 1024) {
             return Err(NakamaChatFailure::InvalidConfiguration);
         }
         self.outgoing
-            .try_send(Command::History { limit, cursor })
-            .map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => NakamaChatFailure::QueueFull,
-                mpsc::error::TrySendError::Closed(_) => NakamaChatFailure::Closed,
+            .try_send(Command::History {
+                channel: channel.to_owned(),
+                limit,
+                cursor,
             })
+            .map_err(map_queue_error)
     }
 
     pub fn try_recv(&mut self) -> Result<Value, mpsc::error::TryRecvError> {
         self.incoming.try_recv()
+    }
+}
+
+fn map_queue_error(error: mpsc::error::TrySendError<Command>) -> NakamaChatFailure {
+    match error {
+        mpsc::error::TrySendError::Full(_) => NakamaChatFailure::QueueFull,
+        mpsc::error::TrySendError::Closed(_) => NakamaChatFailure::Closed,
     }
 }
 
@@ -169,24 +200,63 @@ async fn run(
         let _ = incoming.try_send(json!({"error": {"code": "unavailable"}}));
         return;
     }
-    let mut channel_id: Option<String> = None;
-    let mut pending_messages: VecDeque<String> = VecDeque::new();
+    let mut channels: HashMap<String, String> = HashMap::new();
+    let mut aliases: HashMap<String, String> = HashMap::new();
+    let mut joins: HashMap<String, String> = HashMap::new();
+    joins.insert("lynx-chat-join".to_owned(), "zone".to_owned());
+    let mut sequence = 0_u64;
+    let mut pending_messages: HashMap<String, VecDeque<String>> = HashMap::new();
+    let mut pending_messages_total = 0_usize;
+    channels.insert("zone".to_owned(), String::new());
     loop {
         tokio::select! {
             incoming_message = stream.next() => {
                 match incoming_message {
                     Some(Ok(Message::Text(text))) => {
-                        let Ok(envelope) = serde_json::from_str::<Value>(&text) else { continue; };
+                        let Ok(mut envelope) = serde_json::from_str::<Value>(&text) else { continue; };
                         if let Some(id) = envelope.pointer("/channel/id").and_then(Value::as_str) {
-                            channel_id = Some(id.to_owned());
-                            while let Some(content) = pending_messages.pop_front() {
-                                let message = serde_json::from_str::<Value>(&content).unwrap_or(Value::Null);
-                                let outgoing = json!({"channel_message_send": {
-                                    "channel_id": channel_id.as_deref().unwrap_or_default(),
-                                    "content": message
-                                }});
-                                if sink.send(Message::Text(outgoing.to_string().into())).await.is_err() {
-                                    return;
+                            if let Some(cid) = envelope.get("cid").and_then(Value::as_str)
+                                && let Some(alias) = joins.remove(cid) {
+                                channels.insert(alias.clone(), id.to_owned());
+                                aliases.insert(id.to_owned(), alias.clone());
+                                if let Some(mut queued) = pending_messages.remove(&alias) {
+                                    while let Some(content) = queued.pop_front() {
+                                        pending_messages_total = pending_messages_total.saturating_sub(1);
+                                        let message = serde_json::from_str::<Value>(&content).unwrap_or(Value::Null);
+                                        let outgoing = json!({"channel_message_send": {"channel_id": id, "content": message}});
+                                        if sink.send(Message::Text(outgoing.to_string().into())).await.is_err() { return; }
+                                    }
+                                }
+                            } else if joins.contains_key("lynx-chat-join") {
+                                joins.remove("lynx-chat-join");
+                                channels.insert("zone".to_owned(), id.to_owned());
+                                aliases.insert(id.to_owned(), "zone".to_owned());
+                            }
+                            if let Some(channel) = envelope.get("channel").and_then(Value::as_object) {
+                                let mut channel = channel.clone();
+                                if let Some(alias) = aliases.get(id) { channel.insert("id".to_owned(), Value::String(alias.clone())); }
+                                envelope["channel"] = Value::Object(channel);
+                            }
+                        }
+                        if let Some(message) = envelope.get_mut("channel_message")
+                            && let Some(id) = message.get("channel_id").and_then(Value::as_str)
+                            && let Some(alias) = aliases.get(id) {
+                            message["channel_id"] = Value::String(alias.clone());
+                        }
+                        // Channel join responses are routed by request cid above.
+                        if let Some(history) = envelope.get_mut("channel_history")
+                            && let Some(id) = history.get("channel_id").and_then(Value::as_str)
+                            && let Some(alias) = aliases.get(id) {
+                            history["channel_id"] = Value::String(alias.clone());
+                        }
+                        if let Some(messages) = envelope
+                            .pointer_mut("/channel_history/messages")
+                            .and_then(Value::as_array_mut)
+                        {
+                            for message in messages {
+                                if let Some(id) = message.get("channel_id").and_then(Value::as_str)
+                                    && let Some(alias) = aliases.get(id) {
+                                    message["channel_id"] = Value::String(alias.clone());
                                 }
                             }
                         }
@@ -202,14 +272,28 @@ async fn run(
             outgoing_message = outgoing.recv() => {
                 let Some(command) = outgoing_message else { break; };
                 match command {
-                    Command::Send(content) => {
-                        let Some(channel_id) = channel_id.as_deref() else {
-                            if pending_messages.len() >= QUEUE_SIZE {
+                    Command::Join(target) => {
+                        let (alias, wire_target, channel_type) = match target {
+                            ChatChannelTarget::Room(room) => (room.clone(), room, 1),
+                            ChatChannelTarget::Direct(account) => (format!("direct:{account}"), account.to_string(), 2),
+                            ChatChannelTarget::Group(group) => (format!("group:{group}"), group.to_string(), 3),
+                        };
+                        if channels.contains_key(&alias) { continue; }
+                        sequence = sequence.saturating_add(1);
+                        let cid = format!("lynx-chat-{sequence}");
+                        joins.insert(cid.clone(), alias);
+                        let envelope = json!({"cid": cid, "channel_join": {"target": wire_target, "type": channel_type, "persistence": true, "hidden": false}});
+                        if sink.send(Message::Text(envelope.to_string().into())).await.is_err() { break; }
+                    }
+                    Command::Send { channel, content } => {
+                        let Some(channel_id) = channels.get(&channel).filter(|id| !id.is_empty()) else {
+                            if pending_messages_total >= QUEUE_SIZE {
                                 if incoming.try_send(json!({"error": {"code": "rate_limited"}})).is_err() {
                                     break;
                                 }
                             } else {
-                                pending_messages.push_back(content);
+                                pending_messages.entry(channel).or_default().push_back(content);
+                                pending_messages_total += 1;
                             }
                             continue;
                         };
@@ -219,9 +303,9 @@ async fn run(
                         }});
                         if sink.send(Message::Text(envelope.to_string().into())).await.is_err() { break; }
                     }
-                    Command::History { limit, cursor } => {
+                    Command::History { channel, limit, cursor } => {
                         let older = cursor.is_some();
-                        let Some(channel_id) = channel_id.clone() else { continue; };
+                        let Some(channel_id) = channels.get(&channel).filter(|id| !id.is_empty()).cloned() else { continue; };
                         let base_url = base_url.clone();
                         let bearer = bearer.clone();
                         let history_agent = history_agent.clone();
@@ -238,7 +322,12 @@ async fn run(
                             serde_json::from_str::<Value>(&body).map_err(|_| ())
                         }).await;
                         match result {
-                            Ok(Ok(history)) => {
+                            Ok(Ok(mut history)) => {
+                                if let Some(messages) = history.get_mut("messages").and_then(Value::as_array_mut) {
+                                    for message in messages {
+                                        message["channel_id"] = Value::String(channel.clone());
+                                    }
+                                }
                                 if incoming.try_send(json!({"channel_history": history, "older": older})).is_err() {
                                     break;
                                 }

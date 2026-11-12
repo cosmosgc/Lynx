@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use axum::Json;
 use axum::extract::connect_info::Connected;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, Path, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -30,21 +30,27 @@ use engine_core::id::StableId;
 use engine_net::envelope::Envelope;
 use engine_net::framing::{FRAME_HEADER_BYTES, MAX_FRAME_BYTES, decode_frame, encode_frame};
 use engine_net::protocol::ErrorPayload;
-use game_api::{ApiError, CharacterCreationKey, CharacterId, CreateCharacter, SessionToken};
+use game_api::{
+    AccountId, ApiError, CharacterCreationKey, CharacterId, CreateCharacter, CreateGroup, GroupId,
+    GroupSearch, SessionToken, validate_group_page,
+};
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use world_gateway::{ERROR_KIND, ResumeToken};
 
 use crate::auth::{
-    Authenticator, CharacterManagementBackend, IdentityBackend, IdentityError,
-    authenticate_selection,
+    Authenticator, CharacterManagementBackend, ChatManagementBackend, GroupManagementBackend,
+    IdentityBackend, IdentityError, SocialManagementBackend, authenticate_selection,
 };
+use crate::multi_zone::ZoneConnection;
 use crate::rate_limit::{RateLimitConfig, RateLimits};
 use crate::service::{Admitted, Credential, HELLO_KIND, Hello, Metrics, ServerEvent, ServerFrame};
 
 /// How long a peer has to send `session.hello` after the upgrade.
 pub const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+/// Maximum time for one raw HTTP request header block to arrive.
+pub const HTTP_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Default messages queued for one connection before it is considered too
 /// slow. The running service uses the validated `--outbound-queue` value.
@@ -94,6 +100,64 @@ struct ConnectionLimitedListener {
 struct LimitedStream {
     stream: tokio::net::TcpStream,
     _permit: OwnedSemaphorePermit,
+    header_read_timeout: Duration,
+    header_timer: Pin<Box<tokio::time::Sleep>>,
+    header_timeout_active: bool,
+    status_probe: [u8; 128],
+    status_probe_len: usize,
+    status_probe_done: bool,
+}
+
+impl LimitedStream {
+    fn new(
+        stream: tokio::net::TcpStream,
+        permit: OwnedSemaphorePermit,
+        header_read_timeout: Duration,
+    ) -> Self {
+        let header_deadline = tokio::time::Instant::now() + header_read_timeout;
+        Self {
+            stream,
+            _permit: permit,
+            header_read_timeout,
+            header_timer: Box::pin(tokio::time::sleep_until(header_deadline)),
+            header_timeout_active: true,
+            status_probe: [0; 128],
+            status_probe_len: 0,
+            status_probe_done: false,
+        }
+    }
+
+    fn reset_header_deadline(&mut self) {
+        self.header_timer
+            .as_mut()
+            .reset(tokio::time::Instant::now() + self.header_read_timeout);
+    }
+
+    fn inspect_status_line(&mut self, bytes: &[u8]) {
+        if self.status_probe_done {
+            return;
+        }
+        for byte in bytes {
+            if self.status_probe_len == self.status_probe.len() {
+                self.status_probe_done = true;
+                return;
+            }
+            self.status_probe[self.status_probe_len] = *byte;
+            self.status_probe_len += 1;
+            if self.status_probe_len >= 2
+                && self.status_probe[self.status_probe_len - 2..self.status_probe_len] == *b"\r\n"
+            {
+                self.status_probe_done = true;
+                let status = &self.status_probe[..self.status_probe_len];
+                if status.starts_with(b"HTTP/1.1 101 ") || status.starts_with(b"HTTP/1.0 101 ") {
+                    // The same IO becomes the upgraded WebSocket stream. Its
+                    // idle policy is enforced at the WebSocket layer.
+                    self.header_timeout_active = false;
+                }
+                return;
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -105,6 +169,19 @@ impl AsyncRead for LimitedStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        if self.header_timeout_active && self.status_probe_done {
+            // A keep-alive connection may carry another request after the
+            // previous response. Inspect its response status independently so
+            // a later WebSocket upgrade also disables this HTTP-only timer.
+            self.status_probe_len = 0;
+            self.status_probe_done = false;
+        }
+        if self.header_timeout_active && self.header_timer.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "HTTP request headers were not received before the deadline",
+            )));
+        }
         Pin::new(&mut self.stream).poll_read(cx, buf)
     }
 }
@@ -115,7 +192,16 @@ impl AsyncWrite for LimitedStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.stream).poll_write(cx, buf)
+        let result = Pin::new(&mut self.stream).poll_write(cx, buf);
+        if let Poll::Ready(Ok(written)) = &result {
+            if *written > 0 {
+                self.inspect_status_line(&buf[..*written]);
+                if self.header_timeout_active {
+                    self.reset_header_deadline();
+                }
+            }
+        }
+        result
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -143,10 +229,7 @@ impl Listener for ConnectionLimitedListener {
             }
         };
         (
-            LimitedStream {
-                stream,
-                _permit: permit,
-            },
+            LimitedStream::new(stream, permit, HTTP_HEADER_READ_TIMEOUT),
             address,
         )
     }
@@ -210,11 +293,17 @@ pub struct AppState {
     events: mpsc::Sender<ServerEvent>,
     admission: AdmissionAuthenticator,
     characters: Option<Arc<dyn CharacterManagementBackend + Send + Sync>>,
+    social: Option<Arc<dyn SocialManagementBackend + Send + Sync>>,
+    groups: Option<Arc<dyn GroupManagementBackend + Send + Sync>>,
+    chat: Option<Arc<dyn ChatManagementBackend + Send + Sync>>,
     ready: AtomicBool,
     origins: OriginPolicy,
     limits: RateLimits,
     outbound_queue: usize,
+    hello_timeout: Duration,
+    idle_timeout: Duration,
     metrics: Arc<Metrics>,
+    content_version: ContentVersionSnapshot,
     backend_telemetry: Option<Arc<dyn Fn() -> BackendTelemetrySnapshot + Send + Sync>>,
     capacity: Arc<Mutex<Capacity>>,
 }
@@ -238,8 +327,12 @@ impl std::fmt::Debug for AppState {
         f.debug_struct("AppState")
             .field("admission", &self.admission)
             .field("character_management", &self.characters.is_some())
+            .field("social_management", &self.social.is_some())
+            .field("group_management", &self.groups.is_some())
+            .field("chat_target_discovery", &self.chat.is_some())
             .field("ready", &self.ready.load(Ordering::Relaxed))
             .field("outbound_queue", &self.outbound_queue)
+            .field("idle_timeout", &self.idle_timeout)
             .field("backend_telemetry", &self.backend_telemetry.is_some())
             .finish_non_exhaustive()
     }
@@ -308,11 +401,17 @@ impl AppState {
             events,
             admission: AdmissionAuthenticator::Demo(authenticator),
             characters: None,
+            social: None,
+            groups: None,
+            chat: None,
             ready: AtomicBool::new(true),
             origins: OriginPolicy::default(),
             limits: RateLimits::new(RateLimitConfig::default()),
             outbound_queue: OUTBOUND_QUEUE,
+            hello_timeout: HELLO_TIMEOUT,
+            idle_timeout: IDLE_TIMEOUT,
             metrics: Arc::new(Metrics::default()),
+            content_version: ContentVersionSnapshot::absent(),
             backend_telemetry: None,
             capacity: Arc::new(Mutex::new(Capacity::default())),
         }
@@ -330,11 +429,17 @@ impl AppState {
             events,
             admission: AdmissionAuthenticator::Identity(backend),
             characters: None,
+            social: None,
+            groups: None,
+            chat: None,
             ready: AtomicBool::new(true),
             origins: OriginPolicy::default(),
             limits: RateLimits::new(RateLimitConfig::default()),
             outbound_queue: OUTBOUND_QUEUE,
+            hello_timeout: HELLO_TIMEOUT,
+            idle_timeout: IDLE_TIMEOUT,
             metrics: Arc::new(Metrics::default()),
+            content_version: ContentVersionSnapshot::absent(),
             backend_telemetry: None,
             capacity: Arc::new(Mutex::new(Capacity::default())),
         }
@@ -347,6 +452,36 @@ impl AppState {
         backend: Arc<dyn CharacterManagementBackend + Send + Sync>,
     ) -> Self {
         self.characters = Some(backend);
+        self
+    }
+
+    /// Enable authenticated social relationship routes on the player API.
+    #[must_use]
+    pub fn with_social_backend(
+        mut self,
+        backend: Arc<dyn SocialManagementBackend + Send + Sync>,
+    ) -> Self {
+        self.social = Some(backend);
+        self
+    }
+
+    /// Enable authenticated Nakama group routes on the player API.
+    #[must_use]
+    pub fn with_group_backend(
+        mut self,
+        backend: Arc<dyn GroupManagementBackend + Send + Sync>,
+    ) -> Self {
+        self.groups = Some(backend);
+        self
+    }
+
+    /// Enable authorized chat-target discovery on the player API.
+    #[must_use]
+    pub fn with_chat_backend(
+        mut self,
+        backend: Arc<dyn ChatManagementBackend + Send + Sync>,
+    ) -> Self {
+        self.chat = Some(backend);
         self
     }
 
@@ -372,6 +507,13 @@ impl AppState {
     #[must_use]
     pub fn with_metrics(mut self, metrics: Arc<Metrics>) -> Self {
         self.metrics = metrics;
+        self
+    }
+
+    /// Report the content bundle that startup actually loaded and verified.
+    #[must_use]
+    pub fn with_content_version(mut self, version: ContentVersionSnapshot) -> Self {
+        self.content_version = version;
         self
     }
 
@@ -402,6 +544,13 @@ impl AppState {
             "an outbound queue must hold at least one frame"
         );
         self.outbound_queue = capacity;
+        self
+    }
+
+    /// Set the maximum time without client activity on an admitted connection.
+    #[must_use]
+    pub fn with_idle_timeout(mut self, timeout: Duration) -> Self {
+        self.idle_timeout = timeout;
         self
     }
 
@@ -450,11 +599,41 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/metrics", get(metrics))
         .route("/characters", get(list_characters).post(create_character))
         .route("/characters/{character}/select", post(select_character))
+        .route("/social/friends", get(list_friends))
+        .route("/social/friends/request", post(request_friend))
+        .route("/social/friends/accept", post(accept_friend_request))
+        .route("/social/friends/dismiss", post(dismiss_friend_request))
+        .route("/social/friends/remove", post(remove_friend))
+        .route("/social/blocks/block", post(block_account))
+        .route("/social/blocks/unblock", post(unblock_account))
+        .route("/social/chat/channels", get(discover_chat_channels))
+        .route("/social/groups", get(my_groups).post(create_group))
+        .route("/social/groups/discover", get(discover_groups))
+        .route("/social/groups/{group}/join", post(join_group))
+        .route("/social/groups/{group}/leave", post(leave_group))
+        .route("/social/groups/{group}/members", get(group_members))
+        .route(
+            "/social/groups/{group}/members/add",
+            post(add_group_members),
+        )
+        .route(
+            "/social/groups/{group}/members/kick",
+            post(kick_group_members),
+        )
+        .route(
+            "/social/groups/{group}/members/promote",
+            post(promote_group_members),
+        )
+        .route(
+            "/social/groups/{group}/members/demote",
+            post(demote_group_members),
+        )
         .route(
             "/characters/{character}/inventory",
             get(character_inventory),
         )
         .route("/world", get(world))
+        .route("/world/{zone_id}", get(world_in_zone))
         .with_state(state)
 }
 
@@ -464,6 +643,7 @@ pub fn admin_router(state: Arc<AppState>) -> Router {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
+        .route("/diagnostics/replication", get(replication_diagnostics))
         .with_state(state)
 }
 
@@ -516,9 +696,7 @@ async fn readyz(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>)
 
 async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let mut body = state.metrics.render();
-    // This service composition does not yet load content bundles. Report that
-    // explicitly instead of presenting a missing series as version zero.
-    body.push_str(&encode_content_version(&ContentVersionSnapshot::absent()));
+    body.push_str(&encode_content_version(&state.content_version));
     if let Some(telemetry) = &state.backend_telemetry {
         body.push_str(&encode_backend_metrics(&telemetry()));
     }
@@ -541,6 +719,10 @@ async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         )],
         body,
     )
+}
+
+async fn replication_diagnostics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(state.metrics.replication_diagnostics())
 }
 
 fn character_backend(
@@ -668,6 +850,522 @@ async fn character_inventory(
         Ok(Err(error)) => character_api_error(&error),
         Err(_) => character_unavailable(),
     }
+}
+
+async fn list_friends(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let (backend, token) = match social_backend(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match tokio::task::spawn_blocking(move || backend.friends(&token)).await {
+        Ok(Ok(friends)) => (StatusCode::OK, Json(json!({"friends": friends}))).into_response(),
+        Ok(Err(error)) => social_api_error(&error),
+        Err(_) => social_unavailable(),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SocialAction {
+    Request,
+    Accept,
+    Dismiss,
+    Remove,
+    Block,
+    Unblock,
+}
+
+async fn request_friend(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<SocialAccountRequest>,
+) -> Response {
+    social_operation(state, headers, request.account_id, SocialAction::Request).await
+}
+
+async fn accept_friend_request(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<SocialAccountRequest>,
+) -> Response {
+    social_operation(state, headers, request.account_id, SocialAction::Accept).await
+}
+
+async fn dismiss_friend_request(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<SocialAccountRequest>,
+) -> Response {
+    social_operation(state, headers, request.account_id, SocialAction::Dismiss).await
+}
+
+async fn remove_friend(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<SocialAccountRequest>,
+) -> Response {
+    social_operation(state, headers, request.account_id, SocialAction::Remove).await
+}
+
+async fn block_account(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<SocialAccountRequest>,
+) -> Response {
+    social_operation(state, headers, request.account_id, SocialAction::Block).await
+}
+
+async fn unblock_account(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<SocialAccountRequest>,
+) -> Response {
+    social_operation(state, headers, request.account_id, SocialAction::Unblock).await
+}
+
+#[derive(serde::Deserialize)]
+struct SocialAccountRequest {
+    account_id: String,
+}
+
+async fn social_operation(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    account: String,
+    action: SocialAction,
+) -> Response {
+    let account = match AccountId::new(account) {
+        Ok(account) => account,
+        Err(error) => return social_api_error(&error),
+    };
+    let (backend, token) = match social_backend(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match tokio::task::spawn_blocking(move || match action {
+        SocialAction::Request => backend.request_friend(&token, &account),
+        SocialAction::Accept => backend.accept_friend_request(&token, &account),
+        SocialAction::Dismiss => backend.dismiss_friend_request(&token, &account),
+        SocialAction::Remove => backend.remove_friend(&token, &account),
+        SocialAction::Block => backend.block_account(&token, &account),
+        SocialAction::Unblock => backend.unblock_account(&token, &account),
+    })
+    .await
+    {
+        Ok(Ok(())) => (StatusCode::OK, Json(json!({"ok": true}))).into_response(),
+        Ok(Err(error)) => social_api_error(&error),
+        Err(_) => social_unavailable(),
+    }
+}
+
+fn social_backend(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<(Arc<dyn SocialManagementBackend + Send + Sync>, SessionToken), Box<Response>> {
+    let Some(backend) = &state.social else {
+        return Err(Box::new(
+            (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response(),
+        ));
+    };
+    let Some(token) = bearer(headers) else {
+        return Err(Box::new(
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "unauthorized"})),
+            )
+                .into_response(),
+        ));
+    };
+    let token = SessionToken::new(token.to_owned()).map_err(|_| {
+        Box::new(
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "unauthorized"})),
+            )
+                .into_response(),
+        )
+    })?;
+    Ok((Arc::clone(backend), token))
+}
+
+fn social_api_error(error: &ApiError) -> Response {
+    let (status, code) = match error {
+        ApiError::Unauthenticated | ApiError::SessionExpired => {
+            (StatusCode::UNAUTHORIZED, "unauthorized")
+        }
+        ApiError::NotFound(_) | ApiError::PermissionDenied => {
+            (StatusCode::NOT_FOUND, "social_target_not_found")
+        }
+        ApiError::InvalidRequest(_) => (StatusCode::BAD_REQUEST, "invalid_request"),
+        ApiError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
+        ApiError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
+        ApiError::Unavailable(_) | ApiError::Transport(_) | ApiError::Backend { .. } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "social_service_unavailable",
+        ),
+    };
+    (status, Json(json!({"error": code}))).into_response()
+}
+
+fn social_unavailable() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error": "social_service_unavailable"})),
+    )
+        .into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct GroupSearchQuery {
+    name: Option<String>,
+    open: Option<bool>,
+    members: Option<u32>,
+    limit: Option<u16>,
+    cursor: Option<String>,
+}
+
+async fn my_groups(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<GroupSearchQuery>,
+) -> Response {
+    let limit = query.limit.unwrap_or(50);
+    if let Err(error) = validate_group_page(limit, query.cursor.as_deref()) {
+        return social_api_error(&error);
+    }
+    let (backend, token) = match group_backend(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match tokio::task::spawn_blocking(move || {
+        backend.my_groups(&token, limit, query.cursor.as_deref())
+    })
+    .await
+    {
+        Ok(Ok(groups)) => (StatusCode::OK, Json(json!(groups))).into_response(),
+        Ok(Err(error)) => social_api_error(&error),
+        Err(_) => social_unavailable(),
+    }
+}
+
+async fn discover_chat_channels(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<GroupSearchQuery>,
+) -> Response {
+    let limit = query.limit.unwrap_or(50);
+    if let Err(error) = validate_group_page(limit, query.cursor.as_deref()) {
+        return social_api_error(&error);
+    }
+    let Some(backend) = &state.chat else {
+        return (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response();
+    };
+    let Some(token) = bearer(&headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "unauthorized"})),
+        )
+            .into_response();
+    };
+    let token = match SessionToken::new(token.to_owned()) {
+        Ok(token) => token,
+        Err(_) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "unauthorized"})),
+            )
+                .into_response();
+        }
+    };
+    let backend = Arc::clone(backend);
+    match tokio::task::spawn_blocking(move || {
+        backend.discover_channels(&token, limit, query.cursor.as_deref())
+    })
+    .await
+    {
+        Ok(Ok(targets)) => (StatusCode::OK, Json(json!(targets))).into_response(),
+        Ok(Err(error)) => social_api_error(&error),
+        Err(_) => social_unavailable(),
+    }
+}
+
+async fn discover_groups(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<GroupSearchQuery>,
+) -> Response {
+    let limit = query.limit.unwrap_or(50);
+    if let Err(error) = validate_group_page(limit, query.cursor.as_deref()) {
+        return social_api_error(&error);
+    }
+    let search = GroupSearch {
+        name: query.name,
+        open: query.open,
+        members: query.members,
+    };
+    if let Err(error) = search.validate() {
+        return social_api_error(&error);
+    }
+    let (backend, token) = match group_backend(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match tokio::task::spawn_blocking(move || {
+        backend.discover_groups(&token, &search, limit, query.cursor.as_deref())
+    })
+    .await
+    {
+        Ok(Ok(groups)) => (StatusCode::OK, Json(json!(groups))).into_response(),
+        Ok(Err(error)) => social_api_error(&error),
+        Err(_) => social_unavailable(),
+    }
+}
+
+async fn create_group(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<CreateGroup>,
+) -> Response {
+    if let Err(error) = request.validate() {
+        return social_api_error(&error);
+    }
+    let (backend, token) = match group_backend(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match tokio::task::spawn_blocking(move || backend.create_group(&token, &request)).await {
+        Ok(Ok(group)) => (StatusCode::CREATED, Json(json!(group))).into_response(),
+        Ok(Err(error)) => social_api_error(&error),
+        Err(_) => social_unavailable(),
+    }
+}
+
+async fn join_group(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(group): Path<String>,
+) -> Response {
+    group_operation(state, headers, group, true).await
+}
+
+async fn leave_group(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(group): Path<String>,
+) -> Response {
+    group_operation(state, headers, group, false).await
+}
+
+async fn group_operation(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    group: String,
+    join: bool,
+) -> Response {
+    let group = match GroupId::new(group) {
+        Ok(group) => group,
+        Err(error) => return social_api_error(&error),
+    };
+    let (backend, token) = match group_backend(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match tokio::task::spawn_blocking(move || {
+        if join {
+            backend.request_join(&token, &group)
+        } else {
+            backend.leave_group(&token, &group)
+        }
+    })
+    .await
+    {
+        Ok(Ok(())) => (StatusCode::OK, Json(json!({"ok": true}))).into_response(),
+        Ok(Err(error)) => social_api_error(&error),
+        Err(_) => social_unavailable(),
+    }
+}
+
+async fn group_members(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(group): Path<String>,
+    Query(query): Query<GroupSearchQuery>,
+) -> Response {
+    let group = match GroupId::new(group) {
+        Ok(group) => group,
+        Err(error) => return social_api_error(&error),
+    };
+    let limit = query.limit.unwrap_or(50);
+    if let Err(error) = validate_group_page(limit, query.cursor.as_deref()) {
+        return social_api_error(&error);
+    }
+    let (backend, token) = match group_backend(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match tokio::task::spawn_blocking(move || {
+        backend.group_members(&token, &group, limit, query.cursor.as_deref())
+    })
+    .await
+    {
+        Ok(Ok(members)) => (StatusCode::OK, Json(json!(members))).into_response(),
+        Ok(Err(error)) => social_api_error(&error),
+        Err(_) => social_unavailable(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct GroupMembersRequest {
+    account_ids: Vec<String>,
+}
+
+#[derive(Clone, Copy)]
+enum GroupMemberAction {
+    Add,
+    Kick,
+    Promote,
+    Demote,
+}
+
+async fn add_group_members(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(group): Path<String>,
+    Json(request): Json<GroupMembersRequest>,
+) -> Response {
+    group_member_operation(
+        state,
+        headers,
+        group,
+        request.account_ids,
+        GroupMemberAction::Add,
+    )
+    .await
+}
+
+async fn kick_group_members(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(group): Path<String>,
+    Json(request): Json<GroupMembersRequest>,
+) -> Response {
+    group_member_operation(
+        state,
+        headers,
+        group,
+        request.account_ids,
+        GroupMemberAction::Kick,
+    )
+    .await
+}
+
+async fn promote_group_members(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(group): Path<String>,
+    Json(request): Json<GroupMembersRequest>,
+) -> Response {
+    group_member_operation(
+        state,
+        headers,
+        group,
+        request.account_ids,
+        GroupMemberAction::Promote,
+    )
+    .await
+}
+
+async fn demote_group_members(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(group): Path<String>,
+    Json(request): Json<GroupMembersRequest>,
+) -> Response {
+    group_member_operation(
+        state,
+        headers,
+        group,
+        request.account_ids,
+        GroupMemberAction::Demote,
+    )
+    .await
+}
+
+async fn group_member_operation(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    group: String,
+    account_ids: Vec<String>,
+    action: GroupMemberAction,
+) -> Response {
+    if account_ids.is_empty() || account_ids.len() > 100 {
+        return social_api_error(&ApiError::InvalidRequest(
+            "group account list must contain between 1 and 100 accounts".into(),
+        ));
+    }
+    let accounts = match account_ids
+        .into_iter()
+        .map(AccountId::new)
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(accounts) => accounts,
+        Err(error) => return social_api_error(&error),
+    };
+    let unique = accounts.iter().collect::<std::collections::BTreeSet<_>>();
+    if unique.len() != accounts.len() {
+        return social_api_error(&ApiError::InvalidRequest(
+            "group account list contains duplicates".into(),
+        ));
+    }
+    let group = match GroupId::new(group) {
+        Ok(group) => group,
+        Err(error) => return social_api_error(&error),
+    };
+    let (backend, token) = match group_backend(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match tokio::task::spawn_blocking(move || match action {
+        GroupMemberAction::Add => backend.add_members(&token, &group, &accounts),
+        GroupMemberAction::Kick => backend.kick_members(&token, &group, &accounts),
+        GroupMemberAction::Promote => backend.promote_members(&token, &group, &accounts),
+        GroupMemberAction::Demote => backend.demote_members(&token, &group, &accounts),
+    })
+    .await
+    {
+        Ok(Ok(())) => (StatusCode::OK, Json(json!({"ok": true}))).into_response(),
+        Ok(Err(error)) => social_api_error(&error),
+        Err(_) => social_unavailable(),
+    }
+}
+
+fn group_backend(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<(Arc<dyn GroupManagementBackend + Send + Sync>, SessionToken), Box<Response>> {
+    let Some(backend) = &state.groups else {
+        return Err(Box::new(
+            (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response(),
+        ));
+    };
+    let Some(token) = bearer(headers) else {
+        return Err(Box::new(
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "unauthorized"})),
+            )
+                .into_response(),
+        ));
+    };
+    let token = SessionToken::new(token.to_owned()).map_err(|_| {
+        Box::new(
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "unauthorized"})),
+            )
+                .into_response(),
+        )
+    })?;
+    Ok((Arc::clone(backend), token))
 }
 
 fn character_api_error(error: &ApiError) -> Response {
@@ -835,6 +1533,30 @@ async fn world(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
+    world_admit(state, peer, headers, upgrade, None).await
+}
+
+async fn world_in_zone(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<PeerAddress>,
+    Path(zone_id): Path<String>,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    world_admit(state, peer, headers, upgrade, Some(zone_id)).await
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "upgrade admission validates bearer, origin, identity, and rate limits before socket acceptance"
+)]
+async fn world_admit(
+    state: Arc<AppState>,
+    peer: PeerAddress,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+    zone_id: Option<String>,
+) -> Response {
     if request_header_bytes(&headers) > MAX_REQUEST_HEADER_BYTES {
         return (
             StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
@@ -857,6 +1579,9 @@ async fn world(
         .admission()
         .handshake(peer.0.ip(), Instant::now())
     {
+        if error.code() == ErrorCode::RateLimited {
+            audit_admission_rate_limit(peer.0.ip(), "handshake");
+        }
         return admission_rejected(&error);
     }
     if !state.origins.permits(&headers) {
@@ -868,14 +1593,7 @@ async fn world(
             .into_response();
     }
     let Some(presented) = bearer(&headers) else {
-        return match state
-            .limits
-            .admission()
-            .failed_auth(peer.0.ip(), Instant::now())
-        {
-            Ok(()) => unauthorized(),
-            Err(error) => admission_rejected(&error),
-        };
+        return failed_auth_with_reason(&state, peer.0.ip(), Instant::now(), "credential_missing");
     };
     let credential = match &state.admission {
         AdmissionAuthenticator::Demo(authenticator) => match authenticator.grant_for(presented) {
@@ -929,11 +1647,25 @@ async fn world(
             }
         }
     };
+    if matches!(&credential, Credential::Resume(_))
+        && let Err(error) = state
+            .limits
+            .admission()
+            .resume_attempt(peer.0.ip(), Instant::now())
+    {
+        if error.code() == ErrorCode::RateLimited {
+            audit_admission_rate_limit(peer.0.ip(), "resume_attempt");
+        }
+        return admission_rejected(&error);
+    }
     if let Err(error) = state
         .limits
         .admission()
         .connection_churn(peer.0.ip(), Instant::now())
     {
+        if error.code() == ErrorCode::RateLimited {
+            audit_admission_rate_limit(peer.0.ip(), "connection_churn");
+        }
         return admission_rejected(&error);
     }
 
@@ -942,7 +1674,7 @@ async fn world(
         .max_frame_size(MAX_FRAME_BYTES + FRAME_HEADER_BYTES)
         .on_upgrade(move |socket| async move {
             let _permit = permit;
-            connection(socket, credential, state).await;
+            connection(socket, credential, state, peer.0.ip(), zone_id).await;
         })
 }
 
@@ -989,10 +1721,46 @@ fn unauthorized() -> Response {
 }
 
 fn failed_auth(state: &AppState, ip: IpAddr) -> Response {
-    match state.limits.admission().failed_auth(ip, Instant::now()) {
-        Ok(()) => unauthorized(),
-        Err(error) => admission_rejected(&error),
+    failed_auth_at(state, ip, Instant::now())
+}
+
+fn failed_auth_at(state: &AppState, ip: IpAddr, now: Instant) -> Response {
+    failed_auth_with_reason(state, ip, now, "credential_rejected")
+}
+
+fn failed_auth_with_reason(
+    state: &AppState,
+    ip: IpAddr,
+    now: Instant,
+    denial_reason: &'static str,
+) -> Response {
+    match state.limits.admission().failed_auth(ip, now) {
+        Ok(()) => {
+            tracing::warn!(
+                event = "world_admission_denied",
+                source_ip = %ip,
+                reason = denial_reason,
+                "world credential admission denied"
+            );
+            unauthorized()
+        }
+        Err(error) => {
+            if error.code() == ErrorCode::RateLimited {
+                audit_admission_rate_limit(ip, "failed_auth");
+            }
+            admission_rejected(&error)
+        }
     }
+}
+
+fn audit_admission_rate_limit(ip: IpAddr, class: &'static str) {
+    tracing::warn!(
+        event = "world_rate_limit_rejected",
+        source_ip = %ip,
+        class,
+        reason = "rate_limited",
+        "world admission rate limit reached"
+    );
 }
 
 fn identity_rejected(
@@ -1008,6 +1776,7 @@ fn identity_rejected(
         // excludes the bearer credential and the backend's failure details.
         tracing::warn!(
             event = "world_admission_denied",
+            source_ip = %ip,
             reason = error.code(),
             character = %character,
             "world character selection denied"
@@ -1058,8 +1827,14 @@ fn selected_character(headers: &HeaderMap) -> Result<StableId, IdentityError> {
         .ok_or(IdentityError::CharacterForbidden)
 }
 
-async fn connection(mut socket: WebSocket, credential: Credential, state: Arc<AppState>) {
-    let hello = match tokio::time::timeout(HELLO_TIMEOUT, read_hello(&mut socket)).await {
+async fn connection(
+    mut socket: WebSocket,
+    credential: Credential,
+    state: Arc<AppState>,
+    source_ip: IpAddr,
+    requested_zone: Option<String>,
+) {
+    let hello = match tokio::time::timeout(state.hello_timeout, read_hello(&mut socket)).await {
         Ok(Ok(hello)) => hello,
         Ok(Err(error)) => {
             reject(&mut socket, &error).await;
@@ -1075,30 +1850,70 @@ async fn connection(mut socket: WebSocket, credential: Credential, state: Arc<Ap
         }
     };
 
+    let is_resume = matches!(&credential, Credential::Resume(_));
     let (outbound, mut out_rx) = mpsc::channel(state.outbound_queue);
-    let (reply, reply_rx) = oneshot::channel();
-    if state
-        .events
-        .send(ServerEvent::Admit {
-            credential,
-            hello,
-            outbound,
-            reply,
-        })
-        .await
-        .is_err()
-    {
-        return;
-    }
-
-    let admitted: Admitted = match reply_rx.await {
-        Ok(Ok(admitted)) => admitted,
-        Ok(Err(error)) => {
-            tracing::info!(code = ?error.code(), "websocket admission rejected");
+    let admitted_result: Result<(Admitted, Option<ZoneConnection>), EngineError> =
+        if let Some(zone_id) = requested_zone {
+            let (reply, reply_rx) = oneshot::channel();
+            if state
+                .events
+                .send(ServerEvent::AdmitZone {
+                    zone_id,
+                    credential,
+                    hello,
+                    outbound,
+                    reply,
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
+            match reply_rx.await {
+                Ok(Ok(admitted)) => Ok((
+                    Admitted {
+                        connection: admitted.route.connection,
+                        session: admitted.session,
+                        actor: admitted.actor,
+                        resumed: admitted.resumed,
+                    },
+                    Some(admitted.route),
+                )),
+                Ok(Err(error)) => Err(error),
+                Err(_) => return,
+            }
+        } else {
+            let (reply, reply_rx) = oneshot::channel();
+            if state
+                .events
+                .send(ServerEvent::Admit {
+                    credential,
+                    hello,
+                    outbound,
+                    reply,
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
+            match reply_rx.await {
+                Ok(Ok(admitted)) => Ok((admitted, None)),
+                Ok(Err(error)) => Err(error),
+                Err(_) => return,
+            }
+        };
+    let (admitted, route) = match admitted_result {
+        Ok(admitted) => admitted,
+        Err(error) => {
+            if is_resume {
+                audit_resume_admission_denied(source_ip, &error);
+            } else {
+                tracing::info!(code = ?error.code(), "websocket admission rejected");
+            }
             reject(&mut socket, &error).await;
             return;
         }
-        Err(_) => return,
     };
 
     if let Err(error) = state
@@ -1108,20 +1923,18 @@ async fn connection(mut socket: WebSocket, credential: Credential, state: Arc<Ap
     {
         tracing::warn!(code = ?error.code(), "websocket rate-limit registration rejected");
         reject(&mut socket, &error).await;
-        let _ = state
-            .events
-            .send(ServerEvent::Leave {
-                connection: admitted.connection,
-            })
-            .await;
+        send_leave(&state, admitted.connection, route).await;
         return;
     }
 
     let end = pump(
         &mut socket,
         &state,
+        source_ip,
         admitted.connection,
         &admitted.session,
+        admitted.actor,
+        route.clone(),
         &mut out_rx,
     )
     .await;
@@ -1130,12 +1943,27 @@ async fn connection(mut socket: WebSocket, credential: Credential, state: Arc<Ap
         reject(&mut socket, &error).await;
     }
 
-    let _ = state
-        .events
-        .send(ServerEvent::Leave {
-            connection: admitted.connection,
-        })
-        .await;
+    send_leave(&state, admitted.connection, route).await;
+}
+
+async fn send_leave(
+    state: &AppState,
+    connection: world_server::ConnectionId,
+    route: Option<ZoneConnection>,
+) {
+    let event = route.map_or(ServerEvent::Leave { connection }, |route| {
+        ServerEvent::LeaveZone { route }
+    });
+    let _ = state.events.send(event).await;
+}
+
+fn audit_resume_admission_denied(source_ip: IpAddr, error: &EngineError) {
+    tracing::warn!(
+        event = "world_resume_admission_denied",
+        source_ip = %source_ip,
+        reason = error.code().as_str(),
+        "world resume admission denied"
+    );
 }
 
 enum End {
@@ -1146,27 +1974,30 @@ enum End {
 async fn pump(
     socket: &mut WebSocket,
     state: &Arc<AppState>,
+    source_ip: IpAddr,
     connection: world_server::ConnectionId,
     session: &engine_net::replication::SessionId,
+    actor: StableId,
+    route: Option<ZoneConnection>,
     out_rx: &mut mpsc::Receiver<ServerFrame>,
 ) -> End {
-    let idle = tokio::time::sleep(IDLE_TIMEOUT);
+    let idle = tokio::time::sleep(state.idle_timeout);
     tokio::pin!(idle);
     loop {
         tokio::select! {
             () = &mut idle => return End::Clean,
             incoming = socket.recv() => {
-                idle.as_mut().reset(tokio::time::Instant::now() + IDLE_TIMEOUT);
+                idle.as_mut().reset(tokio::time::Instant::now() + state.idle_timeout);
                 match incoming {
                     Some(Ok(Message::Binary(bytes))) => {
                         match decode_frame(&bytes) {
                             Ok(envelope) => {
                                 if let Err(error) = state.limits.sessions().check(session, &envelope, Instant::now()) {
-                                    return rate_limit_end(error);
+                                    return rate_limit_end(source_ip, session, "message", error);
                                 }
                                 let queued = tokio::time::timeout(
                                     AUTHORITY_QUEUE_TIMEOUT,
-                                    state.events.send(ServerEvent::Frame { connection, envelope }),
+                                    state.events.send(frame_event(connection, route.clone(), envelope)),
                                 ).await;
                                 if !matches!(queued, Ok(Ok(()))) {
                                     return End::Clean;
@@ -1174,7 +2005,7 @@ async fn pump(
                             }
                             Err(error) => {
                                 if let Err(limited) = state.limits.sessions().check_unknown(session, Instant::now()) {
-                                    return rate_limit_end(limited);
+                                    return rate_limit_end(source_ip, session, "unknown_message", limited);
                                 }
                                 return End::Protocol(error);
                             }
@@ -1184,11 +2015,11 @@ async fn pump(
                         match Envelope::decode(text.as_str()) {
                             Ok(envelope) => {
                                 if let Err(error) = state.limits.sessions().check(session, &envelope, Instant::now()) {
-                                    return rate_limit_end(error);
+                                    return rate_limit_end(source_ip, session, "message", error);
                                 }
                                 let queued = tokio::time::timeout(
                                     AUTHORITY_QUEUE_TIMEOUT,
-                                    state.events.send(ServerEvent::Frame { connection, envelope }),
+                                    state.events.send(frame_event(connection, route.clone(), envelope)),
                                 ).await;
                                 if !matches!(queued, Ok(Ok(()))) {
                                     return End::Clean;
@@ -1196,7 +2027,7 @@ async fn pump(
                             }
                             Err(error) => {
                                 if let Err(limited) = state.limits.sessions().check_unknown(session, Instant::now()) {
-                                    return rate_limit_end(limited);
+                                    return rate_limit_end(source_ip, session, "unknown_message", limited);
                                 }
                                 return End::Protocol(error);
                             }
@@ -1209,6 +2040,7 @@ async fn pump(
             outgoing = out_rx.recv() => {
                 match outgoing {
                     Some(ServerFrame::Envelope(envelope)) => {
+                        audit_outbound_rejection(source_ip, session, actor, &envelope);
                         if send_envelope(socket, &envelope).await.is_err() {
                             return End::Clean;
                         }
@@ -1216,7 +2048,12 @@ async fn pump(
                     Some(ServerFrame::EncodedReplication { bytes, kind }) => {
                         let byte_count = bytes.len();
                         let sent = send_encoded(socket, bytes).await.is_ok();
-                        state.metrics.record_replication_socket_write(kind, byte_count, sent);
+                        state.metrics.record_replication_socket_write_for_session(
+                            session,
+                            kind,
+                            byte_count,
+                            sent,
+                        );
                         if !sent {
                             return End::Clean;
                         }
@@ -1231,10 +2068,67 @@ async fn pump(
     }
 }
 
-fn rate_limit_end(error: EngineError) -> End {
+fn frame_event(
+    connection: world_server::ConnectionId,
+    route: Option<ZoneConnection>,
+    envelope: Envelope,
+) -> ServerEvent {
+    route.map_or(
+        ServerEvent::Frame {
+            connection,
+            envelope: envelope.clone(),
+        },
+        |route| ServerEvent::FrameZone { route, envelope },
+    )
+}
+
+fn audit_outbound_rejection(
+    source_ip: IpAddr,
+    session: &engine_net::replication::SessionId,
+    actor: StableId,
+    envelope: &Envelope,
+) {
+    let code = match envelope.kind.as_str() {
+        ERROR_KIND => envelope
+            .body
+            .get("code")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<ErrorCode>(value).ok()),
+        "action.result" => {
+            serde_json::from_value::<engine_sim::action::ActionResult>(envelope.body.clone())
+                .ok()
+                .and_then(|result| result.error().map(EngineError::code))
+        }
+        _ => None,
+    };
+    let Some(code) = code else {
+        return;
+    };
+    let correlation_id = envelope.correlation.as_ref().map(|id| id.as_str());
     tracing::warn!(
-        code = ?error.code(),
-        "websocket rate limit exceeded"
+        event = "world_authority_rejected",
+        source_ip = %source_ip,
+        session = %session,
+        actor = %actor,
+        correlation_id,
+        reason = code.as_str(),
+        "world authority rejected client operation"
+    );
+}
+
+fn rate_limit_end(
+    source_ip: IpAddr,
+    session: &engine_net::replication::SessionId,
+    class: &'static str,
+    error: EngineError,
+) -> End {
+    tracing::warn!(
+        event = "world_rate_limit_rejected",
+        source_ip = %source_ip,
+        %session,
+        class,
+        reason = error.code().as_str(),
+        "world session rate limit reached"
     );
     End::Protocol(error)
 }
@@ -1298,7 +2192,14 @@ async fn send_envelope(socket: &mut WebSocket, envelope: &Envelope) -> Result<()
 }
 
 async fn send_encoded(socket: &mut WebSocket, frame: Vec<u8>) -> Result<(), ()> {
-    tokio::time::timeout(WRITE_TIMEOUT, socket.send(Message::Binary(frame.into())))
+    write_with_timeout(socket.send(Message::Binary(frame.into())), WRITE_TIMEOUT).await
+}
+
+async fn write_with_timeout<T>(
+    write: impl Future<Output = Result<T, axum::Error>>,
+    timeout: Duration,
+) -> Result<T, ()> {
+    tokio::time::timeout(timeout, write)
         .await
         .map_err(|_| ())?
         .map_err(|_| ())
@@ -1316,13 +2217,283 @@ fn error_envelope(error: &EngineError) -> Result<Envelope, EngineError> {
     ))
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;
     use engine_core::id::{IdKind, StableId};
     use game_api::{AccountId, Character, CharacterCreationReceipt, CharacterStatus};
+    use std::sync::Mutex as StdMutex;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::layer::Context as LayerContext;
+    use tracing_subscriber::prelude::*;
+
+    #[derive(Clone)]
+    struct CaptureEvents(Arc<StdMutex<Vec<String>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CaptureEvents {
+        fn on_event(&self, event: &tracing::Event<'_>, _context: LayerContext<'_, S>) {
+            let mut fields = CapturedFields::default();
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(fields.0);
+        }
+    }
+
+    #[derive(Default)]
+    struct CapturedFields(String);
+
+    impl Visit for CapturedFields {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            use std::fmt::Write as _;
+            let _ = write!(self.0, "{}={value:?} ", field.name());
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            use std::fmt::Write as _;
+            let _ = write!(self.0, "{}={value} ", field.name());
+        }
+    }
+
+    #[tokio::test]
+    async fn incomplete_http_headers_report_a_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let permit = Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap();
+        let mut server = LimitedStream::new(server, permit, Duration::from_millis(40));
+        client
+            .write_all(b"GET /healthz HTTP/1.1\r\nHost: ")
+            .await
+            .unwrap();
+        let mut byte = [0; 1];
+        let error = loop {
+            match server.read(&mut byte).await {
+                Ok(0) => panic!("client closed before the HTTP header deadline"),
+                Ok(_) => continue,
+                Err(error) => break error,
+            }
+        };
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn slow_websocket_write_is_bounded_by_the_write_deadline() {
+        let result = write_with_timeout(
+            std::future::pending::<Result<(), axum::Error>>(),
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(result.is_err(), "a stalled write must time out");
+    }
 
     const CHARACTER_TOKEN: &str = "character-api-secret";
+
+    #[test]
+    fn resume_denial_audit_uses_only_ip_and_stable_reason() {
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CaptureEvents(Arc::clone(&events)));
+        let error = EngineError::new(ErrorCode::SessionExpired, "resume rejected")
+            .with_detail("credential", "must-not-be-logged");
+        tracing::subscriber::with_default(subscriber, || {
+            audit_resume_admission_denied("192.0.2.4".parse().unwrap(), &error);
+        });
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].contains("world_resume_admission_denied"));
+        assert!(events[0].contains("192.0.2.4"));
+        assert!(events[0].contains("session_expired"));
+        assert!(!events[0].contains("must-not-be-logged"));
+    }
+
+    #[test]
+    fn failed_credential_audit_is_bounded_and_rate_limit_is_logged() {
+        let (server_events, _receiver) = event_channel();
+        let state = AppState::new(
+            server_events,
+            Authenticator::new(&[crate::auth::digest("unused")]).unwrap(),
+        );
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CaptureEvents(Arc::clone(&events)));
+        let now = Instant::now();
+        tracing::subscriber::with_default(subscriber, || {
+            for _ in 0..6 {
+                let _ = failed_auth_at(&state, "192.0.2.9".parse().unwrap(), now);
+            }
+        });
+        let events = events.lock().unwrap();
+        let credential_denials = events
+            .iter()
+            .filter(|event| event.contains("world_admission_denied"))
+            .count();
+        let rate_limit_events = events
+            .iter()
+            .filter(|event| event.contains("world_rate_limit_rejected"))
+            .count();
+        assert_eq!(credential_denials, 5, "the bucket allows five attempts");
+        assert_eq!(rate_limit_events, 1, "the sixth attempt is rate-limited");
+        assert!(events[0].contains("world_admission_denied"));
+        assert!(events[0].contains("credential_rejected"));
+        assert!(events[0].contains("192.0.2.9"));
+    }
+
+    #[test]
+    fn security_audit_paths_redact_credentials_and_backend_details() {
+        const SECRET: &str = "audit-redaction-sentinel";
+
+        let (server_events, _receiver) = event_channel();
+        let state = AppState::new(
+            server_events,
+            Authenticator::new(&[crate::auth::digest("unused")]).unwrap(),
+        );
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CaptureEvents(Arc::clone(&events)));
+        let ip = "192.0.2.23".parse().unwrap();
+        let character = StableId::from_parts(IdKind::Character, 1, 23);
+        let detail_error = EngineError::new(ErrorCode::SessionExpired, "private backend message")
+            .with_detail("credential", SECRET)
+            .with_detail("provider_response", SECRET);
+
+        tracing::subscriber::with_default(subscriber, || {
+            let _ = failed_auth_at(&state, ip, Instant::now());
+            audit_resume_admission_denied(ip, &detail_error);
+            identity_rejected(
+                &state,
+                ip,
+                IdentityError::CharacterForbidden,
+                Some(character),
+            );
+            let rate_limit_error = EngineError::new(ErrorCode::RateLimited, "private rate detail")
+                .with_detail("credential", SECRET);
+            let _ = rate_limit_end(
+                ip,
+                &engine_net::replication::SessionId::new("public-session").unwrap(),
+                "message",
+                rate_limit_error,
+            );
+        });
+
+        let events = events.lock().unwrap();
+        let rendered = events.join("\n");
+        assert!(rendered.contains("world_admission_denied"));
+        assert!(rendered.contains("world_resume_admission_denied"));
+        assert!(rendered.contains("world_rate_limit_rejected"));
+        assert!(rendered.contains("character_forbidden"));
+        assert!(!rendered.contains(SECRET));
+        assert!(!rendered.contains("private backend message"));
+        assert!(!rendered.contains("private rate detail"));
+    }
+
+    #[test]
+    fn authority_rejection_audit_is_correlated_and_redacted() {
+        const SECRET: &str = "authority-rejection-private-detail";
+        let actor = StableId::from_parts(IdKind::Character, 8, 41);
+        let session = engine_net::replication::SessionId::new("audit-session-41").unwrap();
+        let envelope = Envelope::new(
+            engine_net::MessageId::parse("request-41").unwrap(),
+            engine_net::MessageKind::parse(ERROR_KIND).unwrap(),
+            serde_json::json!({
+                "code": "permission_denied",
+                "message": SECRET,
+                "details": { "credential": SECRET },
+            }),
+        )
+        .with_correlation(engine_net::MessageId::parse("request-41").unwrap());
+
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CaptureEvents(Arc::clone(&events)));
+        tracing::subscriber::with_default(subscriber, || {
+            audit_outbound_rejection("192.0.2.41".parse().unwrap(), &session, actor, &envelope);
+        });
+
+        let rendered = events.lock().unwrap().join("\n");
+        assert!(rendered.contains("world_authority_rejected"));
+        assert!(rendered.contains("192.0.2.41"));
+        assert!(rendered.contains("audit-session-41"));
+        assert!(rendered.contains(&actor.to_string()));
+        assert!(rendered.contains("request-41"));
+        assert!(rendered.contains("permission_denied"));
+        assert!(!rendered.contains(SECRET));
+    }
+
+    #[tokio::test]
+    async fn slow_peer_without_session_hello_is_closed_before_admission() {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::Message as ClientMessage;
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        use tokio_tungstenite::tungstenite::http::{HeaderValue, header};
+
+        const TOKEN: &str = "slow-handshake-test-secret";
+
+        let (events, mut receiver) = event_channel();
+        let mut app_state = AppState::new(
+            events,
+            Authenticator::new(&[crate::auth::digest(TOKEN)]).unwrap(),
+        );
+        assert_eq!(app_state.hello_timeout, HELLO_TIMEOUT);
+        app_state.hello_timeout = Duration::from_millis(25);
+        let metrics = Arc::clone(&app_state.metrics);
+        let state = Arc::new(app_state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (shutdown, shutdown_rx) = oneshot::channel();
+        let server = tokio::spawn(serve_with_shutdown(listener, state, async move {
+            let _ = shutdown_rx.await;
+        }));
+
+        let mut request = format!("ws://{address}/world")
+            .into_client_request()
+            .unwrap();
+        request.headers_mut().insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {TOKEN}")).unwrap(),
+        );
+        let (mut socket, _) = tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio_tungstenite::connect_async(request),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        let response_message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let ClientMessage::Binary(frame) = response_message else {
+            panic!("slow handshake should receive a protocol error before close");
+        };
+        let error = decode_frame(frame.as_ref()).unwrap();
+        assert_eq!(error.kind.as_str(), ERROR_KIND);
+        assert_eq!(error.body["code"], "invalid_request");
+        assert!(
+            !serde_json::to_string(&error.body).unwrap().contains(TOKEN),
+            "slow-handshake errors must not disclose the bearer credential"
+        );
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            ClientMessage::Close(_)
+        ));
+        assert!(receiver.try_recv().is_err());
+        assert!(
+            metrics
+                .render()
+                .contains("lynx_world_session_attaches_total 0\n")
+        );
+
+        let _ = shutdown.send(());
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
 
     #[test]
     fn outbound_queue_capacity_defaults_and_follows_configuration() {
@@ -1563,6 +2734,74 @@ mod tests {
         assert_eq!(body["error"], "character_not_found");
         assert!(!body.to_string().contains("not disclosed"));
         assert!(!body.to_string().contains(CHARACTER_TOKEN));
+    }
+
+    #[tokio::test]
+    async fn character_api_error_mapping_matches_catalog_and_redacts_backend_text() {
+        const PRIVATE: &str = "backend-private-error-sentinel";
+        let cases = [
+            (
+                ApiError::Unauthenticated,
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+            ),
+            (
+                ApiError::SessionExpired,
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+            ),
+            (
+                ApiError::NotFound(PRIVATE.into()),
+                StatusCode::NOT_FOUND,
+                "character_not_found",
+            ),
+            (
+                ApiError::PermissionDenied,
+                StatusCode::NOT_FOUND,
+                "character_not_found",
+            ),
+            (
+                ApiError::InvalidRequest(PRIVATE.into()),
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+            (
+                ApiError::Conflict(PRIVATE.into()),
+                StatusCode::CONFLICT,
+                "conflict",
+            ),
+            (
+                ApiError::RateLimited,
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limited",
+            ),
+            (
+                ApiError::Unavailable(PRIVATE.into()),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "character_service_unavailable",
+            ),
+            (
+                ApiError::Transport(PRIVATE.into()),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "character_service_unavailable",
+            ),
+            (
+                ApiError::Backend {
+                    status: 500,
+                    code: Some(17),
+                    message: PRIVATE.into(),
+                },
+                StatusCode::SERVICE_UNAVAILABLE,
+                "character_service_unavailable",
+            ),
+        ];
+
+        for (error, expected_status, expected_code) in cases {
+            let (status, body) = response_json(character_api_error(&error)).await;
+            assert_eq!(status, expected_status);
+            assert_eq!(body, json!({"error": expected_code}));
+            assert!(!body.to_string().contains(PRIVATE));
+        }
     }
 
     #[test]

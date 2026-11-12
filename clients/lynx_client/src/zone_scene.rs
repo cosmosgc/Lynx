@@ -817,6 +817,7 @@ pub fn unsupported_asset_reason(presentation: &Presentation, root: &Path) -> Opt
     None
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

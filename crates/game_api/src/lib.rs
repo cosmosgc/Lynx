@@ -1,3 +1,6 @@
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, allow(unused_features))]
+
 //! Backend service interfaces and gameplay DTOs.
 
 pub mod admin;
@@ -7,6 +10,7 @@ pub mod chat;
 pub mod faction;
 pub mod group;
 pub mod inventory;
+pub mod party;
 pub mod service;
 pub mod social;
 
@@ -23,8 +27,10 @@ pub use character::{
     CharacterService, CharacterStatus, CharacterWorldService, EphemeralCharacterIntentService,
 };
 pub use chat::{
-    ChatChannel, ChatChannelKind, ChatMessage, ChatService, MAX_MESSAGE_CHARS, MAX_MESSAGE_PAGE,
-    SendChatMessage, validate_channel_id, validate_page,
+    ChatChannel, ChatChannelKind, ChatChannelTarget, ChatChannelTargetPage, ChatMessage,
+    ChatMessagePage, ChatMessageReceipt, ChatPresence, ChatRealtimeEvent, ChatService,
+    MAX_MESSAGE_CHARS, MAX_MESSAGE_PAGE, RealtimeChatService, RealtimeChatSession, SendChatMessage,
+    validate_channel_id, validate_page,
 };
 pub use faction::{
     FactionMemberView, FactionService, FactionStore, FactionView, TerritoryView, validate_snapshot,
@@ -34,9 +40,10 @@ pub use group::{
     GroupService, MAX_GROUP_PAGE, SocialGroup, validate_group_page,
 };
 pub use inventory::{
-    InventoryReconciliation, InventoryService, InventorySlot, InventoryStore,
-    TransferInventoryUpdate, VersionedInventory, validate_slots,
+    InventoryReconciliation, InventoryReconciliationDifference, InventoryService, InventorySlot,
+    InventoryStore, TransferInventoryUpdate, VersionedInventory, validate_slots,
 };
+pub use party::{PartyPresence, RealtimeParty, RealtimePartyService, RealtimePartySession};
 pub use service::{
     Account, AccountId, ApiError, AuthService, Backend, CreateCharacter, DeviceLogin,
     HealthService, HealthStatus, Session, SessionToken, WorldService, WorldSession, Zone,

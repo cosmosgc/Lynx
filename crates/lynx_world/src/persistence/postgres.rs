@@ -1016,7 +1016,7 @@ fn valid_world_id(value: &str) -> bool {
 ///
 /// `serde_json`'s map is a `BTreeMap` by default, so key order does not depend
 /// on the order PostgreSQL returned from JSONB.
-fn canonical_json(value: &Value) -> Result<String, EngineError> {
+pub(super) fn canonical_json(value: &Value) -> Result<String, EngineError> {
     serde_json::to_string(value).map_err(|error| encode_error(&error))
 }
 
@@ -1058,6 +1058,7 @@ fn write_error(_error: &postgres::Error) -> EngineError {
     )
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

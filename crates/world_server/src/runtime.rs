@@ -216,6 +216,12 @@ impl WorldServer {
         self.connections.len()
     }
 
+    /// Whether `connection` is currently attached to this zone server.
+    #[must_use]
+    pub fn has_connection(&self, connection: ConnectionId) -> bool {
+        self.connections.contains_key(&connection)
+    }
+
     /// Iterate over attached connections in stable ID order.
     pub fn connections(&self) -> impl Iterator<Item = (ConnectionId, &SessionId)> {
         self.connections
@@ -380,6 +386,48 @@ impl WorldServer {
             session,
             reason,
         }])
+    }
+
+    /// Revoke a live connection and its resume credential immediately.
+    ///
+    /// Used when an authoritative zone handoff replaces the session in its
+    /// destination. Unlike `disconnect`, the old session cannot be resumed.
+    pub fn close_connection(
+        &mut self,
+        connection: ConnectionId,
+    ) -> Result<Option<Outbound>, EngineError> {
+        let Some(session) = self.connections.get(&connection).cloned() else {
+            return Ok(None);
+        };
+        self.gateway.close_session(&session)?;
+        self.connections.remove(&connection);
+        Ok(Some(Outbound::Closed {
+            connection,
+            session,
+            reason: CloseReason::SessionExpired,
+        }))
+    }
+
+    /// Detach and forget a source-zone connection after the durable handoff
+    /// transaction has redirected its resume token to the destination zone.
+    /// The bearer token remains usable and is not revoked.
+    pub fn handoff_connection(
+        &mut self,
+        connection: ConnectionId,
+        last_ack_tick: Tick,
+        now: Millis,
+    ) -> Result<Option<Outbound>, EngineError> {
+        let Some(session) = self.connections.get(&connection).cloned() else {
+            return Ok(None);
+        };
+        self.gateway.disconnect(&session, last_ack_tick, now)?;
+        self.gateway.forget_handed_off_session(&session)?;
+        self.connections.remove(&connection);
+        Ok(Some(Outbound::Closed {
+            connection,
+            session,
+            reason: CloseReason::ClientDisconnected,
+        }))
     }
 
     /// Advance the zone and produce per-connection deliveries.

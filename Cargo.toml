@@ -15,6 +15,9 @@ members = [
     "crates/world_server",
     "crates/lynx_world",
     "tools/project_cli",
+    "tools/content_editor",
+    "tools/test_harness",
+    "tools/load_harness",
 ]
 
 [workspace.package]
@@ -30,13 +33,17 @@ anyhow = "1.0.104"
 bevy = { version = "=0.20.0", default-features = false }
 base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive"] }
+clap_complete = "4.6.11"
 dotenvy = "0.15.7"
 futures-util = "0.3.31"
 getrandom = "0.4.3"
 ron = "0.12.2"
+rmcp = { version = "3.9.0", default-features = false, features = ["server", "macros", "transport-io"] }
+schemars = "1.2.3"
 semver = { version = "1.0.28", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sysinfo = "0.39.6"
 sha2 = "0.11.1"
 thiserror = "2.0.21"
 tracing = "0.1.44"
@@ -78,6 +85,7 @@ codegen-units = 1
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_debug_implementations = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage_nightly)'] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

@@ -16,7 +16,7 @@
 //! them silently. Client input and wire payloads never reach this path; only an
 //! authoritative caller may adopt a snapshot.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use engine_core::error::{EngineError, ErrorCode};
@@ -51,6 +51,9 @@ pub struct ZoneSnapshot {
     pub links: Vec<EntityLink>,
     /// Action result cache in dedupe order, for idempotent retries.
     pub action_results: Vec<(String, ActionResult)>,
+    /// Wire request IDs for retained action results, for log-to-event tracing.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub action_correlations: BTreeMap<String, String>,
     /// Link-activation result cache in dedupe order.
     pub link_results: Vec<(String, Vec<ActionEffect>)>,
     /// Active action cooldowns keyed by actor, verb, and target.
@@ -186,6 +189,7 @@ impl Zone {
             entities,
             links,
             action_results,
+            action_correlations: self.action_correlations.clone(),
             link_results,
             cooldowns,
             link_cooldowns,
@@ -341,6 +345,20 @@ impl Zone {
             zone.action_results.insert(request.clone(), result.clone());
             zone.action_order.push_back(request.clone());
         }
+        for (request, correlation_id) in &snapshot.action_correlations {
+            if !zone.action_results.contains_key(request)
+                || !valid_action_correlation_id(correlation_id)
+                || zone
+                    .action_correlations
+                    .insert(request.clone(), correlation_id.clone())
+                    .is_some()
+            {
+                return Err(EngineError::new(
+                    ErrorCode::InvalidRequest,
+                    "snapshot action correlation is invalid",
+                ));
+            }
+        }
         for (request, effects) in &snapshot.link_results {
             if zone.link_results.contains_key(request) {
                 return Err(EngineError::new(
@@ -424,6 +442,19 @@ impl Zone {
     }
 }
 
+fn valid_action_correlation_id(value: &str) -> bool {
+    value.len() <= 64
+        && value
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic())
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+        && !value.ends_with('_')
+        && !value.ends_with('-')
+}
+
 fn validate_restored_entity(
     entity: &EntityRecord,
     rules: &dyn ItemRules,
@@ -476,6 +507,7 @@ fn validate_transfer_receipt(
     Ok(())
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,6 +516,7 @@ mod tests {
     use engine_core::id::DefinitionId;
     use engine_core::inventory::{Inventory, ItemStack, UniformItemRules};
     use engine_core::math::Vec3;
+    use proptest::prelude::*;
 
     fn rules() -> Arc<dyn ItemRules + Send + Sync> {
         Arc::new(UniformItemRules::new(9))
@@ -578,6 +611,35 @@ mod tests {
             effects
         );
         assert_eq!(restored.snapshot(), snapshot);
+    }
+
+    proptest! {
+        #[test]
+        fn generated_persistent_entity_snapshots_round_trip(
+            health_rows in prop::collection::vec((1u16..=100, 0u16..=100), 0..=4),
+            ticks in 0u8..=20,
+        ) {
+            let mut source = zone();
+            for (index, (maximum, current_seed)) in health_rows.into_iter().enumerate() {
+                let seed = u128::try_from(index + 1).unwrap();
+                let id = source.spawn(
+                    entity(seed, PersistencePolicy::PersistentEntity).with_health(i32::from(maximum))
+                ).unwrap();
+                source.entity_mut(id).unwrap().health.as_mut().unwrap().current =
+                    i32::from(current_seed % (maximum + 1));
+            }
+            for _ in 0..ticks {
+                source.advance_tick();
+            }
+
+            let snapshot = source.snapshot();
+            let encoded = serde_json::to_vec(&snapshot).unwrap();
+            let decoded: ZoneSnapshot = serde_json::from_slice(&encoded).unwrap();
+            let restored = Zone::restore(&decoded, nav(), rules()).unwrap();
+
+            prop_assert_eq!(&decoded, &snapshot);
+            prop_assert_eq!(&restored.snapshot(), &snapshot);
+        }
     }
 
     #[test]
@@ -739,7 +801,9 @@ mod tests {
         snapshot
             .action_results
             .push(("action-1".into(), result.clone()));
-        snapshot.action_results.push(("action-1".into(), result));
+        snapshot
+            .action_results
+            .push(("action-1".into(), result.clone()));
         assert_eq!(
             Zone::restore(&snapshot, nav(), rules()).unwrap_err().code(),
             ErrorCode::Conflict
@@ -761,6 +825,26 @@ mod tests {
         assert_eq!(
             Zone::restore(&snapshot, nav(), rules()).unwrap_err().code(),
             ErrorCode::InvalidRequest
+        );
+
+        snapshot.link_results.clear();
+        snapshot.action_results = vec![("action-1".into(), result)];
+        snapshot
+            .action_correlations
+            .insert("action-1".into(), "invalid correlation".into());
+        assert_eq!(
+            Zone::restore(&snapshot, nav(), rules()).unwrap_err().code(),
+            ErrorCode::InvalidRequest
+        );
+        snapshot
+            .action_correlations
+            .insert("action-1".into(), "wire-action-1".into());
+        assert_eq!(
+            Zone::restore(&snapshot, nav(), rules())
+                .unwrap()
+                .snapshot()
+                .action_correlations,
+            snapshot.action_correlations
         );
     }
 

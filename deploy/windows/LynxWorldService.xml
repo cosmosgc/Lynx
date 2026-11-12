@@ -1,0 +1,9 @@
+<service>
+  <id>LynxWorld</id>
+  <name>Lynx World</name>
+  <description>Authoritative Lynx world service</description>
+  <executable>%BASE%\lynx-world.exe</executable>
+  <arguments>serve --bind 127.0.0.1:8090 --admin-bind 127.0.0.1:8091 --auth-mode nakama --state-postgres</arguments>
+  <stoptimeout>60sec</stoptimeout>
+  <log mode="roll" />
+</service>

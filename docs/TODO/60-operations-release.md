@@ -6,10 +6,10 @@ correlation, docs, and capacity.
 
 **What exists today:** structured logs, health/readiness endpoints, graceful
 shutdown with a final snapshot, a checksummed migration runner, native
-setup/run scripts, and a CI workflow that runs formatting, Clippy, tests, a
-generated-project check, migrations on Ubuntu, and a PostgreSQL 17
-service. Partial metrics exist; dashboards, backup drills, staging/rollback automation, client
-packaging, load testing, and runbooks are still missing.
+setup/run scripts, Prometheus metrics, and a CI workflow that runs formatting,
+Clippy, tests, a generated-project check, migrations on Ubuntu, and PostgreSQL
+17. Dashboards, backup drills, staging/rollback automation, client packaging,
+load testing, and runbooks remain open.
 
 **Related design:** [operations](../operations.md),
 [platforms](../platforms.md), [getting started](../getting-started.md),
@@ -20,7 +20,9 @@ packaging, load testing, and runbooks are still missing.
 ## OPS-001 — Metrics endpoint
 
 - **Priority:** P1
-- **Status:** In progress
+- **Status:** Done
+- **Completed:** 2026-11-12
+- **Completion record:** [OPS-001](completed/ops-001-metrics-endpoint.md)
 - **Depends on:** —
 - **References:** [operations §Metrics and logs](../operations.md#metrics-and-logs)
 
@@ -47,37 +49,30 @@ invisible until players complain.
 - [x] Missing metrics are documented as unsupported, not silently omitted.
 - [x] Readiness and metrics can be scraped without opening the world port.
 
-Partial implementation: the admin listener exports tick execution time, scheduler
-deadline misses, overruns and failures, entities, attached and retained sessions,
-authority inputs and action request/rejection/applied/timing metrics, resume
-outcomes, sampled outbound queue pressure and enqueued replication bytes, AI
-budget counters, bounded admission/rate-limit rejections, snapshot write outcomes
-and store write latency. Nakama mode also exports bounded backend adapter counts,
-errors and duration histograms. Content state is explicitly reported as absent
-until the service loads a bundle. `Zone::find_path` now accumulates bounded
-pathfinding diagnostics, which the admin metrics listener exports. The demo
-GuardChase scenario produces path activity; authored behavior/content activation
-remains under `SIM-006`. Localization diagnostics are
-still opt-in and unwired: repository search found no `CatalogSet` or
-`resolve_with_diagnostics` use in `crates/lynx_world/src`. See operations for
-metric semantics and unsupported families. The existing live session/input/tick
-metrics regression passed locally with
-`cargo test -p lynx-world metrics_follow_real_session_input_and_tick` (1 passed).
+The admin listener exports tick duration, deadline misses, overruns and
+failures, entity/session counts, authority input and action metrics, resume
+outcomes, replication queue/byte metrics, AI and pathfinding budgets, bounded
+admission/rate-limit rejections, snapshot write outcomes and store latency.
+Nakama mode exports bounded backend adapter counts, errors and duration
+histograms. Content state reports `absent` until a bundle is loaded. The demo
+GuardChase path activity is included in the real-scenario metrics regression.
+Localization fallback/missing-key counts are explicitly unsupported because the
+world service does not resolve localized catalogs; operations docs list that
+limitation and other incomplete metric families rather than presenting absence
+as zero. Backend query/pool histograms and live staging alert exercises remain
+separate operational follow-ups.
 
-This task remains in progress until pathfinding/localization are integrated or
-formally removed from scope, and the full validation gates are verified.
-The read-only `scripts/test-nakama.ps1` smoke check accepts an explicit
-`-MetricsUrl`, and Ubuntu CI has a dedicated ShellCheck job for operations
-scripts. Live Nakama metrics verification is still pending because the available
-Nakama health endpoint and PostgreSQL listener were unreachable during the
-latest smoke attempt; the existing Nakama process was not restarted.
+Focused verification on 2026-11-12: `cargo test -p lynx-world --lib metrics`
+passed the metrics suite, including a real session/input/tick/pathfinding
+scenario, Prometheus exposition, bounded labels/redaction, and HTTP separation
+of gameplay and admin scrape surfaces.
 
 ---
 
 ## OPS-002 — Dashboards and alerts
 
 - **Priority:** P2
-- **Status:** Blocked — `OPS-001`
+- **Status:** In progress
 - **Depends on:** `OPS-001`
 - **References:** [operations §Metrics and logs](../operations.md#metrics-and-logs)
 
@@ -97,6 +92,15 @@ latest smoke attempt; the existing Nakama process was not restarted.
 - [ ] Alerts distinguish a real incident from a deploy/restart.
 - [ ] SLOs are documented and reviewed.
 
+Grafana provisioning and a versioned dashboard, Prometheus rules with runbook
+links, initial thresholds, and proposed SLOs are checked in. CI installs the
+Ubuntu Prometheus package and runs `promtool check rules` against the checked-in
+rule file. Local verification on 2026-11-12 used the checksum-verified
+Prometheus 3.16.0 Windows release; `promtool check rules` accepted all seven
+rules. Thresholds and SLOs remain provisional pending a staging exercise.
+Backup failures require a deployment-owned exporter because Lynx has no backup
+job or backup metrics.
+
 ---
 
 ## OPS-003 — Backup and restore automation
@@ -104,7 +108,8 @@ latest smoke attempt; the existing Nakama process was not restarted.
 - **Priority:** P1
 - **Status:** Blocked — `PST-009`
 - **Depends on:** `PST-009`
-- **References:** `PST-009`, [security §Abuse prevention](../security.md#abuse-prevention)
+- **References:** `PST-009`, [security §Abuse prevention](../security.md#abuse-prevention),
+  [ADR 0027](../adr/0027-backup-retention-and-recovery-objectives.md)
 
 **Scope**
 
@@ -172,10 +177,11 @@ latest smoke attempt; the existing Nakama process was not restarted.
 - [ ] Release notes list breaking changes and migrations.
 
 **Implementation:** `.github/workflows/release.yml` builds version-matched,
-tagged Linux and Windows server archives, emits a checksum and build stamp, and
-publishes them with GitHub-generated notes. `docs/release.md` documents checksum
-verification, install, upgrade, rollback, and removal. The workflow must run on
-a real tag before these acceptance criteria can be checked.
+tagged Linux and Windows server archives, emits a checksum, build stamp, and
+target-specific CycloneDX SBOM, and publishes them with GitHub-generated notes.
+`docs/release.md` documents checksum verification, SBOM scope, install,
+upgrade, rollback, and removal. The workflow must run on a real tag before
+these acceptance criteria can be checked.
 
 ---
 
@@ -183,6 +189,7 @@ a real tag before these acceptance criteria can be checked.
 
 - **Priority:** P1
 - **Status:** Done — hosted Linux, Windows, and macOS checks are green; completion record: [`completed/ops-006-ci-matrix.md`](completed/ops-006-ci-matrix.md). Linux graphical CI coverage is deferred to `OPS-016`.
+- **Completion record:** [ops-006-ci-matrix.md](completed/ops-006-ci-matrix.md)
 - **Depends on:** —
 - **References:** [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml),
   [platforms](../platforms.md)
@@ -278,7 +285,9 @@ services are confined to hosted CI.
 ## OPS-008 — Dependency and license auditing
 
 - **Priority:** P1
-- **Status:** In progress
+- **Status:** Done
+- **Completed:** 2026-11-12
+- **Completion record:** [OPS-008](completed/ops-008-dependency-audit-sbom.md)
 - **Depends on:** —
 - **References:** [security §Abuse prevention](../security.md#abuse-prevention)
 
@@ -292,10 +301,10 @@ services are confined to hosted CI.
 
 **Acceptance criteria**
 
-- [ ] CI fails on known vulnerable or disallowed dependencies.
-- [ ] Exceptions are documented with an owner and expiry.
-- [ ] Release artifacts include an SBOM.
-- [ ] Security updates have a documented turnaround target.
+- [x] CI fails on known vulnerable or disallowed dependencies.
+- [x] Exceptions are documented with an owner and expiry.
+- [x] Release artifacts include an SBOM.
+- [x] Security updates have a documented turnaround target.
 
 **Initial implementation:** `.github/workflows/ci.yml` runs pinned
 `cargo-deny` 0.19.0 against the committed lockfile on pull requests and pushes;
@@ -320,7 +329,10 @@ target remediation or documented mitigation within 7 calendar days for
 critical/high advisories and 30 calendar days for other severities. Review
 dependencies monthly and after RustSec alerts. `cargo deny --locked check`
 passes locally with these rules; duplicate-version warnings remain visible.
-Release SBOM generation/attachment is still missing.
+The tag release workflow installs pinned `cargo-cyclonedx` 0.5.9, generates a
+CycloneDX 1.5 JSON SBOM for the Linux or Windows `lynx-world` binary target,
+and includes it both in the archive and as a standalone release asset.
+[`docs/release.md`](../release.md) describes its scope and limitations.
 
 ---
 
@@ -378,7 +390,7 @@ Release SBOM generation/attachment is still missing.
 ## OPS-011 — Production topology and deployment
 
 - **Priority:** P2
-- **Status:** Ready
+- **Status:** In progress — topology, service examples, deployment checklist, and Unix SIGTERM shutdown handling are documented/implemented; a clean-host deployment drill remains
 - **Depends on:** `OPS-001`
 - **References:** [operations](../operations.md), [platforms](../platforms.md)
 
@@ -398,6 +410,15 @@ Release SBOM generation/attachment is still missing.
 - [ ] The service drains and restarts without losing the durable world.
 - [ ] Only intended ports are exposed; the database is not public.
 - [ ] Deployment does not require Docker.
+
+The deployment reference and sample service definitions live in
+[`operations`](../operations.md#reference-deployment-topology-and-service-lifecycle),
+[`deploy/systemd/lynx-world.service`](../../deploy/systemd/lynx-world.service),
+and [`deploy/windows/LynxWorldService.xml`](../../deploy/windows/LynxWorldService.xml).
+The Linux process now treats SIGTERM as a graceful shutdown request, matching
+the systemd stop path and allowing configured final persistence to run. A
+clean-host exercise is still needed to confirm listener exposure, service
+identity/permissions, secret injection, readiness, and restart recovery.
 
 ---
 
@@ -428,7 +449,9 @@ Release SBOM generation/attachment is still missing.
 ## OPS-013 — Correlation and observability plumbing
 
 - **Priority:** P1
-- **Status:** Blocked — `OPS-001`
+- **Status:** Done
+- **Completed:** 2026-11-12
+- **Completion record:** [OPS-013](completed/ops-013-correlation-observability.md)
 - **Depends on:** `OPS-001`
 - **References:** [operations §Metrics and logs](../operations.md#metrics-and-logs)
 
@@ -443,17 +466,25 @@ Release SBOM generation/attachment is still missing.
 
 **Acceptance criteria**
 
-- [ ] A single action can be followed from wire receipt to persistence/audit.
-- [ ] Logs use a documented schema and stable field names.
-- [ ] Sensitive fields are redacted in a tested path.
-- [ ] Sampling does not hide errors/audit events.
+- [x] A single action can be followed from wire receipt to persistence/audit.
+- [x] Logs use a documented schema and stable field names.
+- [x] Sensitive fields are redacted in a tested path.
+- [x] Sampling does not hide errors/audit events.
+
+`world_action_processed` links the validated wire ID to the scoped simulation
+idempotency key stored in the zone snapshot and `zone.action-results.replace`
+event. The payload's optional `action_correlations` field is additive, preserving
+the existing event kind for older replay readers. Structured stdout logs are the
+documented trace-export alternative; applied events are info and non-applied
+outcomes are warn, without sampling. Focused service and replay tests verify the
+wire-to-log-to-durable path and restored correlation map.
 
 ---
 
 ## OPS-014 — Documentation, changelog, and release discipline
 
 - **Priority:** P1
-- **Status:** Ready
+- **Status:** Done — tagged-release notes are gated, README metadata and local links are checked in CI, all completed tasks are indexed, and the stale claims found in the documentation review were corrected; see [completion record](completed/ops-014-docs-changelog-release.md)
 - **Depends on:** —
 - **References:** [`CHANGELOG.md`](../../CHANGELOG.md),
   [`docs/TODO/README.md`](README.md)
@@ -469,10 +500,22 @@ Release SBOM generation/attachment is still missing.
 
 **Acceptance criteria**
 
-- [ ] A release cannot ship without changelog and migration notes.
-- [ ] README counts/links are checked in CI or reviewed in the release checklist.
-- [ ] Closed tasks are moved to `completed/` with their design record.
-- [ ] Stale docs are treated as defects, not cleanup.
+- [x] A release cannot ship without changelog and migration notes.
+- [x] README counts/links are checked in CI or reviewed in the release checklist.
+- [x] Closed tasks are moved to `completed/` with their design record.
+- [x] Stale docs are treated as defects, not cleanup.
+
+**Progress (2026-11-12):** CI validates README workspace-crate, accepted-ADR,
+documentation counts, and ADR range against repository metadata. The tag
+release workflow rejects a missing versioned changelog section or migration
+note (use `- None.` when no migration applies), and CI checks local Markdown
+links. The November review audited all 25 backlog tasks marked Done and ensured
+each has a completion file, task link, and README index entry. It also corrected
+stale README phase focus/counts, persistence and Nakama capability summaries,
+outdated ADR implementation notes, and the resolved NET-002 issue report. The
+`Unreleased` changelog remains intentionally unreleasable until a versioned
+section and migration note are prepared for an actual release.
+
 
 ---
 

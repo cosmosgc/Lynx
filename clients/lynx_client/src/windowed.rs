@@ -122,6 +122,13 @@ pub(crate) fn interaction_keyboard(
         }
         return;
     }
+    if client
+        .interaction()
+        .panel()
+        .is_some_and(crate::content_panel::is_content_panel)
+    {
+        return;
+    }
     let Some(target) = selected.0 else {
         return;
     };
@@ -1023,6 +1030,7 @@ fn present_scene(
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

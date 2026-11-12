@@ -3,8 +3,9 @@
 //! This module is the server-side seam between atlas topology and the
 //! authoritative simulation. It rejects unplaced or un-routed pairs before
 //! delegating the state move to `Zone::transfer_entity_to`. Receipts are bounded
-//! and idempotent for the lifetime of this coordinator; durable cross-zone
-//! receipts and atomic multi-zone checkpoints remain a persistence follow-up.
+//! and idempotent for the lifetime of this coordinator. The
+//! [`ZoneHandoffStore`] seam can commit both zone snapshots and the receipt as
+//! one durable transaction.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -12,6 +13,7 @@ use engine_content::{RouteKind, WorldMapDefinition};
 use engine_core::error::{EngineError, ErrorCode};
 use engine_core::id::{IdKind, StableId};
 use engine_core::math::Vec3;
+use engine_sim::snapshot::ZoneSnapshot;
 use engine_sim::zone::Zone;
 
 use crate::authority::ZoneAuthoritySet;
@@ -43,7 +45,7 @@ impl PlayerHandoffRequest {
 }
 
 /// Server-created evidence of one completed zone handoff.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ZoneHandoffReceipt {
     /// Caller-supplied server request key.
     pub request_key: String,
@@ -61,19 +63,103 @@ pub struct ZoneHandoffReceipt {
     pub destination: Vec3,
 }
 
+/// Durable transaction seam for a cross-zone handoff.
+///
+/// Implementations commit the source checkpoint, destination checkpoint,
+/// resume-token zone routing update, and receipt together, after validating
+/// authority for both zones. Retrying the same receipt key and payload returns
+/// the original receipt without applying another checkpoint pair; reusing a
+/// key with different data is a conflict.
+pub trait ZoneHandoffStore: std::fmt::Debug + Send + Sync {
+    /// Atomically persist both post-transfer snapshots and the receipt.
+    fn commit_handoff(
+        &self,
+        source: &ZoneSnapshot,
+        destination: &ZoneSnapshot,
+        receipt: &ZoneHandoffReceipt,
+    ) -> Result<ZoneHandoffReceipt, EngineError>;
+
+    /// Read a committed receipt by its idempotency key.
+    fn handoff_receipt(&self, request_key: &str)
+    -> Result<Option<ZoneHandoffReceipt>, EngineError>;
+}
+
 /// Coordinates validated, duplicate-safe handoffs between two live zones.
 ///
 /// A receipt key may be retried with identical inputs and returns the original
 /// result without moving the entity again. Reusing a key with different
-/// principal, zones, route, or arrival is a conflict. This implementation is
-/// intentionally in-memory; it does not claim crash-safe exactly-once transfer.
-#[derive(Debug, Default)]
+/// principal, zones, route, or arrival is a conflict. This in-memory path does
+/// not claim crash-safe exactly-once transfer without [`ZoneHandoffStore`].
+#[derive(Debug, Default, Clone)]
 pub struct ZoneHandoffCoordinator {
     receipts: BTreeMap<String, ZoneHandoffReceipt>,
     order: VecDeque<String>,
 }
 
 impl ZoneHandoffCoordinator {
+    /// Transfer a player and persist both resulting zones before publishing
+    /// either in-memory state change.
+    ///
+    /// A matching durable receipt makes retries safe after process recovery:
+    /// the stored receipt is returned without applying the transfer again.
+    /// For a new request, the transfer is performed against private zone
+    /// copies. The live zones and coordinator are replaced only after the
+    /// store atomically commits both snapshots and the receipt.
+    ///
+    /// # Errors
+    /// Returns the same validation errors as [`Self::handoff_player`], plus any
+    /// persistence error. On persistence failure, this method leaves the live
+    /// zones and in-memory receipt cache unchanged. A connection failure during
+    /// database commit can leave the durable outcome unknown; callers must stop
+    /// serving and reload both zones before accepting more work.
+    pub fn handoff_player_durable(
+        &mut self,
+        atlas: &WorldMapDefinition,
+        authorities: &ZoneAuthoritySet,
+        source: &mut Zone,
+        destination: &mut Zone,
+        request: &PlayerHandoffRequest,
+        store: &dyn ZoneHandoffStore,
+    ) -> Result<ZoneHandoffReceipt, EngineError> {
+        if request.request_key.is_empty() || request.request_key.len() > 128 {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "handoff request key must contain 1 to 128 bytes",
+            ));
+        }
+        request.character.expect_kind(IdKind::Character)?;
+        if let Some(receipt) = store.handoff_receipt(&request.request_key)? {
+            validate_durable_retry(atlas, authorities, source, destination, request, &receipt)?;
+            return Ok(receipt);
+        }
+
+        let mut staged_source = source.clone();
+        let mut staged_destination = destination.clone();
+        let mut staged_coordinator = self.clone();
+        let receipt = staged_coordinator.handoff_player(
+            atlas,
+            authorities,
+            &mut staged_source,
+            &mut staged_destination,
+            request,
+        )?;
+        let committed = store.commit_handoff(
+            &staged_source.snapshot(),
+            &staged_destination.snapshot(),
+            &receipt,
+        )?;
+        if committed != receipt {
+            return Err(EngineError::new(
+                ErrorCode::Conflict,
+                "the durable handoff store returned a different receipt",
+            ));
+        }
+        *source = staged_source;
+        *destination = staged_destination;
+        *self = staged_coordinator;
+        Ok(committed)
+    }
+
     /// Validate an authored route and move one persistent living player entity.
     ///
     /// The destination must be an atlas-placed zone, and travel must be an
@@ -209,6 +295,72 @@ impl ZoneHandoffCoordinator {
     }
 }
 
+fn validate_durable_retry(
+    atlas: &WorldMapDefinition,
+    authorities: &ZoneAuthoritySet,
+    source: &Zone,
+    destination: &Zone,
+    request: &PlayerHandoffRequest,
+    receipt: &ZoneHandoffReceipt,
+) -> Result<(), EngineError> {
+    if request.request_key.is_empty() || request.request_key.len() > 128 {
+        return Err(EngineError::new(
+            ErrorCode::InvalidRequest,
+            "handoff request key must contain 1 to 128 bytes",
+        ));
+    }
+    request.character.expect_kind(IdKind::Character)?;
+    for instance in [source.config().instance, destination.config().instance] {
+        let Some(authority) = authorities.get(&instance.to_string()) else {
+            return Err(EngineError::new(
+                ErrorCode::InvalidState,
+                "handoff requires authority over both zone instances",
+            ));
+        };
+        if authority.renew()?.is_none() {
+            return Err(EngineError::new(
+                ErrorCode::Conflict,
+                "zone authority was lost before handoff",
+            ));
+        }
+    }
+    let source_definition = &source.config().definition;
+    let destination_definition = &destination.config().definition;
+    let route = atlas
+        .route_kind(source_definition, destination_definition)
+        .filter(|_| {
+            atlas
+                .zones
+                .iter()
+                .any(|zone| zone.zone == *source_definition)
+                && atlas
+                    .zones
+                    .iter()
+                    .any(|zone| zone.zone == *destination_definition)
+        })
+        .ok_or_else(|| {
+            EngineError::new(
+                ErrorCode::InvalidRequest,
+                "no authored route connects the source and destination zones",
+            )
+        })?;
+    if receipt.request_key != request.request_key
+        || receipt.character != request.character
+        || receipt.source_instance != source.config().instance
+        || receipt.destination_instance != destination.config().instance
+        || receipt.route != route
+        || receipt.destination != request.arrival
+    {
+        return Err(EngineError::new(
+            ErrorCode::Conflict,
+            "handoff request key was already used with different inputs",
+        ));
+    }
+    receipt.entity.expect_kind(IdKind::Entity)?;
+    Ok(())
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

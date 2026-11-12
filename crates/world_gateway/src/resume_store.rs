@@ -43,6 +43,7 @@ impl std::fmt::Debug for TokenDigest {
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::TokenDigest;
@@ -62,6 +63,8 @@ mod tests {
 pub struct ResumeSessionRecord {
     /// Opaque gateway routing identifier, not a bearer credential.
     pub session_id: String,
+    /// Stable zone instance that owns this session.
+    pub zone_id: String,
     /// Authenticated account identifier.
     pub account_id: String,
     /// Verified character principal identifier.
@@ -89,6 +92,17 @@ pub struct ResumeSessionRecord {
 pub trait ResumeSessionStore: std::fmt::Debug + Send + Sync {
     /// Insert an initially connected record.
     fn create(&self, record: &ResumeSessionRecord) -> Result<(), EngineError>;
+
+    /// Read session metadata for a token without consuming or rotating it.
+    /// Multi-zone routers use this to select the owning character zone before
+    /// calling `consume_and_rotate`. Older adapters may return `None` when
+    /// they do not support preflight routing.
+    fn lookup_token(
+        &self,
+        _token: TokenDigest,
+    ) -> Result<Option<ResumeSessionRecord>, EngineError> {
+        Ok(None)
+    }
 
     /// Detach a connected record, setting its expiry and advancing its fence.
     /// Returns false if the current generation is stale or not connected.

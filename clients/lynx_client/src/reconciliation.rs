@@ -265,6 +265,7 @@ fn distance(a: Position, b: Position) -> f32 {
     (dx.mul_add(dx, dy.mul_add(dy, dz * dz))).sqrt()
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

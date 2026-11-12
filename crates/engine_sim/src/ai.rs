@@ -5,9 +5,9 @@ use engine_core::faction::{
 };
 use engine_core::id::{DefinitionId, StableId};
 use engine_core::math::Vec3;
-use engine_core::time::{Millis, Tick};
+use engine_core::time::{DailySchedule, Millis, Tick};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 
 use crate::action::{ActionRequest, ActionResult, Verb};
@@ -15,6 +15,13 @@ use crate::entity::EntityRecord;
 use crate::mind::Controller;
 use crate::nav::{PartialPathPolicy, Path, ReplanPolicy, ReplanState};
 use crate::zone::Zone;
+
+/// Hard upper bound on behavior graph instructions executed for one AI per tick.
+pub const MAX_AI_BEHAVIOR_STEPS_PER_DECISION: usize = 16;
+/// Maximum behavior graph nodes accepted by the runtime binding.
+pub const MAX_AI_BEHAVIOR_GRAPH_NODES: usize = 64;
+/// Maximum route points accepted by a patrol instruction.
+pub const MAX_AI_PATROL_ROUTE_POINTS: usize = 64;
 
 /// Server-owned, opt-in policy for the built-in guard behavior.
 /// Simulation time is `epoch + tick * tick_ms`, not wall-clock time.
@@ -34,6 +41,9 @@ pub struct AiTickPolicy {
     /// around in stable-ID order, so a low limit cannot permanently starve
     /// controllers that sort later.
     pub max_controller_candidates: usize,
+    /// Maximum per-tick decisions that may reuse a confirmed hostile target
+    /// from another AI in the same authored aggro group. Zero disables sharing.
+    pub max_group_aggro_shares: usize,
     /// Simulation epoch for reputation expiry.
     pub epoch: Millis,
     /// Milliseconds per simulation tick.
@@ -54,6 +64,79 @@ pub struct AiBehaviorDefinition {
     pub kind: AiBehaviorKind,
     /// Perception range for this behavior, in meters.
     pub range_m: f32,
+    /// Optional recurring window in UTC simulation time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<DailySchedule>,
+    /// Optional stable group key for same-tick hostile-target sharing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggro_group: Option<DefinitionId>,
+    /// Optional directed instruction graph that overrides the legacy primitive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<AiBehaviorGraph>,
+    /// Ordered looping route used by graph `patrol` instructions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub patrol_route: Vec<Vec3>,
+}
+
+/// A validated graph of bounded AI instructions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AiBehaviorGraph {
+    /// First instruction evaluated each tick.
+    pub entry: DefinitionId,
+    /// Directed nodes; the interpreter also enforces a per-decision step cap.
+    pub nodes: Vec<AiBehaviorNode>,
+}
+
+impl AiBehaviorGraph {
+    /// Whether all IDs and transitions are valid within the runtime node cap.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        if self.nodes.is_empty() || self.nodes.len() > MAX_AI_BEHAVIOR_GRAPH_NODES {
+            return false;
+        }
+        let ids: BTreeSet<_> = self.nodes.iter().map(|node| node.id.clone()).collect();
+        ids.len() == self.nodes.len()
+            && ids.contains(&self.entry)
+            && self.nodes.iter().all(|node| {
+                node.on_success
+                    .as_ref()
+                    .is_none_or(|next| ids.contains(next))
+                    && node
+                        .on_failure
+                        .as_ref()
+                        .is_none_or(|next| ids.contains(next))
+                    && (node.instruction != AiBehaviorInstruction::Wait
+                        || (node.on_success.is_none() && node.on_failure.is_none()))
+            })
+    }
+}
+
+/// One instruction node in an AI behavior graph.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AiBehaviorNode {
+    /// Stable node identifier.
+    pub id: DefinitionId,
+    /// Operation evaluated by this node.
+    pub instruction: AiBehaviorInstruction,
+    /// Next node when the operation succeeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_success: Option<DefinitionId>,
+    /// Next node when the operation fails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_failure: Option<DefinitionId>,
+}
+
+/// Runtime operation supported by the bounded behavior graph interpreter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiBehaviorInstruction {
+    PerceiveHostiles,
+    AttackTarget,
+    ChaseTarget,
+    FleeTarget,
+    InteractTarget,
+    Patrol,
+    Wait,
 }
 
 /// Bounded behavior primitives supported by the runtime.
@@ -76,6 +159,12 @@ pub struct AiTickReport {
     pub decisions: Vec<AiDecision>,
     /// Number of action attempts, including rejections.
     pub action_attempts: usize,
+    /// Number of decisions that reused a target confirmed by an ally.
+    pub group_aggro_shares: usize,
+    /// Total unique player and AI action attempts admitted in this tick window.
+    pub shared_action_attempts: usize,
+    /// Remaining unique player and AI action attempts in this tick window.
+    pub action_budget_remaining: usize,
 }
 
 /// Fixed-size cumulative diagnostics for tick-driven AI. All counters saturate.
@@ -97,6 +186,10 @@ pub struct AiDiagnostics {
     pub perception_los_limit_reached: u64,
     /// Decisions with a target but no remaining action budget.
     pub action_budget_exhaustions: u64,
+    /// Decisions that could not reuse an available group target due to budget.
+    pub group_aggro_share_budget_exhaustions: u64,
+    /// Decisions that reached the behavior graph instruction cap.
+    pub behavior_step_budget_exhaustions: u64,
 }
 
 /// A guard decision or an explicit reason for not acting.
@@ -112,6 +205,14 @@ pub struct AiDecision {
     pub target: Option<StableId>,
     /// Action pipeline result, if dispatched.
     pub action: Option<ActionResult>,
+    /// Whether the target came from another AI decision this tick.
+    pub shared_target: bool,
+    /// Whether this decision exhausted the shared player/AI action quota.
+    pub action_budget_exhausted: bool,
+    /// Graph instructions evaluated for this decision.
+    pub behavior_nodes_executed: usize,
+    /// Current route point for a patrol instruction, when applicable.
+    pub patrol_waypoint: Option<usize>,
     /// Navigation outcome, if this decision requested or followed a path.
     pub navigation: Option<AiNavigationReport>,
     /// Stable decision diagnostic.
@@ -149,6 +250,54 @@ impl Zone {
         self.ai_policy = policy.map(std::sync::Arc::new);
     }
 
+    /// Merge validated content behavior bindings into the installed policy.
+    /// Matching IDs replace demo/runtime defaults; new IDs are available to
+    /// controllers whose behavior ID is authored by the world composition.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no AI policy is installed or a graph is invalid.
+    pub fn merge_ai_behavior_bindings(
+        &mut self,
+        behaviors: Vec<AiBehaviorDefinition>,
+    ) -> Result<(), engine_core::error::EngineError> {
+        if behaviors.iter().any(|behavior| {
+            behavior
+                .graph
+                .as_ref()
+                .is_some_and(|graph| !graph.is_valid())
+                || behavior.patrol_route.len() > MAX_AI_PATROL_ROUTE_POINTS
+                || behavior.patrol_route.iter().any(|point| {
+                    !point.x.is_finite() || !point.y.is_finite() || !point.z.is_finite()
+                })
+        }) {
+            return Err(engine_core::error::EngineError::new(
+                engine_core::error::ErrorCode::InvalidRequest,
+                "content AI behavior bindings are invalid",
+            ));
+        }
+        let policy = self.ai_policy.as_ref().ok_or_else(|| {
+            engine_core::error::EngineError::new(
+                engine_core::error::ErrorCode::InvalidState,
+                "AI behavior bindings require an installed AI policy",
+            )
+        })?;
+        let mut updated = policy.as_ref().clone();
+        for behavior in behaviors {
+            if let Some(existing) = updated
+                .behaviors
+                .iter_mut()
+                .find(|existing| existing.id == behavior.id)
+            {
+                *existing = behavior;
+            } else {
+                updated.behaviors.push(behavior);
+            }
+        }
+        self.ai_policy = Some(std::sync::Arc::new(updated));
+        Ok(())
+    }
+
     /// Inspect the most recent AI tick.
     #[must_use]
     pub fn ai_tick_report(&self) -> &AiTickReport {
@@ -173,6 +322,8 @@ impl Zone {
             ..AiTickReport::default()
         };
         let Some(policy) = self.ai_policy.clone() else {
+            report.shared_action_attempts = self.action_attempts_this_tick;
+            report.action_budget_remaining = self.action_budget_remaining();
             self.ai_report = report;
             return;
         };
@@ -262,6 +413,24 @@ impl Zone {
             .collect();
         self.ai_navigation
             .retain(|actor, _| active_chasers.contains(actor));
+        let active_patrollers: BTreeSet<_> = controllers
+            .iter()
+            .filter(|(_, behavior)| {
+                policy.behaviors.iter().any(|definition| {
+                    definition.id == *behavior
+                        && definition.graph.as_ref().is_some_and(|graph| {
+                            graph.is_valid()
+                                && graph
+                                    .nodes
+                                    .iter()
+                                    .any(|node| node.instruction == AiBehaviorInstruction::Patrol)
+                        })
+                })
+            })
+            .map(|(actor, _)| *actor)
+            .collect();
+        self.ai_patrol_cursors
+            .retain(|actor, _| active_patrollers.contains(actor));
         let elapsed = self.tick.0.saturating_mul(u64::from(policy.tick_ms));
         let now = Millis::new(
             policy
@@ -269,6 +438,7 @@ impl Zone {
                 .0
                 .saturating_add(i64::try_from(elapsed).unwrap_or(i64::MAX)),
         );
+        let mut group_targets = BTreeMap::new();
         for (actor, behavior) in controllers {
             let mut decision = AiDecision {
                 actor,
@@ -276,11 +446,15 @@ impl Zone {
                 perception: None,
                 target: None,
                 action: None,
+                shared_target: false,
+                action_budget_exhausted: false,
+                behavior_nodes_executed: 0,
+                patrol_waypoint: None,
                 navigation: None,
                 reason: "unknown_behavior",
             };
             // The built-in behavior is deliberately explicit: unknown content does not attack.
-            if let Some(definition) = policy
+            let definition = policy
                 .behaviors
                 .iter()
                 .find(|definition| definition.id == decision.behavior)
@@ -289,8 +463,34 @@ impl Zone {
                         definition.kind,
                         AiBehaviorKind::Guard | AiBehaviorKind::GuardChase
                     )
-                })
+                });
+            if let Some(definition) = definition
+                && definition
+                    .schedule
+                    .is_some_and(|schedule| !schedule.contains(now))
             {
+                decision.reason = "schedule_inactive";
+            } else if let Some(definition) = definition.filter(|definition| {
+                definition
+                    .graph
+                    .as_ref()
+                    .is_some_and(|graph| graph.is_valid())
+            }) {
+                let graph = definition.graph.as_ref().expect("filtered graph exists");
+                self.run_ai_behavior_graph(
+                    actor,
+                    definition,
+                    graph,
+                    &policy,
+                    now,
+                    &mut group_targets,
+                    &mut report,
+                    &mut decision,
+                );
+            } else if definition.is_some_and(|definition| definition.graph.is_some()) {
+                decision.reason = "invalid_behavior_graph";
+            } else if let Some(definition) = definition {
+                let aggro_group = definition.aggro_group.clone();
                 let perception = self
                     .perceive_hostiles_bounded(
                         actor,
@@ -302,6 +502,34 @@ impl Zone {
                     )
                     .expect("selected actor exists");
                 decision.target = perception.targets.first().map(|target| target.entity);
+                if decision.target.is_none()
+                    && matches!(
+                        perception.status,
+                        PerceptionStatus::Complete
+                            | PerceptionStatus::CandidateBudgetReached
+                            | PerceptionStatus::LineOfSightBudgetReached
+                    )
+                    && let Some(group) = aggro_group.as_ref()
+                    && let Some(target) = group_targets.get(group).copied()
+                    && self.ai_target_is_hostile(
+                        actor,
+                        target,
+                        &policy.factions,
+                        policy.thresholds,
+                        now,
+                    )
+                {
+                    if report.group_aggro_shares < policy.max_group_aggro_shares {
+                        decision.target = Some(target);
+                        decision.shared_target = true;
+                        report.group_aggro_shares += 1;
+                    } else {
+                        self.ai_diagnostics.group_aggro_share_budget_exhaustions = self
+                            .ai_diagnostics
+                            .group_aggro_share_budget_exhaustions
+                            .saturating_add(1);
+                    }
+                }
                 match perception.status {
                     PerceptionStatus::CandidateBudgetReached => {
                         self.ai_diagnostics.perception_candidate_limit_reached = self
@@ -357,6 +585,7 @@ impl Zone {
                     decision.navigation = Some(navigation);
                 } else if let Some(target) = decision.target
                     && report.action_attempts < self.config.budget.max_actions
+                    && self.action_budget_remaining() > 0
                 {
                     let request_id =
                         format!("ai:{}:{}:{}", self.config.instance, self.tick.0, actor);
@@ -369,6 +598,12 @@ impl Zone {
                             .at_tick(self.tick);
                         report.action_attempts += 1;
                         let result = self.apply_action(&request, now);
+                        if result.is_applied()
+                            && !decision.shared_target
+                            && let Some(group) = aggro_group
+                        {
+                            group_targets.entry(group).or_insert(target);
+                        }
                         decision.reason = if result.is_applied() {
                             "applied"
                         } else {
@@ -379,7 +614,7 @@ impl Zone {
                 }
             }
             self.ai_diagnostics.decisions = self.ai_diagnostics.decisions.saturating_add(1);
-            if decision.reason == "action_budget_reached" {
+            if decision.reason == "action_budget_reached" || decision.action_budget_exhausted {
                 self.ai_diagnostics.action_budget_exhaustions = self
                     .ai_diagnostics
                     .action_budget_exhaustions
@@ -387,7 +622,291 @@ impl Zone {
             }
             report.decisions.push(decision);
         }
+        report.shared_action_attempts = self.action_attempts_this_tick;
+        report.action_budget_remaining = self.action_budget_remaining();
         self.ai_report = report;
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn run_ai_behavior_graph(
+        &mut self,
+        actor: StableId,
+        definition: &AiBehaviorDefinition,
+        graph: &AiBehaviorGraph,
+        policy: &AiTickPolicy,
+        now: Millis,
+        group_targets: &mut BTreeMap<DefinitionId, StableId>,
+        report: &mut AiTickReport,
+        decision: &mut AiDecision,
+    ) {
+        let mut current = Some(graph.entry.clone());
+        let mut target = None;
+        let mut perception = None;
+        let mut perception_ran = false;
+        let mut action_ran = false;
+        let mut navigation_ran = false;
+        decision.reason = "behavior_graph_complete";
+
+        while let Some(node_id) = current {
+            if decision.behavior_nodes_executed >= MAX_AI_BEHAVIOR_STEPS_PER_DECISION {
+                decision.reason = "behavior_step_budget_reached";
+                self.ai_diagnostics.behavior_step_budget_exhaustions = self
+                    .ai_diagnostics
+                    .behavior_step_budget_exhaustions
+                    .saturating_add(1);
+                break;
+            }
+            let Some(node) = graph.nodes.iter().find(|node| node.id == node_id) else {
+                decision.reason = "invalid_behavior_graph";
+                break;
+            };
+            let instruction = node.instruction;
+            let on_success = node.on_success.clone();
+            let on_failure = node.on_failure.clone();
+            decision.behavior_nodes_executed += 1;
+
+            if instruction == AiBehaviorInstruction::Wait {
+                decision.reason = "behavior_wait";
+                break;
+            }
+
+            let succeeded = match instruction {
+                AiBehaviorInstruction::PerceiveHostiles => {
+                    if !perception_ran {
+                        perception = self.perceive_hostiles_bounded(
+                            actor,
+                            &policy.factions,
+                            policy.thresholds,
+                            definition.range_m,
+                            now,
+                            policy.perception,
+                        );
+                        perception_ran = true;
+                        if let Some(perception) = perception.as_ref() {
+                            target = perception.targets.first().map(|target| target.entity);
+                            match perception.status {
+                                PerceptionStatus::CandidateBudgetReached => {
+                                    self.ai_diagnostics.perception_candidate_limit_reached = self
+                                        .ai_diagnostics
+                                        .perception_candidate_limit_reached
+                                        .saturating_add(1);
+                                }
+                                PerceptionStatus::LineOfSightBudgetReached => {
+                                    self.ai_diagnostics.perception_los_limit_reached = self
+                                        .ai_diagnostics
+                                        .perception_los_limit_reached
+                                        .saturating_add(1);
+                                }
+                                _ => {}
+                            }
+                        }
+                        if target.is_none()
+                            && perception.as_ref().is_some_and(|perception| {
+                                matches!(
+                                    perception.status,
+                                    PerceptionStatus::Complete
+                                        | PerceptionStatus::CandidateBudgetReached
+                                        | PerceptionStatus::LineOfSightBudgetReached
+                                )
+                            })
+                            && let Some(group) = definition.aggro_group.as_ref()
+                            && let Some(shared) = group_targets.get(group).copied()
+                            && self.ai_target_is_hostile(
+                                actor,
+                                shared,
+                                &policy.factions,
+                                policy.thresholds,
+                                now,
+                            )
+                        {
+                            if report.group_aggro_shares < policy.max_group_aggro_shares {
+                                target = Some(shared);
+                                decision.shared_target = true;
+                                report.group_aggro_shares += 1;
+                            } else {
+                                self.ai_diagnostics.group_aggro_share_budget_exhaustions = self
+                                    .ai_diagnostics
+                                    .group_aggro_share_budget_exhaustions
+                                    .saturating_add(1);
+                            }
+                        }
+                        decision.reason = match perception.as_ref().map(|report| report.status) {
+                            Some(PerceptionStatus::IneligibleObserver) => "ineligible_observer",
+                            Some(PerceptionStatus::InvalidGeometry) => "invalid_geometry",
+                            _ if target.is_some() => "target_acquired",
+                            _ => "no_target",
+                        };
+                    }
+                    target.is_some()
+                }
+                AiBehaviorInstruction::AttackTarget => {
+                    if action_ran {
+                        decision.reason = "action_already_attempted";
+                        false
+                    } else if target.is_none() {
+                        decision.reason = "no_target";
+                        false
+                    } else if report.action_attempts >= self.config.budget.max_actions
+                        || self.action_budget_remaining() == 0
+                    {
+                        decision.reason = "action_budget_reached";
+                        decision.action_budget_exhausted = true;
+                        false
+                    } else {
+                        let target = target.expect("checked target is present");
+                        let request_id =
+                            format!("ai:{}:{}:{}", self.config.instance, self.tick.0, actor);
+                        if self.action_results.contains_key(&request_id) {
+                            decision.reason = "request_id_conflict";
+                            action_ran = true;
+                            false
+                        } else {
+                            let request = ActionRequest::new(request_id, actor, Verb::Attack)
+                                .on(target)
+                                .at_tick(self.tick);
+                            report.action_attempts += 1;
+                            action_ran = true;
+                            let result = self.apply_action(&request, now);
+                            let succeeded = result.is_applied();
+                            if succeeded
+                                && !decision.shared_target
+                                && let Some(group) = definition.aggro_group.as_ref()
+                            {
+                                group_targets.entry(group.clone()).or_insert(target);
+                            }
+                            decision.reason = if succeeded {
+                                "applied"
+                            } else {
+                                "action_rejected"
+                            };
+                            decision.action = Some(result);
+                            succeeded
+                        }
+                    }
+                }
+                AiBehaviorInstruction::ChaseTarget => {
+                    if navigation_ran {
+                        decision.reason = "navigation_already_attempted";
+                        false
+                    } else if target.is_none() {
+                        decision.reason = "no_target";
+                        false
+                    } else {
+                        let target = target.expect("checked target is present");
+                        navigation_ran = true;
+                        if self.ai_target_in_range(actor, target) {
+                            self.ai_navigation.remove(&actor);
+                            decision.reason = "target_in_interaction_range";
+                            true
+                        } else {
+                            let navigation = self.navigate_ai_toward(
+                                actor,
+                                target,
+                                policy.navigation_speed_m_per_s,
+                                policy.tick_ms,
+                                policy.navigation_replan,
+                            );
+                            let succeeded = matches!(
+                                navigation.status,
+                                "navigating" | "following_partial_path" | "arrived"
+                            );
+                            decision.reason = navigation.status;
+                            decision.navigation = Some(navigation);
+                            succeeded
+                        }
+                    }
+                }
+                AiBehaviorInstruction::FleeTarget => {
+                    if navigation_ran {
+                        decision.reason = "navigation_already_attempted";
+                        false
+                    } else if let Some(target) = target {
+                        navigation_ran = true;
+                        let succeeded = self.flee_ai_from(
+                            actor,
+                            target,
+                            policy.navigation_speed_m_per_s,
+                            policy.tick_ms,
+                        );
+                        decision.reason = if succeeded { "fleeing" } else { "flee_blocked" };
+                        decision.navigation = Some(AiNavigationReport {
+                            target,
+                            goal_cell: self.entities.get(&actor).map_or((0, 0), |entity| {
+                                self.nav.cell_of(entity.position()).unwrap_or((0, 0))
+                            }),
+                            status: decision.reason,
+                            complete: false,
+                            expansions: 0,
+                        });
+                        succeeded
+                    } else {
+                        decision.reason = "no_target";
+                        false
+                    }
+                }
+                AiBehaviorInstruction::InteractTarget => {
+                    if action_ran {
+                        decision.reason = "action_already_attempted";
+                        false
+                    } else if let Some(target) = target {
+                        action_ran = true;
+                        if report.action_attempts >= self.config.budget.max_actions
+                            || self.action_budget_remaining() == 0
+                        {
+                            decision.reason = "action_budget_reached";
+                            decision.action_budget_exhausted = true;
+                            false
+                        } else {
+                            let request_id =
+                                format!("ai:{}:{}:{}", self.config.instance, self.tick.0, actor);
+                            if self.action_results.contains_key(&request_id) {
+                                decision.reason = "request_id_conflict";
+                                false
+                            } else {
+                                let request = ActionRequest::new(request_id, actor, Verb::Use)
+                                    .on(target)
+                                    .at_tick(self.tick);
+                                report.action_attempts += 1;
+                                let result = self.apply_action(&request, now);
+                                let succeeded = result.is_applied();
+                                decision.reason = if succeeded {
+                                    "interaction_applied"
+                                } else {
+                                    "interaction_rejected"
+                                };
+                                decision.action = Some(result);
+                                succeeded
+                            }
+                        }
+                    } else {
+                        decision.reason = "no_target";
+                        false
+                    }
+                }
+                AiBehaviorInstruction::Patrol => {
+                    if navigation_ran {
+                        decision.reason = "navigation_already_attempted";
+                        false
+                    } else {
+                        navigation_ran = true;
+                        let (reason, waypoint) = self.patrol_ai_route(
+                            actor,
+                            &definition.id,
+                            &definition.patrol_route,
+                            policy.navigation_speed_m_per_s,
+                            policy.tick_ms,
+                        );
+                        decision.reason = reason;
+                        decision.patrol_waypoint = waypoint;
+                        reason == "patrolling" || reason == "patrol_waypoint_reached"
+                    }
+                }
+                AiBehaviorInstruction::Wait => unreachable!("wait terminates before evaluation"),
+            };
+            decision.target = target;
+            decision.perception = perception.clone();
+            current = if succeeded { on_success } else { on_failure };
+        }
     }
 
     fn ai_target_in_range(&self, actor: StableId, target: StableId) -> bool {
@@ -400,6 +919,116 @@ impl Zone {
         target.interactable.as_ref().is_some_and(|interaction| {
             actor.position().distance_xz(target.position()) <= interaction.range_m
         })
+    }
+
+    fn flee_ai_from(
+        &mut self,
+        actor: StableId,
+        target: StableId,
+        speed_m_per_s: f32,
+        tick_ms: u32,
+    ) -> bool {
+        let (actor_position, target_position, radius) =
+            match (self.entities.get(&actor), self.entities.get(&target)) {
+                (Some(actor_entity), Some(target_entity)) => (
+                    actor_entity.position(),
+                    target_entity.position(),
+                    actor_entity
+                        .movement_profile()
+                        .map_or(0.0, |profile| profile.radius_m),
+                ),
+                _ => return false,
+            };
+        let dx = actor_position.x - target_position.x;
+        let dz = actor_position.z - target_position.z;
+        let distance = dx.hypot(dz);
+        if !distance.is_finite() || distance <= f32::EPSILON {
+            return false;
+        }
+        let step = f64::from(speed_m_per_s) * f64::from(tick_ms) / 1_000.0;
+        if !step.is_finite() || step <= 0.0 {
+            return false;
+        }
+        // The endpoint only establishes direction; move_ai_toward caps the
+        // actual displacement by the actor's server-owned speed profile.
+        let reach = (step + f64::from(radius) + 1.0).max(1.0);
+        #[allow(clippy::cast_possible_truncation)]
+        let destination = Vec3::new(
+            (f64::from(actor_position.x) + f64::from(dx / distance) * reach) as f32,
+            actor_position.y,
+            (f64::from(actor_position.z) + f64::from(dz / distance) * reach) as f32,
+        );
+        self.move_ai_toward(actor, destination, speed_m_per_s, tick_ms)
+    }
+
+    fn patrol_ai_route(
+        &mut self,
+        actor: StableId,
+        behavior: &DefinitionId,
+        route: &[Vec3],
+        speed_m_per_s: f32,
+        tick_ms: u32,
+    ) -> (&'static str, Option<usize>) {
+        if route.len() < 2 || route.len() > MAX_AI_PATROL_ROUTE_POINTS {
+            return ("invalid_patrol_route", None);
+        }
+        let Some(position) = self.entities.get(&actor).map(EntityRecord::position) else {
+            return ("actor_missing", None);
+        };
+        let cursor = self
+            .ai_patrol_cursors
+            .entry(actor)
+            .or_insert((behavior.clone(), 0));
+        if cursor.0 != *behavior || cursor.1 >= route.len() {
+            *cursor = (behavior.clone(), 0);
+        }
+        let mut waypoint = cursor.1;
+        let arrival_distance = (self.nav.cell_size() * 0.25).max(0.1);
+        if position.distance_xz(route[waypoint]) <= arrival_distance {
+            waypoint = (waypoint + 1) % route.len();
+            cursor.1 = waypoint;
+        }
+        let destination = route[waypoint];
+        if self.move_ai_toward(actor, destination, speed_m_per_s, tick_ms) {
+            ("patrolling", Some(waypoint))
+        } else {
+            ("patrol_blocked", Some(waypoint))
+        }
+    }
+
+    fn ai_target_is_hostile(
+        &self,
+        actor: StableId,
+        target: StableId,
+        factions: &FactionCatalog,
+        thresholds: Thresholds,
+        now: Millis,
+    ) -> bool {
+        let Some(actor) = self.entities.get(&actor) else {
+            return false;
+        };
+        let Some(target) = self
+            .entities
+            .get(&target)
+            .filter(|target| target.is_alive())
+        else {
+            return false;
+        };
+        let (Some(actor_faction), Some(target_faction)) =
+            (actor.faction.as_ref(), target.faction.as_ref())
+        else {
+            return false;
+        };
+        resolve_alignment(
+            factions,
+            &actor_faction.faction,
+            &target_faction.faction,
+            Some(&actor_faction.reputation),
+            now,
+            &[],
+        )
+        .class(thresholds)
+            == AlignmentClass::Enemy
     }
 
     #[allow(
@@ -985,6 +1614,7 @@ fn skip(entity: StableId, reason: &str) -> HelpSkipped {
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1057,6 +1687,7 @@ mod tests {
                 max_targets: 1,
             },
             max_controller_candidates: 10,
+            max_group_aggro_shares: 10,
             epoch: Millis::new(0),
             tick_ms: 50,
             navigation_speed_m_per_s: 2.0,
@@ -1065,6 +1696,10 @@ mod tests {
                 id: DefinitionId::new("behavior.guard").unwrap(),
                 kind: AiBehaviorKind::Guard,
                 range_m: 8.0,
+                schedule: None,
+                aggro_group: None,
+                graph: None,
+                patrol_route: Vec::new(),
             }],
         }));
         zone
@@ -1206,6 +1841,10 @@ mod tests {
             id: content_id.clone(),
             kind: AiBehaviorKind::Guard,
             range_m: 0.5,
+            schedule: None,
+            aggro_group: None,
+            graph: None,
+            patrol_route: Vec::new(),
         }];
         zone.set_ai_tick_policy(Some(policy));
         let mut sentinel = ai_at(1, "faction.guards", 1.5, 1.5);

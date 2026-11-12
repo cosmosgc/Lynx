@@ -56,6 +56,19 @@ pub struct InventoryReconciliation {
     pub total_quantity: i64,
     /// Number of receipts where this character was either endpoint.
     pub transfer_receipts: i64,
+    /// Item quantity mismatches between the current inventory and signed ledger.
+    pub differences: Vec<InventoryReconciliationDifference>,
+}
+
+/// One item definition whose aggregate inventory quantity differs from ledger history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InventoryReconciliationDifference {
+    /// Item definition compared.
+    pub item_definition: String,
+    /// Quantity in current inventory slots.
+    pub inventory_quantity: i64,
+    /// Quantity implied by opening balances plus ledger entries.
+    pub ledger_quantity: i64,
 }
 
 impl InventorySlot {

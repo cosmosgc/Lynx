@@ -15,8 +15,10 @@ use backend_nakama::NakamaPostgresBackend;
 use engine_core::id::{IdKind, StableId};
 use game_api::{
     AccountId, ApiError, AuthService, Character, CharacterCreationKey, CharacterCreationReceipt,
-    CharacterId, CharacterIntentService, CharacterService, CreateCharacter, InventoryService,
-    InventorySlot, SessionToken,
+    CharacterId, CharacterIntentService, CharacterService, ChatChannelTargetPage, CreateCharacter,
+    CreateGroup, Friend, GroupId, GroupMember, GroupMembership, GroupPage, GroupSearch,
+    GroupService, InventoryService, InventorySlot, RealtimeChatService, SessionToken, SocialGroup,
+    SocialService,
 };
 use sha2::{Digest, Sha256};
 use world_gateway::SessionClaims;
@@ -92,6 +94,109 @@ pub trait CharacterManagementBackend {
         token: &SessionToken,
         character: CharacterId,
     ) -> Result<Vec<InventorySlot>, ApiError>;
+}
+
+/// Authenticated, account-scoped social operations exposed by the player API.
+/// The caller identity always comes from the validated session token.
+pub trait SocialManagementBackend {
+    /// List the caller's friend requests, mutual friends, and blocks.
+    fn friends(&self, token: &SessionToken) -> Result<Vec<Friend>, ApiError>;
+    /// Send a friend request.
+    fn request_friend(&self, token: &SessionToken, friend: &AccountId) -> Result<(), ApiError>;
+    /// Accept an incoming friend request.
+    fn accept_friend_request(
+        &self,
+        token: &SessionToken,
+        friend: &AccountId,
+    ) -> Result<(), ApiError>;
+    /// Dismiss an incoming request or cancel an outgoing one.
+    fn dismiss_friend_request(
+        &self,
+        token: &SessionToken,
+        friend: &AccountId,
+    ) -> Result<(), ApiError>;
+    /// Remove a mutual friendship.
+    fn remove_friend(&self, token: &SessionToken, friend: &AccountId) -> Result<(), ApiError>;
+    /// Block an account.
+    fn block_account(&self, token: &SessionToken, account: &AccountId) -> Result<(), ApiError>;
+    /// Remove a block.
+    fn unblock_account(&self, token: &SessionToken, account: &AccountId) -> Result<(), ApiError>;
+}
+
+/// Authenticated persistent-group operations exposed by the player API.
+pub trait GroupManagementBackend {
+    /// Discover groups using bounded pages and validated filters.
+    fn discover_groups(
+        &self,
+        token: &SessionToken,
+        search: &GroupSearch,
+        limit: u16,
+        cursor: Option<&str>,
+    ) -> Result<GroupPage<SocialGroup>, ApiError>;
+    /// List groups and current membership state for the caller.
+    fn my_groups(
+        &self,
+        token: &SessionToken,
+        limit: u16,
+        cursor: Option<&str>,
+    ) -> Result<GroupPage<GroupMembership>, ApiError>;
+    /// List a group's members or pending requests.
+    fn group_members(
+        &self,
+        token: &SessionToken,
+        group: &GroupId,
+        limit: u16,
+        cursor: Option<&str>,
+    ) -> Result<GroupPage<GroupMember>, ApiError>;
+    /// Create a group owned by the caller.
+    fn create_group(
+        &self,
+        token: &SessionToken,
+        request: &CreateGroup,
+    ) -> Result<SocialGroup, ApiError>;
+    /// Join an open group or request to join a closed group.
+    fn request_join(&self, token: &SessionToken, group: &GroupId) -> Result<(), ApiError>;
+    /// Leave a group.
+    fn leave_group(&self, token: &SessionToken, group: &GroupId) -> Result<(), ApiError>;
+    /// Add accounts or approve join requests.
+    fn add_members(
+        &self,
+        token: &SessionToken,
+        group: &GroupId,
+        accounts: &[AccountId],
+    ) -> Result<(), ApiError>;
+    /// Remove members or decline join requests.
+    fn kick_members(
+        &self,
+        token: &SessionToken,
+        group: &GroupId,
+        accounts: &[AccountId],
+    ) -> Result<(), ApiError>;
+    /// Promote members.
+    fn promote_members(
+        &self,
+        token: &SessionToken,
+        group: &GroupId,
+        accounts: &[AccountId],
+    ) -> Result<(), ApiError>;
+    /// Demote administrators.
+    fn demote_members(
+        &self,
+        token: &SessionToken,
+        group: &GroupId,
+        accounts: &[AccountId],
+    ) -> Result<(), ApiError>;
+}
+
+/// Account-authorized destinations for direct and group chat channels.
+pub trait ChatManagementBackend {
+    /// Discover the channels the validated session may join.
+    fn discover_channels(
+        &self,
+        token: &SessionToken,
+        limit: u16,
+        cursor: Option<&str>,
+    ) -> Result<ChatChannelTargetPage, ApiError>;
 }
 
 /// Identity adapter for the selected Nakama/PostgreSQL production backend.
@@ -171,6 +276,138 @@ impl CharacterManagementBackend for NakamaIdentityBackend {
         character: CharacterId,
     ) -> Result<Vec<InventorySlot>, ApiError> {
         self.backend.inventory(token, character)
+    }
+}
+
+impl SocialManagementBackend for NakamaIdentityBackend {
+    fn friends(&self, token: &SessionToken) -> Result<Vec<Friend>, ApiError> {
+        SocialService::friends(&self.backend, token)
+    }
+
+    fn request_friend(&self, token: &SessionToken, friend: &AccountId) -> Result<(), ApiError> {
+        SocialService::request_friend(&self.backend, token, friend)
+    }
+
+    fn accept_friend_request(
+        &self,
+        token: &SessionToken,
+        friend: &AccountId,
+    ) -> Result<(), ApiError> {
+        SocialService::accept_friend_request(&self.backend, token, friend)
+    }
+
+    fn dismiss_friend_request(
+        &self,
+        token: &SessionToken,
+        friend: &AccountId,
+    ) -> Result<(), ApiError> {
+        SocialService::dismiss_friend_request(&self.backend, token, friend)
+    }
+
+    fn remove_friend(&self, token: &SessionToken, friend: &AccountId) -> Result<(), ApiError> {
+        SocialService::remove_friend(&self.backend, token, friend)
+    }
+
+    fn block_account(&self, token: &SessionToken, account: &AccountId) -> Result<(), ApiError> {
+        SocialService::block_account(&self.backend, token, account)
+    }
+
+    fn unblock_account(&self, token: &SessionToken, account: &AccountId) -> Result<(), ApiError> {
+        SocialService::unblock_account(&self.backend, token, account)
+    }
+}
+
+impl GroupManagementBackend for NakamaIdentityBackend {
+    fn discover_groups(
+        &self,
+        token: &SessionToken,
+        search: &GroupSearch,
+        limit: u16,
+        cursor: Option<&str>,
+    ) -> Result<GroupPage<SocialGroup>, ApiError> {
+        GroupService::discover_groups(&self.backend, token, search, limit, cursor)
+    }
+
+    fn my_groups(
+        &self,
+        token: &SessionToken,
+        limit: u16,
+        cursor: Option<&str>,
+    ) -> Result<GroupPage<GroupMembership>, ApiError> {
+        GroupService::my_groups(&self.backend, token, limit, cursor)
+    }
+
+    fn group_members(
+        &self,
+        token: &SessionToken,
+        group: &GroupId,
+        limit: u16,
+        cursor: Option<&str>,
+    ) -> Result<GroupPage<GroupMember>, ApiError> {
+        GroupService::group_members(&self.backend, token, group, limit, cursor)
+    }
+
+    fn create_group(
+        &self,
+        token: &SessionToken,
+        request: &CreateGroup,
+    ) -> Result<SocialGroup, ApiError> {
+        GroupService::create_group(&self.backend, token, request)
+    }
+
+    fn request_join(&self, token: &SessionToken, group: &GroupId) -> Result<(), ApiError> {
+        GroupService::request_join(&self.backend, token, group)
+    }
+
+    fn leave_group(&self, token: &SessionToken, group: &GroupId) -> Result<(), ApiError> {
+        GroupService::leave_group(&self.backend, token, group)
+    }
+
+    fn add_members(
+        &self,
+        token: &SessionToken,
+        group: &GroupId,
+        accounts: &[AccountId],
+    ) -> Result<(), ApiError> {
+        GroupService::add_members(&self.backend, token, group, accounts)
+    }
+
+    fn kick_members(
+        &self,
+        token: &SessionToken,
+        group: &GroupId,
+        accounts: &[AccountId],
+    ) -> Result<(), ApiError> {
+        GroupService::kick_members(&self.backend, token, group, accounts)
+    }
+
+    fn promote_members(
+        &self,
+        token: &SessionToken,
+        group: &GroupId,
+        accounts: &[AccountId],
+    ) -> Result<(), ApiError> {
+        GroupService::promote_members(&self.backend, token, group, accounts)
+    }
+
+    fn demote_members(
+        &self,
+        token: &SessionToken,
+        group: &GroupId,
+        accounts: &[AccountId],
+    ) -> Result<(), ApiError> {
+        GroupService::demote_members(&self.backend, token, group, accounts)
+    }
+}
+
+impl ChatManagementBackend for NakamaIdentityBackend {
+    fn discover_channels(
+        &self,
+        token: &SessionToken,
+        limit: u16,
+        cursor: Option<&str>,
+    ) -> Result<ChatChannelTargetPage, ApiError> {
+        RealtimeChatService::discover_channels(&self.backend, token, limit, cursor)
     }
 }
 
@@ -382,6 +619,7 @@ fn constant_time_eq(left: &[u8; 32], right: &[u8; 32]) -> bool {
     difference == 0
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

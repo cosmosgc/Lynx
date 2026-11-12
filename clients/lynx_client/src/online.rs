@@ -3,11 +3,11 @@
 //! Construct and connect on a live Tokio runtime. The runtime must remain alive
 //! while Bevy polls. Transient transport failures reconnect with exponential
 //! backoff and the latest rotated resume token; protocol and state violations
-//! are terminal until the caller connects again. Reliable replication (including
-//! owner inventory) is not implemented: a delivery containing it fails the
-//! connection rather than acknowledging it.
+//! are terminal until the caller connects again. Owner inventory is private to
+//! its controlling session and is applied only from server replication.
 
 use bevy::prelude::{ResMut, Resource};
+use engine_core::inventory::Inventory;
 use engine_core::time::Tick;
 use engine_net::envelope::{Envelope, MessageId, MessageKind};
 use engine_net::protocol::Handshake;
@@ -25,6 +25,7 @@ use crate::{
     reconciliation::Position,
     world_state::{self, WorldState},
 };
+use game_api::{ChatChannelTarget, ChatChannelTargetPage, SessionToken};
 use lynx_client_net::{NakamaChatClient, NakamaChatFailure};
 
 const POLL_BUDGET: usize = 64;
@@ -51,6 +52,20 @@ struct ChatHistoryResponse {
 struct ChatPresenceResponse {
     members: Vec<ChatMember>,
     truncated: bool,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TravelTriggerCatalog {
+    triggers: Vec<ClientTravelTrigger>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClientTravelTrigger {
+    id: String,
+    position: world_state::WirePosition,
+    radius_m: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +133,21 @@ struct ConnectionSettings {
     resume: Option<String>,
 }
 
+struct PendingInventoryAction {
+    request_id: MessageId,
+    baseline: Inventory,
+    awaiting_replication: bool,
+}
+
+impl fmt::Debug for PendingInventoryAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PendingInventoryAction")
+            .field("request_id", &self.request_id)
+            .field("awaiting_replication", &self.awaiting_replication)
+            .finish_non_exhaustive()
+    }
+}
+
 impl fmt::Debug for ConnectionSettings {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ConnectionSettings")
@@ -135,6 +165,11 @@ impl fmt::Debug for ConnectionSettings {
 pub struct OnlineClient {
     interaction: crate::interaction::InteractionState,
     interaction_sequence: u64,
+    pending_inventory_action: Option<PendingInventoryAction>,
+    travel_triggers: Vec<ClientTravelTrigger>,
+    pending_travel: Option<MessageId>,
+    attempted_travel_trigger: Option<String>,
+    travel_armed: bool,
     world: WorldState,
     client: Option<Client>,
     generation: Option<u64>,
@@ -146,6 +181,11 @@ pub struct OnlineClient {
     chat_request_sequence: u64,
     chat_bootstrapped: bool,
     nakama_chat: Option<NakamaChatClient>,
+    chat_api_url: Option<String>,
+    chat_targets: Vec<ChatChannelTarget>,
+    chat_target_refresh: Option<
+        Mutex<mpsc::Receiver<Result<Vec<ChatChannelTarget>, lynx_client_net::CharacterApiFailure>>>,
+    >,
     credential_refresher: Option<Arc<CredentialRefresher>>,
     credential_refresh:
         Option<Mutex<mpsc::Receiver<Result<String, crate::nakama_credentials::NakamaLoginError>>>>,
@@ -186,6 +226,11 @@ impl OnlineClient {
         Ok(Self {
             interaction: crate::interaction::InteractionState::default(),
             interaction_sequence: 0,
+            pending_inventory_action: None,
+            travel_triggers: Vec::new(),
+            pending_travel: None,
+            attempted_travel_trigger: None,
+            travel_armed: false,
             world: WorldState::new(max_prediction_distance)?,
             client: None,
             generation: None,
@@ -197,6 +242,9 @@ impl OnlineClient {
             chat_request_sequence: 0,
             chat_bootstrapped: false,
             nakama_chat: None,
+            chat_api_url: None,
+            chat_targets: Vec::new(),
+            chat_target_refresh: None,
             credential_refresher: None,
             credential_refresh: None,
             credential_refresh_state: CredentialRefreshState::NotUsed,
@@ -226,6 +274,11 @@ impl OnlineClient {
         + 'static,
     ) {
         self.credential_refresher = Some(Arc::new(CredentialRefresher(Arc::new(refresher))));
+    }
+
+    /// Set the authenticated world API origin used to discover server-authorized chat destinations.
+    pub fn set_chat_api_url(&mut self, api_url: String) {
+        self.chat_api_url = Some(api_url);
     }
 
     /// Replaces any prior connection. Must be called inside a Tokio runtime.
@@ -274,6 +327,7 @@ impl OnlineClient {
         // Snapshot everything before mutating self; the settings borrow ends here.
         let url = settings.url.clone();
         let handshake = settings.handshake.clone();
+        let locale = handshake.locale.clone();
         let resume = prefer_resume.then(|| settings.resume.clone()).flatten();
         let use_resume = resume.is_some();
         let (bearer, character) = resume.map_or_else(
@@ -282,6 +336,7 @@ impl OnlineClient {
         );
         let authenticated_character = character.is_some();
         let chat_bearer = bearer.clone();
+        self.interaction.set_locale(locale);
 
         if authenticated_character
             && self.nakama_chat.is_none()
@@ -289,6 +344,35 @@ impl OnlineClient {
         {
             let room = std::env::var("LYNX_CHAT_ROOM").unwrap_or_else(|_| "lynx-zone".to_owned());
             self.nakama_chat = NakamaChatClient::connect(&nakama_url, &chat_bearer, &room).ok();
+        }
+        if authenticated_character
+            && self.chat_targets.is_empty()
+            && self.chat_target_refresh.is_none()
+            && let Some(api_url) = self.chat_api_url.clone()
+        {
+            let (tx, rx) = mpsc::channel();
+            let token = chat_bearer.clone();
+            runtime.spawn_blocking(move || {
+                let result = (|| {
+                    let api = lynx_client_net::CharacterApiClient::new(api_url)?;
+                    let token = SessionToken::new(token)
+                        .map_err(|_| lynx_client_net::CharacterApiFailure::InvalidConfiguration)?;
+                    let mut targets = Vec::new();
+                    let mut cursor = None;
+                    for _ in 0..20 {
+                        let page: ChatChannelTargetPage =
+                            api.discover_chat_channels(&token, 100, cursor.as_deref())?;
+                        targets.extend(page.targets);
+                        cursor = page.next_cursor;
+                        if cursor.is_none() {
+                            break;
+                        }
+                    }
+                    Ok(targets)
+                })();
+                let _ = tx.send(result);
+            });
+            self.chat_target_refresh = Some(Mutex::new(rx));
         }
 
         let generation = self.world.begin_connection().map_err(OnlineError::State)?;
@@ -322,6 +406,20 @@ impl OnlineClient {
     }
     pub fn chat(&self) -> &ChatFeed {
         &self.chat
+    }
+    pub fn chat_targets(&self) -> &[ChatChannelTarget] {
+        &self.chat_targets
+    }
+
+    /// Join a destination from the server-authorized discovery page.
+    pub fn join_chat_target(&mut self, target: &ChatChannelTarget) -> Result<(), OnlineError> {
+        if !self.chat_targets.contains(target) {
+            return Err(OnlineError::Protocol);
+        }
+        let Some(chat) = &self.nakama_chat else {
+            return Err(OnlineError::Protocol);
+        };
+        chat.join(target.clone()).map_err(|_| OnlineError::Protocol)
     }
     /// Last authoritative tick acknowledged to the server; sent on resume.
     pub fn last_ack_tick(&self) -> u64 {
@@ -366,6 +464,12 @@ impl OnlineClient {
         &self.interaction
     }
 
+    /// True until an inventory action is confirmed and its owner-only state
+    /// update has been applied.
+    pub fn inventory_action_pending(&self) -> bool {
+        self.pending_inventory_action.is_some()
+    }
+
     /// Supported verbs must also be advertised by the current public target.
     pub fn target_verbs(&self, target: engine_core::id::StableId) -> Vec<&'static str> {
         let Some(surface) = self
@@ -403,10 +507,63 @@ impl OnlineClient {
                 "target": target, "verb": verb, "params": {}, "client_tick": self.world.tick()
             }),
         )
+        .map(|_| ())
+    }
+
+    /// Request an inventory split/merge; local inventory remains unchanged
+    /// until the server sends a new owner-only inventory snapshot.
+    pub fn move_inventory_stack(
+        &mut self,
+        operation: &str,
+        source_slot: usize,
+        destination_slot: usize,
+        quantity: u32,
+    ) -> Result<(), OnlineError> {
+        let inventory = self.world.inventory().ok_or(OnlineError::Protocol)?;
+        if self.pending_inventory_action.is_some()
+            || source_slot == destination_slot
+            || quantity == 0
+        {
+            return Err(OnlineError::Protocol);
+        }
+        let source = inventory.slot(source_slot).ok_or(OnlineError::Protocol)?;
+        let destination = inventory.slot(destination_slot);
+        let permitted = match operation {
+            "split" => !source.is_unique() && quantity < source.quantity && destination.is_none(),
+            "merge" => destination.is_some_and(|destination| {
+                !source.is_unique()
+                    && !destination.is_unique()
+                    && source.definition == destination.definition
+                    && quantity <= source.quantity
+            }),
+            _ => false,
+        };
+        if !permitted {
+            return Err(OnlineError::Protocol);
+        }
+        let baseline = inventory.clone();
+        let request_id = self.send_interaction(
+            "action.request",
+            json!({
+                "verb": operation,
+                "params": {
+                    "source_slot": source_slot.to_string(),
+                    "destination_slot": destination_slot.to_string(),
+                    "quantity": quantity.to_string()
+                },
+                "client_tick": self.world.tick()
+            }),
+        )?;
+        self.pending_inventory_action = Some(PendingInventoryAction {
+            request_id,
+            baseline,
+            awaiting_replication: false,
+        });
+        Ok(())
     }
 
     pub fn close_panel(&mut self) -> Result<(), OnlineError> {
-        self.send_interaction("ui.close", json!({}))
+        self.send_interaction("ui.close", json!({})).map(|_| ())
     }
 
     /// Submit an action advertised by the exact panel it was composed for.
@@ -418,6 +575,7 @@ impl OnlineClient {
     ) -> Result<(), OnlineError> {
         if self.interaction.panel() != Some(panel)
             || !panel.actions.contains(action)
+            || !action.allowed_params.is_empty()
             || action.params.len() > crate::interaction::MAX_PANEL_ITEMS
         {
             return Err(OnlineError::Protocol);
@@ -431,6 +589,7 @@ impl OnlineClient {
                 "client_tick": self.world.tick()
             }),
         )
+        .map(|_| ())
     }
 
     /// Echo only the schema of the exact panel the input was composed for.
@@ -443,6 +602,11 @@ impl OnlineClient {
         let lock = self.interaction.lock().ok_or(OnlineError::Protocol)?;
         if self.interaction.panel() != Some(panel)
             || lock.solved
+            || !panel.actions.iter().any(|action| {
+                action.name == "play"
+                    && action.params.is_empty()
+                    && action.allowed_params.contains("guess")
+            })
             || !self.world.entities().any(|entity| {
                 entity.entity == panel.target
                     && entity.interaction.as_ref().is_some_and(|surface| {
@@ -461,9 +625,14 @@ impl OnlineClient {
         self.send_interaction("ui.action", json!({
             "schema": panel.schema, "action": "play", "params": {"guess": guess}, "client_tick": self.world.tick()
         }))
+        .map(|_| ())
     }
 
-    fn send_interaction(&mut self, kind: &str, body: serde_json::Value) -> Result<(), OnlineError> {
+    fn send_interaction(
+        &mut self,
+        kind: &str,
+        body: serde_json::Value,
+    ) -> Result<MessageId, OnlineError> {
         if self.status != OnlineStatus::Active || self.interaction.pending() {
             return Err(OnlineError::Protocol);
         }
@@ -483,8 +652,48 @@ impl OnlineClient {
             .ok_or(OnlineError::Protocol)?
             .try_send(&request)
             .map_err(OnlineError::Send)?;
-        self.interaction.sent(id);
-        Ok(())
+        self.interaction.sent(id.clone());
+        Ok(id)
+    }
+
+    fn resolve_inventory_action_reply(&mut self, envelope: &Envelope) {
+        let is_pending = self
+            .pending_inventory_action
+            .as_ref()
+            .is_some_and(|pending| envelope.correlation.as_ref() == Some(&pending.request_id));
+        if !is_pending {
+            return;
+        }
+        match envelope.kind.as_str() {
+            "protocol.error" => self.pending_inventory_action = None,
+            "action.result" => {
+                if envelope.body["outcome"]["status"].as_str() == Some("applied") {
+                    if let Some(pending) = self.pending_inventory_action.as_mut() {
+                        pending.awaiting_replication = true;
+                    }
+                    self.finish_inventory_action_if_replicated();
+                } else {
+                    self.pending_inventory_action = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn finish_inventory_action_if_replicated(&mut self) {
+        let replicated = self
+            .pending_inventory_action
+            .as_ref()
+            .is_some_and(|pending| {
+                pending.awaiting_replication
+                    && self
+                        .world
+                        .inventory()
+                        .is_some_and(|inventory| inventory != &pending.baseline)
+            });
+        if replicated {
+            self.pending_inventory_action = None;
+        }
     }
 
     pub fn send_chat(&mut self, content: &str) -> Result<(), OnlineError> {
@@ -501,12 +710,16 @@ impl OnlineClient {
         };
         request.validate().map_err(|_| OnlineError::Protocol)?;
         if let Some(chat) = &self.nakama_chat {
-            // The Nakama adapter currently joins one persistent zone room.
-            if channel != "zone" {
+            if channel != "zone"
+                && !self
+                    .chat_targets
+                    .iter()
+                    .any(|target| chat_target_alias(target) == channel)
+            {
                 self.chat.show_send_error(Some("invalid_request"));
                 return Err(OnlineError::Protocol);
             }
-            chat.send(content.trim()).map_err(|error| {
+            chat.send(channel, content.trim()).map_err(|error| {
                 self.chat.show_send_error(Some(match error {
                     NakamaChatFailure::QueueFull => "rate_limited",
                     NakamaChatFailure::Closed | NakamaChatFailure::Transport => "unavailable",
@@ -533,6 +746,7 @@ impl OnlineClient {
         }
         if let Some(chat) = &self.nakama_chat {
             chat.history(
+                "zone",
                 u8::try_from(limit).map_err(|_| OnlineError::Protocol)?,
                 before,
             )
@@ -596,6 +810,11 @@ impl OnlineClient {
     /// rotated resume token. The world view is invalidated until a new baseline.
     fn close_transport(&mut self) {
         self.interaction = crate::interaction::InteractionState::default();
+        self.pending_inventory_action = None;
+        self.travel_triggers.clear();
+        self.pending_travel = None;
+        self.attempted_travel_trigger = None;
+        self.travel_armed = false;
         if let Some(mut client) = self.client.take() {
             client.close();
         }
@@ -768,6 +987,7 @@ impl OnlineClient {
             let Ok(envelope) = self.client.as_mut().expect("connected").try_recv() else {
                 break;
             };
+            self.resolve_inventory_action_reply(&envelope);
             match self.interaction.receive(&envelope) {
                 Ok(true) => continue,
                 Ok(false) => {}
@@ -777,6 +997,10 @@ impl OnlineClient {
                 }
             }
             if envelope.kind.as_str() == "protocol.error" {
+                if envelope.correlation.as_ref() == self.pending_travel.as_ref() {
+                    self.pending_travel = None;
+                    continue;
+                }
                 if let Some(correlation) = envelope.correlation.as_ref()
                     && self.pending_chat.remove(correlation.as_str())
                 {
@@ -801,6 +1025,43 @@ impl OnlineClient {
                     settings.resume = Some(token.to_owned());
                 }
                 self.attempt_received_token = true;
+                continue;
+            }
+            if envelope.kind.as_str() == "zone.travel_triggers" {
+                let Ok(catalog) =
+                    serde_json::from_value::<TravelTriggerCatalog>(envelope.body.clone())
+                else {
+                    self.fail(OnlineError::Protocol);
+                    return;
+                };
+                if catalog.triggers.len() > 64
+                    || catalog.triggers.iter().any(|trigger| {
+                        trigger.id.is_empty()
+                            || trigger.id.len() > 64
+                            || !trigger.id.chars().all(|character| {
+                                character.is_ascii_lowercase()
+                                    || character.is_ascii_digit()
+                                    || matches!(character, '_' | '-')
+                            })
+                            || !trigger.position.x.is_finite()
+                            || !trigger.position.y.is_finite()
+                            || !trigger.position.z.is_finite()
+                            || !trigger.radius_m.is_finite()
+                            || !(0.1..=32.0).contains(&trigger.radius_m)
+                    })
+                {
+                    self.fail(OnlineError::Protocol);
+                    return;
+                }
+                self.travel_triggers = catalog.triggers;
+                self.pending_travel = None;
+                self.attempted_travel_trigger = None;
+                continue;
+            }
+            if envelope.kind.as_str() == "zone.travelled" {
+                if envelope.correlation.as_ref() == self.pending_travel.as_ref() {
+                    self.pending_travel = None;
+                }
                 continue;
             }
             match envelope.kind.as_str() {
@@ -860,6 +1121,7 @@ impl OnlineClient {
                 self.fail(OnlineError::State(error));
                 return;
             }
+            self.finish_inventory_action_if_replicated();
             if envelope.kind.as_str() == "world.ready"
                 && self.attempt_used_resume
                 && let Some(settings) = self.settings.as_mut()
@@ -878,6 +1140,7 @@ impl OnlineClient {
             }
             if let Some(applied) = self.world.take_movement_applied() {
                 self.last_movement_applied = Some(applied);
+                self.travel_armed |= applied;
                 if let Some(sent) = self.movement_sent_at.take() {
                     self.last_round_trip = Some(sent.elapsed());
                 }
@@ -935,10 +1198,85 @@ impl OnlineClient {
                 self.chat_bootstrapped = true;
             }
         }
+        self.maybe_request_nearby_travel();
         self.poll_nakama_chat();
     }
 
+    fn maybe_request_nearby_travel(&mut self) {
+        if self.status != OnlineStatus::Active
+            || !self.travel_armed
+            || self.pending_travel.is_some()
+        {
+            return;
+        }
+        let Some(actor) = self.world.actor() else {
+            return;
+        };
+        let Some(position) = self
+            .world
+            .entities()
+            .find(|entity| entity.entity == actor)
+            .map(|entity| entity.position)
+        else {
+            return;
+        };
+        let trigger = self.travel_triggers.iter().find(|trigger| {
+            let dx = position.x - trigger.position.x;
+            let dz = position.z - trigger.position.z;
+            dx * dx + dz * dz <= trigger.radius_m * trigger.radius_m
+        });
+        let Some(trigger) = trigger else {
+            self.attempted_travel_trigger = None;
+            return;
+        };
+        if self.attempted_travel_trigger.as_deref() == Some(&trigger.id) {
+            return;
+        }
+        self.interaction_sequence = match self.interaction_sequence.checked_add(1) {
+            Some(sequence) => sequence,
+            None => {
+                self.fail(OnlineError::Protocol);
+                return;
+            }
+        };
+        let Ok(id) = MessageId::parse(&format!("travel-{}", self.interaction_sequence)) else {
+            self.fail(OnlineError::Protocol);
+            return;
+        };
+        let request = Envelope::new(
+            id.clone(),
+            MessageKind::parse("zone.travel").expect("literal travel request kind"),
+            json!({ "trigger_id": trigger.id }),
+        );
+        match self
+            .client
+            .as_ref()
+            .expect("active client")
+            .try_send(&request)
+        {
+            Ok(()) => {
+                self.pending_travel = Some(id);
+                self.attempted_travel_trigger = Some(trigger.id.clone());
+            }
+            Err(SendError::Full) => {}
+            Err(error) => self.fail(OnlineError::Send(error)),
+        }
+    }
+
     fn poll_nakama_chat(&mut self) {
+        if let Some(receiver) = &self.chat_target_refresh {
+            let result = receiver.lock().ok().map(|receiver| receiver.try_recv());
+            match result {
+                Some(Ok(Ok(targets))) => {
+                    self.chat_targets = targets;
+                    self.chat_target_refresh = None;
+                }
+                Some(Ok(Err(_))) | Some(Err(mpsc::TryRecvError::Disconnected)) | None => {
+                    self.chat_target_refresh = None
+                }
+                Some(Err(mpsc::TryRecvError::Empty)) => {}
+            }
+        }
         let Some(chat) = self.nakama_chat.as_mut() else {
             return;
         };
@@ -1015,6 +1353,14 @@ impl OnlineClient {
         if joined && !self.chat_bootstrapped && self.request_chat_history(50, None).is_ok() {
             self.chat_bootstrapped = true;
         }
+    }
+}
+
+pub fn chat_target_alias(target: &ChatChannelTarget) -> String {
+    match target {
+        ChatChannelTarget::Room(room) => room.clone(),
+        ChatChannelTarget::Direct(account) => format!("direct:{account}"),
+        ChatChannelTarget::Group(group) => format!("group:{group}"),
     }
 }
 
@@ -1129,6 +1475,7 @@ pub(crate) fn smooth_online(client: Option<ResMut<OnlineClient>>) {
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod movement_tests {
     use super::slowed_step;

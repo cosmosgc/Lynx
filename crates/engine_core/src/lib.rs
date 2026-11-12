@@ -1,3 +1,6 @@
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, allow(unused_features))]
+
 //! Platform-neutral domain types for Lynx.
 //!
 //! This crate contains no I/O, no Bevy, no database driver, and no clock reads.

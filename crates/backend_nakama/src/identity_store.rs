@@ -120,6 +120,7 @@ fn unavailable() -> ApiError {
     ApiError::Unavailable("identity store unavailable".into())
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::{PostgresIdentityStore, is_uuid};

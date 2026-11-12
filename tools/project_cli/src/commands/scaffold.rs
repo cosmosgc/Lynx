@@ -18,7 +18,10 @@ impl Template {
             ("content/maps/overworld.ron", WORLD_MAP),
             ("content/zones/starter.ron", STARTER_ZONE),
             ("content/zones/market.ron", MARKET_ZONE),
+            ("content/definitions/lever_to_door.ron", LEVER_TO_DOOR_LINK),
             ("content/entities/tavern_keeper.ron", TAVERN_KEEPER),
+            ("content/entities/starter_lever.ron", STARTER_LEVER),
+            ("content/entities/starter_gate.ron", STARTER_GATE),
             ("content/items/torch.ron", TORCH),
             ("content/ui/inventory.ron", INVENTORY_PANEL),
             (
@@ -44,8 +47,29 @@ const STARTER_ZONE: &str = r#"(
     id: "zone.starter",
     version: (major: 1, minor: 0),
     display: (name: "zone.starter.name", description: "zone.starter.description"),
+    entity_placements: [
+        (id: "starter_lever", definition: "entity.starter_lever", position: (x: 62.5, y: 0.0, z: 64.5)),
+        (id: "starter_gate", definition: "entity.starter_gate", position: (x: 60.5, y: 0.0, z: 64.5)),
+    ],
+    entity_links: [
+        (link_type: "link.lever_to_door", source: "starter_lever", target: "starter_gate", events: [activated]),
+    ],
     components: {
-        "core.zone": {"max_players": 64, "cell_size_m": 1.0},
+        "core.zone": {
+            "max_players": 64,
+            "cell_size_m": 1.0,
+            "width_cells": 128,
+            "height_cells": 128,
+            "origin_x_m": 0.0,
+            "origin_z_m": 0.0,
+            "floor_y_m": 0.0,
+            "ceiling_y_m": 4.0,
+            "entry_x_m": 64.5,
+            "entry_y_m": 0.0,
+            "entry_z_m": 64.5,
+            "blocked_cells": [],
+            "max_entities": 1000,
+        },
     },
 )
 "#;
@@ -55,7 +79,21 @@ const MARKET_ZONE: &str = r#"(
     version: (major: 1, minor: 0),
     display: (name: "zone.market.name", description: "zone.market.description"),
     components: {
-        "core.zone": {"max_players": 64, "cell_size_m": 1.0},
+        "core.zone": {
+            "max_players": 64,
+            "cell_size_m": 1.0,
+            "width_cells": 128,
+            "height_cells": 128,
+            "origin_x_m": 0.0,
+            "origin_z_m": 0.0,
+            "floor_y_m": 0.0,
+            "ceiling_y_m": 4.0,
+            "entry_x_m": 64.5,
+            "entry_y_m": 0.0,
+            "entry_z_m": 64.5,
+            "blocked_cells": [],
+            "max_entities": 1000,
+        },
     },
 )
 "#;
@@ -85,6 +123,49 @@ const TAVERN_KEEPER: &str = r#"(
             "requires_line_of_sight": true,
         },
     },
+)
+"#;
+
+const STARTER_LEVER: &str = r#"(
+    id: "entity.starter_lever",
+    version: (major: 1, minor: 0),
+    display: (name: "entity.starter_lever.name", description: "entity.starter_lever.description"),
+    components: {
+        "core.interactable": {
+            "verbs": ["inspect", "activate"],
+            "range_m": 2.0,
+            "requires_line_of_sight": true,
+        },
+    },
+)
+"#;
+
+const STARTER_GATE: &str = r#"(
+    id: "entity.starter_gate",
+    version: (major: 1, minor: 0),
+    display: (name: "entity.starter_gate.name", description: "entity.starter_gate.description"),
+    components: {
+        "core.interactable": {
+            "verbs": ["inspect", "open", "close"],
+            "range_m": 2.0,
+            "requires_line_of_sight": true,
+        },
+        "core.door": {"open": false},
+    },
+)
+"#;
+
+const LEVER_TO_DOOR_LINK: &str = r#"(
+    id: "link.lever_to_door",
+    version: (major: 1, minor: 0),
+    display: (name: "link.lever_to_door.name", description: "link.lever_to_door.description"),
+    components: {},
+    link: Some((
+        source_component: "core.interactable",
+        target_component: "core.door",
+        supported_events: [activated],
+        action: toggle_door,
+    )),
 )
 "#;
 
@@ -163,6 +244,12 @@ const MINIMAL_CATALOG: &str = r#"(
         "zone.market.description": "Uma rota comercial ligada à taverna.",
         "entity.tavern_keeper.name": "Dona Rosa",
         "entity.tavern_keeper.description": "A responsável pela taverna. Peça informações.",
+        "entity.starter_lever.name": "Alavanca",
+        "entity.starter_lever.description": "Acione a alavanca para abrir o portão.",
+        "entity.starter_gate.name": "Portão",
+        "entity.starter_gate.description": "Um portão conectado à alavanca próxima.",
+        "link.lever_to_door.name": "Alavanca do portão",
+        "link.lever_to_door.description": "Conexão de ativação da alavanca ao portão.",
         "item.torch.name": "Tocha",
         "item.torch.description": "Ilumina caminhos escuros.",
         "ui.inventory.title": "Inventário",
@@ -184,6 +271,12 @@ const MMORPG_CATALOG: &str = r#"(
         "zone.market.description": "Uma rota comercial ligada à taverna.",
         "entity.tavern_keeper.name": "Dona Rosa",
         "entity.tavern_keeper.description": "A responsável pela taverna. Peça informações.",
+        "entity.starter_lever.name": "Lever",
+        "entity.starter_lever.description": "Activate the lever to open the gate.",
+        "entity.starter_gate.name": "Gate",
+        "entity.starter_gate.description": "A gate connected to the nearby lever.",
+        "link.lever_to_door.name": "Gate lever",
+        "link.lever_to_door.description": "Activation link from the lever to the gate.",
         "item.torch.name": "Tocha",
         "item.torch.description": "Ilumina caminhos escuros.",
         "ui.inventory.title": "Inventário",
@@ -223,8 +316,8 @@ pub(crate) fn new_project(args: &NewArgs) -> Result<Value> {
                 "# {project_name}\n\n\
                  This project was generated by the Lynx project CLI.\n\n\
                  Authored game data lives in `content/`. The world map, two \
-                 connected starter zones, interactable tavern keeper, torch \
-                 item, inventory panel, and Brazilian Portuguese source catalog \
+                 connected starter zones, interactable tavern keeper, a typed \
+                 lever-to-gate link, torch item, inventory panel, and Brazilian Portuguese source catalog \
                  are ready for `lynx validate --project .`. Use `lynx build --project .`, \
                  `lynx run --project .`, or `lynx test --project .` to validate and invoke Cargo. This \
                  starter executable is not yet a playable game server.\n\n\
@@ -240,11 +333,11 @@ pub(crate) fn new_project(args: &NewArgs) -> Result<Value> {
         create_directory(output_dir.join("content/definitions").as_path())?,
         create_file(
             output_dir.join("content/definitions/README.md").as_path(),
-            b"Add authored definitions here.\n",
+            b"Add reusable entity, behavior, and link definitions here. The generated starter includes `link.lever_to_door`, which declares its source component, target component, event, and authoritative action.\n",
         )?,
         create_file(
             output_dir.join("content/README.md").as_path(),
-            b"Content is data, not authority. The server validates every interaction and owns all gameplay outcomes.\n",
+            b"Content is data, not authority. The starter zone includes a lever linked to a gate by a typed `link.*` definition. The server validates every interaction and owns all gameplay outcomes.\n",
         )?,
         create_file(
             output_dir.join(".env.example").as_path(),

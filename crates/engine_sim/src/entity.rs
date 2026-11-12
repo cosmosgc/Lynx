@@ -179,6 +179,9 @@ pub struct UiAction {
     /// Fixed, server-authored parameters for this action.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub params: BTreeMap<String, String>,
+    /// Parameter names the client may supply dynamically for this action.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub allowed_params: BTreeSet<String>,
 }
 
 /// An entity-provided interface, described declaratively.
@@ -673,6 +676,7 @@ impl EntityRecord {
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

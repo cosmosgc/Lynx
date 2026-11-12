@@ -1,9 +1,7 @@
-//! Read-only presentation of the controlled actor's private inventory.
+//! Presentation and server-requested stack operations for the controlled actor's inventory.
 //!
-//! Owner state is replicated only to the owning session. The panel therefore
-//! shows the actor's server-provided stacks without optimistically moving,
-//! equipping, splitting, or merging them; those operations still require a
-//! server-validated protocol.
+//! Owner state is replicated only to the owning session. Buttons submit
+//! split/merge intents but never change the displayed inventory optimistically.
 
 use bevy::input::ButtonState;
 use bevy::input::keyboard::KeyboardInput;
@@ -11,8 +9,11 @@ use bevy::picking::Pickable;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_immediate::{
-    BevyImmediatePlugin, ImmCtx,
-    ui::{CapsUi, floating_window_plugin::FloatingWindowPlugin},
+    BevyImmediatePlugin, Imm, ImmCtx,
+    ui::{
+        CapsUi, clicked::ImmUiClicked, disabled::ImmUiInteractionsDisabled,
+        floating_window_plugin::FloatingWindowPlugin,
+    },
 };
 
 use engine_core::inventory::{Inventory, ItemStack};
@@ -97,9 +98,10 @@ pub(crate) fn inventory_keyboard(
 #[allow(clippy::needless_pass_by_value)]
 fn draw(
     ctx: ImmCtx<CapsUi>,
-    client: Res<OnlineClient>,
+    mut client: ResMut<OnlineClient>,
     mut panel: ResMut<InventoryPanel>,
     memory: Res<WindowMemory>,
+    chat: Res<ChatComposer>,
     windows: Query<&Window, With<PrimaryWindow>>,
 ) {
     ctx.build_immediate_root("online-inventory-root")
@@ -124,7 +126,7 @@ fn draw(
                 panel.open = false;
                 return;
             }
-            let Some(inventory) = client.world().inventory() else {
+            let Some(inventory) = client.world().inventory().cloned() else {
                 panel.open = false;
                 return;
             };
@@ -150,27 +152,141 @@ fn draw(
                 min_size: INVENTORY_MIN_SIZE,
                 position,
                 size,
-                subtitle: Some(inventory_summary(inventory)),
+                subtitle: Some(inventory_summary(&inventory)),
                 ..WindowSpec::new(INVENTORY_WINDOW_ID, "Inventário", INVENTORY_DEFAULT_SIZE)
             };
-            let rows: Vec<(usize, String)> = inventory
-                .entries()
-                .map(|(slot, stack)| (slot, describe_slot(slot, stack)))
-                .collect();
+            let rows = inventory_rows(&inventory);
+            let actions_enabled = inventory_actions_enabled(&client, &chat, &windows);
 
             let outcome = show_window(ui.ch_id("inventory-window"), spec, |ui| {
-                if rows.is_empty() {
-                    label(ui, "empty", 13.0, "Inventário vazio.");
-                    return;
-                }
-                for (slot, text) in &rows {
-                    label(ui, &format!("inventory-slot-{slot}"), 14.0, text.clone());
-                }
+                draw_inventory_rows(ui, &rows, &mut client, actions_enabled);
             });
             if outcome.close_requested {
                 panel.open = false;
             }
         });
+}
+
+fn inventory_actions_enabled(
+    client: &OnlineClient,
+    chat: &ChatComposer,
+    windows: &Query<&Window, With<PrimaryWindow>>,
+) -> bool {
+    !chat.active
+        && !client.interaction().pending()
+        && !client.inventory_action_pending()
+        && windows.single().is_ok_and(|window| window.focused)
+}
+
+fn draw_inventory_rows(
+    ui: &mut Imm<CapsUi>,
+    rows: &[InventoryRow],
+    client: &mut OnlineClient,
+    actions_enabled: bool,
+) {
+    if rows.is_empty() {
+        label(ui, "empty", 13.0, "Inventário vazio.");
+        return;
+    }
+    for row in rows {
+        ui.ch_id(format!("inventory-row-{}", row.slot))
+            .on_spawn_insert(|| Node {
+                display: Display::Flex,
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: px(6),
+                ..default()
+            })
+            .add(|ui| {
+                label(
+                    ui,
+                    &format!("inventory-slot-{}", row.slot),
+                    14.0,
+                    row.text.clone(),
+                );
+                if let Some(destination) = row.split_destination
+                    && inventory_action_button(
+                        ui,
+                        &format!("inventory-action-split-{}", row.slot),
+                        &format!("Separar 1 → {}", destination + 1),
+                        actions_enabled,
+                    )
+                {
+                    let _ = client.move_inventory_stack("split", row.slot, destination, 1);
+                }
+                if let Some(destination) = row.merge_destination
+                    && inventory_action_button(
+                        ui,
+                        &format!("inventory-action-merge-{}", row.slot),
+                        &format!("Unir 1 → {}", destination + 1),
+                        actions_enabled,
+                    )
+                {
+                    let _ = client.move_inventory_stack("merge", row.slot, destination, 1);
+                }
+            });
+    }
+}
+
+#[derive(Debug)]
+struct InventoryRow {
+    slot: usize,
+    text: String,
+    split_destination: Option<usize>,
+    merge_destination: Option<usize>,
+}
+
+fn inventory_rows(inventory: &Inventory) -> Vec<InventoryRow> {
+    let first_empty = (0..inventory.capacity()).find(|slot| inventory.slot(*slot).is_none());
+    let entries: Vec<_> = inventory
+        .entries()
+        .map(|(slot, stack)| (slot, stack.clone()))
+        .collect();
+    entries
+        .iter()
+        .map(|(slot, stack)| InventoryRow {
+            slot: *slot,
+            text: describe_slot(*slot, stack),
+            split_destination: (!stack.is_unique() && stack.quantity > 1)
+                .then_some(first_empty)
+                .flatten(),
+            merge_destination: (!stack.is_unique())
+                .then(|| {
+                    entries
+                        .iter()
+                        .find(|(other_slot, other)| {
+                            other_slot != slot
+                                && !other.is_unique()
+                                && other.definition == stack.definition
+                        })
+                        .map(|(other_slot, _)| *other_slot)
+                })
+                .flatten(),
+        })
+        .collect()
+}
+
+fn inventory_action_button(ui: &mut Imm<CapsUi>, id: &str, text: &str, enabled: bool) -> bool {
+    ui.ch_id(id)
+        .on_spawn_insert(|| {
+            (
+                Name::new(id.to_string()),
+                bevy::ui_widgets::Button,
+                Node {
+                    padding: UiRect::axes(px(7), px(4)),
+                    min_height: px(28),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    border_radius: BorderRadius::all(px(4)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgb(0.13, 0.24, 0.32)),
+            )
+        })
+        .interactions_disabled(!enabled)
+        .add(|ui| label(ui, "caption", 12.0, text))
+        .primary_clicked()
+        && enabled
 }
 
 /// Human-readable summary of occupied slots for the window subtitle.
@@ -194,6 +310,7 @@ pub fn describe_slot(slot: usize, stack: &ItemStack) -> String {
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,5 +345,31 @@ mod tests {
             )
             .unwrap();
         assert_eq!(inventory_summary(&inventory), "1 de 8 slots ocupados");
+    }
+
+    #[test]
+    fn stack_rows_offer_only_possible_split_and_merge_targets() {
+        let torch = definition("item.torch");
+        let inventory = Inventory::from_slots(
+            vec![
+                Some(ItemStack::new(torch.clone(), 3)),
+                Some(ItemStack::new(torch, 2)),
+                None,
+                Some(ItemStack::unique(
+                    definition("item.vault_key"),
+                    StableId::from_parts(IdKind::Item, 1, 99),
+                )),
+            ],
+            &engine_core::inventory::UniformItemRules::new(99),
+        )
+        .unwrap();
+        let rows = inventory_rows(&inventory);
+        assert_eq!(rows[0].split_destination, Some(2));
+        assert_eq!(rows[0].merge_destination, Some(1));
+        assert_eq!(rows[1].split_destination, Some(2));
+        assert_eq!(rows[1].merge_destination, Some(0));
+        assert_eq!(rows[2].slot, 3);
+        assert_eq!(rows[2].split_destination, None);
+        assert_eq!(rows[2].merge_destination, None);
     }
 }

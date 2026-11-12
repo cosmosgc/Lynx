@@ -2,7 +2,8 @@
 //!
 //! Links are authored, validated references. Missing endpoints produce
 //! diagnostics and never execute silently. See the project guide's linked
-//! entity rules and `docs/adr/0010` for the activation budget.
+//! entity rules and `docs/content-authoring.md` for the supported content
+//! contract.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -25,6 +26,19 @@ pub enum LinkEvent {
     Triggered,
     /// An AI requested nearby assistance.
     HelpRequested,
+}
+
+/// Server-side operation performed when a link receives an event.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkAction {
+    /// Toggle an unlocked target door.
+    #[default]
+    ToggleDoor,
+    /// Set the target door to open.
+    OpenDoor,
+    /// Set the target door to closed.
+    CloseDoor,
 }
 
 impl LinkEvent {
@@ -52,6 +66,9 @@ pub struct EntityLink {
     pub target: StableId,
     /// Events carried by this link.
     pub events: BTreeSet<LinkEvent>,
+    /// Authoritative action selected by the link definition.
+    #[serde(default)]
+    pub action: LinkAction,
     /// Whether the link is active.
     pub enabled: bool,
     /// Whether the target is in another zone and requires an explicit route.
@@ -76,6 +93,7 @@ impl EntityLink {
             source,
             target,
             events: events.into_iter().collect(),
+            action: LinkAction::default(),
             enabled: true,
             cross_zone: false,
             persistence: PersistencePolicy::PersistentEntity,
@@ -156,13 +174,19 @@ impl LinkGraph {
             .with_detail("entity", link.source.to_string()));
         }
         if self.links.iter().any(|existing| {
-            existing.link_type == link.link_type
-                && existing.source == link.source
+            existing.source == link.source
                 && existing.target == link.target
+                && existing
+                    .events
+                    .iter()
+                    .any(|event| link.events.contains(event))
         }) {
-            return Err(EngineError::new(ErrorCode::Conflict, "link already exists")
-                .with_detail("source", link.source.to_string())
-                .with_detail("target", link.target.to_string()));
+            return Err(EngineError::new(
+                ErrorCode::Conflict,
+                "a link already carries an event between these endpoints",
+            )
+            .with_detail("source", link.source.to_string())
+            .with_detail("target", link.target.to_string()));
         }
 
         self.links.push(link);
@@ -272,6 +296,8 @@ impl LinkGraph {
             if link.enabled
                 && !link.cross_zone
                 && (link.events.contains(&LinkEvent::Activated)
+                    || link.events.contains(&LinkEvent::Opened)
+                    || link.events.contains(&LinkEvent::Closed)
                     || link.events.contains(&LinkEvent::Triggered))
             {
                 adjacency.entry(link.source).or_default().push(link.target);
@@ -328,6 +354,7 @@ fn find_cycle_from(
     None
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

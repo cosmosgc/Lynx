@@ -44,13 +44,41 @@ lynx_import_env() {
     done <"$file"
 }
 
+# Resolve a secret from NAME or NAME_FILE. Read one trailing line ending as
+# provided by common mounted-secret implementations; never print file contents.
+lynx_secret_env() {
+    local name="$1"
+    local file_name="${name}_FILE"
+    local value=""
+    local path=""
+    [[ -n "${!name+x}" ]] && value="${!name}"
+    [[ -n "${!file_name+x}" ]] && path="${!file_name}"
+    if [[ -n "$value" && -n "${!file_name+x}" ]]; then
+        lynx_die "configure either $name or $file_name, not both"
+    fi
+    if [[ -n "${!file_name+x}" ]]; then
+        [[ -n "$path" && -r "$path" ]] || lynx_die "$file_name could not be read"
+        value="$(<"$path")" || lynx_die "$file_name could not be read"
+        value="${value%$'\n'}"
+        value="${value%$'\r'}"
+        [[ -n "$value" ]] || lynx_die "$file_name is empty"
+    fi
+    printf -v "$name" '%s' "$value"
+    export "$name"
+}
+
 lynx_require_pg() {
     LYNX_PG_HOST="${LYNX_PG_HOST:-127.0.0.1}"
     LYNX_PG_PORT="${LYNX_PG_PORT:-5432}"
     LYNX_PG_DATABASE="${LYNX_PG_DATABASE:-lynx}"
     LYNX_PG_USER="${LYNX_PG_USER:-lynx}"
     LYNX_PG_MIGRATION_USER="${LYNX_PG_MIGRATION_USER:-$LYNX_PG_USER}"
-    LYNX_PG_MIGRATION_PASSWORD="${LYNX_PG_MIGRATION_PASSWORD:-${LYNX_PG_PASSWORD-}}"
+    lynx_secret_env LYNX_PG_PASSWORD
+    if [[ -n "${LYNX_PG_MIGRATION_PASSWORD_FILE+x}" || -n "${LYNX_PG_MIGRATION_PASSWORD+x}" ]]; then
+        lynx_secret_env LYNX_PG_MIGRATION_PASSWORD
+    else
+        LYNX_PG_MIGRATION_PASSWORD="$LYNX_PG_PASSWORD"
+    fi
 
     [[ "$LYNX_PG_HOST" =~ ^[]A-Za-z0-9.:[_-]+$ ]] ||
         lynx_die "LYNX_PG_HOST contains unsupported characters: '$LYNX_PG_HOST'"

@@ -24,12 +24,12 @@ localization model is described in
 
 | Metric | Value |
 | --- | --- |
-| Workspace crates | 14 members, including two client crates and the `lynx` CLI |
+| Workspace crates | 17 members, including two client crates, the `lynx` CLI, and `lynx-load` |
 | Rust edition / toolchain | 2024 edition, pinned to Rust **1.99** via `rust-toolchain.toml` |
 | Tests | Unit and integration tests; workspace forbids unsafe code (`unsafe_code = "forbid"`) |
-| ADRs | 21 accepted architecture decision records |
-| Platform database | 6 SQL migrations (Nakama/PostgreSQL) |
-| Docs | 12 design docs + full ADR index (see [Documentation](#documentation)) |
+| ADRs | 32 accepted architecture decision records |
+| Platform database | 15 SQL migrations (Nakama/PostgreSQL) |
+| Docs | 14 design docs + full ADR index (see [Documentation](#documentation)) |
 
 ## Status
 
@@ -75,7 +75,7 @@ forward-looking backlog with task IDs, dependencies, and acceptance criteria is
 ### Overview
 
 ```text
-Engine project · 9 phases · last reviewed: October 2026
+Engine project · 9 phases · last reviewed: November 2026
 
 Phase 0  Architecture proof          [███████████████░░░]       In progress — platform validation pending
 Phase 1  Engine skeleton             [███████████████░░░]  85%  In progress — client integration pending
@@ -97,7 +97,7 @@ Phase 8  Expand & stabilize          [██░░░░░░░░░░░░
 - [x] Decide the authoritative simulation topology (ADR 0002, 0004).
 - [x] Minimal login path and server health checks (`/healthz`, `/readyz`,
       hashed bearer auth, `backend_nakama` device-auth client).
-- [x] Architecture decision records for key choices (21 accepted ADRs).
+- [x] Architecture decision records for key choices (32 accepted ADRs).
 
 ### Phase 1 — Engine skeleton · In progress
 
@@ -121,11 +121,12 @@ Phase 8  Expand & stabilize          [██░░░░░░░░░░░░
       resume tokens, session-scoped idempotency (ADR 0013).
 - [x] Server-side action validation: range, permission, state, and cooldown
       checks proven by tests.
-- [~] Persistence: Postgres migrations 0001–0006 exist and storage adapters
-      are in place; `lynx-world` loads and writes durable whole-world snapshots
-      behind a trusted, engine-owned seam, and `--fresh` restores the authored
-      demo over the played world. The remaining work is operational hardening
-      and any additional database-backed features beyond the snapshot seam.
+- [~] Persistence: Postgres migrations 0001–0017 cover schema evolution,
+      snapshots/events, inventory revisions/receipts, and durable resume state.
+      Account/character, faction/calendar, and snapshot stores exist; inventory
+      persistence is not yet routed by the live world service. `--fresh`
+      restores the authored demo over the played world. Backup/recovery drills
+      and additional live database routing remain.
 - [ ] Exit criterion: two graphical clients observing consistent state
       (headless integration tests cover consistency; clients are pending).
 
@@ -139,8 +140,9 @@ Phase 8  Expand & stabilize          [██░░░░░░░░░░░░
 - [x] Faction definitions, alignment thresholds, and reputation resolution
       (ADR 0009); governance, treasury, and territory ship early from Phase 8
       scope (ADR 0020, migration 0004).
-- [~] Basic chat and presence: `ChatService`/`SocialService` exist in
-      `game_api` and the in-memory backend; world-level chat wiring is pending.
+- [~] Zone chat, bounded history, and presence are wired through the world
+      gateway and Bevy client. Nakama direct/group/party channel integration,
+      moderation, and broader social flows remain in `SIM-008`/`NET-009`.
 
 ### Phase 4 — UI and minigame framework · In progress
 
@@ -152,9 +154,9 @@ Phase 8  Expand & stabilize          [██░░░░░░░░░░░░
 - [x] One server-validated minigame: combination lock with per-principal
       attempt budget and tick-based lockout; progress never replicated
       (ADR 0016).
-- [~] Inventory, terminal, dialogue, and crafting panels: the panel framework
-      is generic and validated, but most concrete panel definitions are not
-      authored yet.
+- [~] Inventory/container and lock panels use server-described fields and
+      validated actions. Dialogue, crafting, and richer content-authored panel
+      layouts remain.
 - [x] Exit criterion (headless): different entity types open different
       interfaces through one common protocol; the viewport/editor exit
       criterion is pending client work.
@@ -192,8 +194,9 @@ Phase 8  Expand & stabilize          [██░░░░░░░░░░░░
 - [~] A runnable WebSocket world service with a demo zone (characters, doors,
       barrels, owner-only crate, locked vault, and one publishable faction
       conflict) is playable headless today.
-- [~] Device authentication exists in `backend_nakama`; character selection
-      and the in-game flow await the client.
+- [~] Device authentication and Bevy account/character screens exist. Live
+      authenticated character entry and the sustained in-game flow still need
+      end-to-end validation and graphical integration.
 - [ ] One polished zone with movement, chat, inventory, and persistence in a
       graphical client.
 - [ ] Performance profiling and abuse testing at scale.
@@ -335,6 +338,8 @@ root.
 | [`docs/getting-started.md`](docs/getting-started.md) | Native setup: engine workspace, Nakama, PostgreSQL — no Docker. |
 | [`docs/networking.md`](docs/networking.md) | Protocol envelopes, wire kinds, version handshake, reconnect/resume. |
 | [`docs/operations.md`](docs/operations.md) | Environments, configuration, backups, shutdown, rollout. |
+| [`docs/error-catalog.md`](docs/error-catalog.md) | Stable error codes, retryability, operator guidance, and public parameter rules. |
+| [`docs/upgrade-rehearsal.md`](docs/upgrade-rehearsal.md) | Rust, Bevy, dependency upgrade gates, generated project migration, and rollback. |
 | [`docs/security.md`](docs/security.md) | Threat model, authority invariants, moderation rules. |
 | [`docs/content-authoring.md`](docs/content-authoring.md) | RON formats, kind directories, validation gates, bundles/manifests. |
 | [`docs/world-simulation.md`](docs/world-simulation.md) | Faction parity, territory, world events, calendar, map authoring. |
@@ -344,7 +349,7 @@ root.
 | [`docs/ai-tooling.md`](docs/ai-tooling.md) | Optional MCP tooling policy and shell-execution rules. |
 | [`docs/ai-tooling.md#visual-ui-test-and-task-report-protocol`](docs/ai-tooling.md#visual-ui-test-and-task-report-protocol) | Required visual validation and task-report protocol for AI-authored UI changes. |
 | [`docs/TODO/`](docs/TODO/README.md) | Forward-looking backlog: milestones, priorities, tasks, and known gaps. |
-| [`docs/adr/`](docs/adr/) | 21 accepted architecture decision records (0001–0021) plus proposed ADR 0022. |
+| [`docs/adr/`](docs/adr/) | 32 accepted architecture decision records (0001–0033) with proposed ADR 0022. |
 
 ## Contributing
 

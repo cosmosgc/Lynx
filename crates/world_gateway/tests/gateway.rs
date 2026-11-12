@@ -15,7 +15,7 @@ use engine_sim::action::{ActionEffect, ActionRequest, ActionResult, Verb};
 use engine_sim::combat::{CombatRules, CombatStats, FactionAttackRule};
 use engine_sim::entity::{
     Door, EntityRecord, FactionMembership, Interactable, InteractionPermission, MovementProfile,
-    MovementStatus, RespawnPolicy, UiProvider,
+    MovementStatus, RespawnPolicy, UiAction, UiProvider,
 };
 use engine_sim::mind::{ControlCapability, Controller, Mind};
 use engine_sim::minigame::Minigame;
@@ -215,7 +215,17 @@ fn spawn_panels(
         .with_interactable(
             Interactable::new(3.0, [Verb::Use, Verb::Inspect]).without_line_of_sight(),
         )
-        .with_ui(UiProvider::new(text("ui.terminal"), "Terminal")),
+        .with_ui(
+            UiProvider::new(text("ui.terminal"), "Terminal").with_actions([UiAction {
+                name: "inspect".to_string(),
+                label: "Inspect".to_string(),
+                params: std::collections::BTreeMap::from([(
+                    "mode".to_string(),
+                    "summary".to_string(),
+                )]),
+                allowed_params: std::collections::BTreeSet::new(),
+            }]),
+        ),
     )
     .unwrap();
 
@@ -246,8 +256,17 @@ fn spawn_panels(
             text("prop.display"),
             Vec3::new(9.5, 0.0, 10.0),
         )
-        .with_interactable(Interactable::new(3.0, [Verb::Use]).without_line_of_sight())
-        .with_ui(UiProvider::new(text("ui.display"), "Display")),
+        .with_interactable(
+            Interactable::new(3.0, [Verb::Use, Verb::Inspect]).without_line_of_sight(),
+        )
+        .with_ui(
+            UiProvider::new(text("ui.display"), "Display").with_actions([UiAction {
+                name: "inspect".to_string(),
+                label: "Inspect".to_string(),
+                params: std::collections::BTreeMap::new(),
+                allowed_params: std::collections::BTreeSet::new(),
+            }]),
+        ),
     )
     .unwrap();
 
@@ -262,7 +281,14 @@ fn spawn_panels(
                 locked: true,
                 key: None,
             })
-            .with_ui(UiProvider::new(text("ui.lockpick"), "Vault Lock"))
+            .with_ui(
+                UiProvider::new(text("ui.lockpick"), "Vault Lock").with_actions([UiAction {
+                    name: "play".to_string(),
+                    label: "Try".to_string(),
+                    params: std::collections::BTreeMap::new(),
+                    allowed_params: std::collections::BTreeSet::from(["guess".to_string()]),
+                }]),
+            )
             .with_minigame(Minigame::new(text("minigame.lockpick"), 3, 4, 10, 7).unwrap()),
     )
     .unwrap();
@@ -775,6 +801,11 @@ fn envelope(id: &str, kind: &str, body: serde_json::Value) -> Envelope {
         MessageKind::parse(kind).unwrap(),
         body,
     )
+}
+
+fn assert_wire_fixture(envelope: &Envelope, fixture: &str) {
+    assert_eq!(envelope.encode().unwrap(), fixture.trim());
+    assert_eq!(Envelope::decode(fixture).unwrap(), *envelope);
 }
 
 fn action(id: &str, body: serde_json::Value) -> Envelope {
@@ -2923,6 +2954,7 @@ fn acknowledgement_cursors_are_clamped_to_the_authoritative_tick() {
     );
 
     let ack = envelope("req_ack_0001", "session.ack", json!({ "tick": 999 }));
+    assert_wire_fixture(&ack, include_str!("fixtures/session-ack-1.1.0.json"));
     let replies = fixture
         .gateway
         .handle(&alice.session, &ack, Millis::new(2_000))
@@ -3007,7 +3039,12 @@ fn opening_a_panel_emits_server_resolved_ui_state() {
         schema: text("ui.terminal"),
         title: "Terminal".to_string(),
         fields: Vec::new(),
-        actions: Vec::new(),
+        actions: vec![UiAction {
+            name: "inspect".to_string(),
+            label: "Inspect".to_string(),
+            params: std::collections::BTreeMap::from([("mode".to_string(), "summary".to_string())]),
+            allowed_params: std::collections::BTreeSet::new(),
+        }],
     };
     assert_eq!(state.tick, fixture.gateway.zone().tick());
     assert_eq!(state.panel, Some(expected.clone()));
@@ -3015,6 +3052,7 @@ fn opening_a_panel_emits_server_resolved_ui_state() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One scenario verifies allowlisting, parameter policy, and range.
 fn panel_actions_use_the_open_target_and_revalidate_range() {
     let mut fixture = fixture();
     let alice = connect(
@@ -3043,7 +3081,7 @@ fn panel_actions_use_the_open_target_and_revalidate_range() {
             &envelope(
                 "req_ui_action_0001",
                 UI_ACTION_KIND,
-                json!({ "schema": "ui.terminal", "action": "inspect" }),
+                json!({ "schema": "ui.terminal", "action": "inspect", "params": { "mode": "summary" } }),
             ),
             Millis::new(2_001),
         )
@@ -3073,7 +3111,7 @@ fn panel_actions_use_the_open_target_and_revalidate_range() {
             &envelope(
                 "req_ui_action_0002",
                 UI_ACTION_KIND,
-                json!({ "schema": "ui.terminal", "action": "inspect" }),
+                json!({ "schema": "ui.terminal", "action": "inspect", "params": { "mode": "summary" } }),
             ),
             Millis::new(2_002),
         )
@@ -3099,10 +3137,36 @@ fn panel_actions_use_the_open_target_and_revalidate_range() {
             Millis::new(2_003),
         )
         .unwrap();
-    let result: ActionResult =
-        serde_json::from_value(reply_of_kind(&unsupported, "action.result").body.clone()).unwrap();
-    assert_eq!(result.error().unwrap().code(), ErrorCode::Unsupported);
+    let error: ErrorPayload =
+        serde_json::from_value(reply_of_kind(&unsupported, "protocol.error").body.clone()).unwrap();
+    assert_eq!(error.code, ErrorCode::Unsupported);
     assert!(fixture.gateway.panel(&alice.session).is_some());
+
+    for (request_id, params) in [
+        ("req_ui_action_0004", json!({ "mode": "admin" })),
+        (
+            "req_ui_action_0005",
+            json!({ "mode": "summary", "target": "other" }),
+        ),
+    ] {
+        let rejected = fixture
+            .gateway
+            .handle(
+                &alice.session,
+                &envelope(
+                    request_id,
+                    UI_ACTION_KIND,
+                    json!({ "schema": "ui.terminal", "action": "inspect", "params": params }),
+                ),
+                Millis::new(2_004),
+            )
+            .unwrap();
+        let error: ErrorPayload =
+            serde_json::from_value(reply_of_kind(&rejected, "protocol.error").body.clone())
+                .unwrap();
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        assert!(fixture.gateway.panel(&alice.session).is_some());
+    }
 }
 
 #[test]
@@ -3156,7 +3220,7 @@ fn tick_closes_panels_outside_authored_range_once_and_rejects_later_actions() {
             &envelope(
                 "stale-range",
                 UI_ACTION_KIND,
-                json!({"schema":"ui.terminal", "action":"inspect"}),
+                json!({"schema":"ui.terminal", "action":"inspect", "params":{"mode":"summary"}}),
             ),
             Millis::new(2_102),
         )
@@ -3220,7 +3284,7 @@ fn a_panel_whose_target_disappeared_is_cleared() {
             &envelope(
                 "req_ui_action_0001",
                 UI_ACTION_KIND,
-                json!({ "schema": "ui.terminal", "action": "inspect" }),
+                json!({ "schema": "ui.terminal", "action": "inspect", "params": { "mode": "summary" } }),
             ),
             Millis::new(2_001),
         )
@@ -3312,29 +3376,28 @@ fn panel_messages_reject_client_targets_and_schema_mismatches() {
     assert_eq!(error.code, ErrorCode::InvalidRequest);
     assert!(fixture.gateway.panel(&alice.session).is_some());
 
+    let close_request = envelope("req_ui_close_0002", UI_CLOSE_KIND, json!({}));
+    assert_wire_fixture(&close_request, include_str!("fixtures/ui-close-1.1.0.json"));
     let closed = fixture
         .gateway
-        .handle(
-            &alice.session,
-            &envelope("req_ui_close_0002", UI_CLOSE_KIND, json!({})),
-            Millis::new(2_004),
-        )
+        .handle(&alice.session, &close_request, Millis::new(2_004))
         .unwrap();
     let state = ui_state(reply_of_kind(&closed, UI_STATE_KIND));
     assert!(state.panel.is_none());
     assert!(fixture.gateway.panel(&alice.session).is_none());
 
+    let ui_action_request = envelope(
+        "req_ui_action_0001",
+        UI_ACTION_KIND,
+        json!({ "schema": "ui.terminal", "action": "inspect", "params": { "mode": "summary" } }),
+    );
+    assert_wire_fixture(
+        &ui_action_request,
+        include_str!("fixtures/ui-action-1.1.0.json"),
+    );
     let no_panel = fixture
         .gateway
-        .handle(
-            &alice.session,
-            &envelope(
-                "req_ui_action_0001",
-                UI_ACTION_KIND,
-                json!({ "schema": "ui.terminal", "action": "inspect" }),
-            ),
-            Millis::new(2_005),
-        )
+        .handle(&alice.session, &ui_action_request, Millis::new(2_005))
         .unwrap();
     let error: ErrorPayload = serde_json::from_value(no_panel[0].body.clone()).unwrap();
     assert_eq!(error.code, ErrorCode::InvalidState);
@@ -3378,7 +3441,7 @@ fn panel_state_is_cleared_on_disconnect_and_resume() {
             &envelope(
                 "req_ui_action_0001",
                 UI_ACTION_KIND,
-                json!({ "schema": "ui.terminal", "action": "inspect" }),
+                json!({ "schema": "ui.terminal", "action": "inspect", "params": { "mode": "summary" } }),
             ),
             Millis::new(4_001),
         )
@@ -3477,7 +3540,7 @@ fn opening_another_panel_replaces_the_previous_state() {
             &envelope(
                 "req_ui_action_0002",
                 UI_ACTION_KIND,
-                json!({ "schema": "ui.display", "action": "use" }),
+                json!({ "schema": "ui.display", "action": "inspect" }),
             ),
             Millis::new(2_002),
         )
@@ -3492,6 +3555,7 @@ fn opening_another_panel_replaces_the_previous_state() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One scenario exercises dynamic params and the full minigame lifecycle.
 fn minigame_panel_runs_turns_and_closes_when_solved() {
     let mut fixture = fixture();
     let alice = connect(
@@ -3530,6 +3594,26 @@ fn minigame_panel_runs_turns_and_closes_when_solved() {
 
     let secret = secret_for(&fixture, fixture.alice_vault, fixture.alice_principal);
     let wrong = if secret == "000" { "111" } else { "000" };
+    let injected = fixture
+        .gateway
+        .handle(
+            &alice.session,
+            &envelope(
+                "req_vault_play_injected",
+                UI_ACTION_KIND,
+                json!({
+                    "schema": "ui.lockpick",
+                    "action": "play",
+                    "params": { "guess": wrong, "cheat": "true" }
+                }),
+            ),
+            Millis::new(2_000),
+        )
+        .unwrap();
+    let error: ErrorPayload =
+        serde_json::from_value(reply_of_kind(&injected, "protocol.error").body.clone()).unwrap();
+    assert_eq!(error.code, ErrorCode::InvalidRequest);
+
     let turn = play_guess(
         &mut fixture,
         &alice.session,

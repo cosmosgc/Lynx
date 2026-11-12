@@ -20,7 +20,7 @@ def main() -> int:
     marker = Path(temp) / f"lynx-ci-{args.job}-started-at"
 
     if args.phase == "start":
-        marker.write_text(f"{time.time():.6f}\n", encoding="ascii")
+        marker.write_text(f"{time.monotonic():.6f}\n", encoding="ascii")
         return 0
 
     try:
@@ -29,7 +29,7 @@ def main() -> int:
         print(f"Unable to read CI duration start marker {marker}: {error}", file=sys.stderr)
         return 1
 
-    elapsed = max(0, round(time.time() - started))
+    elapsed = max(0, round(time.monotonic() - started))
     minutes, seconds = divmod(elapsed, 60)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if not summary:

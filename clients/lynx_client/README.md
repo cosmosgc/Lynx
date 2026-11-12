@@ -95,8 +95,8 @@ Run `cargo run -p lynx_client -- --demo-online`. In the online window:
   Press its **number key** to send an action. Approach the target with **WASD**
   if the server rejects the distance. The door supports opening; the barrel
   supports inspection/attacks and opens a generic `bevy_immediate` panel with
-  server-described fields and actions. **Pegar 2 moedas** performs a
-  server-validated transfer from the barrel into the actor inventory.
+  server-described fields and actions. **Pegar 2 moedas** and **Guardar 1 moeda**
+  perform server-validated transfers between the barrel and actor inventory.
 - Approach the vault and choose **use** to open its combination lock. Type the
   requested number of decimal digits, **Backspace** to edit, and **Enter** to
   submit, or click the live `bevy_immediate` dialog's keypad and **Tentar** button.
@@ -119,9 +119,10 @@ Run `cargo run -p lynx_client -- --demo-online`. In the online window:
 - The inventory window is also a `bevy_immediate` floating window. Press **I**
   to toggle it and **Escape** or the title-bar **X** to close. It lists the
   controlled actor's server-replicated slots with derived item names, quantities,
-  and unique markers; drag its title bar or edges like the chat window. Inventory
-  changes only after owner-only server replication; equip and split/merge remain
-  future operations. Chat composition and focus loss suppress **I**.
+  and unique markers; stack rows offer **Separar 1** into an empty slot and
+  **Unir 1** into another compatible stack. Changes appear only after owner-only
+  server replication; equip remains future work. Chat composition and focus loss
+  suppress inventory keyboard/actions.
 - Chat tabs are **Zona** and **Sussurros**, plus **Grupo** and **Party** once
   those channels become active. Inactive tabs show unread counts. **PageUp /
   PageDown** browse history. The gateway currently accepts sends only on the
@@ -266,15 +267,17 @@ Entities with server-provided health now show a green health bar above their
 marker. Missing health hides the bar; updates follow authoritative replication.
 Online entities also show a readable name derived from their replicated
 prototype ID; localized authored display names are not yet wired.
-Server-replicated stunned entities display a `STUN` tag; the demo does not spawn
-a stunned entity by default.
+Server-replicated stunned entities display a `STUN` tag and slowed entities
+display a `SLOW` tag. The online demo includes a persistent non-AI raider with
+both public statuses so the indicators can be inspected repeatedly; only the
+boolean statuses are replicated, never stun timers or slow multipliers.
 Entities with an enabled server-advertised interaction show a small gold marker;
 it is an availability cue only, not authorization or an interaction action.
-Nameplates, status displays, and contextual interaction
-affordances remain planned, backed by server-approved public data.
-Additional inventory operations (equip and split/merge) remain future work in
-CLT-008; the owner inventory window is display-only. The handshake uses this
-workspace's package version for engine and
+Localized authored names and richer contextual affordances remain planned,
+backed by server-approved public data.
+Equip remains future inventory work in CLT-008. Split and merge are requested
+through the authenticated action channel and applied only after owner-only
+replication. The handshake uses this workspace's package version for engine and
 content, matching the built-in demo server.
 The Windows online demo was visually confirmed with movement, chat, presence,
 and live diagnostics; the user considers current localhost movement smooth
@@ -357,5 +360,6 @@ decide authoritative gameplay state. The fixture parser rejects unknown fields
 and control names. Replay ends after its last frame and leaves controls released.
 
 Bevy is pinned to 0.20.0 at the workspace boundary. Per ADR 0001, upgrade it in
-a dedicated change, run workspace tests and a visual smoke test, and add a
+a dedicated change, run the gates and visual smoke checklist in
+[`docs/upgrade-rehearsal.md`](../../docs/upgrade-rehearsal.md), and add a
 migration note to `CHANGELOG.md` for a minor upgrade.

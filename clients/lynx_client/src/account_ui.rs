@@ -9,7 +9,10 @@ use bevy::{
     input::{ButtonState, keyboard::KeyboardInput},
     prelude::*,
 };
-use game_api::{Character, CreateCharacter, SessionToken};
+use game_api::{
+    Character, CreateCharacter, CreateGroup, Friend, FriendState, GroupMember, GroupMembership,
+    GroupRole, GroupSearch, SessionToken, SocialGroup,
+};
 use lynx_client_net::{CharacterApiClient, NakamaAuthClient, NakamaAuthConfig};
 use std::{
     path::PathBuf,
@@ -31,6 +34,7 @@ pub struct WorldLaunch {
     pub bearer: String,
     pub character: String,
     pub world_url: String,
+    pub api_url: String,
     /// Credential namespace used for post-entry token refresh.
     pub credential_scope: CredentialScope,
 }
@@ -42,6 +46,7 @@ impl std::fmt::Debug for WorldLaunch {
             .field("bearer", &"[REDACTED]")
             .field("character", &self.character)
             .field("world_url", &self.world_url)
+            .field("api_url", &self.api_url)
             .field("credential_scope", &"[REDACTED]")
             .finish()
     }
@@ -81,6 +86,8 @@ enum Field {
     ServerName,
     ServerHost,
     ServerPort,
+    FriendAccount,
+    GroupName,
 }
 
 #[derive(Resource)]
@@ -91,6 +98,13 @@ struct Screen {
     focus: Field,
     token: Option<String>,
     characters: Vec<Character>,
+    friends: Vec<Friend>,
+    friend_account: String,
+    groups: Vec<GroupMembership>,
+    discovered_groups: Vec<SocialGroup>,
+    group_members: Vec<GroupMember>,
+    selected_group: Option<String>,
+    group_name: String,
     selected: Option<(String, String)>,
     intent: Option<(String, String)>,
     credential_scope: Option<CredentialScope>,
@@ -115,6 +129,13 @@ impl Default for Screen {
             focus: Field::Email,
             token: None,
             characters: Vec::new(),
+            friends: Vec::new(),
+            friend_account: String::new(),
+            groups: Vec::new(),
+            discovered_groups: Vec::new(),
+            group_members: Vec::new(),
+            selected_group: None,
+            group_name: String::new(),
             selected: None,
             intent: None,
             credential_scope: None,
@@ -205,7 +226,23 @@ enum Outcome {
     SignedOut(NakamaLogoutOutcome),
     Listed(Vec<Character>),
     Created,
-    Selected { id: String, name: String },
+    Selected {
+        id: String,
+        name: String,
+    },
+    Friends(Vec<Friend>),
+    FriendMutation(&'static str),
+    MyGroups(Vec<GroupMembership>),
+    DiscoveredGroups(Vec<SocialGroup>),
+    GroupMutation(&'static str),
+    GroupCreated(SocialGroup),
+    GroupMembers {
+        group_id: String,
+        members: Vec<GroupMember>,
+    },
+    GroupMembersChanged {
+        group_id: String,
+    },
 }
 #[derive(Component)]
 struct Root;
@@ -221,6 +258,35 @@ enum Action {
     TogglePin(String),
     AddServer,
     SignOut,
+    FriendList,
+    RequestFriend,
+    BlockEnteredAccount,
+    FriendMutation(String, RelationshipAction),
+    MyGroups,
+    DiscoverGroups,
+    CreateGroup,
+    JoinGroup(String),
+    LeaveGroup(String),
+    LoadGroupMembers(String),
+    AddGroupAccount,
+    GroupMemberMutation(String, GroupMemberAction),
+}
+
+#[derive(Clone, Copy)]
+enum RelationshipAction {
+    Accept,
+    Dismiss,
+    Remove,
+    Block,
+    Unblock,
+}
+
+#[derive(Clone, Copy)]
+enum GroupMemberAction {
+    Add,
+    Kick,
+    Promote,
+    Demote,
 }
 
 fn setup(mut commands: Commands, mut screen: ResMut<Screen>) {
@@ -244,6 +310,136 @@ fn api(token: &str, url: &str) -> Result<(CharacterApiClient, SessionToken), Str
         CharacterApiClient::new(url).map_err(|e| format!("Character API configuration: {e:?}"))?;
     let token = SessionToken::new(token).map_err(|_| "Invalid session.".to_owned())?;
     Ok((api, token))
+}
+
+fn load_friends(screen: &mut Screen) {
+    let Some(token) = screen.token.clone() else {
+        return;
+    };
+    let api_url = screen.api_url();
+    start(screen, move || {
+        let (api, token) = api(&token, &api_url)?;
+        api.friends(&token)
+            .map(Outcome::Friends)
+            .map_err(|error| format!("Friend list failed: {error:?}."))
+    });
+}
+
+fn mutate_friend(screen: &mut Screen, account: String, action: RelationshipAction) {
+    let Some(token) = screen.token.clone() else {
+        return;
+    };
+    let api_url = screen.api_url();
+    start(screen, move || {
+        let (api, token) = api(&token, &api_url)?;
+        let result = match action {
+            RelationshipAction::Accept => api.accept_friend_request(&token, &account),
+            RelationshipAction::Dismiss => api.dismiss_friend_request(&token, &account),
+            RelationshipAction::Remove => api.remove_friend(&token, &account),
+            RelationshipAction::Block => api.block_account(&token, &account),
+            RelationshipAction::Unblock => api.unblock_account(&token, &account),
+        };
+        result
+            .map(|()| Outcome::FriendMutation("Social relationship updated."))
+            .map_err(|error| format!("Social action failed: {error:?}."))
+    });
+}
+
+fn load_my_groups(screen: &mut Screen) {
+    let Some(token) = screen.token.clone() else {
+        return;
+    };
+    let api_url = screen.api_url();
+    start(screen, move || {
+        let (api, token) = api(&token, &api_url)?;
+        api.my_groups(&token, 50, None)
+            .map(|page| Outcome::MyGroups(page.items))
+            .map_err(|error| format!("Group list failed: {error:?}."))
+    });
+}
+
+fn discover_groups(screen: &mut Screen) {
+    let Some(token) = screen.token.clone() else {
+        return;
+    };
+    let api_url = screen.api_url();
+    let name = screen.group_name.trim().to_owned();
+    let search = GroupSearch {
+        name: (!name.is_empty()).then_some(name),
+        ..GroupSearch::default()
+    };
+    start(screen, move || {
+        let (api, token) = api(&token, &api_url)?;
+        api.discover_groups(&token, &search, 50, None)
+            .map(|page| Outcome::DiscoveredGroups(page.items))
+            .map_err(|error| format!("Group discovery failed: {error:?}."))
+    });
+}
+
+fn mutate_group(screen: &mut Screen, group: String, join: bool) {
+    let Some(token) = screen.token.clone() else {
+        return;
+    };
+    let api_url = screen.api_url();
+    start(screen, move || {
+        let (api, token) = api(&token, &api_url)?;
+        let result = if join {
+            api.request_group_join(&token, &group)
+        } else {
+            api.leave_group(&token, &group)
+        };
+        result
+            .map(|()| {
+                Outcome::GroupMutation(if join {
+                    "Join request submitted."
+                } else {
+                    "Left the group."
+                })
+            })
+            .map_err(|error| format!("Group action failed: {error:?}."))
+    });
+}
+
+fn load_group_members(screen: &mut Screen, group: String) {
+    let Some(token) = screen.token.clone() else {
+        return;
+    };
+    screen.selected_group = Some(group.clone());
+    let api_url = screen.api_url();
+    start(screen, move || {
+        let (api, token) = api(&token, &api_url)?;
+        api.group_members(&token, &group, 100, None)
+            .map(|page| Outcome::GroupMembers {
+                group_id: group,
+                members: page.items,
+            })
+            .map_err(|error| format!("Group roster failed: {error:?}."))
+    });
+}
+
+fn mutate_group_member(screen: &mut Screen, account: String, action: GroupMemberAction) {
+    let Some(group) = screen.selected_group.clone() else {
+        screen.status = "Select a group roster first.".into();
+        screen.dirty = true;
+        return;
+    };
+    let Some(token) = screen.token.clone() else {
+        return;
+    };
+    let api_url = screen.api_url();
+    start(screen, move || {
+        let (api, token) = api(&token, &api_url)?;
+        let accounts = vec![account];
+        let result = match action {
+            GroupMemberAction::Add => api.add_group_members(&token, &group, &accounts),
+            GroupMemberAction::Kick => api.kick_group_members(&token, &group, &accounts),
+            GroupMemberAction::Promote => api.promote_group_members(&token, &group, &accounts),
+            GroupMemberAction::Demote => api.demote_group_members(&token, &group, &accounts),
+        };
+        result
+            .map(|()| Outcome::GroupMembersChanged { group_id: group })
+            .map_err(|error| format!("Group roster action failed: {error:?}."))
+    });
 }
 
 #[allow(deprecated)] // Bevy 0.20 still supports the legacy interaction component.
@@ -333,6 +529,78 @@ fn buttons(
                     });
                 }
             }
+            Action::FriendList => load_friends(&mut screen),
+            Action::RequestFriend => {
+                let account = screen.friend_account.trim().to_owned();
+                if game_api::AccountId::new(account.clone()).is_err() {
+                    screen.status = "Enter a valid account ID.".into();
+                    screen.dirty = true;
+                    continue;
+                }
+                let Some(token) = screen.token.clone() else {
+                    continue;
+                };
+                let api_url = screen.api_url();
+                start(&mut screen, move || {
+                    let (api, token) = api(&token, &api_url)?;
+                    api.request_friend(&token, &account)
+                        .map(|()| Outcome::FriendMutation("Friend request sent."))
+                        .map_err(|error| format!("Friend request failed: {error:?}."))
+                });
+            }
+            Action::BlockEnteredAccount => {
+                let account = screen.friend_account.trim().to_owned();
+                if game_api::AccountId::new(account.clone()).is_err() {
+                    screen.status = "Enter a valid account ID.".into();
+                    screen.dirty = true;
+                    continue;
+                }
+                mutate_friend(&mut screen, account, RelationshipAction::Block);
+            }
+            Action::FriendMutation(account, action) => {
+                mutate_friend(&mut screen, account.clone(), *action);
+            }
+            Action::MyGroups => load_my_groups(&mut screen),
+            Action::DiscoverGroups => discover_groups(&mut screen),
+            Action::JoinGroup(group) => mutate_group(&mut screen, group.clone(), true),
+            Action::LeaveGroup(group) => mutate_group(&mut screen, group.clone(), false),
+            Action::LoadGroupMembers(group) => load_group_members(&mut screen, group.clone()),
+            Action::AddGroupAccount => {
+                let account = screen.friend_account.trim().to_owned();
+                if game_api::AccountId::new(account.clone()).is_err() {
+                    screen.status = "Enter a valid account ID.".into();
+                    screen.dirty = true;
+                    continue;
+                }
+                mutate_group_member(&mut screen, account, GroupMemberAction::Add);
+            }
+            Action::GroupMemberMutation(account, action) => {
+                mutate_group_member(&mut screen, account.clone(), *action);
+            }
+            Action::CreateGroup => {
+                let name = screen.group_name.trim().to_owned();
+                let request = CreateGroup {
+                    name,
+                    description: String::new(),
+                    open: true,
+                    max_count: 25,
+                };
+                if let Err(error) = request.validate() {
+                    screen.status = format!("Invalid group name: {error}");
+                    screen.dirty = true;
+                    continue;
+                }
+                let Some(token) = screen.token.clone() else {
+                    continue;
+                };
+                let api_url = screen.api_url();
+                start(&mut screen, move || {
+                    let (api, token) = api(&token, &api_url)?;
+                    api.create_group(&token, &request)
+                        .map(Outcome::GroupCreated)
+                        .map_err(|error| format!("Group creation failed: {error:?}."))
+                });
+            }
             Action::Create => {
                 let Some(token) = screen.token.clone() else {
                     continue;
@@ -393,6 +661,7 @@ fn buttons(
                         bearer: token,
                         character: id,
                         world_url: screen.world_url(),
+                        api_url: screen.api_url(),
                         credential_scope,
                     });
                     exit.write(AppExit::Success);
@@ -483,7 +752,9 @@ fn keyboard(mut events: MessageReader<KeyboardInput>, mut screen: ResMut<Screen>
                 Field::ServerName => Field::ServerHost,
                 Field::ServerHost => Field::ServerPort,
                 Field::ServerPort => Field::Name,
-                Field::Name => Field::Email,
+                Field::Name => Field::FriendAccount,
+                Field::FriendAccount => Field::GroupName,
+                Field::GroupName => Field::Email,
             };
             screen.dirty = true;
             continue;
@@ -496,12 +767,19 @@ fn keyboard(mut events: MessageReader<KeyboardInput>, mut screen: ResMut<Screen>
             Field::ServerName => &mut screen.server_name,
             Field::ServerHost => &mut screen.server_host,
             Field::ServerPort => &mut screen.server_port,
+            Field::FriendAccount => &mut screen.friend_account,
+            Field::GroupName => &mut screen.group_name,
         };
         if event.key_code == KeyCode::Backspace {
             value.pop();
         } else if let Some(text) = &event.text {
             for c in text.chars().filter(|c| !c.is_control()) {
-                if value.len() + c.len_utf8() <= 320 {
+                let limit = match focus {
+                    Field::FriendAccount => 128,
+                    Field::GroupName => 64,
+                    _ => 320,
+                };
+                if value.len() + c.len_utf8() <= limit {
                     value.push(c);
                 }
             }
@@ -530,6 +808,7 @@ fn poll(mut screen: ResMut<Screen>) {
         Err(error) => screen.status = error,
         Ok(Outcome::SignedIn(token)) => {
             screen.token = Some(token.clone());
+            screen.friends.clear();
             screen.status = "Signed in; loading characters…".into();
             let api_url = screen.api_url();
             start(&mut screen, move || {
@@ -552,6 +831,9 @@ fn poll(mut screen: ResMut<Screen>) {
         Ok(Outcome::SignedOut(outcome)) => {
             screen.token = None;
             screen.characters.clear();
+            screen.friends.clear();
+            screen.groups.clear();
+            screen.discovered_groups.clear();
             screen.selected = None;
             screen.credential_scope = None;
             screen.status = match outcome {
@@ -570,6 +852,40 @@ fn poll(mut screen: ResMut<Screen>) {
         Ok(Outcome::Selected { id, name }) => {
             screen.selected = Some((id, name.clone()));
             screen.status = format!("{name} verified. Enter the world when ready.");
+        }
+        Ok(Outcome::Friends(friends)) => {
+            screen.friends = friends;
+            screen.status = "Friend list refreshed.".into();
+        }
+        Ok(Outcome::FriendMutation(message)) => {
+            screen.status = message.into();
+            load_friends(&mut screen);
+        }
+        Ok(Outcome::MyGroups(groups)) => {
+            screen.groups = groups;
+            screen.status = "Group memberships refreshed.".into();
+        }
+        Ok(Outcome::DiscoveredGroups(groups)) => {
+            screen.discovered_groups = groups;
+            screen.status = "Open groups refreshed.".into();
+        }
+        Ok(Outcome::GroupMutation(message)) => {
+            screen.status = message.into();
+            load_my_groups(&mut screen);
+        }
+        Ok(Outcome::GroupCreated(group)) => {
+            screen.group_name.clear();
+            screen.status = format!("Created group {}.", group.name);
+            load_my_groups(&mut screen);
+        }
+        Ok(Outcome::GroupMembers { group_id, members }) => {
+            screen.selected_group = Some(group_id);
+            screen.group_members = members;
+            screen.status = "Group roster refreshed.".into();
+        }
+        Ok(Outcome::GroupMembersChanged { group_id }) => {
+            screen.status = "Group roster updated.".into();
+            load_group_members(&mut screen, group_id);
         }
     }
 }
@@ -609,6 +925,17 @@ fn render(mut commands: Commands, mut screen: ResMut<Screen>, roots: Query<Entit
         .map(|profile| (profile.world_url(), profile.api_url()));
     let recent = screen.browser.recent().join(", ");
     let status = screen.status.clone();
+    let friends = screen.friends.clone();
+    let groups = screen.groups.clone();
+    let discovered_groups = screen.discovered_groups.clone();
+    let group_members = screen.group_members.clone();
+    let selected_group = screen.selected_group.clone();
+    let can_manage_group = selected_group.as_ref().is_some_and(|selected| {
+        groups.iter().any(|membership| {
+            membership.group.id.as_str() == selected
+                && matches!(membership.role, GroupRole::Owner | GroupRole::Admin)
+        })
+    });
     commands.spawn((Root, Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Column, padding: UiRect::all(px(24)), row_gap: px(8), overflow: Overflow::scroll_y(), ..default() }, BackgroundColor(Color::srgb(0.06, 0.08, 0.12)))).with_children(|parent| {
         parent.spawn((Text::new("Lynx — Account & Characters"), TextFont { font_size: bevy::text::FontSize::Px(28.0), ..default() }));
         parent.spawn(Text::new(status));
@@ -637,6 +964,82 @@ fn render(mut commands: Commands, mut screen: ResMut<Screen>, roots: Query<Entit
             parent.spawn(Text::new("Enter email; password may be blank when resuming. Click a field or use Tab."));
         } else {
             button(parent, "Refresh character list".into(), Action::List);
+            button(parent, "Refresh friends and requests".into(), Action::FriendList);
+            button(parent, format!("{}Account ID: {}", marker(screen.focus == Field::FriendAccount), screen.friend_account), Action::Focus(Field::FriendAccount));
+            button(parent, "Send friend request".into(), Action::RequestFriend);
+            button(parent, "Block account ID".into(), Action::BlockEnteredAccount);
+            parent.spawn(Text::new("Friends and requests"));
+            for friend in &friends {
+                let account = friend.account_id.to_string();
+                let label = friend.display_name.as_deref().or(friend.username.as_deref()).unwrap_or(&account);
+                parent.spawn(Text::new(format!("{label} ({:?}) · {account}", friend.state)));
+                match friend.state {
+                    FriendState::Friend => {
+                        button(parent, format!("Remove {label}"), Action::FriendMutation(account.clone(), RelationshipAction::Remove));
+                        button(parent, format!("Block {label}"), Action::FriendMutation(account, RelationshipAction::Block));
+                    }
+                    FriendState::IncomingRequest => {
+                        button(parent, format!("Accept {label}"), Action::FriendMutation(account.clone(), RelationshipAction::Accept));
+                        button(parent, format!("Dismiss {label}"), Action::FriendMutation(account.clone(), RelationshipAction::Dismiss));
+                        button(parent, format!("Block {label}"), Action::FriendMutation(account, RelationshipAction::Block));
+                    }
+                    FriendState::OutgoingRequest => {
+                        button(parent, format!("Cancel request to {label}"), Action::FriendMutation(account.clone(), RelationshipAction::Dismiss));
+                        button(parent, format!("Block {label}"), Action::FriendMutation(account, RelationshipAction::Block));
+                    }
+                    FriendState::Blocked => {
+                        button(parent, format!("Unblock {label}"), Action::FriendMutation(account, RelationshipAction::Unblock));
+                    }
+                }
+            }
+            parent.spawn(Text::new("Groups"));
+            button(parent, "Refresh my groups".into(), Action::MyGroups);
+            button(parent, format!("{}Group name: {}", marker(screen.focus == Field::GroupName), screen.group_name), Action::Focus(Field::GroupName));
+            button(parent, "Create open group (25 members)".into(), Action::CreateGroup);
+            button(parent, "Discover open groups".into(), Action::DiscoverGroups);
+            for membership in &groups {
+                let group = &membership.group;
+                parent.spawn(Text::new(format!("{} · {:?} · {}/{} members", group.name, membership.role, group.member_count, group.max_count)));
+                button(parent, format!("View roster: {}", group.name), Action::LoadGroupMembers(group.id.to_string()));
+                if membership.role != GroupRole::Owner {
+                    button(parent, format!("Leave {}", group.name), Action::LeaveGroup(group.id.to_string()));
+                }
+            }
+            for group in &discovered_groups {
+                let is_member = groups.iter().any(|membership| membership.group.id == group.id);
+                parent.spawn(Text::new(format!("{}{} · {}/{} members", if group.open { "Open: " } else { "Approval required: " }, group.name, group.member_count, group.max_count)));
+                if !is_member {
+                    button(parent, format!("{} {}", if group.open { "Join" } else { "Request to join" }, group.name), Action::JoinGroup(group.id.to_string()));
+                }
+            }
+            if let Some(group_id) = &selected_group {
+                parent.spawn(Text::new(format!("Roster: {group_id}")));
+                if can_manage_group {
+                    button(parent, "Add account ID to selected group".into(), Action::AddGroupAccount);
+                }
+                for member in &group_members {
+                    let account = member.account_id.to_string();
+                    parent.spawn(Text::new(format!("{} · {:?}", member.username.as_deref().unwrap_or(&account), member.role)));
+                    if !can_manage_group {
+                        continue;
+                    }
+                    match member.role {
+                        GroupRole::JoinRequest => {
+                            button(parent, format!("Approve {account}"), Action::GroupMemberMutation(account.clone(), GroupMemberAction::Add));
+                            button(parent, format!("Decline {account}"), Action::GroupMemberMutation(account, GroupMemberAction::Kick));
+                        }
+                        GroupRole::Member => {
+                            button(parent, format!("Promote {account}"), Action::GroupMemberMutation(account.clone(), GroupMemberAction::Promote));
+                            button(parent, format!("Remove {account}"), Action::GroupMemberMutation(account, GroupMemberAction::Kick));
+                        }
+                        GroupRole::Admin => {
+                            button(parent, format!("Demote {account}"), Action::GroupMemberMutation(account.clone(), GroupMemberAction::Demote));
+                            button(parent, format!("Remove {account}"), Action::GroupMemberMutation(account, GroupMemberAction::Kick));
+                        }
+                        GroupRole::Owner | GroupRole::Banned => {}
+                    }
+                }
+            }
             for c in &screen.characters { button(parent, format!("Select {} ({:?})", c.name, c.status), Action::Select(c.id.to_string())); }
             if let Some((_, name)) = &screen.selected {
                 button(parent, format!("Enter world with {name}"), Action::EnterWorld);
@@ -687,6 +1090,7 @@ fn button(parent: &mut ChildSpawnerCommands, label: String, action: Action) {
         });
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -698,6 +1102,7 @@ mod tests {
             bearer: "secret-access-token".into(),
             character: "chr-test".into(),
             world_url: "ws://127.0.0.1:8090/world".into(),
+            api_url: "http://127.0.0.1:8090".into(),
             credential_scope: scope.clone(),
         }));
         let debug = format!("{launch:?}");
@@ -709,6 +1114,7 @@ mod tests {
                 bearer: "secret-access-token".into(),
                 character: "chr-test".into(),
                 world_url: "ws://127.0.0.1:8090/world".into(),
+                api_url: "http://127.0.0.1:8090".into(),
                 credential_scope: scope,
             })
         );

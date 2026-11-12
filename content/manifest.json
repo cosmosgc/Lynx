@@ -1,0 +1,17 @@
+{
+  "content_version": "0.1.0",
+  "engine": "^0.1",
+  "definitions": [],
+  "locales": [
+    {
+      "locale": "en",
+      "path": "localization/en.ron",
+      "sha256": "9f73a7b91c61481b49bfb39a67727019f10724c27132342db006c246a6ce12ce"
+    },
+    {
+      "locale": "pt-BR",
+      "path": "localization/pt-BR.ron",
+      "sha256": "98681cbaacf87c0d39f9eca36abb1e7868d72c08c9bcc36625bef673a126b929"
+    }
+  ]
+}

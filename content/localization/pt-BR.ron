@@ -1,0 +1,21 @@
+(
+    locale: "pt-BR",
+    messages: {
+        "error.invalid_request": "A solicitação é inválida. Atualize a interface e tente novamente.",
+        "error.not_found": "O alvo não está mais disponível.",
+        "error.out_of_range": "Aproxime-se do alvo e tente novamente.",
+        "error.not_visible": "O alvo não está visível. Atualize a área e tente novamente.",
+        "error.permission_denied": "Você não tem permissão para esta ação.",
+        "error.invalid_state": "O estado mudou. Atualize a interface antes de tentar novamente.",
+        "error.session_expired": "Sua sessão expirou. Entre novamente.",
+        "error.cooldown": "Aguarde antes de tentar novamente.",
+        "error.capacity_exceeded": "Não há espaço suficiente para concluir esta ação.",
+        "error.version_mismatch": "A versão do cliente ou do conteúdo não é compatível.",
+        "error.content_invalid": "Este conteúdo está indisponível no momento.",
+        "error.conflict": "O estado mudou. Atualize a interface antes de tentar novamente.",
+        "error.budget_exhausted": "A solicitação exige muito trabalho. Tente novamente em instantes.",
+        "error.rate_limited": "Aguarde antes de tentar novamente.",
+        "error.unsupported": "Esta ação não está disponível nesta versão.",
+        "error.internal": "A ação não foi concluída. Tente novamente mais tarde.",
+    },
+)

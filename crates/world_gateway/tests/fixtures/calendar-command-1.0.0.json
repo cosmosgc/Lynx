@@ -1,0 +1,1 @@
+{"v":"1.0.0","id":"req-1","kind":"calendar.command","body":{"action":{"event":"event.demo.assault","kind":"enroll","side":"side.attackers"},"request_id":"enroll-1"}}

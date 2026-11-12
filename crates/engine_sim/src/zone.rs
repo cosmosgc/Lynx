@@ -16,7 +16,7 @@ use crate::action::{ActionEffect, ActionKey, ActionResult};
 use crate::ai::{AiDiagnostics, AiNavigationState, AiTickPolicy, AiTickReport};
 use crate::combat::{CombatAuditEvent, CombatRules, DamageType};
 use crate::entity::{EntityRecord, TimedDamageOverTime, TimedShield, TimedSlow};
-use crate::link::{EntityLink, LinkEvent, LinkGraph};
+use crate::link::{EntityLink, LinkAction, LinkEvent, LinkGraph};
 use crate::mind::Controller;
 use crate::movement::{MovementIntent, MovementSequence};
 use crate::nav::{
@@ -29,7 +29,9 @@ pub const ACTION_CACHE_LIMIT: usize = 2_048;
 pub const LINK_CACHE_LIMIT: usize = 1_024;
 /// Maximum targets one activation may fan out to.
 pub const MAX_LINK_TARGETS: usize = 32;
-/// Maximum retained server-only movement diagnostics.
+/// Maximum trigger sensors scanned by accepted movement in one zone.
+pub const MAX_TRIGGER_SENSORS_PER_ZONE: usize = 256;
+/// Maximum retained server-only client-input rejection diagnostics.
 pub const MOVEMENT_DIAGNOSTIC_LIMIT: usize = 256;
 /// Maximum concurrent timed damage effects or shields on one entity.
 pub const TIMED_COMBAT_EFFECT_LIMIT: usize = 8;
@@ -39,7 +41,8 @@ pub const COMBAT_AUDIT_LIMIT: usize = 512;
 /// Work limits for one simulation tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TickBudget {
-    /// Maximum actions processed in one tick.
+    /// Maximum unique action requests admitted between tick boundaries,
+    /// shared by player and AI actions. Cached retries do not consume quota.
     pub max_actions: usize,
     /// Maximum AI controller updates in one tick.
     pub max_ai_updates: usize,
@@ -212,6 +215,7 @@ pub struct Diagnostic {
 }
 
 /// The authoritative simulation state for one zone instance.
+#[derive(Clone)]
 pub struct Zone {
     pub(crate) config: ZoneConfig,
     pub(crate) entities: BTreeMap<StableId, EntityRecord>,
@@ -221,6 +225,7 @@ pub struct Zone {
     pub(crate) transfers: TransferLedger,
     pub(crate) action_results: BTreeMap<String, ActionResult>,
     pub(crate) action_order: VecDeque<String>,
+    pub(crate) action_correlations: BTreeMap<String, String>,
     pub(crate) cooldowns: BTreeMap<ActionKey, Tick>,
     pub(crate) link_results: BTreeMap<String, Vec<ActionEffect>>,
     pub(crate) link_order: VecDeque<String>,
@@ -229,8 +234,11 @@ pub struct Zone {
     pub(crate) stats: TickStats,
     pub(crate) phase_timings: TickPhaseTimings,
     pub(crate) movement_pending: BTreeMap<StableId, MovementIntent>,
+    /// Unique action attempts accepted into the current tick window. Retries
+    /// are handled before this counter is consulted.
+    pub(crate) action_attempts_this_tick: usize,
     pub(crate) movement_sequences: BTreeMap<StableId, MovementSequence>,
-    pub(crate) movement_diagnostics: VecDeque<Diagnostic>,
+    pub(crate) input_rejection_diagnostics: VecDeque<Diagnostic>,
     pub(crate) combat_audit: VecDeque<CombatAuditEvent>,
     pub(crate) respawned_this_tick: Vec<StableId>,
     pub(crate) movement_resets: BTreeSet<StableId>,
@@ -241,6 +249,8 @@ pub struct Zone {
     pub(crate) ai_report: AiTickReport,
     pub(crate) ai_diagnostics: AiDiagnostics,
     pub(crate) ai_navigation: BTreeMap<StableId, AiNavigationState>,
+    /// Runtime-only route cursors for bounded content-authored patrols.
+    pub(crate) ai_patrol_cursors: BTreeMap<StableId, (DefinitionId, usize)>,
     /// Stable ID after which the next AI controller scan starts. Runtime-only:
     /// snapshots reset it because it is scheduling state, not simulation state.
     pub(crate) ai_scan_cursor: Option<StableId>,
@@ -299,6 +309,7 @@ impl Zone {
             transfers: TransferLedger::new(),
             action_results: BTreeMap::new(),
             action_order: VecDeque::new(),
+            action_correlations: BTreeMap::new(),
             cooldowns: BTreeMap::new(),
             link_results: BTreeMap::new(),
             link_order: VecDeque::new(),
@@ -307,8 +318,9 @@ impl Zone {
             stats: TickStats::default(),
             phase_timings: TickPhaseTimings::default(),
             movement_pending: BTreeMap::new(),
+            action_attempts_this_tick: 0,
             movement_sequences: BTreeMap::new(),
-            movement_diagnostics: VecDeque::new(),
+            input_rejection_diagnostics: VecDeque::new(),
             combat_audit: VecDeque::new(),
             respawned_this_tick: Vec::new(),
             movement_resets: BTreeSet::new(),
@@ -319,6 +331,7 @@ impl Zone {
             ai_report: AiTickReport::default(),
             ai_diagnostics: AiDiagnostics::default(),
             ai_navigation: BTreeMap::new(),
+            ai_patrol_cursors: BTreeMap::new(),
             ai_scan_cursor: None,
         })
     }
@@ -333,6 +346,15 @@ impl Zone {
     #[must_use]
     pub fn tick(&self) -> Tick {
         self.tick
+    }
+
+    /// Remaining validated-action attempts in the current tick window.
+    #[must_use]
+    pub(crate) fn action_budget_remaining(&self) -> usize {
+        self.config
+            .budget
+            .max_actions
+            .saturating_sub(self.action_attempts_this_tick)
     }
 
     /// Navigation grid.
@@ -537,6 +559,40 @@ impl Zone {
                 EngineError::new(ErrorCode::CapacityExceeded, "zone entity limit reached")
                     .with_detail("max_entities", self.config.max_entities.to_string()),
             );
+        }
+        if let Some(trigger) = entity
+            .components
+            .values()
+            .find(|component| component.key.as_str() == "core.trigger")
+        {
+            let radius = trigger
+                .data
+                .get("radius_m")
+                .and_then(serde_json::Value::as_f64);
+            if !radius.is_some_and(|radius| (0.1..=32.0).contains(&radius)) {
+                return Err(EngineError::new(
+                    ErrorCode::InvalidRequest,
+                    "trigger sensor radius must be between 0.1 and 32 meters",
+                )
+                .with_detail("entity", entity.id.to_string()));
+            }
+            let trigger_count = self
+                .entities
+                .values()
+                .filter(|existing| {
+                    existing
+                        .components
+                        .values()
+                        .any(|component| component.key.as_str() == "core.trigger")
+                })
+                .count();
+            if trigger_count >= MAX_TRIGGER_SENSORS_PER_ZONE {
+                return Err(EngineError::new(
+                    ErrorCode::CapacityExceeded,
+                    "zone trigger sensor limit reached",
+                )
+                .with_detail("max_triggers", MAX_TRIGGER_SENSORS_PER_ZONE.to_string()));
+            }
         }
         let id = entity.id;
         self.entities.insert(id, entity);
@@ -1047,6 +1103,10 @@ impl Zone {
             .values()
             .filter(|entity| entity.is_controlled())
             .count();
+        // Actions arrive between tick boundaries and AI actions run during the
+        // boundary. Clear the shared bucket only after both have had their
+        // opportunity to consume it.
+        self.action_attempts_this_tick = 0;
         self.phase_timings.statistics_ns = statistics_started.elapsed().as_nanos();
         self.stats.clone()
     }
@@ -1076,7 +1136,7 @@ impl Zone {
                 message: diagnostic.message,
             })
             .collect();
-        diagnostics.extend(self.movement_diagnostics.iter().cloned());
+        diagnostics.extend(self.input_rejection_diagnostics.iter().cloned());
 
         for entity in self.entities.values() {
             if !self.config.contains(entity.position()) {
@@ -1108,6 +1168,22 @@ impl Zone {
             }
         }
         diagnostics
+    }
+
+    pub(crate) fn record_input_rejection(
+        &mut self,
+        code: String,
+        actor: StableId,
+        message: &'static str,
+    ) {
+        if self.input_rejection_diagnostics.len() >= MOVEMENT_DIAGNOSTIC_LIMIT {
+            let _ = self.input_rejection_diagnostics.pop_front();
+        }
+        self.input_rejection_diagnostics.push_back(Diagnostic {
+            code,
+            entity: Some(actor),
+            message: message.into(),
+        });
     }
 
     /// Activate every enabled link from `source` carrying `event`.
@@ -1186,20 +1262,30 @@ impl Zone {
                 continue;
             }
 
-            let mut applied = true;
-            if let Some(target) = self.entities.get_mut(&link.target)
-                && let Some(door) = target.door.as_mut()
-            {
-                if door.locked {
-                    applied = false;
-                } else {
-                    door.open = !door.open;
-                    effects.push(ActionEffect::DoorToggled {
-                        target: link.target,
-                        open: door.open,
-                    });
+            let applied = match link.action {
+                LinkAction::ToggleDoor | LinkAction::OpenDoor | LinkAction::CloseDoor => {
+                    let Some(target) = self.entities.get_mut(&link.target) else {
+                        continue;
+                    };
+                    let Some(door) = target.door.as_mut() else {
+                        continue;
+                    };
+                    if door.locked {
+                        false
+                    } else {
+                        door.open = match link.action {
+                            LinkAction::ToggleDoor => !door.open,
+                            LinkAction::OpenDoor => true,
+                            LinkAction::CloseDoor => false,
+                        };
+                        effects.push(ActionEffect::DoorToggled {
+                            target: link.target,
+                            open: door.open,
+                        });
+                        true
+                    }
                 }
-            }
+            };
             if applied {
                 effects.push(ActionEffect::Activated {
                     source: link.source,

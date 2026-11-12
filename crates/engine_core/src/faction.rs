@@ -559,6 +559,7 @@ fn active_sum(modifiers: &[ReputationModifier], now: Millis) -> i16 {
         })
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

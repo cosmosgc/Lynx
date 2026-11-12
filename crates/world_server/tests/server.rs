@@ -11,7 +11,7 @@ use engine_net::envelope::{Envelope, MessageId, MessageKind};
 use engine_net::protocol::Handshake;
 use engine_net::replication::{ReplicationBatch, SessionId};
 use engine_sim::action::{ActionEffect, ActionResult, Verb};
-use engine_sim::entity::{Door, EntityRecord, Interactable, UiProvider};
+use engine_sim::entity::{Door, EntityRecord, Interactable, UiAction, UiProvider};
 use engine_sim::mind::Mind;
 use engine_sim::minigame::Minigame;
 use engine_sim::nav::NavGrid;
@@ -125,7 +125,14 @@ fn fixture_with_ttl(ttl_ms: u64) -> Fixture {
                 Interactable::new(3.0, [Verb::Use, Verb::Play, Verb::Open]).without_line_of_sight(),
             )
             .with_door(Door::locked_with(text("key.vault")))
-            .with_ui(UiProvider::new(text("ui.lockpick"), "Vault Lock"))
+            .with_ui(
+                UiProvider::new(text("ui.lockpick"), "Vault Lock").with_actions([UiAction {
+                    name: "play".to_string(),
+                    label: "Try".to_string(),
+                    params: std::collections::BTreeMap::new(),
+                    allowed_params: std::collections::BTreeSet::from(["guess".to_string()]),
+                }]),
+            )
             .with_minigame(Minigame::new(text("minigame.lockpick"), 3, 4, 10, 9).unwrap()),
     )
     .unwrap();
@@ -419,6 +426,148 @@ fn failed_tick_detaches_and_resume_recovers_consumed_movement() {
     assert_eq!(movement.position, Vec3::new(10.05, 0.0, 10.0));
 }
 
+#[test]
+fn common_client_requests_have_stable_server_reply_envelopes() {
+    let mut fixture = fixture();
+    let alice = open(&mut fixture.server, "alice", fixture.alice_principal);
+
+    let action_request = action(
+        "golden-action",
+        json!({
+            "target": fixture.alice_door,
+            "verb": "open",
+            "params": {},
+            "client_tick": Tick::ZERO,
+        }),
+    );
+    assert_golden(
+        &action_request,
+        include_str!("fixtures/action-request-1.1.0.json"),
+    );
+    let action_outbound = fixture
+        .server
+        .receive(alice.connection, &action_request, Millis::new(1_001))
+        .unwrap();
+    let action_reply = message_for(&action_outbound, alice.connection).unwrap();
+    assert_golden(
+        action_reply,
+        include_str!("fixtures/action-result-1.1.0.json"),
+    );
+
+    let movement = Envelope::new(
+        MessageId::parse("golden-movement").unwrap(),
+        MessageKind::parse("movement.request").unwrap(),
+        json!({
+            "sequence": 1,
+            "destination": { "x": 10.05, "y": 0.0, "z": 10.0 },
+        }),
+    );
+    assert_golden(
+        &movement,
+        include_str!("fixtures/movement-request-1.1.0.json"),
+    );
+    let movement_outbound = fixture
+        .server
+        .receive(alice.connection, &movement, Millis::new(1_002))
+        .unwrap();
+    let movement_reply = message_for(&movement_outbound, alice.connection).unwrap();
+    assert_golden(
+        movement_reply,
+        include_str!("fixtures/movement-queued-1.1.0.json"),
+    );
+
+    let chat = Envelope::new(
+        MessageId::parse("golden-chat").unwrap(),
+        MessageKind::parse("chat.send").unwrap(),
+        json!({ "channel_id": "zone", "content": "hello golden" }),
+    );
+    assert_golden(&chat, include_str!("fixtures/chat-send-1.1.0.json"));
+    let chat_outbound = fixture
+        .server
+        .receive(alice.connection, &chat, Millis::new(1_003))
+        .unwrap();
+    for chat_reply in messages_for(&chat_outbound, alice.connection) {
+        let golden = match chat_reply.kind.as_str() {
+            "chat.message" => include_str!("fixtures/chat-message-1.1.0.json"),
+            "chat.send.result" => include_str!("fixtures/chat-send-result-1.1.0.json"),
+            kind => panic!("unexpected golden chat response kind {kind}"),
+        };
+        assert_golden(chat_reply, golden);
+    }
+}
+
+#[test]
+fn chat_query_responses_match_versioned_wire_fixtures() {
+    let mut fixture = fixture();
+    let alice = open(&mut fixture.server, "alice", fixture.alice_principal);
+
+    for (id, kind, body, request_golden, golden_kind, response_golden) in [
+        (
+            "golden-channels",
+            "chat.channels",
+            json!({}),
+            include_str!("fixtures/chat-channels-1.1.0.json"),
+            "chat.channels.result",
+            include_str!("fixtures/chat-channels-result-1.1.0.json"),
+        ),
+        (
+            "golden-presence",
+            "chat.presence",
+            json!({}),
+            include_str!("fixtures/chat-presence-1.1.0.json"),
+            "chat.presence.result",
+            include_str!("fixtures/chat-presence-result-1.1.0.json"),
+        ),
+        (
+            "golden-history",
+            "chat.history",
+            json!({ "channel_id": "zone", "limit": 10 }),
+            include_str!("fixtures/chat-history-1.1.0.json"),
+            "chat.history.result",
+            include_str!("fixtures/chat-history-result-1.1.0.json"),
+        ),
+    ] {
+        let request = Envelope::new(
+            MessageId::parse(id).unwrap(),
+            MessageKind::parse(kind).unwrap(),
+            body,
+        );
+        assert_golden(&request, request_golden);
+        let outbound = fixture
+            .server
+            .receive(alice.connection, &request, Millis::new(1_010))
+            .unwrap();
+        let response = messages_for(&outbound, alice.connection)
+            .into_iter()
+            .find(|message| message.kind.as_str() == golden_kind)
+            .expect("expected chat query response");
+        assert_golden(response, response_golden);
+    }
+}
+
+#[test]
+fn panel_state_matches_versioned_wire_fixture() {
+    let mut fixture = fixture();
+    let alice = open(&mut fixture.server, "alice", fixture.alice_principal);
+    let request = action(
+        "golden-ui-open",
+        json!({ "verb": "use", "target": fixture.alice_vault.to_string() }),
+    );
+    assert_golden(
+        &request,
+        include_str!("fixtures/ui-open-request-1.1.0.json"),
+    );
+    let outbound = fixture
+        .server
+        .receive(alice.connection, &request, Millis::new(1_010))
+        .unwrap();
+    let state = messages_for(&outbound, alice.connection)
+        .into_iter()
+        .find(|message| message.kind.as_str() == UI_STATE_KIND)
+        .expect("opening the panel emits ui.state");
+    assert_golden(state, include_str!("fixtures/ui-state-1.1.0.json"));
+}
+
 fn open(server: &mut WorldServer, account: &str, principal: StableId) -> Opened {
     server
         .open(claims(account, principal), &handshake(), Millis::new(1_000))
@@ -463,6 +612,12 @@ fn envelope_with_kind<'a>(opened: &'a Opened, kind: &str) -> &'a Envelope {
         .iter()
         .find(|envelope| envelope.kind.as_str() == kind)
         .expect("the expected envelope should be present")
+}
+
+fn assert_golden(envelope: &Envelope, fixture: &str) {
+    let fixture = fixture.trim();
+    assert_eq!(envelope.encode().unwrap(), fixture);
+    assert_eq!(Envelope::decode(fixture).unwrap(), *envelope);
 }
 
 fn update(envelope: &Envelope) -> WorldUpdate {
@@ -643,7 +798,11 @@ fn minigame_actions_route_only_to_the_originating_connection() {
         "a minigame turn reaches only its player"
     );
     let turn_messages = messages_for(&turn, alice.connection);
-    assert_eq!(turn_messages.len(), 2);
+    assert_eq!(
+        turn_messages.len(),
+        2,
+        "unexpected minigame turn replies: {turn_messages:?}"
+    );
     assert_eq!(turn_messages[0].kind.as_str(), "action.result");
     assert_eq!(turn_messages[1].kind.as_str(), UI_STATE_KIND);
     let result: ActionResult = serde_json::from_value(turn_messages[0].body.clone()).unwrap();

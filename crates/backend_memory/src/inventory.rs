@@ -271,6 +271,7 @@ fn replace_inventory_locked(
     Ok(next)
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use backend_contract_tests::{SessionInventoryContract, assert_inventory_contract};

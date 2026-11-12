@@ -24,6 +24,7 @@ client/editor crates. Phases 1, 2, 4, and 7 still require further client work.
 
 - **Priority:** P0
 - **Status:** Done
+- **Completion record:** [clt-001-client-workspace-and-crate-layout.md](completed/clt-001-client-workspace-and-crate-layout.md)
 - **Depends on:** —
 - **References:** ADR 0001, [architecture §What is deliberately not here yet](../architecture.md#what-is-deliberately-not-here-yet)
 
@@ -73,7 +74,7 @@ window displaying the default offline placeholder scene.
 ## CLT-002 — Login and session bootstrap
 
 - **Priority:** P0
-- **Status:** In progress — secure Nakama groundwork and the account-screen server browser exist; live multi-server and credential isolation remain
+- **Status:** In progress — secure Nakama groundwork, the account-screen server browser, and per-profile OS credential scopes exist; live multi-server session behavior and auth-error localization remain
 - **Depends on:** `NET-001`, `CLT-001`
 - **References:** [networking §Transport](../networking.md#transport)
 
@@ -105,7 +106,7 @@ window displaying the default offline placeholder scene.
       port.
 - [x] Recent connections appear in history, and pinned servers remain easy to
       find across restarts.
-- [ ] Remembered credentials are isolated per server and stored only in the
+- [x] Remembered credentials are isolated per server and stored only in the
       operating system's secure credential store.
 - [ ] Multiple client instances connect according to the server's selected
       per-character or per-account session policy.
@@ -128,16 +129,19 @@ OS configuration directory and persist atomically without credential fields.
 Pinned profiles sort first and history is unique and bounded. The selected
 profile supplies both the character API and world WebSocket endpoints, with
 `wss://`/`https://` required for remote hosts and plaintext restricted to
-loopback and private-network addresses. Focused tests cover round-trip
+loopback and private-network addresses. Saved Nakama refresh credentials use a
+hashed secure-store scope derived from both the selected world-profile key and
+Nakama origin; profile credentials never enter the server-browser document.
+Focused tests cover round-trip
 persistence through a new parent directory, missing/corrupt/oversized documents,
 temporary-file cleanup, pin/recent ordering, URL policy (including IPv6), and
-secret-free serialization (7/7). The screen also has a pure selection/endpoint
-test. Localized errors, per-world-profile credential isolation, live multi-server
-reconnect, and world resume-token lifecycle remain open. Nakama credentials are
-still scoped to the configured Nakama server rather than each world profile.
-The server-browser UI itself has not been visually reviewed against a live
-server, and no live multi-instance policy run is claimed. `NET-001` and
-`CLT-001` remain prerequisites and are not assumed complete.
+secret-free serialization (7/7). The account screen also has focused scope and
+endpoint-selection tests. Live multi-server reconnect, server-policy behavior
+across multiple client instances, account-error localization, and world
+resume-token lifecycle remain open. The server-browser UI has not been visually
+reviewed against a live server, and no live multi-instance policy run is
+claimed. `NET-001` and `CLT-001` remain prerequisites and are not assumed
+complete.
 
 ---
 
@@ -196,9 +200,10 @@ live Nakama/PostgreSQL plus process-restart onboarding remains to be exercised.
 
 - **Priority:** P0
 - **Status:** Done
+- **Completion record:** [clt-004-scene-camera-input.md](completed/clt-004-scene-camera-input.md)
 - **Depends on:** `CLT-001`
 - **References:** [project guide §24](../lightweight_mmorpg_engine_project_guide.md#24-initial-vertical-slice-keep-it-small),
-  `QUA-017` (camera/input ADR)
+  [ADR 0024](../adr/0024-camera-and-input-abstraction.md)
 
 **Scope**
 
@@ -253,6 +258,7 @@ unversioned until a manifest is built.
 
 - **Priority:** P0
 - **Status:** Done — background reconnect, Nakama access-token refresh, and terminal recovery are implemented and tested
+- **Completion record:** [clt-005-network-client-loop.md](completed/clt-005-network-client-loop.md)
 - **Depends on:** `CLT-001`, `CLT-002`
 - **References:** [networking](../networking.md), `engine_net`
 
@@ -306,6 +312,7 @@ refreshed bearer is used on retry without blocking the Bevy polling loop.
 
 - **Priority:** P0
 - **Status:** Done — client entity presentation delivered and visually reviewed; network-impairment tuning remains in `CLT-016`
+- **Completion record:** [clt-006-entity-presentation-and-interpolation.md](completed/clt-006-entity-presentation-and-interpolation.md)
 - **Depends on:** `CLT-004`, `CLT-005`
 - **References:** ADR 0012, `SIM-002`
 
@@ -418,7 +425,7 @@ in chat and is not stored in the repository.
 ## CLT-018 — Public status indicators
 
 - **Priority:** P2
-- **Status:** In progress — safe stunned/slowed booleans, indicators, and deterministic demo fixture implemented; visual review remains in `CLT-020`
+- **Status:** Done — public status contract, safe indicators, and deterministic demo fixture are implemented; user visual review is tracked separately in `CLT-020`
 - **Depends on:** `CLT-006`
 - **References:** [CLT-006](#clt-006--entity-presentation-and-interpolation), `SIM-002`
 
@@ -440,12 +447,12 @@ simulation state is not exposed implicitly.
 
 **Acceptance criteria**
 
-- [ ] Public status contract is explicit, bounded, and covered by privacy tests.
-- [ ] Status indicators appear/update/clear with authoritative state and entity
+- [x] Public status contract is explicit, bounded, and covered by privacy tests.
+- [x] Status indicators appear/update/clear with authoritative state and entity
       visibility; no private movement/combat internals leak.
 - [x] A deterministic visual fixture demonstrates statuses in the graphical
       client. User visual review is tracked separately in `CLT-020`.
-- [ ] Additional effects are displayed only when modeled by authoritative
+- [x] Additional effects are displayed only when modeled by authoritative
       simulation data; unsupported statuses fail closed.
 
 **Implementation progress:** Public entity replication now includes optional
@@ -460,6 +467,13 @@ ensure no private multiplier or slow component leaks. The built-in navigation
 scenario keeps the non-AI raider stunned and slowed for graphical inspection;
 the gateway still exposes only the public booleans. User visual review has been
 moved to the future `CLT-020` task.
+
+**Completion (2026-11-12):** Static review confirms only the typed public
+`stunned` and `slowed` flags drive indicators; unknown/private effect fields do
+not create UI state. Projection and client decoding coverage checks omission,
+clearing, compatibility defaults, and privacy boundaries. The demo's persistent
+raider keeps both indicators visible for repeatable inspection. User feedback on
+readability and overlap remains in `CLT-020`.
 
 ---
 
@@ -513,7 +527,7 @@ have not been visually tuned in the Windows demo.
 ## CLT-008 — Interaction, inventory, and UI panels
 
 - **Priority:** P1
-- **Status:** In progress — `bevy_immediate` now renders server-described fields/actions and a validated container take; equip/split/merge, localization, and broader content-authored layouts remain
+- **Status:** In progress — `bevy_immediate` renders server-described fields/actions, gateway-enforced action/parameter policies, validated take/insert transfers, and server-authoritative split/merge; equip, localization, and broader content-authored layouts remain
 - **Depends on:** `CLT-006`, `SIM-008`
 - **References:** ADR 0015, [content authoring §UI panels](../content-authoring.md#ui-panels)
 
@@ -534,6 +548,8 @@ have not been visually tuned in the Windows demo.
 - [x] A panel action rejected by the server does not change local state.
 - [x] Inventory moves match server results after reconnect.
 - [x] Stale/closed panels cannot send actions for a different target.
+- [x] The gateway rejects unadvertised panel actions and parameters, while
+      explicitly allowed dynamic parameters remain usable.
 
 **Progress (2026-11-05):** The online HUD lists supported, server-advertised
 parameter-free verbs for the selected target. Number keys submit correlated
@@ -546,20 +562,21 @@ when the server confirms a solve. Submission checks the exact composed panel,
 current target visibility, and advertised `play`; unsupported schemas have a
 read-only title/schema fallback. Server error diagnostics are not displayed.
 
-The demo barrel now exposes a read-only `ui.display` panel alongside the vault's
+The demo barrel exposes a `ui.display` panel alongside the vault's
 `ui.lockpick` minigame. A real-socket client test opens both schemas through the
 same `ui.state` lifecycle and closes the display panel authoritatively. A focused
-client test verifies a rejected panel action preserves the server-owned panel;
-stale-target and closed-panel protections remain covered by client and gateway
-tests. This does not yet provide content-authored localized widgets or inventory
-operations.
+client test verifies a rejected panel action preserves server-owned state;
+stale-target and closed-panel protections are covered by client and gateway
+tests. Generic declarative rendering and the first server-validated inventory
+transfers are now implemented; localized authored layouts and other inventory
+operations remain.
 
 Real-socket tests cover an out-of-range rejection, opening a door, approaching
 and opening the vault, invalid/stale input rejection, solving from server hints,
 and authoritative panel closure. A two-client test observes the same barrel
-damage. Generic content-defined/localized widgets, inventory operations, gamepad
-navigation, and graphical review remain open. No new
-crate is needed for this slice: existing Bevy UI and the framed protocol suffice.
+damage. Localized content-defined widgets, equip, and other inventory operations,
+gamepad navigation, and graphical review remain open. No new crate is needed for
+this slice: existing Bevy UI and the framed protocol suffice.
 
 **Follow-up (2026-11-05):** User visually confirmed opening/using the vault and
 guessing its code in the Windows online client (screenshot supplied in chat).
@@ -602,20 +619,39 @@ inventory contents are redacted from diagnostics. The built-in demo character
 starts with deterministic stackable and unique items. A `bevy_immediate` window
 (**I** to toggle; **Escape** or the title-bar **X** to close) shows slot, derived
 item name, quantity, and unique marker; it is suppressed during chat composition
-and focus loss and is installed on both online launch paths. This is
-presentation only: moves, equip, split/merge, and container transfers still need
-a server-validated protocol, so the reconnect-inventory acceptance criterion
-remains open.
+and focus loss and is installed on both online launch paths. At that point this
+was presentation only; the later transfer slice below adds server-validated
+container operations and reconnect verification.
 
-**Declarative panel and transfer slice (2026-11-08):** `UiProvider` now carries
+**Declarative panel and transfer slice (2026-11-09):** `UiProvider` now carries
 bounded read-only fields and server-advertised actions through `ui.state`; the
 client validates these payloads and renders a generic floating panel with
-`bevy_immediate`. The demo barrel advertises a server-validated take action for
-two coins. GPU-free pointer integration opens the panel and activates the button
-through the real socket; the client inventory changes only after owner-only
-replication, and the updated count remains correct after session resume. Equip,
-split/merge, localized message-key resolution, and richer authored layouts remain
-open.
+`bevy_immediate`. The demo barrel advertises server-validated actions to take two
+coins or insert one coin from the actor's inventory. GPU-free pointer integration
+opens the panel and activates both buttons through the real socket; inventory
+changes only after owner-only replication, and the final count remains correct
+after session resume. The gateway enforces the open panel's action allowlist and
+parameter policy: fixed server-authored values must match, dynamic values must
+use explicitly allowed keys, and unadvertised actions/parameters are rejected
+before simulation. The inventory window also offers one-item split and merge
+requests through the authenticated action channel; the client suppresses repeat
+clicks until authoritative owner replication lands. The real-socket test verifies
+split/merge conservation and final slots after resume. Equip, localized
+message-key resolution, and richer authored layouts remain open.
+
+**Keyboard action navigation (2026-11-12):** Generic content panels now show
+number shortcuts for the first nine fixed-parameter actions. Pressing a shortcut
+submits the same correlated, server-authorized `ui.action` request as clicking
+its button. Shortcuts are ignored during chat composition, focus loss, a pending
+request, or a non-active connection; they do not fall through to the world
+interaction bindings while a generic panel is open. Actions requiring dynamic
+parameters remain disabled until an authored input widget is available.
+
+**Remaining equipment dependency:** See the [local completion blocker](../agents/issue-tracker.md#local-completion-blockers).
+The current `core.item` content contract has no equipment-slot compatibility
+or stat-effect data, and owner-only state carries inventory only. The client
+will not offer an equip action until the authoritative simulation and persisted
+character-state contract exists.
 
 ---
 
@@ -623,6 +659,7 @@ open.
 
 - **Priority:** P1
 - **Status:** Done
+- **Completion record:** [clt-009-chat-presence-ui.md](completed/clt-009-chat-presence-ui.md)
 - **Depends on:** —
 - **References:** `SIM-008`, [security §Abuse prevention](../security.md#abuse-prevention)
 
@@ -777,7 +814,7 @@ for validated behavior and deferred follow-up work.
 ## CLT-014 — Client integration and protocol tests
 
 - **Priority:** P1
-- **Status:** In progress — real-socket two-client gameplay/chat/resume coverage; account-service scenario remains
+- **Status:** In progress — reusable headless server/client harness, two-client gameplay/chat/resume coverage, and versioned fixtures for the exercised protocol families are implemented; Nakama account-flow validation remains
 - **Depends on:** `CLT-005`, `QUA-014`, `CLT-009`
 - **References:** `QUA-014`, `NET-004`
 
@@ -798,9 +835,9 @@ for validated behavior and deferred follow-up work.
 
 **Acceptance criteria**
 
-- [ ] CI runs a headless login → move → chat → reconnect scenario.
-- [ ] Protocol fixtures catch accidental wire changes.
-- [ ] Prediction/reconciliation tests run under simulated latency/loss.
+- [x] CI runs a headless login → move → chat → reconnect scenario.
+- [x] Versioned protocol fixtures catch accidental wire changes for the exercised handshake, world, action, movement, chat, calendar, and UI-panel messages.
+- [x] Prediction/reconciliation tests run under simulated latency/loss.
 - [x] Two clients observe the same authoritative state in one test.
 - [x] Two clients exchange zone chat and observe presence changes without
       duplicate history entries after reconnect.
@@ -812,7 +849,18 @@ server identities, see two connected members, resume one client, page history
 without duplicates, and observe the other member leaving. This uses static demo
 authentication; Nakama login/character creation and service-restart persistence
 are still separate validation work. The suite runs in the existing GPU-free
-client test command.
+client test command. **Progress (2026-11-10):** The shared
+[QUA-014 harness](completed/qua-014-multi-client-headless-harness.md)
+now also covers headless movement, session-private reconciliation, and bounded
+envelope delay/loss; the client integration test reuses its in-process server.
+The WebSocket client test also delays movement acknowledgement and authoritative
+correction, and omits the queue acknowledgement in one deterministic case; the
+client holds a single bounded prediction until the authoritative rejection
+arrives, then converges without optimistic authority changes. Versioned golden
+fixtures now pin the exercised handshake/error, ready/snapshot/delta,
+action/movement, chat, calendar, and panel-state envelopes. Authentication
+fixtures intentionally avoid bearer-token values; Nakama account-flow
+validation remains environment-dependent.
 
 ---
 
@@ -886,6 +934,7 @@ claimed.
 
 - **Priority:** P1
 - **Status:** Done
+- **Completion record:** [clt-017-rejected-movement-and-desync-evidence.md](completed/clt-017-rejected-movement-and-desync-evidence.md)
 - **Depends on:** `CLT-007`, `CLT-014`
 - **References:** [CLT-007](#clt-007--local-movement-and-prediction), [CLT-014](#clt-014--client-integration-and-protocol-tests), `SIM-001`, `SIM-002`
 

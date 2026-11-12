@@ -15,7 +15,7 @@ testing a Lynx project never requires an MCP server.
 
 | Surface | Status | Notes |
 |---|---|---|
-| CLI (`lynx new/doctor/validate/build/run/test/content build/content hash/content diff/content publish-check`) | Partial | JSON reports are available; consistent failure handling and schemas across all commands remain in progress |
+| CLI (`lynx new/doctor/validate/build/run/test/content .../migrate/completions/reference`) | Partial | JSON reports, shell completions, generated reference, and content-file migration are available; persisted-instance migration and richer diagnostics remain in progress |
 | Engine MCP server | Planned | Narrow tools wrapping the CLI and content validators |
 | External MCP client | Planned | Explicit per-workspace configuration |
 | Shell execution | Not exposed by default | Allowlist or user approval per command |
@@ -32,14 +32,21 @@ and working-directory changes.
 
 ## Planned MCP tools
 
-Read-only:
+Read-only tools are available through the optional `lynx-mcp` stdio server.
+Build it with `cargo build -p project_cli --features mcp-server --bin lynx-mcp`
+and configure the MCP host to launch `lynx-mcp --workspace <project-root>`.
+The binary is not built by default; no normal build or test requires MCP.
 
-- `lynx.project.inspect` — manifest, engine version, content versions.
-- `lynx.content.validate` — schema and reference diagnostics.
-- `lynx.content.diff` — compare two manifests and report the required version
-  bump, additions, removals, changes, and compatibility diagnostics.
-- `lynx.diagnostics` — backend and environment checks.
-- `lynx.build.status` — last build result and error summary.
+- `project.inspect` — project validation and content manifest summary.
+- `content.validate` — the same validation report as `lynx validate`.
+- `content.diff` — the same compatibility report as `lynx content diff`; both
+  manifest paths must be workspace-relative.
+- `doctor` — project diagnostics without backend network checks.
+- `content.hash` — SHA-256 for one workspace-relative regular file.
+
+Tool paths reject absolute paths, parent traversal, symlinks in the content
+tree, and resolved paths outside the configured workspace. Results are JSON
+text capped at 256 KiB and depth 16. The server exposes no shell or write tool.
 
 Write or consequential (approval required):
 
@@ -112,14 +119,21 @@ fields are:
 | `content hash` | `path`, `sha256` |
 | `content diff` | `base`, `next`, compatibility diagnostics and version-bump data |
 | `content publish-check` | `manifest`, `base`, author/state/revision and publish diagnostics |
+| `completions` | `shell`, `path` |
+| `reference` | `path` |
+| `migrate apply` | `mode`, migration ID, source/target versions, affected definitions/catalogs, changed files, manifest hashes, compatibility and validation status |
+| `migrate rollback` | migration ID, restored content version, retained applied-content path, rollback record |
 
 When command dispatch fails before it can construct its command-specific
 report, `--json` emits the common failure shape `command`, `ok: false`,
 `exit_code: 1`, and `error: { code: "command_failed", message }`. This covers
-runtime command failures (for example, an unreadable content-hash input); CLI
-argument parsing failures are still handled by Clap before dispatch.
+runtime command failures (for example, an unreadable content-hash input).
+Invalid arguments in JSON mode use `command: "cli"`,
+`error.code: "invalid_arguments"`, and exit code 2; help and version requests
+remain plain text.
 
-Process exit codes are 0 for success, 2 for content/project validation failure,
+Process exit codes are 0 for success, 2 for invalid arguments or
+content/project validation failure,
 3 for compatibility failure, and 1 for other command or internal failures. A
 validation failure nested in the project-execution report remains code 2;
 Cargo execution failure is code 1. Build/run/test capture output until Cargo
@@ -127,6 +141,20 @@ exits and close stdin; they are not interactive or streaming runners. If a
 command fails before its report can be constructed, that failure uses exit code
 1 and the common JSON failure shape above when `--json` is enabled. This report
 schema is versioned with the CLI source; consumers should ignore unknown fields.
+
+`lynx completions <bash|elvish|fish|powershell|zsh> --output <path>` writes a
+shell completion definition generated from the registered Clap command tree.
+`lynx reference --output docs/cli-reference.md` regenerates the versioned
+command reference at that path. Both commands support `--json` and return the
+output path. The reference is checked in CI for drift.
+
+`lynx migrate apply --project <dir> --plan <plan.ron>` previews a reviewed
+content migration without changing the project. Add `--apply` only after
+reviewing its report; a successful apply retains the exact previous `content/`
+tree under `.lynx/migrations/<id>/backup`. `lynx migrate rollback --project
+<dir> --id <id>` restores those bytes and refuses if content changed after the
+apply. These commands migrate authored definitions and locale catalogs;
+persisted instances remain owned by PST-013.
 
 `lynx content build --project <dir> --content-version <semver> --engine <version-req>`
 validates first, then writes a deterministic `content/manifest.json` by default.

@@ -1,15 +1,16 @@
 //! PostgreSQL persistence for authoritative character inventories.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use std::time::Duration;
 
 use engine_core::inventory::TransferReceipt;
 use engine_core::{StableId, id::DefinitionId, inventory::ItemStack};
 use game_api::{
-    AccountId, ApiError, CharacterId, InventoryReconciliation, InventorySlot, InventoryStore,
-    TransferInventoryUpdate, VersionedInventory, validate_slots,
+    AccountId, ApiError, CharacterId, InventoryReconciliation, InventoryReconciliationDifference,
+    InventorySlot, InventoryStore, TransferInventoryUpdate, VersionedInventory, validate_slots,
 };
-use postgres::{Client, Error, error::SqlState};
+use postgres::{Client, Error, Transaction, error::SqlState};
 
 use crate::postgres_pool::{ConnectionPool, PooledConnection, PostgresPool};
 
@@ -147,6 +148,9 @@ impl PostgresInventoryStore {
             return Err(ApiError::Conflict("inventory version changed".into()));
         }
 
+        let before = read_item_quantities(&mut tx, &character_id)?;
+        let after = item_quantities(slots);
+
         tx.execute(
             "DELETE FROM lynx.inventory_slots WHERE owner_id = $1",
             &[&character_id],
@@ -172,6 +176,19 @@ impl PostgresInventoryStore {
             &[&character_id, &next],
         )
         .map_err(|_| unavailable())?;
+        let event_key = format!("snapshot:{character_id}:{next}");
+        record_inventory_value_event(
+            &mut tx,
+            &event_key,
+            "inventory.snapshot_replace",
+            "system",
+            None,
+            "trusted inventory snapshot replacement",
+            &event_key,
+            &before,
+            &after,
+            &character_id,
+        )?;
         tx.commit().map_err(|_| unavailable())?;
         Ok(next)
     }
@@ -196,12 +213,38 @@ impl PostgresInventoryStore {
             )
             .map_err(|_| unavailable())?
             .ok_or_else(|| ApiError::NotFound("character not found".into()))?;
+        let differences = client
+            .query(
+                "WITH inventory AS (\
+                    SELECT item_definition, SUM(quantity)::bigint AS quantity \
+                    FROM lynx.inventory_slots WHERE owner_id = $1 GROUP BY item_definition\
+                 ), ledger AS (\
+                    SELECT item_definition, SUM(quantity_delta)::bigint AS quantity \
+                    FROM lynx.inventory_value_entries WHERE owner_character_id = $1 \
+                    GROUP BY item_definition\
+                 ) \
+                 SELECT COALESCE(inventory.item_definition, ledger.item_definition), \
+                        COALESCE(inventory.quantity, 0), COALESCE(ledger.quantity, 0) \
+                 FROM inventory FULL JOIN ledger USING (item_definition) \
+                 WHERE COALESCE(inventory.quantity, 0) <> COALESCE(ledger.quantity, 0) \
+                 ORDER BY 1",
+                &[&id],
+            )
+            .map_err(|_| unavailable())?
+            .into_iter()
+            .map(|row| InventoryReconciliationDifference {
+                item_definition: row.get(0),
+                inventory_quantity: row.get(1),
+                ledger_quantity: row.get(2),
+            })
+            .collect();
         Ok(InventoryReconciliation {
             character_id,
             version: row.get(0),
             occupied_slots: row.get(1),
             total_quantity: row.get(2),
             transfer_receipts: row.get(3),
+            differences,
         })
     }
 }
@@ -332,6 +375,22 @@ impl InventoryStore for PostgresInventoryStore {
             }
         }
 
+        let source_before = read_item_quantities(&mut tx, &source_id)?;
+        let destination_before = read_item_quantities(&mut tx, &destination_id)?;
+        let source_after = item_quantities(source.slots);
+        let destination_after = item_quantities(destination.slots);
+        let definition = receipt.definition.as_str();
+        let quantity = i64::from(receipt.quantity);
+        let source_delta = source_before.get(definition).copied().unwrap_or(0)
+            - source_after.get(definition).copied().unwrap_or(0);
+        let destination_delta = destination_after.get(definition).copied().unwrap_or(0)
+            - destination_before.get(definition).copied().unwrap_or(0);
+        if source_delta != quantity || destination_delta != quantity {
+            return Err(ApiError::InvalidRequest(
+                "inventory snapshots do not match the transfer receipt".into(),
+            ));
+        }
+
         for (owner, slots) in [
             (&source_id, source.slots),
             (&destination_id, destination.slots),
@@ -370,9 +429,117 @@ impl InventoryStore for PostgresInventoryStore {
             "INSERT INTO lynx.inventory_transfer_receipts (idempotency_key, source_owner_id, destination_owner_id, receipt) VALUES ($1, $2, $3, $4)",
             &[&key, &source_id, &destination_id, &receipt_json],
         ).map_err(|error| map_write_error(&error))?;
+        let event_key = format!("transfer:{key}");
+        record_inventory_value_event(
+            &mut tx,
+            &event_key,
+            "inventory.player_transfer",
+            "character",
+            Some(&source_id),
+            "player inventory item transfer",
+            key,
+            &source_before,
+            &source_after,
+            &source_id,
+        )?;
+        record_inventory_value_event(
+            &mut tx,
+            &event_key,
+            "inventory.player_transfer",
+            "character",
+            Some(&source_id),
+            "player inventory item transfer",
+            key,
+            &destination_before,
+            &destination_after,
+            &destination_id,
+        )?;
         tx.commit().map_err(|_| unavailable())?;
         Ok(receipt.clone())
     }
+}
+
+fn item_quantities(slots: &[InventorySlot]) -> BTreeMap<String, i64> {
+    let mut quantities = BTreeMap::new();
+    for slot in slots {
+        *quantities
+            .entry(slot.stack.definition.to_string())
+            .or_insert(0) += i64::from(slot.stack.quantity);
+    }
+    quantities
+}
+
+fn read_item_quantities(
+    tx: &mut Transaction<'_>,
+    character_id: &str,
+) -> Result<BTreeMap<String, i64>, ApiError> {
+    let rows = tx
+        .query(
+            "SELECT item_definition, SUM(quantity)::bigint FROM lynx.inventory_slots \
+             WHERE owner_id = $1 GROUP BY item_definition",
+            &[&character_id],
+        )
+        .map_err(|_| unavailable())?;
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_inventory_value_event(
+    tx: &mut Transaction<'_>,
+    event_key: &str,
+    source: &str,
+    actor_kind: &str,
+    actor_id: Option<&str>,
+    reason: &str,
+    correlation_id: &str,
+    before: &BTreeMap<String, i64>,
+    after: &BTreeMap<String, i64>,
+    owner: &str,
+) -> Result<(), ApiError> {
+    let definitions: BTreeSet<_> = before.keys().chain(after.keys()).collect();
+    let changes: Vec<_> = definitions
+        .into_iter()
+        .filter_map(|definition| {
+            let before_quantity = before.get(definition).copied().unwrap_or(0);
+            let after_quantity = after.get(definition).copied().unwrap_or(0);
+            (before_quantity != after_quantity).then_some((
+                definition.as_str(),
+                after_quantity - before_quantity,
+                before_quantity,
+                after_quantity,
+            ))
+        })
+        .collect();
+    if changes.is_empty() {
+        return Ok(());
+    }
+    tx.execute(
+        "INSERT INTO lynx.inventory_value_events \
+         (event_key, source, actor_kind, actor_id, reason, correlation_id) \
+         VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (event_key) DO NOTHING",
+        &[
+            &event_key,
+            &source,
+            &actor_kind,
+            &actor_id,
+            &reason,
+            &correlation_id,
+        ],
+    )
+    .map_err(|_| unavailable())?;
+    for (definition, delta, before_quantity, after_quantity) in changes {
+        tx.execute(
+            "INSERT INTO lynx.inventory_value_entries \
+             (event_key, owner_character_id, item_definition, quantity_delta, before_quantity, after_quantity) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
+            &[&event_key, &owner, &definition, &delta, &before_quantity, &after_quantity],
+        )
+        .map_err(|_| unavailable())?;
+    }
+    Ok(())
 }
 
 fn map_write_error(error: &Error) -> ApiError {

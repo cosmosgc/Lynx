@@ -75,6 +75,7 @@ fn replay_controls(mut replay: Option<ResMut<ReplayInput>>, mut pressed: ResMut<
     replay.next_frame = replay.next_frame.saturating_add(1);
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -371,6 +371,7 @@ fn diff_locales(
     (added, removed, changed, required)
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use engine_core::schema::SchemaVersion;

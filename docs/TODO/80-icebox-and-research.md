@@ -12,7 +12,7 @@ scoping task exists.
 | ICE-003 | Browser/Wasm client | Desktop slice is stable and browser demand justifies the storage/threading/asset work | Feasibility report covering IndexedDB, SharedArrayBuffer/COOP/COEP, audio, asset loading |
 | ICE-004 | Mobile/handheld client | Desktop input/UI and performance budgets are stable | Input/UI/memory study; no renderer feature-gating shortcuts |
 | ICE-005 | Console support | Desktop platforms are CI-smoked and business terms exist | Platform certification and controller/UI requirements |
-| ICE-006 | Player housing/property | Ownership, lease, placement, and moderation rules are accepted (`QUA-017`) | ADR + bounded placement prototype in one zone |
+| ICE-006 | Player housing/property | Explicitly deferred from the initial vertical slice (`QUA-017`, ADR 0030) | New ADR + bounded placement prototype before implementation |
 | ICE-007 | Unrestricted public user-content publishing | Ownership/moderation/revocation (`CNT-008`) is live and audited | Threat model + staged rollout with quotas and review |
 | ICE-008 | Cross-region / multi-datacenter placement | Single-region capacity or latency targets are exceeded | Measure `OPS-015`; design world routing and data residency |
 | ICE-009 | Third-party engine extension/plugin API | Multiple games duplicate engine features or maintain forks | Define stable extension points, versioning, and sandbox/trust rules |

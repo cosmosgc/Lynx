@@ -1,0 +1,1 @@
+{"v":"1.1.0","id":"res-0000000000000001","kind":"action.result","body":{"actor":"ent_00000000010000000000000001","outcome":{"effects":[{"kind":"door_toggled","open":true,"target":"ent_0000000001000000000000000A"}],"status":"applied"},"request_id":"golden-action","server_tick":0,"verb":"open"},"correlation":"golden-action"}

@@ -9,13 +9,15 @@ use std::time::Duration;
 
 use engine_core::id::{IdKind, StableId};
 use engine_core::time::Tick;
-use engine_net::envelope::{Envelope, MessageId, MessageKind};
-use engine_net::framing::{decode_frame, encode_frame};
+use engine_net::envelope::{Envelope, MAX_JSON_DEPTH, MessageId, MessageKind};
+use engine_net::framing::{MAX_FRAME_BYTES, decode_frame, encode_frame};
 use futures_util::{SinkExt, StreamExt};
 use game_api::AccountId;
 use lynx_world::auth::{Authenticator, Grant, IdentityBackend, IdentityError, digest};
 use lynx_world::demo;
-use lynx_world::rate_limit::{RateLimitConfig, TokenBucketConfig};
+use lynx_world::rate_limit::{
+    AdmissionLimitConfig, RateLimitConfig, SessionLimitConfig, TokenBucketConfig,
+};
 use lynx_world::service::{HELLO_KIND, Hello, Metrics, ServerEvent, Service, TOKEN_KIND};
 use lynx_world::transport::{self, AppState, CHARACTER_HEADER, OriginPolicy};
 use serde_json::json;
@@ -28,6 +30,70 @@ use world_gateway::{GatewayConfig, SystemResumeTokens, WorldGateway};
 use world_server::{DELTA_KIND, READY_KIND, SNAPSHOT_KIND, WorldServer};
 
 const TOKEN: &str = "websocket-integration-token";
+
+#[tokio::test]
+async fn admitted_websocket_is_closed_after_the_client_idle_deadline() {
+    let authenticator = Authenticator::new(&[digest(TOKEN)]).unwrap();
+    let (service, _) = websocket_service(&authenticator);
+    let (events, receivers) = transport::event_channel();
+    let (shutdown, shutdown_rx) = watch::channel(false);
+    let service_task = tokio::spawn(service.run(receivers, shutdown_rx));
+
+    let state =
+        Arc::new(AppState::new(events, authenticator).with_idle_timeout(Duration::from_millis(40)));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (server_shutdown, server_shutdown_rx) = oneshot::channel();
+    let server_task = tokio::spawn(transport::serve_with_shutdown(
+        listener,
+        state,
+        async move {
+            let _ = server_shutdown_rx.await;
+        },
+    ));
+
+    let mut request = format!("ws://{address}/world")
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {TOKEN}")).unwrap(),
+    );
+    let (mut socket, response) = connect_async(request).await.unwrap();
+    assert_eq!(response.status(), 101);
+    send_envelope(
+        &mut socket,
+        &envelope(
+            "idle-hello",
+            HELLO_KIND,
+            serde_json::to_value(Hello {
+                handshake: demo::handshake().unwrap(),
+                last_ack_tick: Tick::ZERO,
+            })
+            .unwrap(),
+        ),
+    )
+    .await;
+    assert_eq!(next_envelope(&mut socket).await.kind.as_str(), READY_KIND);
+    assert_eq!(
+        next_envelope(&mut socket).await.kind.as_str(),
+        SNAPSHOT_KIND
+    );
+    assert_eq!(next_envelope(&mut socket).await.kind.as_str(), TOKEN_KIND);
+
+    let closed = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        .await
+        .expect("idle connection should close promptly");
+    assert!(
+        matches!(closed, None | Some(Err(_)) | Some(Ok(Message::Close(_)))),
+        "expected the idle transport to close, got {closed:?}"
+    );
+
+    shutdown.send(true).unwrap();
+    server_shutdown.send(()).unwrap();
+    service_task.await.unwrap();
+    server_task.await.unwrap().unwrap();
+}
 
 #[derive(Debug)]
 struct FakeIdentity {
@@ -131,6 +197,85 @@ async fn origin_allowlist_rejects_before_websocket_upgrade() {
 }
 
 #[tokio::test]
+async fn connection_flood_is_bounded_before_session_admission() {
+    const MAX_PER_IP: usize = 16;
+
+    let authenticator = Authenticator::new(&[digest(TOKEN)]).unwrap();
+    let (events, mut receiver) = transport::event_channel();
+    let admission_limits = AdmissionLimitConfig::new(
+        TokenBucketConfig::new(32, 32).unwrap(),
+        TokenBucketConfig::new(32, 32).unwrap(),
+        TokenBucketConfig::new(32, 32).unwrap(),
+        64,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    let state = Arc::new(AppState::new(events, authenticator).with_rate_limits(
+        RateLimitConfig::new(admission_limits, SessionLimitConfig::default()),
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (shutdown, shutdown_rx) = oneshot::channel();
+    let server = tokio::spawn(transport::serve_with_shutdown(
+        listener,
+        state,
+        async move {
+            let _ = shutdown_rx.await;
+        },
+    ));
+    let request = || {
+        let mut request = format!("ws://{address}/world")
+            .into_client_request()
+            .unwrap();
+        request.headers_mut().insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {TOKEN}")).unwrap(),
+        );
+        request
+    };
+
+    let mut sockets = Vec::with_capacity(MAX_PER_IP);
+    for _ in 0..MAX_PER_IP {
+        let connected = tokio::time::timeout(Duration::from_secs(2), connect_async(request()))
+            .await
+            .expect("available connection capacity should upgrade")
+            .expect("available connection capacity should upgrade");
+        sockets.push(connected.0);
+    }
+
+    let rejected = tokio::time::timeout(Duration::from_secs(2), connect_async(request()))
+        .await
+        .expect("flood rejection should be prompt")
+        .expect_err("the per-IP connection cap must reject the next upgrade");
+    let tokio_tungstenite::tungstenite::Error::Http(response) = rejected else {
+        panic!("connection flood should be rejected during HTTP admission");
+    };
+    assert_eq!(response.status(), 503);
+    let body = response.body().as_deref().unwrap_or_default();
+    assert!(
+        body.windows(b"ip_capacity".len())
+            .any(|part| part == b"ip_capacity")
+    );
+    assert!(!String::from_utf8_lossy(body).contains(TOKEN));
+    assert!(
+        receiver.try_recv().is_err(),
+        "no session may be admitted before hello"
+    );
+
+    drop(sockets);
+    let _ = shutdown.send(());
+    tokio::time::timeout(Duration::from_secs(2), server)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one service instance verifies truncated, oversized, and over-depth pre-admission failures"
+)]
 async fn malformed_handshake_frame_is_rejected_without_authority_side_effects() {
     let authenticator = Authenticator::new(&[digest(TOKEN)]).unwrap();
     let (service, metrics) = websocket_service(&authenticator);
@@ -177,11 +322,169 @@ async fn malformed_handshake_frame_is_rejected_without_authority_side_effects() 
         socket.next().await.unwrap().unwrap(),
         Message::Close(_)
     ));
+
+    // A declared frame length above the protocol limit is rejected before
+    // the transport waits for or allocates the frame body.
+    let mut request = format!("ws://{address}/world")
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {TOKEN}")).unwrap(),
+    );
+    let (mut socket, _) = connect_async(request).await.unwrap();
+    let oversized_length = u32::try_from(MAX_FRAME_BYTES + 1).unwrap();
+    socket
+        .send(Message::Binary(
+            oversized_length.to_be_bytes().to_vec().into(),
+        ))
+        .await
+        .unwrap();
+    let error = next_envelope(&mut socket).await;
+    assert_eq!(error.kind.as_str(), "protocol.error");
+    assert_eq!(error.body["code"], json!("capacity_exceeded"));
+    assert!(
+        !serde_json::to_string(&error.body).unwrap().contains(TOKEN),
+        "oversized-frame errors must not disclose the bearer credential"
+    );
+    assert!(matches!(
+        socket.next().await.unwrap().unwrap(),
+        Message::Close(_)
+    ));
+
+    // Bypass the validating encoder to model an on-wire JSON body whose
+    // nesting exceeds the envelope limit.
+    let mut nested = json!(null);
+    for _ in 0..=MAX_JSON_DEPTH {
+        nested = json!({"nested": nested});
+    }
+    let payload = serde_json::to_vec(&envelope("deep-body", HELLO_KIND, nested)).unwrap();
+    let mut frame = u32::try_from(payload.len()).unwrap().to_be_bytes().to_vec();
+    frame.extend(payload);
+    let mut request = format!("ws://{address}/world")
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {TOKEN}")).unwrap(),
+    );
+    let (mut socket, _) = connect_async(request).await.unwrap();
+    socket.send(Message::Binary(frame.into())).await.unwrap();
+    let error = next_envelope(&mut socket).await;
+    assert_eq!(error.kind.as_str(), "protocol.error");
+    assert_eq!(error.body["code"], json!("capacity_exceeded"));
+    assert!(
+        !serde_json::to_string(&error.body).unwrap().contains(TOKEN),
+        "deep-body errors must not disclose the bearer credential"
+    );
+    assert!(matches!(
+        socket.next().await.unwrap().unwrap(),
+        Message::Close(_)
+    ));
     let rendered = metrics.render();
     assert!(rendered.contains("lynx_world_session_attaches_total 0\n"));
     assert!(rendered.contains("lynx_world_actions_applied_total 0\n"));
 
     drop(socket);
+    let _ = shutdown.send(true);
+    let _ = server_shutdown.send(());
+    tokio::time::timeout(Duration::from_secs(2), service_task)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), server_task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn resume_token_guesses_have_an_independent_per_ip_budget() {
+    let authenticator = Authenticator::new(&[digest(TOKEN)]).unwrap();
+    let (service, metrics) = websocket_service(&authenticator);
+    let (events, receiver) = transport::event_channel();
+    let (shutdown, shutdown_rx) = watch::channel(false);
+    let state = Arc::new(
+        AppState::new(events, authenticator)
+            .with_metrics(Arc::clone(&metrics))
+            .with_rate_limits(
+                RateLimitConfig::default()
+                    .with_resume_attempts(TokenBucketConfig::new(1, 1).unwrap()),
+            ),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let service_task = tokio::spawn(service.run(receiver, shutdown_rx));
+    let (server_shutdown, server_shutdown_rx) = oneshot::channel();
+    let server_task = tokio::spawn(transport::serve_with_shutdown(
+        listener,
+        state,
+        async move {
+            let _ = server_shutdown_rx.await;
+        },
+    ));
+
+    let mut request = format!("ws://{address}/world")
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_static("Bearer guessed-resume-token-0001"),
+    );
+    let (mut socket, _) = connect_async(request).await.unwrap();
+    send_envelope(
+        &mut socket,
+        &envelope(
+            "guess-hello-0001",
+            HELLO_KIND,
+            serde_json::to_value(Hello {
+                handshake: demo::handshake().unwrap(),
+                last_ack_tick: Tick::ZERO,
+            })
+            .unwrap(),
+        ),
+    )
+    .await;
+    let rejected = next_envelope(&mut socket).await;
+    assert_eq!(rejected.kind.as_str(), "protocol.error");
+    assert_eq!(rejected.body["code"], "session_expired");
+    assert!(matches!(
+        socket.next().await.unwrap().unwrap(),
+        Message::Close(_)
+    ));
+
+    let mut second_guess = format!("ws://{address}/world")
+        .into_client_request()
+        .unwrap();
+    second_guess.headers_mut().insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_static("Bearer guessed-resume-token-0002"),
+    );
+    match connect_async(second_guess).await.unwrap_err() {
+        tokio_tungstenite::tungstenite::Error::Http(response) => {
+            assert_eq!(response.status(), 429);
+            let body: serde_json::Value =
+                serde_json::from_slice(response.body().as_deref().unwrap_or_default()).unwrap();
+            assert_eq!(body["error"], "rate_limited");
+            let retry_after_ms = body["retry_after_ms"]
+                .as_u64()
+                .or_else(|| {
+                    body["retry_after_ms"]
+                        .as_str()
+                        .and_then(|value| value.parse().ok())
+                })
+                .expect("rate-limit replies include a retry delay");
+            assert!(retry_after_ms > 0);
+            assert!(
+                !String::from_utf8_lossy(response.body().as_deref().unwrap_or_default())
+                    .contains("guessed-resume-token")
+            );
+            assert!(response.headers().contains_key(header::RETRY_AFTER));
+        }
+        other => panic!("unexpected resume rate-limit result: {other}"),
+    }
+
     let _ = shutdown.send(true);
     let _ = server_shutdown.send(());
     tokio::time::timeout(Duration::from_secs(2), service_task)
@@ -271,6 +574,10 @@ where
 }
 
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "The end-to-end protocol scenario keeps its ordered socket assertions together."
+)]
 async fn a_client_can_authenticate_play_and_receive_correlated_errors() {
     tokio::time::timeout(Duration::from_secs(15), async {
         let authenticator = Authenticator::new(&[digest(TOKEN)]).unwrap();
@@ -422,6 +729,10 @@ async fn a_client_can_authenticate_play_and_receive_correlated_errors() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "The admission scenario compares invalid, foreign, and valid identities over one server."
+)]
 async fn production_admission_verifies_identity_ownership_and_existing_actor() {
     let account = AccountId::new("production-account").unwrap();
     let owned = StableId::from_parts(IdKind::Character, 1, 41);
@@ -645,6 +956,8 @@ async fn movement_is_session_bound_ticked_replicated_and_cancelled_on_disconnect
         let too_far = envelope("move-far", "movement.request", json!({"sequence": 2, "destination": {"x": x + 10.0, "y": initial["y"], "z": initial["z"]}}));
         send_envelope(&mut socket, &too_far).await;
         assert_eq!(next_envelope(&mut socket).await.kind.as_str(), "movement.queued");
+        // The service ticks once per second; wait one tick plus a 200 ms host-
+        // scheduling margin before asserting the authoritative rejection.
         tokio::time::sleep(Duration::from_millis(1200)).await;
         send_envelope(&mut socket, &too_far).await;
         let rejected = loop {
@@ -670,6 +983,7 @@ async fn movement_is_session_bound_ticked_replicated_and_cancelled_on_disconnect
         assert_eq!(next_envelope(&mut socket).await.kind.as_str(), "movement.queued");
         socket.close(None).await.unwrap();
         drop(socket);
+        // Keep the same one-second tick plus 200 ms margin before reconnecting.
         tokio::time::sleep(Duration::from_millis(1200)).await;
         let mut resumed = connect(address, &token).await;
         let ready = next_envelope(&mut resumed).await;

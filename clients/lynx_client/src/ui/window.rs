@@ -329,6 +329,7 @@ pub fn label(ui: &mut Imm<CapsUi>, id: &str, size: f32, text: impl Into<String>)
         .text(text.into());
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::clamped_offset;

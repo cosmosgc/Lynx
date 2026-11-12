@@ -51,6 +51,7 @@ impl fmt::Debug for NakamaConfig {
 }
 
 /// Nakama adapter implementing the shared health and authentication contracts.
+#[derive(Clone)]
 pub struct NakamaClient {
     telemetry: crate::Telemetry,
     agent: ureq::Agent,
@@ -798,6 +799,7 @@ fn status_error(status: StatusCode, body: &str) -> ApiError {
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,0 +1,1 @@
+{"v":"1.1.0","id":"res-0000000000000002","kind":"chat.presence.result","body":{"members":[{"account_id":"alice","character_id":"chr_00000000010000000000000001"}],"truncated":false},"correlation":"golden-presence"}

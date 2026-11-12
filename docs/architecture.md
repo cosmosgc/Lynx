@@ -250,6 +250,9 @@ format, validation rules, and formatting policy are specified in
 ## Failure and recovery
 
 - Structured errors use `ErrorCode`, never free-form strings alone.
+- Stable error semantics, retry behavior, and operator responses are cataloged
+  in [error-catalog.md](error-catalog.md). Player-facing clients render
+  `error.<code>` keys and never display operator diagnostics.
 - Target: missing or obsolete component data loads through the migration chain; if a
   migration is impossible, the entity is quarantined and reported instead of
   silently reset.

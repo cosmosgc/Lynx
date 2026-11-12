@@ -20,6 +20,20 @@ expansion. Keep `.env` local and untracked; do not use it as a production
 secret store.
 
 `LYNX_PG_PASSWORD` is the application database role's password.
+Deployments that mount secrets as files can set `LYNX_PG_PASSWORD_FILE` instead;
+the service reads the file contents and removes the final line ending. A
+non-empty direct value and its `_FILE` form cannot both be set; blank template
+values are treated as unset so mounted secrets work with a copied `.env` file.
+The setup scripts also accept
+`LYNX_PG_MIGRATION_PASSWORD_FILE`; `run-nakama.*` accepts `_FILE` forms for the
+console password, console signing key, socket server key, session and refresh
+encryption keys, and runtime HTTP key. `lynx-world` accepts file forms for
+`LYNX_NAKAMA_HTTP_KEY` and `LYNX_WORLD_TOKEN_HASHES`. In every case the file
+path replaces the literal secret in the service's configuration environment.
+The Rust service reads secret files directly. The shell setup helpers pass
+PostgreSQL values to `psql` through its required environment interface, and the
+Nakama runner writes its values into `.lynx/nakama.local.yml`; keep mounted
+files and that generated overlay readable only by the service account.
 `setup-postgres.*` separately connects as `LYNX_PG_SUPERUSER` (default
 `postgres`), using libpq authentication such as peer auth, a pgpass file, or
 `PGPASSWORD`; it does not use the application password for that connection.
@@ -108,6 +122,83 @@ for the complete trust boundary and HSTS/redirect guidance. TLS termination
 does not replace Nakama authentication: production must still use
 `--auth-mode nakama`.
 
+### Reference deployment topology and service lifecycle
+
+The current production shape is one active `lynx-world` process for the demo
+world, a TLS reverse proxy, private PostgreSQL, Nakama identity, and separate
+backup, metrics, and log collection. The world binary has no TLS support. Keep
+its gameplay listener and unauthenticated admin listener on loopback behind
+the proxy and local scrape agent. Expose only TCP 443 to players, routing the
+world hostname to Lynx and the account/realtime hostname to Nakama's public API
+and socket endpoints. Permit the world host to reach PostgreSQL and Nakama over
+their private service networks; do not expose PostgreSQL, Nakama Console,
+runtime HTTP, or metrics endpoints to the public internet. Upload encrypted
+backups to a separate failure domain.
+
+```text
+Players ── TLS/WSS :443 ──> reverse proxy ── loopback :8090 ──> lynx-world
+   └──── auth/realtime TLS ───────┘          └── private :7350 ──> Nakama
+                                           scrape agent ─ loopback :8091
+lynx-world ── private TLS ──> PostgreSQL and Nakama
+encrypted backup target <──── PostgreSQL
+```
+
+This deployment is single-world and single-active-authority. Starting another
+world process against the same PostgreSQL world and zone does not add capacity;
+the lease intentionally rejects a second authority. Multi-zone scheduling and
+gateway routing are not yet wired into the runtime. Scale the host only after
+measured load data and keep the database, backups, and telemetry in separate
+failure domains where the deployment supports it.
+
+The repository includes a hardened `systemd` unit at
+[`deploy/systemd/lynx-world.service`](../deploy/systemd/lynx-world.service).
+Install the release binary at `/usr/local/bin/lynx-world`, create the `lynx`
+service account and `/var/lib/lynx-world`, and provide the required
+`LYNX_PG_*` and `LYNX_NAKAMA_*` variables through
+`/etc/lynx-world/lynx-world.env`. Restrict that file to root (`0600`); use the
+deployment's secret injection facility where one is available. The unit binds
+both listeners to loopback and runs as an unprivileged account. Install it with
+`systemctl daemon-reload`, enable it with `systemctl enable --now lynx-world`,
+and inspect `systemctl status lynx-world` plus the journal. The process handles
+SIGTERM by marking readiness false, stopping admission, and completing its
+configured final snapshot before exit; keep `TimeoutStopSec` longer than the
+longest expected snapshot write.
+
+For Windows installations that run the service under the Windows Service
+Control Manager, [`deploy/windows/LynxWorldService.xml`](../deploy/windows/LynxWorldService.xml)
+is a WinSW wrapper configuration. Place the pinned, trusted WinSW release,
+`LynxWorldService.xml`, and `lynx-world.exe` in one protected directory, and
+make the `LYNX_PG_*` and `LYNX_NAKAMA_*` variables available to the service
+process without storing production credentials in the repository. From an
+elevated PowerShell session, install/start with
+`.\LynxWorldService.exe install` and `.\LynxWorldService.exe start`; use
+the matching `stop` command for planned shutdown. WinSW sends Ctrl-C and waits
+up to the configured stop timeout, allowing the service's graceful snapshot
+path to run ([WinSW stop-timeout behavior](https://github.com/winsw/winsw/blob/v3/docs/xml-config-file.md#stoptimeout)).
+Windows is the primary development target; Linux x86-64 remains the supported
+server deployment target.
+
+Deployment checklist:
+
+- Apply database migrations with the separate migration role; run the service
+  with only the least-privilege runtime role.
+- Verify PostgreSQL TLS and Nakama reachability from the service host.
+- Confirm the proxy forwards WebSocket upgrades and authorization headers for
+  both Lynx and Nakama; restrict direct access to the loopback gameplay listener.
+- Keep the admin listener private to the local scrape agent or a trusted
+  management network. It has no authentication.
+- Allow only intended ingress ports in host and cloud firewalls; PostgreSQL
+  must remain private.
+- Check `/readyz` and `/metrics` locally before enabling player traffic, then
+  verify the external WSS route through the proxy.
+- Before a planned restart, drain player traffic, stop the service, confirm a
+  successful final snapshot and clean exit, then start it and verify readiness.
+- Confirm backups are encrypted, off-host, and covered by the restore drill in
+  [backups and recovery](#backups-and-recovery).
+- Keep staging and production configuration differences explicit: hostnames,
+  TLS certificates, database/Nakama endpoints, credentials, retention, and
+  resource limits. Never use `--fresh` in staging or production.
+
 Each configured hash creates one demo character. Tokens may also be supplied
 comma- or whitespace-separated through `LYNX_WORLD_TOKEN_HASHES`. Relevant
 flags:
@@ -127,6 +218,7 @@ flags:
 | `--token-hash` | — | repeat once per demo character |
 | `--state-file <path>` | off | write durable world snapshots to this JSON file and load it at startup |
 | `--state-postgres` | off | store durable world snapshots in PostgreSQL instead; reads `LYNX_PG_HOST`, `LYNX_PG_PORT`, `LYNX_PG_DATABASE`, `LYNX_PG_USER`, `LYNX_PG_PASSWORD` (mutually exclusive with `--state-file`) |
+| `--world-map <definition-id>` | off | serve the placed zones from this map in `--content-bundle`; requires `--state-postgres`, acquires a lease per zone, and checkpoints them independently |
 | `--fresh` | off | ignore any saved snapshot, rebuild the authored demo, and overwrite it at startup; requires `--state-file` or `--state-postgres` (development reset) |
 | `--snapshot-ms <ms>` | 10000 | how often the configured snapshot store is rewritten (must be at least the tick interval) |
 | `--lease-ttl-ms <ms>` | 30000 | zone lease lifetime with `--state-postgres`, 1000–600000 ms and at least three tick intervals; the holder renews every third of it |
@@ -143,6 +235,30 @@ Clients send the Nakama bearer session in `Authorization` and exactly one
 ownership; the service validates it against the account returned by Nakama.
 Do not use `--staff` in Nakama mode. The service refuses it because production
 staff roles are not part of this admission path.
+
+To serve an authored map, provide its content bundle and PostgreSQL state:
+
+```text
+lynx-world serve --world-map world.main --content-bundle ./content --state-postgres --token-hash <sha256-hex>
+```
+
+The process acquires every placed zone lease before restoring zone checkpoints.
+Clients connect to `GET /world/<zone-instance-id>`; the ID is stable for a
+map/zone-definition pair. `GET /world` remains available: authenticated
+characters with a persisted actor are routed to that actor's zone, while new
+characters are admitted only to the lexically first stable zone ID. Resume
+tokens are looked up without consumption and routed by their persisted zone
+ID; an explicitly wrong
+zone route is rejected before token rotation. Zone IDs are printed at startup.
+Migration `0018_zone_scoped_resume_sessions` revokes durable resume sessions
+created before zone ownership was recorded; clients must authenticate again
+after applying it. Each zone uses its authored player capacity and geometry.
+This mode currently serves
+zone-owned simulation state only;
+world calendar/faction coordination, typed behavior for authored entity
+placements, and live travel
+handoff are not composed into it yet. Do not treat cross-zone travel as enabled
+until those pieces are wired and the PostgreSQL recovery acceptance is run.
 
 Nakama validation occurs on every fresh WebSocket admission. Resume tokens are
 local, single-use secrets and do not recontact Nakama; keep
@@ -206,6 +322,26 @@ owner used only by setup and migration scripts. The setup script grants the
 runtime role DML on Lynx tables and sequence usage, while future migration-owned
 tables receive the same defaults; do not pass migration credentials to the
 world service.
+
+### Secret rotation
+
+Inject database and Nakama secrets through the deployment environment or an OS
+secret store, not command-line arguments. The service reads them at startup;
+rotate by staging the replacement secret, rolling/restarting instances so new
+connections use it, checking readiness and sanitized error metrics, then
+revoking the old credential. Keep migration-role credentials separate and
+rotate them independently. For zero-downtime PostgreSQL rotation, provision a
+second least-privilege runtime login with the same grants, switch the secret and
+roll the world instances, then revoke the former login. Existing database pool
+connections are not a live credential-refresh mechanism.
+
+Nakama server and runtime keys come from their `LYNX_NAKAMA_*` environment
+variables. Coordinate key changes across every Nakama node; changing session or
+refresh encryption keys invalidates affected sessions. For development bearer
+tokens, `LYNX_WORLD_TOKEN_HASHES` can temporarily contain both old and new
+digests during rollout; distribute the replacement token out-of-band, then
+remove the old digest and restart. Never place raw tokens or passwords in shell
+history, process arguments, logs, or shared `.env` files.
 
 With `--state-postgres`, the service also takes a single-writer lease on the
 demo zone in `lynx.zone_leases` before it loads the snapshot. A second process
@@ -296,6 +432,7 @@ Health checks:
 | Content validity | `lynx validate --project <dir>` |
 | Content compatibility | `lynx content diff --base <manifest> --next <manifest>` |
 | Metrics | `GET /metrics` |
+| Bounded per-session replication diagnostics | `GET /diagnostics/replication` |
 
 Readiness is stricter than liveness: the current binary becomes ready after the
 zone is built or restored and before it accepts connections, and turns not-ready
@@ -307,17 +444,27 @@ loading, and event replay are not readiness checks.
 
 ## Metrics and logs
 
-The service emits tracing logs; the comprehensive structured fields and
-correlation plumbing below are targets, not a guaranteed current log schema
-(`OPS-013`). Never log tokens, passwords, or full private chat.
+See the [error and operator diagnostic catalog](error-catalog.md) for stable
+error codes, retry behavior, and handling guidance. Keep server diagnostics out
+of player-facing text and metric labels.
 
-The admin listener serves `/healthz`, `/readyz`, and `/metrics` independently
-of the gameplay listener. These endpoints are unauthenticated and have no TLS;
-keep the default loopback bind or restrict a private admin interface with
-network policy and a trusted TLS proxy. Local users able to connect can read
-aggregate operational data. The gameplay listener retains these routes for
-compatibility. Do not expose either listener to untrusted networks without
-appropriate controls; demo bearer authentication is not production auth.
+The service emits structured tracing events for authentication denials,
+transport rate limits, authority rejections, and principal-session revocation.
+The deployment collector still needs to extract and retain these fields as
+specified in the security event policy below (`NET-013`, `OPS-013`). Never log
+tokens, passwords, or full private chat.
+
+The admin listener serves `/healthz`, `/readyz`, `/metrics`, and
+`/diagnostics/replication` independently of the gameplay listener. These
+endpoints are unauthenticated and have no TLS; keep the default loopback bind or
+restrict a private admin interface with network policy and a trusted TLS proxy.
+Replication diagnostics retain at most 256 recently active opaque session IDs;
+they include per-session queue and frame/byte counts, but no account, character,
+IP, or credential data. Session IDs are not Prometheus labels. Local users able
+to connect can read this operational data. The gameplay listener retains the
+health, readiness, and metrics routes for compatibility. Do not expose either
+listener to untrusted networks without appropriate controls; demo bearer
+authentication is not production auth.
 
 Prometheus scrape example (use a private target reachable by Prometheus):
 
@@ -419,9 +566,9 @@ scrape_configs:
 | `lynx_world_replication_socket_write_frames_total{kind,outcome}` | snapshot/delta frames whose WebSocket send completed or failed; labels are fixed to two kinds and two outcomes |
 | `lynx_world_replication_socket_written_bytes_total{kind}` | encoded snapshot/delta bytes for completed local WebSocket sends; not client acknowledgements |
 | `lynx_world_ai_ticks_total` / `lynx_world_ai_decisions_total` | enabled AI ticks and evaluated controller decisions |
-| `lynx_world_ai_budget_exhaustions_total{budget}` | AI controller-scan, update, perception and action limits using fixed budget labels |
+| `lynx_world_ai_budget_exhaustions_total{budget}` | AI controller-scan, update, perception, action, group-aggro-share, and behavior-step limits using fixed budget labels |
 | `lynx_world_path_requests_total`, `lynx_world_path_expansions_total`, `lynx_world_path_failures_total`, `lynx_world_path_budget_exhaustions_total`, `lynx_world_path_partial_results_total`, `lynx_world_path_deferred_requests_total` | cumulative path diagnostics sampled from the zone; the demo GuardChase scenario generates path requests and expansions during normal ticks. |
-| `lynx_world_content_version_info{state,version}` | content integration state (`absent`, `configured`, or `loaded`) and version when available. The current world service reports `state="absent"`; it does not load a content bundle |
+| `lynx_world_content_version_info{state,version}` | content integration state (`absent`, `configured`, or `loaded`) and version when available. `--content-bundle <PATH>` reports `loaded` only after manifest, engine requirement, definition metadata, locale paths, and file hashes pass; without the option it reports `absent` |
 | `lynx_backend_operations_total{adapter}` / `lynx_backend_operation_errors_total{adapter}` | Nakama and PostgreSQL adapter operation counts/errors; emitted in Nakama auth mode with fixed adapter labels. Errors include validation/domain failures |
 | `lynx_backend_operation_duration_seconds{adapter}` | backend operation duration including PostgreSQL lock waits and failures; adapter snapshots are individually coherent, not atomic as a group |
 
@@ -431,6 +578,160 @@ Starting alert examples (tune against staging; not tested production rules):
 `increase(lynx_world_snapshot_writes_total{outcome="failure"}[5m]) > 0`, and
 `up{job="lynx-world"} == 0` for five minutes. Monitor readiness separately.
 
+For session abuse, separate routine reconnect volume from suspicious failures
+and throttling. These examples use only bounded metric labels and should alert
+on sustained patterns; tune their windows and thresholds with staging traffic:
+
+```promql
+# Repeated invalid/expired resume attempts, excluding successful reconnects.
+sum(increase(lynx_world_resume_failures_total[5m])) > 20
+
+# Resume-token guessing is reaching the independent per-IP attempt budget.
+sum(increase(lynx_world_rate_limit_rejections_total{class="resume_attempt"}[5m])) > 0
+
+# Failed identity credentials are being throttled.
+sum(increase(lynx_world_rate_limit_rejections_total{class="failed_auth"}[5m])) > 0
+```
+
+The resume failure counter is authority-side and excludes failures rejected
+before authority admission. Rate-limit counters cover those transport-level
+rejections. Neither metric contains IP addresses or session identifiers.
+
+### Dashboards, alert rules, and SLOs
+
+Grafana provisioning files and the versioned world dashboard are in
+[`deploy/grafana`](../deploy/grafana). They use the `lynx-prometheus`
+datasource UID and provision without dashboard edits. Prometheus rules are in
+[`deploy/prometheus/lynx-world.rules.yml`](../deploy/prometheus/lynx-world.rules.yml);
+every alert carries a runbook link and uses a pending interval to avoid
+page-worthy transitions during brief restarts. Counter `increase()` handles
+process counter resets. `LynxWorldMetricsTargetUnavailable` handles sustained
+scrape failure separately. These rules still need promtool validation and a
+staging exercise before operators rely on their thresholds.
+
+| Alert | Initial threshold | Response |
+| --- | --- | --- |
+| `LynxWorldTickDeadlinesMissed` | Any deadline miss in 5 minutes, sustained for 2 minutes | [Tick deadline misses](#tick-deadline-misses) |
+| `LynxWorldOutboundQueueNearCapacity` | Process high-water reaches 90% of capacity for 5 minutes | [Replication queue pressure](#replication-queue-pressure) |
+| `LynxWorldSessionExpirySpike` | 10 expiry closes in 10 minutes, sustained for 2 minutes | [Session expiry](#session-expiry) |
+| `LynxWorldAuthenticationRejections` | Any failed-auth throttle or 10 failed resumes in 5 minutes | [Authentication and resume failures](#authentication-and-resume-failures) |
+| `LynxWorldPostgresOperationErrors` | Any PostgreSQL adapter error in 5 minutes, sustained for 2 minutes | [PostgreSQL operation errors](#postgresql-operation-errors) |
+| `LynxWorldBackupFailure` | External backup exporter reports a failure in 15 minutes | [Backup failures](#backup-failures) |
+| `LynxWorldMetricsTargetUnavailable` | Scrape target down for 5 minutes | [Metrics target unavailable](#metrics-target-unavailable) |
+
+The backup alert requires the deployment backup job to expose the counter
+`lynx_backup_failures_total`; Lynx does not currently run or instrument backup
+jobs. The session alert observes attached connections closed after session
+expiry, not retained-window expiry sweeps. PostgreSQL adapter metrics exist only
+in Nakama authentication mode.
+
+Proposed initial service objectives are 99.9% monthly Prometheus scrape
+availability for the world metrics target, fewer than 0.1% scheduled ticks
+missing their deadline in each rolling 30-day window, and recovery from a
+durable checkpoint within 60 seconds. Scrape availability is an operations
+proxy, not player-visible availability; current tick telemetry has no duration
+histogram, so the deadline objective is the available latency guardrail. The
+60-second recovery objective is exercised by the reference replay test. These
+objectives and alert thresholds need staging review against the chosen topology
+before becoming production SLOs.
+
+#### Tick deadline misses
+
+Check scheduler load and tick duration logs, then compare the alert window with
+deployments and host CPU pressure. Execution overruns and scheduler deadline
+misses are distinct metrics.
+
+#### Replication queue pressure
+
+Inspect slow or disconnected peers and outbound socket write outcomes. The
+high-water metric is process-local and aggregate; it does not identify a
+session. Do not raise queue limits without measuring memory and bandwidth.
+
+#### Session expiry
+
+Check reconnect rates, network interruptions, and resume TTL configuration.
+This counter records closes of attached sessions that disappeared or expired;
+it does not count every disconnected resume window that expires.
+
+#### Authentication and resume failures
+
+Review bounded rate-limit classes, stable error codes, and the correlated
+security audit events. Treat sudden failed-credential throttling as possible
+abuse; do not log or copy submitted tokens into incident notes.
+
+#### PostgreSQL operation errors
+
+Check database availability, migration state, pool connectivity, and the
+restricted operator logs. Adapter errors combine domain/validation and
+infrastructure failures; this signal does not identify a failing query.
+
+#### Backup failures
+
+Check the external backup job's exit status, checksum, destination access, and
+last known good backup. Preserve the last verified backup while investigating.
+The current repository has no backup exporter or scheduled backup job.
+
+#### Metrics target unavailable
+
+Check the process health and readiness endpoints, deployment/restart timeline,
+admin listener bind, and Prometheus target configuration. A scrape outage is
+not by itself proof that gameplay is unavailable.
+
+### Security event logs
+
+The world process emits structured tracing fields to stdout. Preserve these
+event names and fields in the deployment's log collector:
+
+| Event | Safe correlation fields |
+| --- | --- |
+| `world_admission_denied` | `source_ip`, stable `reason`, and selected `character` when known |
+| `world_resume_admission_denied` | `source_ip` and stable `reason` |
+| `world_rate_limit_rejected` | `source_ip`, fixed `class` (`handshake`, `failed_auth`, `resume_attempt`, `connection_churn`, or an authenticated message family), and stable `reason`; `session` after admission |
+| `world_authority_rejected` | `source_ip`, server-issued `session`, server-resolved `actor`, request `correlation_id`, and stable `reason` |
+| `world_action_processed` | `service`, `zone`, `connection`, server-issued `session` and `actor`, `message_kind`, wire `correlation_id`, optional `parent_correlation_id`, `outcome`, `duration_ms`, and stable `reason` on non-applied outcomes |
+| `world_principal_sessions_revoked` | server-verified `principal` and count of revoked sessions |
+| `world session detached` / `world session expired` | `connection` and `session` |
+
+Do not add bearer tokens, resume tokens, request bodies, chat text, or backend
+error details to these records. IP addresses and stable player/session IDs are
+sensitive operational data: restrict log access to incident responders and
+security operators, encrypt collector transport and storage, and retain
+searchable records for 90 days before purge. The world process writes stdout
+only; it does not provide a durable log store or collector. Deployments must
+configure the collector, field extraction, retention, and access controls.
+
+`world_action_processed` uses stable field names on both applied and non-applied
+actions. Applied actions are emitted at `info`; rejected, failed, unknown, and
+no-result actions are emitted at `warn` and include a stable reason code where
+available. These events are not sampled. The action body and private fields are
+never logged. For durable lookup, `zone.action-results.replace` events store the
+bounded `action_correlations` object beside `action_results`; its keys are
+simulation idempotency request IDs and its values are the wire correlation IDs.
+Older readers ignore this additive JSON field and still replay the action
+results. Find the durable request ID for a wire ID, then inspect that result in
+the same event payload:
+
+```sql
+SELECT event.sequence, event.tick, event.kind, mapping.key AS request_id,
+       event.payload->'action_results' AS action_results
+FROM lynx.zone_events AS event
+CROSS JOIN LATERAL jsonb_each_text(
+    COALESCE(event.payload->'action_correlations', '{}'::jsonb)
+) AS mapping(key, correlation_id)
+WHERE event.kind = 'zone.action-results.replace'
+  AND mapping.correlation_id = 'trace-action-41'
+ORDER BY event.sequence;
+```
+
+Use the service's structured stdout logs for latency investigations. Lynx does
+not currently export distributed traces; retain `correlation_id` and
+`parent_correlation_id` in the collector so log searches can join wire,
+authority, and durable event records.
+
+The PromQL rules above are candidate alerts, not exercised production rules.
+Validate their thresholds against staging traffic, confirm alert routing, and
+record false-positive tuning before relying on them for incident response.
+
 Unsupported or incomplete requested families (do not interpret their absence as zero):
 
 - Tick duration distributions.
@@ -438,11 +739,48 @@ Unsupported or incomplete requested families (do not interpret their absence as 
 - End-to-end action latency and action rejections before authority delivery (authority latency, applied actions, and transport rate limits are measured separately).
 - Per-session replication delivery counts and bytes; queue depth is currently
   exposed only as an aggregate maximum to avoid unbounded session-ID labels.
-- Pathfinding expansion, failure, partial-result, and budget counters are exposed from zone diagnostics. The current world runtime has no NPC/pathfinding call site, so these remain zero until AI or another runtime consumer calls `Zone::find_path`; this is not evidence of zero pathfinding pressure in a future integration.
+- Pathfinding expansion, failure, partial-result, and budget counters are sampled from zone diagnostics. The demo GuardChase runtime exercises `Zone::find_path`; these counters represent calls actually made by the current runtime.
 - AI error counters; current AI diagnostics cover decisions and bounded-work limits only.
 - Backend metrics are emitted only in Nakama auth mode and combine database domain/validation errors with infrastructure errors. There are no per-query or pool metrics.
 - Snapshot load failures; write metrics above do not identify the store or error cause and do not include snapshot capture time.
-- Localization fallback/missing-key counts are not wired to the service. `CatalogSet::resolve_with_diagnostics` is opt-in and the world service currently does not resolve localized catalogs.
+- Localization fallback/missing-key counts are unsupported by the current world service: it sends typed message keys and does not resolve localized catalogs. `CatalogSet::resolve_with_diagnostics` remains opt-in for a future server-side catalog consumer; no localization metric is emitted.
+
+## Player inventory value ledger
+
+Migration `0016_player_inventory_value_ledger.sql` establishes an opening
+balance for existing player inventories, then records every trusted inventory
+snapshot replacement and idempotent transfer as signed per-item quantities.
+For transfers, both owners' entries and the inventory update commit in one
+transaction. This ledger does not assign prices; no player currency balance is
+defined yet (ADR 0032).
+
+Operators can investigate movements by account, character, correlation ID, and
+time range. Run this query using the restricted operator database role:
+
+```sql
+SELECT event.occurred_at, account.account_id, entry.owner_character_id,
+       entry.item_definition, entry.quantity_delta, entry.before_quantity,
+       entry.after_quantity, event.source, event.actor_kind, event.actor_id,
+       event.reason, event.correlation_id
+FROM lynx.inventory_value_entries AS entry
+JOIN lynx.inventory_value_events AS event USING (event_key)
+JOIN lynx.characters AS character
+  ON character.character_id = entry.owner_character_id
+JOIN lynx.accounts AS account ON account.account_id = character.account_id
+WHERE account.account_id = 'account-id-or-null'
+  AND entry.owner_character_id = 'chr-id-or-null'
+  AND event.correlation_id = 'correlation-id-or-null'
+  AND event.occurred_at >= '2026-11-01T00:00:00Z'
+  AND event.occurred_at <  '2026-12-01T00:00:00Z'
+ORDER BY event.occurred_at, entry.entry_id;
+```
+
+Replace any `*-or-null` filter with `TRUE` when that dimension is not needed.
+The query intentionally omits Nakama user IDs and character names. Reconcile a
+character through `PostgresInventoryStore::reconcile_character`; its `differences`
+list reports current per-item quantities that do not equal opening balances
+plus signed ledger entries. Ledger rows reject updates and deletes outside the
+documented append-only retention path.
 
 ## Session operations
 
@@ -580,10 +918,11 @@ endpoint is not a database or character/audit continuity check.
 
 ## Deploy and rollback
 
-1. Build and test the exact artifact. Review the changelog, migration notes,
-   README progress and counts, relevant docs and links, and backlog gap register
-   against the release (`OPS-014`; this review is not yet an enforced gate).
-   Run `python scripts/test_check_markdown_links.py` and
+1. Build and test the exact artifact. Review README progress, relevant docs, and
+   the backlog gap register against the release (`OPS-014`). CI checks README
+   crate/ADR/document counts and local Markdown links; the tagged release
+   workflow requires a versioned changelog and migration entry. Run
+   `python scripts/test_check_markdown_links.py` and
    `python scripts/check_markdown_links.py`; manually review links outside the
    checker's documented coverage in `QUA-009`.
 2. Apply forward-compatible migrations.
@@ -592,8 +931,10 @@ endpoint is not a database or character/audit continuity check.
    localization catalogs for every declared locale.
 5. Roll out to one zone, monitor errors and tick health.
 6. Promote to remaining zones.
-7. Roll back the content bundle first; roll back code if the fault is in the
-   runtime. Destructive migrations require a tested down-migration or restore.
+7. Roll back the content bundle and its matching snapshot version together;
+   startup rejects a mismatched pair. Roll back code if the fault is in the
+   runtime. Definition-level data migration and automated pair restoration are
+   still required before content rollback is a complete recovery procedure.
 
 ## Incident response
 

@@ -1,0 +1,21 @@
+(
+    locale: "en",
+    messages: {
+        "error.invalid_request": "The request is invalid. Refresh the interface and try again.",
+        "error.not_found": "That target is no longer available.",
+        "error.out_of_range": "Move closer to the target and try again.",
+        "error.not_visible": "The target is not visible. Refresh the area and try again.",
+        "error.permission_denied": "You do not have permission to perform this action.",
+        "error.invalid_state": "The state changed. Refresh the interface before trying again.",
+        "error.session_expired": "Your session expired. Sign in again.",
+        "error.cooldown": "Wait before trying again.",
+        "error.capacity_exceeded": "There is not enough room to complete this action.",
+        "error.version_mismatch": "The client or content version is not compatible.",
+        "error.content_invalid": "This content is currently unavailable.",
+        "error.conflict": "The state changed. Refresh the interface before trying again.",
+        "error.budget_exhausted": "This request needs too much work. Try again shortly.",
+        "error.rate_limited": "Wait before trying again.",
+        "error.unsupported": "This action is unavailable in this version.",
+        "error.internal": "The action could not be completed. Try again later.",
+    },
+)

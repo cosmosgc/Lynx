@@ -4,6 +4,7 @@
 //! provisions/resolves the durable Lynx account before passing only that account
 //! to the account-scoped character repository. No Nakama type reaches gameplay.
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 use engine_core::faction::FactionSnapshot;
@@ -13,11 +14,13 @@ use engine_core::{DefinitionId, IdKind};
 use game_api::{
     Account, ApiError, AuthService, CalendarService, Character, CharacterCreationKey,
     CharacterCreationReceipt, CharacterId, CharacterIntentService, CharacterService,
-    CharacterWorldService, ConflictResolutionView, CreateCharacter, CreateGroup, DeviceLogin,
-    EventEnrollmentView, FactionService, FactionView, Friend, GroupId, GroupMember,
+    CharacterWorldService, ChatChannel, ChatChannelTarget, ChatChannelTargetPage, ChatMessagePage,
+    ChatMessageReceipt, ChatRealtimeEvent, ConflictResolutionView, CreateCharacter, CreateGroup,
+    DeviceLogin, EventEnrollmentView, FactionService, FactionView, Friend, GroupId, GroupMember,
     GroupMembership, GroupPage, GroupSearch, GroupService, HealthService, HealthStatus,
-    InventoryService, InventorySlot, Session, SessionToken, SocialGroup, SocialService,
-    TerritoryView, WorldEventView,
+    InventoryService, InventorySlot, RealtimeChatService, RealtimeChatSession,
+    RealtimePartyService, Session, SessionToken, SocialGroup, SocialService, TerritoryView,
+    WorldEventView,
 };
 
 use crate::{
@@ -32,6 +35,7 @@ pub struct NakamaPostgresBackend {
     characters: PostgresCharacterStore,
     inventories: PostgresInventoryStore,
     faction_calendar: PostgresFactionCalendarStore,
+    realtime_chat_rooms: BTreeSet<String>,
 }
 
 impl fmt::Debug for NakamaPostgresBackend {
@@ -84,7 +88,33 @@ impl NakamaPostgresBackend {
             characters,
             inventories,
             faction_calendar,
+            realtime_chat_rooms: BTreeSet::new(),
         }
+    }
+
+    /// Allow named room targets for application chat sessions. The default
+    /// backend has no room targets; direct and group targets are account-checked.
+    pub fn with_realtime_chat_rooms<I, S>(mut self, rooms: I) -> Result<Self, ApiError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let rooms = rooms
+            .into_iter()
+            .map(Into::into)
+            .map(|name| {
+                let target = ChatChannelTarget::Room(name.clone());
+                target.validate()?;
+                Ok(name)
+            })
+            .collect::<Result<BTreeSet<_>, ApiError>>()?;
+        if rooms.len() > 256 {
+            return Err(ApiError::InvalidRequest(
+                "too many configured Nakama chat rooms".into(),
+            ));
+        }
+        self.realtime_chat_rooms = rooms;
+        Ok(self)
     }
 
     fn faction_snapshot(&self) -> Result<FactionSnapshot, ApiError> {
@@ -132,6 +162,139 @@ impl NakamaPostgresBackend {
             Err(ApiError::NotFound(_) | ApiError::PermissionDenied) => Ok(false),
             Err(error) => Err(error),
         }
+    }
+}
+
+impl RealtimeChatService for NakamaPostgresBackend {
+    type Session = AuthorizedNakamaChatSession;
+
+    fn discover_channels(
+        &self,
+        token: &SessionToken,
+        limit: u16,
+        cursor: Option<&str>,
+    ) -> Result<ChatChannelTargetPage, ApiError> {
+        game_api::validate_group_page(limit, cursor)?;
+        let friends = SocialService::friends(self, token)?;
+        let groups = GroupService::my_groups(self, token, limit, cursor)?;
+        let mut targets = BTreeSet::new();
+        targets.extend(
+            friends
+                .into_iter()
+                .filter(|friend| friend.state == game_api::FriendState::Friend)
+                .map(|friend| ChatChannelTarget::Direct(friend.account_id)),
+        );
+        targets.extend(
+            groups
+                .items
+                .into_iter()
+                .filter(|membership| {
+                    matches!(
+                        membership.role,
+                        game_api::GroupRole::Owner
+                            | game_api::GroupRole::Admin
+                            | game_api::GroupRole::Member
+                    )
+                })
+                .map(|membership| ChatChannelTarget::Group(membership.group.id)),
+        );
+        Ok(ChatChannelTargetPage {
+            targets: targets.into_iter().collect(),
+            next_cursor: groups.cursor,
+        })
+    }
+
+    async fn connect_chat(&self, token: &SessionToken) -> Result<Self::Session, ApiError> {
+        Ok(AuthorizedNakamaChatSession {
+            session: self.connect_realtime(token).await?,
+            nakama: self.nakama.clone(),
+            token: token.clone(),
+            allowed_rooms: self.realtime_chat_rooms.clone(),
+        })
+    }
+}
+
+impl RealtimePartyService for NakamaPostgresBackend {
+    type Session = crate::realtime::NakamaRealtimeSession;
+
+    async fn connect_party(&self, token: &SessionToken) -> Result<Self::Session, ApiError> {
+        self.connect_realtime(token).await
+    }
+}
+
+/// Chat session that only joins direct channels currently listed as mutual
+/// friendships. Nakama independently enforces group
+/// membership. Configured room names remain deployment policy.
+pub struct AuthorizedNakamaChatSession {
+    session: crate::realtime::NakamaRealtimeSession,
+    nakama: NakamaClient,
+    token: SessionToken,
+    allowed_rooms: BTreeSet<String>,
+}
+
+impl fmt::Debug for AuthorizedNakamaChatSession {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthorizedNakamaChatSession")
+            .field("session", &self.session)
+            .field("nakama", &self.nakama)
+            .field("token", &self.token)
+            .field("allowed_room_count", &self.allowed_rooms.len())
+            .finish()
+    }
+}
+
+impl RealtimeChatSession for AuthorizedNakamaChatSession {
+    async fn join_channel(
+        &mut self,
+        target: &ChatChannelTarget,
+        persistence: bool,
+        hidden: bool,
+    ) -> Result<ChatChannel, ApiError> {
+        target.validate()?;
+        if let ChatChannelTarget::Room(name) = target
+            && !self.allowed_rooms.contains(name)
+        {
+            return Err(ApiError::PermissionDenied);
+        }
+        if let ChatChannelTarget::Direct(account) = target {
+            let mutual_friend = SocialService::friends(&self.nakama, &self.token)?
+                .into_iter()
+                .any(|friend| {
+                    friend.account_id == *account && friend.state == game_api::FriendState::Friend
+                });
+            if !mutual_friend {
+                return Err(ApiError::PermissionDenied);
+            }
+        }
+        RealtimeChatSession::join_channel(&mut self.session, target, persistence, hidden).await
+    }
+
+    async fn leave_channel(&mut self, channel_id: &str) -> Result<(), ApiError> {
+        RealtimeChatSession::leave_channel(&mut self.session, channel_id).await
+    }
+
+    async fn send_realtime_message(
+        &mut self,
+        channel_id: &str,
+        content: &str,
+    ) -> Result<ChatMessageReceipt, ApiError> {
+        RealtimeChatSession::send_realtime_message(&mut self.session, channel_id, content).await
+    }
+
+    async fn realtime_history(
+        &mut self,
+        channel_id: &str,
+        limit: u16,
+        forward: bool,
+        cursor: Option<&str>,
+    ) -> Result<ChatMessagePage, ApiError> {
+        RealtimeChatSession::realtime_history(&mut self.session, channel_id, limit, forward, cursor)
+            .await
+    }
+
+    async fn next_chat_event(&mut self) -> Result<ChatRealtimeEvent, ApiError> {
+        RealtimeChatSession::next_chat_event(&mut self.session).await
     }
 }
 
@@ -522,6 +685,7 @@ fn published_event<'a>(
         .ok_or_else(|| ApiError::NotFound(format!("event: {event}")))
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

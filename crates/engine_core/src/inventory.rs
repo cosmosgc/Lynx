@@ -367,6 +367,154 @@ impl Inventory {
         }
     }
 
+    /// Split part of a stack into a specified empty slot atomically.
+    ///
+    /// The source must remain non-empty; moving the whole stack is a slot move,
+    /// not a split. Unique items cannot be split.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorCode::InvalidRequest`] for identical slots, zero
+    /// quantity, or a quantity that consumes the entire source; [`ErrorCode::NotFound`]
+    /// for a missing slot; and [`ErrorCode::Conflict`] if the destination is
+    /// occupied. Unique-item splits return [`ErrorCode::InvalidState`].
+    pub fn split_into_slot(
+        &mut self,
+        source_slot: usize,
+        destination_slot: usize,
+        quantity: u32,
+    ) -> Result<ItemStack, EngineError> {
+        if source_slot == destination_slot || quantity == 0 {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "a split requires distinct slots and a positive quantity",
+            ));
+        }
+        let destination = self
+            .slots
+            .get(destination_slot)
+            .ok_or_else(|| EngineError::not_found("inventory slot", destination_slot))?;
+        if destination.is_some() {
+            return Err(EngineError::new(
+                ErrorCode::Conflict,
+                "split destination slot is occupied",
+            )
+            .with_detail("slot", destination_slot.to_string()));
+        }
+        let source = self
+            .slot(source_slot)
+            .ok_or_else(|| EngineError::not_found("inventory slot", source_slot))?;
+        if source.is_unique() {
+            return Err(
+                EngineError::new(ErrorCode::InvalidState, "unique items cannot be split")
+                    .with_detail("slot", source_slot.to_string()),
+            );
+        }
+        if quantity >= source.quantity {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "a split must leave at least one item in the source slot",
+            )
+            .with_detail("slot", source_slot.to_string())
+            .with_detail("available", source.quantity.to_string())
+            .with_detail("requested", quantity.to_string()));
+        }
+
+        let mut updated = self.clone();
+        let split = updated.remove(source_slot, quantity)?;
+        updated.slots[destination_slot] = Some(split.clone());
+        *self = updated;
+        Ok(split)
+    }
+
+    /// Merge `quantity` from one stack into another compatible stack atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorCode::InvalidRequest`] for identical slots, zero, or an
+    /// excessive quantity; [`ErrorCode::NotFound`] for a missing slot;
+    /// [`ErrorCode::InvalidState`] for unique or different item definitions;
+    /// and [`ErrorCode::CapacityExceeded`] when the destination would exceed
+    /// its item stack limit.
+    pub fn merge_into_slot(
+        &mut self,
+        source_slot: usize,
+        destination_slot: usize,
+        quantity: u32,
+        rules: &dyn ItemRules,
+    ) -> Result<ItemStack, EngineError> {
+        if source_slot == destination_slot || quantity == 0 {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "a merge requires distinct slots and a positive quantity",
+            ));
+        }
+        let source = self
+            .slot(source_slot)
+            .cloned()
+            .ok_or_else(|| EngineError::not_found("inventory slot", source_slot))?;
+        let destination = self
+            .slot(destination_slot)
+            .cloned()
+            .ok_or_else(|| EngineError::not_found("inventory slot", destination_slot))?;
+        if source.is_unique() || destination.is_unique() {
+            return Err(EngineError::new(
+                ErrorCode::InvalidState,
+                "unique items cannot be merged",
+            ));
+        }
+        if source.definition != destination.definition {
+            return Err(EngineError::new(
+                ErrorCode::InvalidState,
+                "only stacks of the same item can be merged",
+            ));
+        }
+        if quantity > source.quantity {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "cannot merge more than the source stack contains",
+            )
+            .with_detail("available", source.quantity.to_string())
+            .with_detail("requested", quantity.to_string()));
+        }
+        let limit = rules.max_stack(&destination.definition);
+        if limit == 0 {
+            return Err(EngineError::new(
+                ErrorCode::InvalidState,
+                "item rules report a zero stack limit",
+            ));
+        }
+        let merged_quantity = destination.quantity.checked_add(quantity).ok_or_else(|| {
+            EngineError::new(
+                ErrorCode::CapacityExceeded,
+                "merged stack exceeds the item's stack limit",
+            )
+        })?;
+        if merged_quantity > limit {
+            return Err(EngineError::new(
+                ErrorCode::CapacityExceeded,
+                "merged stack exceeds the item's stack limit",
+            )
+            .with_detail("max_stack", limit.to_string()));
+        }
+
+        let mut updated = self.clone();
+        if quantity == source.quantity {
+            updated.slots[source_slot] = None;
+        } else {
+            updated.slots[source_slot]
+                .as_mut()
+                .expect("source slot was checked above")
+                .quantity -= quantity;
+        }
+        updated.slots[destination_slot]
+            .as_mut()
+            .expect("destination slot was checked above")
+            .quantity = merged_quantity;
+        *self = updated;
+        Ok(ItemStack::new(source.definition, quantity))
+    }
+
     fn plan_add(&self, stack: &ItemStack, rules: &dyn ItemRules) -> Option<Vec<(usize, u32)>> {
         if stack.quantity == 0 {
             return None;
@@ -542,6 +690,7 @@ impl TransferLedger {
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -694,6 +843,44 @@ mod tests {
 
         assert_eq!(bag.remove(0, 5).unwrap().quantity, 5);
         assert!(bag.slot(0).is_none());
+    }
+
+    #[test]
+    fn split_and_merge_preserve_quantities_and_fail_atomically() {
+        let rules = UniformItemRules::new(10);
+        let torch = item("item.torch");
+        let mut bag = Inventory::from_slots(
+            vec![
+                Some(ItemStack::new(torch.clone(), 8)),
+                Some(ItemStack::new(torch.clone(), 4)),
+                None,
+            ],
+            &rules,
+        )
+        .unwrap();
+
+        bag.split_into_slot(0, 2, 3).unwrap();
+        assert_eq!(bag.slot(0).unwrap().quantity, 5);
+        assert_eq!(bag.slot(2).unwrap().quantity, 3);
+        bag.merge_into_slot(2, 1, 2, &rules).unwrap();
+        assert_eq!(bag.slot(1).unwrap().quantity, 6);
+        assert_eq!(bag.slot(2).unwrap().quantity, 1);
+        assert_eq!(bag.total_quantity(&torch), 12);
+
+        let before = bag.clone();
+        assert_eq!(
+            bag.split_into_slot(0, 1, 1).unwrap_err().code(),
+            ErrorCode::Conflict
+        );
+        assert_eq!(
+            bag.merge_into_slot(0, 1, 5, &rules).unwrap_err().code(),
+            ErrorCode::CapacityExceeded
+        );
+        assert_eq!(
+            bag.merge_into_slot(0, 2, 0, &rules).unwrap_err().code(),
+            ErrorCode::InvalidRequest
+        );
+        assert_eq!(bag, before);
     }
 
     #[test]

@@ -374,6 +374,168 @@ fn taking_items_conserves_them_and_checks_capacity() {
 }
 
 #[test]
+fn inserting_items_conserves_them_and_checks_target_capacity() {
+    let mut zone = test_zone();
+    let (actor, principal) = player_at(&mut zone, 1, Vec3::ZERO, 4);
+    let chest = entity(2);
+    let torch = text("item.torch");
+    let mut actor_inventory = Inventory::with_capacity(4).unwrap();
+    actor_inventory
+        .try_add(ItemStack::new(torch.clone(), 5), &UniformItemRules::new(10))
+        .unwrap();
+    zone.entity_mut(actor).unwrap().inventory = Some(actor_inventory);
+    zone.spawn(
+        EntityRecord::new(chest, text("prop.chest"), Vec3::new(1.0, 0.0, 0.0))
+            .with_interactable(Interactable::new(2.0, [Verb::Insert]))
+            .with_inventory(Inventory::with_capacity(1).unwrap()),
+    )
+    .unwrap();
+
+    let result = zone.apply_action(
+        &ActionRequest::new("insert-1", actor, Verb::Insert)
+            .on(chest)
+            .by(principal)
+            .with_param("slot", "0")
+            .with_param("quantity", "2"),
+        Millis::new(1),
+    );
+    assert!(result.is_applied(), "{:?}", result.error());
+    assert!(matches!(
+        result.effects().first(),
+        Some(ActionEffect::ItemInserted {
+            source,
+            destination,
+            quantity: 2,
+            ..
+        }) if *source == actor && *destination == chest
+    ));
+    assert_eq!(
+        zone.entity(actor)
+            .unwrap()
+            .inventory
+            .as_ref()
+            .unwrap()
+            .total_quantity(&torch),
+        3
+    );
+    assert_eq!(
+        zone.entity(chest)
+            .unwrap()
+            .inventory
+            .as_ref()
+            .unwrap()
+            .total_quantity(&torch),
+        2
+    );
+
+    let before_actor = zone.entity(actor).unwrap().inventory.clone().unwrap();
+    let before_chest = zone.entity(chest).unwrap().inventory.clone().unwrap();
+    let rejected = zone.apply_action(
+        &ActionRequest::new("insert-too-many", actor, Verb::Insert)
+            .on(chest)
+            .by(principal)
+            .with_param("slot", "0")
+            .with_param("quantity", "11"),
+        Millis::new(1),
+    );
+    assert_eq!(rejected.error().unwrap().code(), ErrorCode::InvalidRequest);
+    assert_eq!(
+        zone.entity(actor).unwrap().inventory.as_ref(),
+        Some(&before_actor)
+    );
+    assert_eq!(
+        zone.entity(chest).unwrap().inventory.as_ref(),
+        Some(&before_chest)
+    );
+}
+
+#[test]
+fn player_inventory_splits_and_merges_are_authoritative_and_idempotent() {
+    let mut zone = test_zone();
+    let (actor, principal) = player_at(&mut zone, 1, Vec3::ZERO, 4);
+    let torch = text("item.torch");
+    let inventory = Inventory::from_slots(
+        vec![
+            Some(ItemStack::new(torch.clone(), 5)),
+            Some(ItemStack::new(torch.clone(), 9)),
+            None,
+            None,
+        ],
+        &UniformItemRules::new(10),
+    )
+    .unwrap();
+    zone.entity_mut(actor).unwrap().inventory = Some(inventory);
+
+    let split_request = ActionRequest::new("split-1", actor, Verb::Split)
+        .by(principal)
+        .with_param("source_slot", "0")
+        .with_param("destination_slot", "2")
+        .with_param("quantity", "2");
+    let split = zone.apply_action(&split_request, Millis::new(1));
+    assert!(split.is_applied(), "{:?}", split.error());
+    assert!(matches!(
+        split.effects().first(),
+        Some(ActionEffect::InventoryStackSplit {
+            actor: owner,
+            source_slot: 0,
+            destination_slot: 2,
+            quantity: 2,
+            ..
+        }) if *owner == actor
+    ));
+    let after_split = zone.entity(actor).unwrap().inventory.clone().unwrap();
+    assert_eq!(after_split.slot(0).unwrap().quantity, 3);
+    assert_eq!(after_split.slot(2).unwrap().quantity, 2);
+    assert_eq!(after_split.total_quantity(&torch), 14);
+
+    let rejected_merge = zone.apply_action(
+        &ActionRequest::new("merge-too-large", actor, Verb::Merge)
+            .by(principal)
+            .with_param("source_slot", "2")
+            .with_param("destination_slot", "1")
+            .with_param("quantity", "2"),
+        Millis::new(1),
+    );
+    assert_eq!(
+        rejected_merge.error().unwrap().code(),
+        ErrorCode::CapacityExceeded
+    );
+    assert_eq!(
+        zone.entity(actor).unwrap().inventory.as_ref(),
+        Some(&after_split)
+    );
+
+    let merge_request = ActionRequest::new("merge-1", actor, Verb::Merge)
+        .by(principal)
+        .with_param("source_slot", "2")
+        .with_param("destination_slot", "0")
+        .with_param("quantity", "2");
+    let merge = zone.apply_action(&merge_request, Millis::new(1));
+    assert!(merge.is_applied(), "{:?}", merge.error());
+    assert!(matches!(
+        merge.effects().first(),
+        Some(ActionEffect::InventoryStacksMerged {
+            actor: owner,
+            source_slot: 2,
+            destination_slot: 0,
+            quantity: 2,
+            ..
+        }) if *owner == actor
+    ));
+    let after_merge = zone.entity(actor).unwrap().inventory.clone().unwrap();
+    assert_eq!(after_merge.slot(0).unwrap().quantity, 5);
+    assert!(after_merge.slot(2).is_none());
+    assert_eq!(after_merge.total_quantity(&torch), 14);
+
+    let replay = zone.apply_action(&split_request, Millis::new(2));
+    assert_eq!(replay, split);
+    assert_eq!(
+        zone.entity(actor).unwrap().inventory.as_ref(),
+        Some(&after_merge)
+    );
+}
+
+#[test]
 fn attacks_apply_damage_and_release_control_on_death() {
     let mut zone = test_zone();
     let (actor, principal) = player_at(&mut zone, 1, Vec3::ZERO, 1);
@@ -435,6 +597,9 @@ fn attack_rejects_client_selected_damage_without_changing_health() {
     );
     assert_eq!(forged.error().unwrap().code(), ErrorCode::InvalidRequest);
     assert_eq!(zone.entity(target).unwrap().health.unwrap().current, 10);
+    assert!(zone.diagnostics().iter().any(|diagnostic| {
+        diagnostic.code == "action.rejected.invalid_request" && diagnostic.entity == Some(actor)
+    }));
 
     zone.entity_mut(actor).unwrap().combat = Some(CombatStats::new(7, 0));
     let valid = zone.apply_action(

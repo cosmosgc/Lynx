@@ -50,7 +50,9 @@ Every definition carries:
 
 Component values are RON maps because the content format carries them as typed
 key/value data. The CLI's starter project registers `core.interactable`,
-`core.item`, and `core.zone` with the schemas used by its generated examples.
+`core.door`, `core.trigger`, `core.health`, `core.item`, `core.movement`,
+`core.behavior`, and `core.zone` with the schemas used by its generated
+examples.
 
 ## Required fields and validation
 
@@ -74,21 +76,259 @@ the authored objectives and versioned rules; a scheduled calendar event is a
 durable runtime instance that records the template version it uses. Validate
 all references when building and publishing a bundle.
 
+## AI behavior schedules
+
+Behavior definitions may include an optional recurring UTC window:
+
+```ron
+behavior: Some((
+  kind: guard_chase,
+  range_m: 24.0,
+  schedule: Some((start_minute_utc: 480, end_minute_utc: 1200)),
+  aggro_group: Some("group.harbor_watch"),
+  graph: Some((
+    entry: "node.detect",
+    nodes: [
+      (id: "node.detect", instruction: perceive_hostiles,
+        on_success: Some("node.attack"), on_failure: Some("node.wait")),
+      (id: "node.attack", instruction: attack_target,
+        on_success: Some("node.wait"), on_failure: Some("node.chase")),
+      (id: "node.chase", instruction: chase_target,
+        on_success: Some("node.wait"), on_failure: Some("node.flee")),
+      (id: "node.flee", instruction: flee_target,
+        on_success: Some("node.wait"), on_failure: Some("node.wait")),
+      (id: "node.wait", instruction: wait),
+    ],
+  )),
+))
+```
+
+Minutes are measured from UTC midnight. The start is inclusive and the end is
+exclusive; windows may cross midnight. Equal endpoints and values outside
+`0..1440` fail content validation. Omitting `schedule` leaves the behavior
+active all day. Runtime evaluates the window against the server's simulation
+timestamp, so the same tick and content produce the same schedule decision.
+Behaviors sharing an `aggro_group` may reuse a living hostile target after an
+ally's attack succeeds. The simulation policy caps the number of same-tick
+shares; each recipient rechecks that the target remains hostile, and resulting
+attacks still pass through the normal action pipeline.
+
+An optional `graph` overrides the legacy `kind` primitive. Node transitions
+follow operation success or failure; `wait` ends the current decision. Content
+validation limits each graph to 64 nodes and checks unique IDs, the entry, and
+every transition. The server executes at most 16 instructions per AI decision,
+so intentional cycles terminate with a budget diagnostic. Perception and
+navigation use the normal zone budgets, and attacks use the shared player/AI
+action quota. `flee_target` moves away from the selected hostile through the
+same server-side speed, navigation geometry, collision, and dynamic-blocker
+checks as other authoritative AI movement. `interact_target` issues the bounded
+`use` action for the selected target; component policy, range, and the normal
+shared action quota still apply, and rejected uses branch to `on_failure`.
+
+Patrol behaviors author a looping route and use a `patrol` node:
+
+```ron
+behavior: Some((
+  kind: guard,
+  range_m: 12.0,
+  patrol_route: [
+    (x: 4.0, y: 0.0, z: 4.0),
+    (x: 8.0, y: 0.0, z: 4.0),
+    (x: 8.0, y: 0.0, z: 8.0),
+  ],
+  graph: Some((
+    entry: "node.patrol",
+    nodes: [
+      (id: "node.patrol", instruction: patrol,
+        on_success: Some("node.patrol"), on_failure: Some("node.patrol")),
+    ],
+  )),
+))
+```
+
+Routes contain 2 to 64 finite points. The runtime advances no more than one
+patrol movement per actor each tick. The route cursor resets when the zone is
+restored, and blocked movement retries the current point on a later tick.
+
 ## Zones
 
-A zone definition contains:
+A zone definition contains a server-only `core.zone` component for its runtime
+geometry and capacity. The first runtime adapter supports one default entry
+point and a uniform-cost static navigation grid:
 
-- Stable zone ID and content version.
-- Bounds, cell size, spawn points, and safe areas.
-- Nav grid: width, height, blocked cells, optional cost multipliers.
-- Entity placements with definition IDs and overrides.
-- Typed links between placed entities (for example `lever.1 → door.1`,
-  `Signal::Activated`).
+```ron
+components: {
+  "core.zone": {
+    "max_players": 64,
+    "cell_size_m": 1.0,
+    "width_cells": 128,
+    "height_cells": 128,
+    "origin_x_m": 0.0,
+    "origin_z_m": 0.0,
+    "floor_y_m": 0.0,
+    "ceiling_y_m": 4.0,
+    "entry_x_m": 64.5,
+    "entry_y_m": 0.0,
+    "entry_z_m": 64.5,
+    "blocked_cells": [],
+    "max_entities": 1000,
+  },
+}
+```
+
+`width_cells` and `height_cells` are each limited to 512, and the grid is
+limited to 262,144 cells. `max_entities` must be at least `max_players`.
+`blocked_cells` contains row-major indexes
+(`row * width_cells + column`). Omitting the optional geometry fields selects
+a 128 by 128 grid at the origin with a four-meter vertical range and a centered
+entry point. Explicit entry coordinates must lie inside the zone and on an
+unblocked cell. The authored adapter derives a stable zone-instance ID from
+the world-map and zone-definition IDs so leases and checkpoints address the
+same zone after restart.
+
+Zones can declare bounded, zone-local travel triggers that activate one
+explicit map route:
+
+```ron
+travel_triggers: [
+  (
+    id: "to_market",
+    destination: "zone.market",
+    position: (x: 120.5, y: 0.0, z: 64.5),
+    radius_m: 2.0,
+  ),
+],
+```
+
+Zones may declare up to 64 travel triggers. IDs are unique lowercase tags within
+the zone. Positions must be finite, inside the zone, and on an unblocked
+navigation cell; radii are in `(0, 32]` meters. The destination must be placed
+on the same map and have an explicit directed route from the source zone.
+Runtime resolution assigns the destination's default safe entry point. After
+the controlled actor's first accepted movement, the client requests travel when
+its authoritative replicated position enters a trigger radius. The server
+rechecks the trigger and position, then atomically commits both zone snapshots,
+the handoff receipt, and any durable resume-token zone update. The socket closes
+after success; the client reconnects with its existing token, which now routes
+to the destination zone.
+
+Zones can also place static entity definitions:
+
+```ron
+entity_placements: [
+  (
+    id: "north_stall",
+    definition: "entity.market_stall",
+    position: (x: 32.5, y: 0.0, z: 18.5),
+    yaw_degrees: 90.0,
+  ),
+],
+```
+
+Placement IDs are unique lowercase tags within the zone. The entity definition
+must resolve to the `entity` namespace. Positions must be finite, inside the
+zone, and on an unblocked navigation cell; only one authored placement may use
+each cell. The server derives a stable entity ID from the map, zone, and
+placement IDs, then copies the definition's validated extension components and
+tags. These `static_definition` instances are rebuilt from the content bundle
+after snapshot recovery and are not stored in zone snapshots. Component data is
+preserved for replication and inspection. The starter `core.interactable`
+component also binds to authoritative verbs, range, and line-of-sight checks;
+the starter `core.door` component binds its initial open state to the simulation
+door state. Declare `open` and `close` in the interactable's verbs to expose
+those actions. Locked doors remain unsupported by this authoring adapter because
+item-key and minigame unlock policies are not yet bound. `core.health` accepts a
+maximum from 1 to 1,000,000 and creates a full-health simulation component.
+Because placed entities use `static_definition` persistence, damage to authored
+health resets to full on restart until per-placement persistence is implemented.
+`core.movement` sets a collision radius from 0 to 10 meters and whether the
+entity occupies space (default `true`). `core.trigger` defines a server-only
+sensor radius from 0.1 to 32 meters and emits a `triggered` link event when an
+actor enters it. Occupying placed entities participate
+in authoritative body collision and are avoided by player spawn selection. Two
+occupying authored bodies cannot overlap at startup. `core.behavior` references
+a validated `behavior.*` definition and gives the placed entity an AI mind; the
+authored-map service installs the bounded behavior policy. Patrol graphs run,
+and hostile target selection uses directional faction relations loaded from the
+database-backed world aggregate at startup. Changing those relations while the
+map is running requires a future world-level faction refresh coordinator.
+
+Link definitions declare the compatible endpoint components, supported events,
+and server-side action. The runtime supports door actions for lever and trigger
+events:
+
+```ron
+(
+  id: "link.lever_to_door",
+  version: (major: 1, minor: 0),
+  display: (
+    name: "link.lever_to_door.name",
+    description: "link.lever_to_door.description",
+  ),
+  components: {},
+  link: Some((
+    source_component: "core.interactable",
+    target_component: "core.door",
+    supported_events: [activated],
+    action: toggle_door,
+  )),
+)
+```
+
+For `activated`, the source component is `core.interactable` and the source must
+advertise the `activate` verb. For `opened` and `closed`, the source component
+is `core.door`; the source must also have `core.interactable` with the matching
+`open` or `close` verb. For `triggered`, the source component is `core.trigger`;
+its required `radius_m` field defines a server-side activation radius. All
+actions require a `core.door` target. Link definitions are resolved and checked
+against both endpoint entity definitions at bundle validation. Player and AI
+movement fires `triggered` when accepted movement enters the radius.
+`toggle_door`, `open_door`, and `close_door` operate only on unlocked target
+doors; a linked door change does not recursively emit a second door event.
+
+A pressure plate can use the same action with a trigger-specific link type:
+
+```ron
+components: {
+  "core.trigger": { "radius_m": 1.5 },
+},
+link: Some((
+  source_component: "core.trigger",
+  target_component: "core.door",
+  supported_events: [triggered],
+  action: open_door,
+)),
+```
+
+Zones may connect placements with directed activation or trigger links:
+
+```ron
+entity_links: [
+  (
+    link_type: "link.lever_to_door",
+    source: "market_lever",
+    target: "north_gate",
+    events: [activated],
+    enabled: true,
+    cooldown_ticks: 10,
+  ),
+],
+```
+
+Link types must resolve to `link.*` definitions. Endpoints must name placements
+in the same zone and match the declared source/target components. Self-links,
+duplicate type/source/target triples, unsupported or empty event sets, and
+activation cycles are rejected. Links start enabled unless `enabled` is false,
+are reconstructed from content after snapshot recovery, and may carry a tick
+cooldown. A supported activation toggles an unlocked door and emits the link
+type. Other actions/events and cross-zone links are not implemented.
+
+The zone contract also describes future runtime data that is not yet consumed
+by this adapter:
+
 - Persistence policy per placed entity.
 - Population and simulation budgets.
 
-Links are validated at load: endpoints exist, link type is compatible with both
-components, no unsupported cycles, and cross-zone links use an explicit route.
 Dynamic territory ownership is runtime state, not part of a zone's authored
 identity or geometry. The editor must visualize routes and territory without
 baking live ownership into a content bundle.
@@ -130,6 +370,9 @@ atlas carries only topology.
   same map, a route cannot connect a zone to itself, and duplicate routes are
   errors. `kind` is `passage`, `gateway`, or `portal`; `bidirectional` defaults
   to `false`.
+- Zone-local `travel_triggers` bind an activation point to one of those routes.
+  They do not add coordinates to the atlas; arrivals currently use the
+  destination zone's default safe entry point.
 - Zone definitions that are not placed on any map produce a warning once at
   least one map exists, so an accidentally omitted zone is visible.
 - Publishing a map change follows the normal content diff. Authored topology and
@@ -175,11 +418,14 @@ keys, action names, and field keys are validated at load. Duplicate action
 names and field keys are errors.
 
 At runtime, an entity's `UiProvider` can send resolved read-only fields and
-server-advertised actions (including fixed server-authored parameters) through
-`ui.state`. The online client renders the generic fields and buttons with
-`bevy_immediate`; clicks only submit intents, and the server still validates the
-action. Directly resolving `UiPanelDefinition` bindings and localized message
-keys into runtime providers remains client/content integration work.
+server-advertised actions through `ui.state`. Each `UiAction` may define fixed
+server-authored `params` and a set of `allowed_params` whose values are supplied
+by the player (for example, a lockpick's `guess`). The gateway authorizes only
+actions on the session's currently open panel, requires fixed parameters to match
+exactly, and rejects every parameter outside that policy. The online client
+renders generic fields/buttons with `bevy_immediate`; clicks only submit intents.
+Directly resolving `UiPanelDefinition` bindings and localized message keys into
+runtime providers remains client/content integration work.
 
 ```ron
 (
@@ -212,7 +458,14 @@ the definition's `panel_schema`:
 EntityRecord::new(vault_id, definition("prop.vault")?, position)
     .with_interactable(Interactable::new(3.0, [Verb::Use, Verb::Play, Verb::Open]))
     .with_door(Door::locked_with(key_id))
-    .with_ui(UiProvider::new(definition("ui.lockpick")?, "Vault Lock"))
+    .with_ui(UiProvider::new(definition("ui.lockpick")?, "Vault Lock").with_actions([
+        UiAction {
+            name: "play".into(),
+            label: "ui.action.try".into(),
+            params: Default::default(),
+            allowed_params: ["guess".to_string()].into(),
+        },
+    ]))
     .with_minigame(Minigame::new(
         definition("minigame.lockpick")?,
         3,      // digits
@@ -306,6 +559,16 @@ the CLI:
 lynx content diff --base deployed/manifest.json --next build/manifest.json --json
 ```
 
+The world server accepts a verified bundle directory with
+`lynx-world serve --content-bundle build`. The directory contains
+`manifest.json`; startup checks engine compatibility, loaded definition
+metadata, locale set, and every declared SHA-256. World snapshots record the
+loaded content version and SHA-256 of the exact manifest bytes, so changing a
+bundle while keeping the same semantic version fails closed with a
+migration/reset instruction. Authored
+behavior definitions whose IDs match installed AI behavior bindings replace
+those runtime defaults.
+
 | Change | Required bump |
 |---|---|
 | No definition or locale bytes changed | none |
@@ -351,6 +614,34 @@ human-readable `compatible`/`incompatible` line) in CI and publish gates. The
 same convention applies to `lynx validate`.
 
 See [ADR 0017](adr/0017-content-manifest-versioning.md).
+
+## Content migrations
+
+Reviewed migration plans live in `migrations/content/` as RON files. A plan
+names its migration ID, exact source manifest SHA-256, source and target content
+versions, affected definition schema transitions, and locale catalog edits.
+Operations use JSON Pointers and expected prior values so a stale plan fails
+before project content changes. Definition IDs, schema versions, locale
+identity, and file paths are controlled by the migration tool.
+
+Create and validate a source manifest, then preview a plan before applying it:
+
+```bash
+lynx content build --project . --content-version 1.0.0 --json
+lynx content hash content/manifest.json --json
+lynx migrate apply --project . --plan migrations/content/upgrade.ron --json
+lynx migrate apply --project . --plan migrations/content/upgrade.ron --apply --json
+lynx migrate rollback --project . --id upgrade-v1-v2 --json
+```
+
+The preview stages a complete candidate outside the project and validates all
+definitions, maps, panels, minigames, and locale references. Applying rechecks
+the manifest hash, validates the candidate, and retains the exact original
+`content/` tree for rollback. A rollback is refused if the applied manifest has
+changed. This migration surface does not modify persisted instances; those
+transitions are transactional persistence work tracked by PST-013. Re-serializing
+a migrated RON document may normalize its formatting and remove comments, so
+review the candidate diff before using `--apply`.
 
 ## Publishing pipeline
 

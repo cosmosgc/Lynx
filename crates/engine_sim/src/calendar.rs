@@ -387,8 +387,11 @@ fn validate_request(request: &CalendarActionRequest) -> Result<(), EngineError> 
     Ok(())
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     #[test]
     fn calendar_action_rejects_unknown_nested_authority_fields() {
         let mut value = serde_json::json!({
@@ -628,6 +631,45 @@ mod tests {
         );
         assert_eq!(switched.error().unwrap().code(), ErrorCode::Conflict);
         assert_eq!(calendar.enrollments(&event_id).count(), 1);
+    }
+
+    proptest! {
+        #[test]
+        fn generated_enrollment_replays_apply_once(
+            participant in 1_u128..=2,
+            first_at in 11_i64..20,
+            replay_count in 1_usize..9
+        ) {
+            let (mut world, _, _) = world();
+            let (mut calendar, event_id) = opened(&mut world);
+            let mut commands = CalendarCommands::new();
+            let side = if participant == 1 {
+                "side.defenders"
+            } else {
+                "side.attackers"
+            };
+            let request = enroll_request("generated-enrollment", participant, side);
+            let applied = commands.execute(
+                &mut calendar,
+                &mut world,
+                &request,
+                Millis::new(first_at),
+            );
+            prop_assert!(applied.is_applied());
+
+            for replay_index in 0..replay_count {
+                let replay_at = 30 + i64::try_from(replay_index).unwrap();
+                let replay = commands.execute(
+                    &mut calendar,
+                    &mut world,
+                    &request,
+                    Millis::new(replay_at),
+                );
+                prop_assert_eq!(replay, applied.clone());
+                prop_assert_eq!(calendar.enrollments(&event_id).count(), 1);
+                prop_assert!(calendar.validate_against(&world).is_ok());
+            }
+        }
     }
 
     #[test]

@@ -76,6 +76,40 @@ function Get-LynxSetting {
     return $value
 }
 
+# Resolve a secret from NAME or NAME_FILE. Mounted-secret files commonly end
+# with a line ending; remove it without exposing contents in failures.
+function Get-LynxSecretSetting {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [string]$Default = ''
+    )
+
+    $fileName = "${Name}_FILE"
+    $directValue = [Environment]::GetEnvironmentVariable($Name)
+    $hasValue = -not [string]::IsNullOrEmpty($directValue)
+    $hasFile = Test-Path -LiteralPath "Env:$fileName"
+    if ($hasValue -and $hasFile) {
+        throw "Configure either $Name or $fileName, not both."
+    }
+    if ($hasFile) {
+        $path = [Environment]::GetEnvironmentVariable($fileName)
+        try {
+            $value = [IO.File]::ReadAllText($path).TrimEnd([char[]]@("`r", "`n"))
+        }
+        catch {
+            throw "$fileName could not be read."
+        }
+        if ([string]::IsNullOrEmpty($value)) {
+            throw "$fileName is empty."
+        }
+        return $value
+    }
+    if ($hasValue) {
+        return $directValue
+    }
+    return $Default
+}
+
 # Read and validate the shared PostgreSQL settings. The application password is
 # required by every script; the setup script uses it for the role it creates.
 function Get-LynxPgConfig {
@@ -84,9 +118,9 @@ function Get-LynxPgConfig {
         Port     = Get-LynxSetting 'LYNX_PG_PORT' '5432'
         Database = Get-LynxSetting 'LYNX_PG_DATABASE' 'lynx'
         User     = Get-LynxSetting 'LYNX_PG_USER' 'lynx'
-        Password = Get-LynxSetting 'LYNX_PG_PASSWORD' ''
+        Password = Get-LynxSecretSetting 'LYNX_PG_PASSWORD' ''
         MigrationUser = Get-LynxSetting 'LYNX_PG_MIGRATION_USER' ''
-        MigrationPassword = Get-LynxSetting 'LYNX_PG_MIGRATION_PASSWORD' ''
+        MigrationPassword = Get-LynxSecretSetting 'LYNX_PG_MIGRATION_PASSWORD' ''
     }
 
     if ($config.Host -notmatch '^[A-Za-z0-9.:\[\]_-]+$') {

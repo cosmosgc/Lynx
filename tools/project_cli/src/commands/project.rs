@@ -14,7 +14,7 @@ pub(crate) fn validate_project(args: &ValidateArgs) -> Result<Value> {
     Ok(report)
 }
 
-pub(super) fn validate_dir(project_dir: &Path) -> Result<Value> {
+pub(crate) fn validate_dir(project_dir: &Path) -> Result<Value> {
     if !project_dir.exists() {
         return Ok(json!({
             "ok": false,

@@ -3,6 +3,13 @@
 - **Status:** Accepted
 - **Date:** 2026-10-24
 
+**Implementation status (2026-11-12):** The initial gateway design has since
+been composed into the `lynx-world` executable and framed WebSocket service
+(ADR 0014). Production Nakama admission, durable PostgreSQL resume state, and
+transport rate limits have also landed. Static token-to-character mapping
+remains development-only; live multi-character client entry is still tracked
+in `CLT-002`/`CLT-003`.
+
 ## Context
 
 `engine_sim` owns an authoritative zone and `engine_net` owns envelopes,
@@ -116,5 +123,8 @@ Three failure modes were motivating:
 - Owner-only state is currently an inventory snapshot. Pty, quest, and
   permission-scoped audiences will need explicit audience entries in
   `engine_net` rather than ad-hoc gateway branches.
-- The gateway binary, database-backed session store, and rate limiting remain
-  future work; `lynx-world` is still a library composition, not a process.
+- At the time of this decision, the gateway binary, database-backed session
+  store, and rate limiting were future work. They are now implemented in the
+  `lynx-world` service and PostgreSQL resume adapter. Static development tokens
+  still map to fixed characters and do not provide the multi-character account
+  login flow needed for multiple client instances.

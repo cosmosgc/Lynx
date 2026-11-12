@@ -211,13 +211,15 @@ first playable build.
 | Gate | Question | Owner | Unblocks |
 | --- | --- | --- | --- |
 | **D1 — Auth** | **Decided: validate Nakama sessions at the world edge; keep identity behind the `game_api` backend seam.** | Networking + backend | `NET-001`, `CLT-002` |
-| **D2 — Client shell** | Bevy client crate layout, camera/input abstraction, and asset formats. Write the missing ADRs. | Client + architecture | `CLT-001`, `CLT-004`, `QUA-017` |
+| **D2 — Client shell** | **Decided:** Keep semantic input and camera modes behind the Bevy client boundary; use glTF 2.0, PNG, and Ogg Vorbis as source asset formats with generated bundles (ADRs 0023–0024). | Client + architecture | `CLT-001`, `CLT-004` |
 | **D3 — Combat model** | Accept, revise, or reject ADR 0022 (dynamic classes and Treat targeting). | Combat + AI + persistence | `SIM-004` |
 | **D4 — Persistence authority** | **Decided: hybrid whole-world checkpoints plus a sequence-ordered zone event log.** Checkpoints are authoritative; fenced ticks atomically append changed persistent entities and every mutable snapshot aggregate. | Persistence | `PST-003`, `PST-005` |
-| **D5 — Editor scope** | In-engine Bevy editor, standalone tool, or CLI-first authoring? | Content + client | `CNT-001`–`CNT-007` |
-| **D6 — User content** | Ownership, moderation, publishing, and revocation policy before any public upload. | Security + content | `CNT-008`, `NET-009` |
+| **D5 — Editor scope** | **Decided:** CLI-first authoring; future editor is standalone and reuses the CLI validation modules (ADR 0025). | Content + client | `CNT-001`–`CNT-007` |
+| **D6 — User content** | **Decided:** Private owner drafts, reviewed publication, immutable revisions, and audited revocation; no executable uploads (ADR 0026). | Security + content | `CNT-008`, `NET-009` |
+| **D9 — Player property** | **Decided:** No player-owned property or lease in the initial vertical slice; authored placements remain versioned content. See ADR 0030. | Simulation + content | `CNT-003`, future housing scope |
 | **D7 — Multi-zone** | When does one authority loop stop being enough, and how are zones handed off? | Simulation + networking | `SIM-014`, `NET-005`, `PST-012` |
-| **D8 — Platforms** | Which targets get CI smoke tests and support promises? | Operations | `OPS-006`, `OPS-005` |
+| **D8 — Platforms** | **Decided:** Linux x86-64 server target, Windows 10/11 development target, experimental desktop clients until graphical release gates pass; see ADR 0028. | Operations | `OPS-006`, `OPS-005` |
+| **D9 — Player property** | **Decided:** No player-owned property or lease in the initial vertical slice; authored placements remain versioned content (ADR 0030). | Simulation + content | `CNT-003`, future housing scope |
 
 ## Risks
 

@@ -455,6 +455,7 @@ fn new_device_id() -> Option<String> {
     Some(device_id)
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

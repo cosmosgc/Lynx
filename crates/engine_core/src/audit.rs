@@ -279,6 +279,7 @@ fn is_sensitive_key(key: &str) -> bool {
     .any(|needle| lowered.contains(needle))
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     #![allow(clippy::assert_is_empty)]

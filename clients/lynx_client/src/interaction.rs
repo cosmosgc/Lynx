@@ -1,4 +1,7 @@
 //! Bounded, server-owned interaction presentation. No optimistic gameplay edits.
+use std::sync::OnceLock;
+
+use engine_core::i18n::{CatalogSet, Locale, MessageCatalog, MessageKey};
 use engine_core::id::{DefinitionId, StableId};
 use engine_net::envelope::{Envelope, MessageId};
 use serde::Deserialize;
@@ -41,6 +44,9 @@ pub struct PanelAction {
     /// Server-authored parameters sent with the action.
     #[serde(default)]
     pub params: std::collections::BTreeMap<String, String>,
+    /// Parameter names the server permits the client to supply dynamically.
+    #[serde(default)]
+    pub allowed_params: std::collections::BTreeSet<String>,
 }
 
 /// Maximum fields or actions rendered from one panel.
@@ -64,6 +70,7 @@ pub struct InteractionState {
     tick: Option<u64>,
     status: &'static str,
     lock: Option<LockChallenge>,
+    locale: Locale,
 }
 
 /// Approved private hints only; never a server seed or answer.
@@ -95,6 +102,10 @@ struct LockAttempt {
 }
 
 impl InteractionState {
+    pub(crate) fn set_locale(&mut self, locale: Locale) {
+        self.locale = locale;
+    }
+
     pub fn lock(&self) -> Option<&LockChallenge> {
         self.lock.as_ref().filter(|lock| {
             self.panel.as_ref().is_some_and(|panel| {
@@ -150,13 +161,16 @@ impl InteractionState {
             return Ok(false);
         }
         self.status = match message.kind.as_str() {
-            "protocol.error" => rejection(message.body["code"].as_str()),
+            "protocol.error" => rejection(&self.locale, message.body["code"].as_str()),
             "action.result" => match message.body["outcome"]["status"].as_str() {
                 Some("applied") => {
                     self.apply_effects(&message.body["outcome"]["effects"])?;
                     "Ação confirmada pelo servidor."
                 }
-                Some("rejected") => rejection(message.body["outcome"]["error"]["code"].as_str()),
+                Some("rejected") => rejection(
+                    &self.locale,
+                    message.body["outcome"]["error"]["code"].as_str(),
+                ),
                 _ => return Err(()),
             },
             _ => return Ok(false),
@@ -230,15 +244,21 @@ fn valid_panel(panel: &Panel) -> bool {
     }) {
         return false;
     }
-    let mut identities = std::collections::BTreeSet::new();
+    let mut names = std::collections::BTreeSet::new();
     panel.actions.iter().all(|action| {
-        let params_are_safe = action.params.len() <= 16
+        let params_are_safe = action.params.len() + action.allowed_params.len() <= 16
             && action.params.iter().all(|(key, value)| {
                 !key.is_empty()
                     && key.len() <= MAX_PANEL_ACTION
                     && value.len() <= MAX_PANEL_TEXT
                     && !key.chars().any(char::is_control)
                     && !value.chars().any(char::is_control)
+            })
+            && action.allowed_params.iter().all(|key| {
+                !key.is_empty()
+                    && key.len() <= MAX_PANEL_ACTION
+                    && !key.chars().any(char::is_control)
+                    && !action.params.contains_key(key)
             });
         !action.name.is_empty()
             && action.name.len() <= MAX_PANEL_ACTION
@@ -250,21 +270,45 @@ fn valid_panel(panel: &Panel) -> bool {
             && action.label.len() <= MAX_PANEL_TEXT
             && !action.label.chars().any(char::is_control)
             && params_are_safe
-            && identities.insert((action.name.as_str(), &action.params))
+            && names.insert(action.name.as_str())
     })
 }
 
-fn rejection(code: Option<&str>) -> &'static str {
-    match code {
-        Some("out_of_range") => "Aproxime-se do alvo e tente novamente.",
-        Some("forbidden" | "unauthorized") => "Você não tem permissão para esta ação.",
-        Some("not_found") => "O alvo não está mais disponível.",
-        Some("conflict") => "O estado mudou. Abra a interface novamente.",
-        Some("rate_limited") => "Aguarde antes de tentar novamente.",
-        _ => "Ação rejeitada. Verifique o alvo, a distância e suas permissões.",
-    }
+fn rejection(locale: &Locale, code: Option<&str>) -> &'static str {
+    let code = match code {
+        Some("forbidden") => "permission_denied",
+        Some("unauthorized") => "session_expired",
+        Some(code) => code,
+        None => "internal",
+    };
+    let key = MessageKey::parse(&format!("error.{code}")).ok();
+    key.and_then(|key| {
+        player_error_catalogs().and_then(|catalogs| catalogs.resolve(&key, locale).map(|m| m.text))
+    })
+    .unwrap_or("A ação não foi concluída. Atualize a interface e tente novamente.")
 }
 
+fn player_error_catalogs() -> Option<&'static CatalogSet> {
+    static CATALOGS: OnceLock<Option<CatalogSet>> = OnceLock::new();
+    CATALOGS
+        .get_or_init(|| {
+            let pt_br = ron::from_str::<MessageCatalog>(include_str!(
+                "../../../content/localization/pt-BR.ron"
+            ))
+            .ok()?;
+            let en = ron::from_str::<MessageCatalog>(include_str!(
+                "../../../content/localization/en.ron"
+            ))
+            .ok()?;
+            let mut catalogs = CatalogSet::new();
+            catalogs.insert(pt_br).ok()?;
+            catalogs.insert(en).ok()?;
+            Some(catalogs)
+        })
+        .as_ref()
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

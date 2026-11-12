@@ -312,6 +312,7 @@ pub trait Backend: HealthService + AuthService + WorldService {}
 
 impl<T: HealthService + AuthService + WorldService> Backend for T {}
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

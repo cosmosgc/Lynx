@@ -14,12 +14,12 @@ does not own authoritative zones or durable world state.
 
 | Nakama capability | Lynx ownership and current status | Notes |
 |---|---|---|
-| Device, email, social, custom, and platform authentication; sessions and refresh tokens | **Partially integrated** | `backend_nakama` validates a fresh bearer session at the world edge. The client has device and email CLI login with OS credential-store persistence and a `--logout` command. A login form and character-list UI remain pending. Static world tokens are development-only. |
+| Device, email, social, custom, and platform authentication; sessions and refresh tokens | **Partially integrated** | `backend_nakama` validates a fresh bearer session at the world edge. The Bevy account screen, server browser, secure credential storage, and refresh groundwork exist; live account/character entry validation remains. Static world tokens are development-only. |
 
 | Account metadata and user profiles | **Partially integrated** | The world edge reads the authenticated account identity. Profile management is not exposed by the Lynx client or `game_api` adapter. |
 | Character inventory | **Lynx PostgreSQL, authenticated read path integrated** | `GET /characters/{character}/inventory` validates the Nakama bearer session and character ownership before reading the Lynx inventory store. Nakama storage is not authoritative; mutations remain behind trusted world persistence. |
 | Factions, territories, and world-event calendar | **Lynx PostgreSQL, authenticated read views integrated** | `NakamaPostgresBackend` implements `FactionService` and `CalendarService` over the normalized faction/calendar store. Reads require a valid Nakama session; mutations remain authoritative world results. Draft events are not public. |
-| Friends, groups, parties, chat, and social presence | **Partially integrated; expansion in progress** | Account sessions use Nakama's authenticated realtime socket for one configured persistent room, history, and room presence. Friend requests, direct/global/group/party chat, Nakama groups/parties, and social operations through the adapter/client remain to be connected. Static `--demo-online` remains a separate development fallback. Nakama social presence is not authoritative Lynx zone presence. |
+| Friends, groups, parties, chat, and social presence | **Friend/group management and room/direct/group chat routing are integrated; live validation remains** | The authenticated world API, `CharacterApiClient`, and account screen expose friend and group management. Authenticated chat destination discovery is limited to mutual friends and current group memberships; the client joins those Nakama channels on demand. Party chat, zone admission binding, and live contract validation remain. Static `--demo-online` remains a separate development fallback. Nakama social presence is not authoritative Lynx zone presence. |
 | Matchmaking and relayed multiplayer | **Planned, not integrated** | Nakama can own party formation and matchmaking; the Rust world service still owns zone admission, sessions, interest, replication, and gameplay authority. |
 | Authoritative matches and runtime modules (Go, TypeScript, Lua) | **Not used for world authority** | They may later host isolated, low-stakes activities. They must not become the source of truth for zones, inventory, faction state, or world events. |
 | Storage engine, leaderboards, and tournaments | **Not integrated for world state** | Lynx-owned PostgreSQL migrations and snapshots own durable simulation data. Any future Nakama storage use needs an explicit `game_api` seam, retention policy, and migration/export plan. |
@@ -110,19 +110,51 @@ by a host firewall or private scrape network. See
 ## Social and chat boundary
 
 The client joins a configured Nakama room over the authenticated realtime
-socket. Nakama derives sender identity, persists room messages, serves cursor
-history, and reports room presence. Set `LYNX_NAKAMA_URL` and optionally
-`LYNX_CHAT_ROOM`; the default room name is `lynx-zone`. This room is a configured
-chat room, not proof that a user is currently admitted to the matching Lynx
-world zone. World admission, movement, and authoritative presence remain owned
-by the Lynx world service. A later zone-membership policy can bind room access
-to trusted world admission.
+socket. It also requests account-authorized direct and group destinations from
+`GET /social/chat/channels` and joins those targets on demand. Nakama derives
+sender identity, persists messages, serves cursor history, and reports room
+presence. Set `LYNX_NAKAMA_URL` and optionally `LYNX_CHAT_ROOM`; the default
+room name is `lynx-zone`. The configured room is not proof of admission to the
+matching Lynx world zone. World admission, movement, and authoritative presence
+remain owned by the Lynx world service. Party chat and zone-admission binding
+remain open.
 
-Friend requests, groups/parties, and full chat-channel operations are not yet
-connected through Lynx's backend/gameplay contracts. The current `FriendState`
-cannot represent incoming/outgoing invitations, so those states must not be
-flattened into immediate mutual friendship. Moderation/content policy remains
-tracked by `NET-009`/`CNT-008`. Lynx administration is separate: it uses
+Friend requests and group REST operations use `game_api` contracts that preserve
+incoming/outgoing invitations, join-request roles, and membership state. The
+player HTTP API exposes the account-scoped friend contract with the Nakama
+bearer session: `GET /social/friends`, `POST /social/friends/request`,
+`/social/friends/accept`, `/social/friends/dismiss`, `/social/friends/remove`,
+and `POST /social/blocks/block` or `/social/blocks/unblock`. Mutation requests
+carry `{"account_id":"..."}`; the server derives the caller from the session.
+`lynx_client_net::CharacterApiClient` maps those routes to typed friend data and
+operations. The Bevy account screen lists relationships, sends requests, and
+offers accept, dismiss, remove, block, and unblock controls.
+
+Group endpoints expose `GET /social/groups` for the caller's memberships,
+`GET /social/groups/discover` for bounded filtered discovery, `POST
+/social/groups` for creation, and `POST /social/groups/{id}/join` or `/leave`
+for membership changes. `GET /social/groups/{id}/members` reads bounded roster
+pages. The member mutation endpoints are
+`POST /social/groups/{id}/members/add`, `/kick`, `/promote`, and `/demote`; each
+accepts an `account_ids` array capped at 100. The account screen provides group discovery,
+open-group creation, join or join-request, membership listing, leave, roster
+inspection, join-request approval/decline, member add/remove, and role
+promotion/demotion. The UI exposes roster mutation controls to owners and
+administrators; Nakama remains the final authorization check for each operation.
+
+The
+`RealtimeChatService` discovers direct-message targets only for mutual friends
+and group targets only for current memberships; join, history, send, and
+presence use the shared `RealtimeChatSession` contract. Transient party
+creation, membership, and join-request moderation use the separate
+`RealtimePartyService`/`RealtimePartySession` contract so party socket lifetime
+remains explicit. Nakama still authorizes each join and mutation.
+
+The current account screen now exposes friend/group discovery and management;
+realtime clients still join only the configured room. Live Nakama contract validation requires a configured test
+service and accounts. Moderation/content policy remains tracked by
+`NET-009`/`CNT-008`.
+Lynx administration is separate: it uses
 dedicated admin authentication and the Lynx audit log rather than player
 Nakama sessions.
 

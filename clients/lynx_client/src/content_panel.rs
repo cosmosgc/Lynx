@@ -4,6 +4,7 @@
 //! client may offer. This module only presents that data; every action is a
 //! correlated `ui.action` request and the server remains authoritative.
 
+use bevy::input::keyboard::KeyCode;
 use bevy::picking::Pickable;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -40,7 +41,62 @@ impl Plugin for ContentPanelPlugin {
         if !app.is_plugin_added::<FloatingWindowPlugin>() {
             app.add_plugins(FloatingWindowPlugin);
         }
-        app.add_systems(Update, draw.after(crate::online::poll_online));
+        app.add_systems(
+            Update,
+            (keyboard_actions, draw)
+                .chain()
+                .after(crate::online::poll_online),
+        );
+    }
+}
+
+/// Send one of the first nine fixed server-advertised actions with its number
+/// key. Dynamic parameters remain unavailable until a content input widget is
+/// present; the server continues to authorize every submitted action.
+#[allow(clippy::needless_pass_by_value)]
+fn keyboard_actions(
+    mut client: ResMut<OnlineClient>,
+    keys: Res<ButtonInput<KeyCode>>,
+    chat: Res<ChatComposer>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+) {
+    if chat.active
+        || client.status() != OnlineStatus::Active
+        || client.interaction().pending()
+        || !windows.single().is_ok_and(|window| window.focused)
+    {
+        return;
+    }
+    let Some(panel) = client.interaction().panel().cloned() else {
+        return;
+    };
+    if !is_content_panel(&panel) {
+        return;
+    }
+
+    let shortcuts = [
+        KeyCode::Digit1,
+        KeyCode::Digit2,
+        KeyCode::Digit3,
+        KeyCode::Digit4,
+        KeyCode::Digit5,
+        KeyCode::Digit6,
+        KeyCode::Digit7,
+        KeyCode::Digit8,
+        KeyCode::Digit9,
+    ];
+    for (index, key) in shortcuts.into_iter().enumerate() {
+        if !keys.just_pressed(key) {
+            continue;
+        }
+        if let Some(action) = panel
+            .actions
+            .get(index)
+            .filter(|action| action.allowed_params.is_empty())
+        {
+            let _ = client.submit_panel_action(&panel, action);
+        }
+        break;
     }
 }
 
@@ -133,7 +189,10 @@ fn draw(
                         })
                         .add(|ui| {
                             for (index, action) in actions.iter().enumerate() {
-                                if action_button(ui, index, action, enabled)
+                                let action_enabled = enabled && action.allowed_params.is_empty();
+                                let shortcut = (index < 9 && action.allowed_params.is_empty())
+                                    .then_some(index + 1);
+                                if action_button(ui, index, action, action_enabled, shortcut)
                                     && client.submit_panel_action(&panel, action).is_ok()
                                 {
                                     // The next poll consumes the correlated result.
@@ -149,7 +208,13 @@ fn draw(
         });
 }
 
-fn action_button(ui: &mut Imm<CapsUi>, index: usize, action: &PanelAction, enabled: bool) -> bool {
+fn action_button(
+    ui: &mut Imm<CapsUi>,
+    index: usize,
+    action: &PanelAction,
+    enabled: bool,
+    shortcut: Option<usize>,
+) -> bool {
     ui.ch_id(format!("content-action-{index}-{}", action.name))
         .on_spawn_insert(|| {
             (
@@ -173,7 +238,11 @@ fn action_button(ui: &mut Imm<CapsUi>, index: usize, action: &PanelAction, enabl
             Color::srgb(0.07, 0.09, 0.11)
         })
         .add(|ui| {
-            label(ui, "caption", 13.0, action.label.clone());
+            let caption = shortcut.map_or_else(
+                || action.label.clone(),
+                |key| format!("{key} · {}", action.label),
+            );
+            label(ui, "caption", 13.0, caption);
         })
         .primary_clicked()
         && enabled
@@ -186,6 +255,7 @@ pub fn is_content_panel(panel: &Panel) -> bool {
     panel.schema.as_str() != "ui.lockpick"
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

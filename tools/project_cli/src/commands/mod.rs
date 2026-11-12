@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 pub(crate) mod content;
 pub(crate) mod doctor;
+pub(crate) mod migrate;
 pub(crate) mod output;
 pub(crate) mod project;
 pub(crate) mod scaffold;

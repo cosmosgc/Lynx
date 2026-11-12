@@ -2,21 +2,22 @@
 
 ## Protocol versioning
 
-The current server emits protocol **1.0.0** and accepts major **1**, any
+The current server emits protocol **1.1.0** and accepts major **1**, any
 non-negative minor and patch. This is a parser compatibility promise, not a
-claim that future, unimplemented features work. No support window for a future
-major has been established; release owners must publish one before shipping it.
-This range is enforced by major equality, not by a bounded lag window: older
-and newer minors are admitted alike. Semantic-version prerelease and build
+claim that future, unimplemented features work. Clients may lag indefinitely
+within the active major; a new major has no overlap window, and the previous
+major is rejected when the server switches majors. Release notes must identify
+the required client update and migration before that cutover. Semantic-version prerelease and build
 metadata are not compared by negotiation; production releases should use stable
 versions and validate interoperability rather than rely on metadata rejection.
 The handshake carries independent protocol, engine and content semantic
 versions, locale (default `pt-BR`), and a set of named features (not a bitmap).
 
-| Client against 1.0 server | Outcome |
+| Client against 1.1 server | Outcome |
 |---|---|
-| 1.0.x | accepted; patch is informational |
-| 1.N.x, N > 0 | accepted with a minor warning if the handshake is readable; only shared known features are negotiated |
+| 1.1.x | accepted; patch is informational |
+| 1.0.x | accepted with a minor warning; old clients ignore additive error-body fields |
+| 1.N.x, N > 1 | accepted with a minor warning if the handshake is readable; only shared known features are negotiated |
 | other protocol major | `version_mismatch` before session creation |
 | different content major | `version_mismatch` before session creation |
 | same content major, different minor | accepted with warning; content patch is informational |
@@ -49,13 +50,14 @@ non-strict response structures are currently ignored; this is not permission
 to ignore unknown authority-bearing input. Request parameter maps are defined
 by their action validators, not arbitrary authority claims.
 
-Before removing support, announce the replacement and a dated minimum support
-window in release notes, provide migration guidance and telemetry, and retain
-the old path throughout that window. A concrete duration is not yet decided.
-Until such a window is published, no client-lag duration is promised; the
-current implementation admits all same-major minors but does not guarantee that
-an unknown future capability can be used. Introducing a bounded support range
-requires implementing and testing it before announcing enforcement.
+The active-major policy is intentionally unbounded for minor and patch lag.
+Breaking protocol changes require a major bump, and a server major cutover
+rejects clients on the previous major immediately; there is no cross-major
+overlap period. Release notes and migration guidance must name the minimum
+client version before that cutover. This matches the major-equality check in
+`negotiate` and avoids advertising a previous-major support window that the
+server does not implement. Minor compatibility does not guarantee that an
+unimplemented feature is available.
 For rollback, deploy an older server only after confirming client messages and
 content remain compatible with it; disable new features first, retain matching
 content bundles, and test admission and resume. A major rollback rejects clients
@@ -65,18 +67,25 @@ persisted state or bypass server authority merely to regain compatibility.
 
 ### Protocol changelog
 
+- **1.1.0** — Protocol errors now include the per-error `retryable` flag and
+  only code-specific bounded display parameters; operator diagnostic details
+  are no longer copied wholesale into client parameters. Protocol 1.0 clients
+  ignore these additive error-body fields; the outer envelope remains readable.
 - **1.0.0** — Existing JSON envelope and handshake baseline, independent content
   major check, named feature intersection, and current world message kinds.
   Nested calendar action unknown fields are rejected as an authority-boundary
   validation correction; no new wire fields or features are introduced.
 
 The `engine_net` golden tests pin the hello and version-error envelopes and the
-negotiated parameters payload. They do not yet cover every world message kind
-or automatically detect every breaking change. A workspace test checks that the
-version constants agree and that the current version has a changelog entry; it
-does not compare changes against the merge base or require a bump when wire code
-changes. Reviewers must classify wire changes and require the appropriate bump,
-entry, and compatibility tests. Retain old fixtures when introducing new
+negotiated parameters payload. The versioned
+`crates/world_server/tests/fixtures/wire-kinds-1.1.0.json` catalog lists all 27
+live message kinds, and CI checks that list. Typed and handler-level golden
+tests compare request and response envelopes against fixtures across
+`engine_net`, `world_gateway`, `world_server`, and `lynx_world`. The token
+fixture uses only the synthetic
+`FAKE_LYNX_TEST_TOKEN_DO_NOT_AUTHENTICATE` sentinel. The CI version gate compares
+wire-contract source changes against the merge base and requires a protocol
+version bump plus a changelog entry. Retain old fixtures when introducing new
 versions; do not update a fixture in place to conceal an incompatible change.
 
 ## Envelope
@@ -85,7 +94,7 @@ Every message is a JSON object:
 
 ```json
 {
-  "v": "1.0.0",
+  "v": "1.1.0",
   "id": "req_01J8Z...",
   "kind": "action.request",
   "body": { },
@@ -157,10 +166,12 @@ separate work.
 loop:
 
 - Per TCP peer IP: 20 upgrade handshakes bursting at 10/s, five failed
-  credentials at 1/s, and 10 valid connection/resume churn attempts at 2/s.
-  Peer IP is taken from the listener, not client forwarding headers. The
-  identity map is capped at 16,384 idle entries and entries expire after five
-  minutes.
+  credentials at 1/s, 10 resume-token attempts at 2/s, and 10 valid
+  connection/resume churn attempts at 2/s. Resume attempts use an independent
+  bucket, so ordinary handshake or identity traffic cannot replenish a token
+  guessing burst. Peer IP is taken from the listener, not client forwarding
+  headers. The identity map is capped at 16,384 idle entries and entries expire
+  after five minutes.
 - Per authenticated server-issued session: 100 total messages at 100/s; action
   20/s; attack 8/s; chat 5/s; movement 30/s; calendar 5/s; and UI 10/s. Each
   family has its own burst capacity and also consumes the total budget. Attack
@@ -174,11 +185,15 @@ loop:
 
 The TCP listener caps accepted HTTP connections at 1,024 before parsing a
 request; when full, the operating-system listener backlog applies backpressure
-instead of allocating another file descriptor for a slow-header peer. Before
-upgrade, the world route independently limits pending/live WebSockets to 1,024
-globally and 16 per peer IP, and rejects aggregate request headers larger than
-16 KiB with HTTP 431 (`request_headers_too_large`). These checks run before
-session admission. Capacity failures return HTTP 503 with `total_capacity` or
+instead of allocating another file descriptor for a slow-header peer. Each
+raw HTTP header block has an absolute 10-second read deadline, including
+keep-alive requests; the timer resets after each response. A WebSocket 101
+upgrade disables this HTTP timer and uses the separate 120-second WebSocket
+idle timeout. Before upgrade, the world route independently limits
+pending/live WebSockets to 1,024 globally and 16 per peer IP, and rejects
+aggregate request headers larger than 16 KiB with HTTP 431
+(`request_headers_too_large`). These checks run before session admission.
+Capacity failures return HTTP 503 with `total_capacity` or
 `ip_capacity`; once draining starts, new attempts receive HTTP 503 with
 `draining`. Capacity and draining counters use fixed reason labels in
 `/metrics`. A request without `Origin` remains permitted for native clients;
@@ -230,13 +245,18 @@ configured bounds are guardrails, not a validated capacity claim.
 | Kind | Direction | Body |
 |---|---|---|
 | `session.hello` | client → server | client handshake and last acknowledged tick |
+| `session.ack` | client → server | latest server tick applied by the client |
 | `world.ready` | server → client | session ID, actor, resumed flag, negotiated protocol |
 | `world.snapshot` | server → client | tick, full interest view delta, filtered replication |
 | `chat.channels` | client → server | empty object; returns the gateway's server-scoped `zone` channel |
+| `chat.channels.result` | server → client | available channel IDs, names, kinds, and member counts |
 | `chat.send` | client → server | `{ channel_id: "zone", content }`; sender identity comes from session claims; live messages arrive as `chat.message` |
+| `chat.send.result` | server → client | accepted message ID |
 | `chat.message` | server → connected zone sessions | server-resolved message ID, account/character identity, content, and creation time |
 | `chat.history` | client → server | `{ channel_id: "zone", limit, before? }`; returns bounded `chat.history.result` pages from the gateway's in-memory history |
+| `chat.history.result` | server → client | page of messages and optional next cursor |
 | `chat.presence` | client → server | empty object; returns up to 100 connected account and character IDs plus a truncation flag |
+| `chat.presence.result` | server → client | connected account and character IDs, plus truncation flag |
 | `world.delta` | server → client | tick, interest delta, filtered replication |
 | `movement.request` / `movement.queued` | client → server / server → client | endpoint intent and queue admission (not processing) |
 | `world.token` | server → client | the session's current resume secret |
@@ -247,6 +267,12 @@ configured bounds are guardrails, not a validated capacity claim.
 | `ui.close` | client → server | empty body |
 | `ui.state` | server → client | authoritative tick plus the open panel (or `null`) |
 | `protocol.error` | server → client | stable code, parameters, correlation ID |
+
+The versioned fixture catalog in
+`crates/world_server/tests/fixtures/wire-kinds-1.1.0.json` covers every kind
+in this table and the paired request/response forms. Its CI test asserts the
+catalog is complete and duplicate-free; the credential-bearing token fixture
+uses only the synthetic sentinel described above.
 
 For account sessions carrying a verified character, `LYNX_NAKAMA_URL` enables
 Nakama's authenticated realtime socket for a persistent chat room instead of
@@ -492,6 +518,10 @@ See [ADR 0013](adr/0013-world-gateway-and-reconnect.md).
   destination-cell occupancy. A correlated `movement.queued` means admission
   only; malformed, stale, unauthorized or over-budget requests return
   `protocol.error` and do not consume the sequence.
+- Unique gameplay action requests from players and server AI also share the
+  configured `max_actions` quota between tick boundaries. Validation failures
+  consume one slot, while cached idempotent retries do not. This is a separate
+  bound from the pending movement-intent queue.
 - `world.snapshot` includes a private `movement` baseline with `tick`,
   authoritative `position`, `last_consumed_sequence` (number or null), and
   `applied: null`; it may include the controlled actor's exact timed-slow factor.

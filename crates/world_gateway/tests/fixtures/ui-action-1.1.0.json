@@ -1,0 +1,1 @@
+{"v":"1.1.0","id":"req_ui_action_0001","kind":"ui.action","body":{"action":"inspect","params":{"mode":"summary"},"schema":"ui.terminal"}}

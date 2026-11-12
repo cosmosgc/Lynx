@@ -4,20 +4,23 @@ Scope: durable state behind `game_api` and the world service — accounts,
 characters, inventories, factions, calendar, zone leases, event replay,
 snapshots, migrations, backups, and adapter coverage.
 
-**What exists today:** migrations `0001`–`0009` define accounts, characters,
+**What exists today:** migrations `0001`–`0017` define accounts, characters,
 versioned components, inventory, property, idempotency keys, audit, content
 bundles, zone leases/snapshots/events, factions, the world calendar, and
-whole-world snapshots, inventory revisions, and append-only transfer receipts.
+  whole-world snapshots, inventory revisions, append-only transfer and value
+  ledgers,
+snapshot checkpoint/recovery quarantine, and durable resume sessions.
 `lynx-world` can persist a whole world to a JSON file or to
 `lynx.world_snapshots` through `PostgresSnapshotStore`. `backend_memory`
 implements every `game_api` service; `backend_nakama` implements health,
-authentication, character SQL repositories, and a transactional inventory store,
-while its Nakama HTTP client is limited to health and authentication. Inventory
-storage is available through the trusted persistence seam but is not yet wired
-into live world-service routing. PostgreSQL faction/calendar runtime wiring is
-implemented under PST-003; durable resume sessions and PostgreSQL connection
-hardening are complete under PST-006/PST-007. Social/chat and admin runtime
-integrations remain absent. Most normalized tables are not yet used by the
+authentication, character SQL repositories, transactional inventory storage,
+social/group REST operations, and typed Nakama realtime room/direct/group
+operations. Inventory storage is available through the trusted persistence seam
+but is not yet wired into live world-service routing. PostgreSQL
+faction/calendar runtime wiring is implemented under PST-003; durable resume
+sessions and PostgreSQL connection hardening are complete under PST-006/PST-007.
+Application-level Nakama channel discovery/session integration and admin runtime
+integration remain open. Several normalized tables are not yet used by the
 runtime.
 
 **Related design:** [architecture §Persistence model](../architecture.md#persistence-model),
@@ -32,6 +35,7 @@ runtime.
 
 - **Priority:** P0
 - **Status:** Done — Nakama-authenticated PostgreSQL character persistence
+- **Completion record:** [pst-001-account-and-character-persistence.md](completed/pst-001-account-and-character-persistence.md)
 - **Depends on:** -
 - **References:** migration `0001_core.sql`, `crates/game_api/src/service.rs`,
   `character.rs`, `crates/backend_memory`
@@ -97,6 +101,7 @@ restart lost creation, selection, and ownership even when the world survived.
 
 - **Priority:** P1
 - **Status:** Done
+- **Completion record:** [pst-002-inventory-and-transfer-ledger-persistence.md](completed/pst-002-inventory-and-transfer-ledger-persistence.md)
 - **Depends on:** `PST-001`
 - **References:** migrations `0001_core.sql`, `0008_inventory_revisions.sql`,
   `0009_inventory_transfer_ledger.sql`, `crates/engine_sim` inventory,
@@ -147,6 +152,7 @@ receipt immutability outside the purge path, and reconciliation counts. Both
 
 - **Priority:** P1
 - **Status:** Done
+- **Completion record:** [pst-003-normalized-faction-and-calendar-persistence.md](completed/pst-003-normalized-faction-and-calendar-persistence.md)
 - **Depends on:** `PST-001`, `PST-005`
 - **References:** migrations `0004_factions.sql`, `0005_world_events.sql`,
   ADRs [0020](../adr/0020-faction-governance-treasury-and-territory.md),
@@ -200,6 +206,7 @@ restart, rollback, fencing, reset, and append-only checks.
 
 - **Priority:** P1
 - **Status:** Done
+- **Completion record:** [pst-004-zone-leases-fencing-and-event-log.md](completed/pst-004-zone-leases-fencing-and-event-log.md)
 - **Depends on:** —
 - **References:** migration `0003_zone_state.sql`, `0007_zone_fencing.sql`,
   ADR 0005
@@ -250,6 +257,7 @@ migration, quarantine, retention, and recovery-performance work are covered by
 
 - **Priority:** P1
 - **Status:** Done
+- **Completion record:** [pst-005-snapshot-and-event-replay.md](completed/pst-005-snapshot-and-event-replay.md)
 - **Depends on:** `PST-004`
 - **References:** [architecture §Failure and recovery](../architecture.md#failure-and-recovery),
   migration `0003_zone_state.sql`
@@ -333,6 +341,7 @@ across a crash, then verifies replay after checkpoint pruning.
 
 - **Priority:** P2
 - **Status:** Done — durable lifecycle and trusted revocation control delivered;
+- **Completion record:** [pst-006-durable-sessions-and-resume-windows.md](completed/pst-006-durable-sessions-and-resume-windows.md)
   upstream role source remains integration-specific
 - **Depends on:** `PST-001`, `NET-001`
 - **References:** [networking §Reconnect and recovery](../networking.md#reconnect-and-recovery),
@@ -398,7 +407,8 @@ does not weaken immediate token invalidation to address it.
 ## PST-007 — PostgreSQL connection hardening
 
 - **Priority:** P1
-- **Status:** Done — verified TLS, bounded pool, and migration/runtime role split
+- **Status:** Done — verified TLS, bounded pool, and migration/runtime role split; see [completion record](completed/pst-007-postgres-hardening.md)
+- **Completion record:** [pst-007-postgres-hardening.md](completed/pst-007-postgres-hardening.md)
 - **Depends on:** —
 - **References:** `crates/lynx_world/src/persistence/postgres.rs`,
   [operations](../operations.md)
@@ -456,7 +466,8 @@ not replayed on ambiguous failures.
 ## PST-008 — Schema version checks and migration integration
 
 - **Priority:** P1
-- **Status:** Done — binary schema gate, read-only doctor, and hosted CI migration coverage
+- **Status:** Done — binary schema gate, read-only doctor, and hosted CI migration coverage; see [completion record](completed/pst-008-schema-migration-gate.md)
+- **Completion record:** [pst-008-schema-migration-gate.md](completed/pst-008-schema-migration-gate.md)
 - **Depends on:** —
 - **References:** [`scripts/db-migrate.ps1`](../../scripts/db-migrate.ps1),
   [migrations README](../../server/migrations/README.md)
@@ -554,7 +565,7 @@ pending for this change.
 ## PST-010 — Nakama adapter coverage
 
 - **Priority:** P1
-- **Status:** In progress — auth, character, inventory, faction, and calendar coverage are implemented; Nakama social, group/party, and chat adapters are now required by ADR 0002 and remain to be connected
+- **Status:** In progress — auth, character, inventory, faction, calendar, social/group REST, and provider-neutral realtime chat/party contracts are implemented; client-facing social flows and live Nakama contract validation remain
 - **Depends on:** `PST-001`, `PST-002`
 - **References:** [ADR 0018](../adr/0018-nakama-adapter-seam-and-replacement-criteria.md),
   `crates/backend_nakama`
@@ -609,26 +620,42 @@ echoed by the provider cannot reach logs or clients.
 - **Social:** The first slice now models Nakama's outgoing/incoming requests,
   mutual friends, and blocks in `game_api`; `NakamaClient` maps the Nakama REST
   friend states and operations, and `NakamaPostgresBackend` exposes that
-  authenticated contract. Friend request listing/mutations have HTTP-stub tests.
-  A live Nakama contract test and user-facing friend-management flow remain.
+  authenticated contract. The player HTTP edge now exposes authenticated
+  friend listing and request/accept/dismiss/remove plus block/unblock routes;
+  `CharacterApiClient` provides corresponding calls, and the account screen now
+  lists relationships and offers those actions. Group discovery, membership
+  listing, creation, join requests, and leaving are now exposed through the
+  authenticated HTTP/client path; the account screen can discover, create,
+  join/request, leave, inspect rosters, approve or decline requests, add/kick
+  members, and promote/demote roles. Live Nakama contract validation and
+  broader social/chat flows remain.
 - **Chat/realtime:** `backend_nakama::NakamaRealtimeSession` now owns an
   authenticated, long-lived Nakama WebSocket with typed room/direct/group
   channel join, leave, send, and history operations; unmatched realtime events
-  are buffered for consumers. Keep Lynx zone chat authoritative in Lynx.
-  The socket session is currently an adapter-level interface; a shared
-  application event/session contract and client-facing channel discovery still
-  need integration.
+  are buffered for consumers. `game_api::RealtimeChatService` now discovers
+  direct channels only for mutual friends and group channels only for current
+  memberships, preserving Nakama-issued channel IDs after join. Direct joins
+  recheck mutual-friend status at join time; named room joins require an explicit
+  backend allowlist, and Nakama checks group membership. Its shared
+  `RealtimeChatSession` contract normalizes message and presence events;
+  `RealtimePartyService` and `RealtimePartySession` expose transient party
+  membership and native join-request decisions. Chat and party sockets are
+  opened separately so chat event polling cannot consume party notifications.
+  Keep Lynx zone chat authoritative in Lynx. The game API seam and account
+  management controls now exist, but the client still joins only its configured
+  realtime room; full social chat routing remains.
 - **Groups:** the persistent-group contract and authenticated Nakama REST
   operations now cover discovery, listing memberships/rosters, creation, join
   requests, leaving, adding/kicking members, and role promotion/demotion. The
   adapter maps Nakama membership states and bounds pages and mutation inputs;
-  HTTP-stub tests cover the routes. A live Nakama contract test and user-facing
-  group flow remain.
+  the player API and account screen now expose the same flows; owner/admin UI
+  controls rely on Nakama for final role authorization. HTTP-stub tests cover
+  the adapter, while live Nakama contract validation remains.
 - **Parties:** the Nakama socket session now supports create/join/leave/close,
-  join-request listing/approval/rejection, and leader promotion. Session
-  lifetime controls Nakama membership; invites/matchmaking and UI integration
-  remain. Keep ready checks and gameplay markers in Lynx only where they affect
-  authoritative world actions.
+  join-request listing/approval/rejection, and leader promotion through the
+  provider-neutral game API. Session lifetime controls Nakama membership;
+  invites/matchmaking and UI integration remain. Keep ready checks and gameplay
+  markers in Lynx only where they affect authoritative world actions.
 - **Admin:** Lynx administration uses separate admin authentication and the
   Lynx-owned append-only audit log. It is intentionally not routed through a
   player Nakama session.
@@ -662,7 +689,7 @@ scoped Clippy, and formatting pass with the PostgreSQL test configuration.
 - [x] Errors map to stable `ErrorCode` categories and retryability.
 - [x] The adapter can be replaced without changing gameplay crates.
 - [x] The decision to keep or retire the adapter is recorded in ADR 0018.
-- [ ] Social, chat, group, and party operations use Nakama through evolved
+- [x] Social, chat, group, and party operations use Nakama through evolved
       `game_api` contracts that preserve native invitation/channel semantics.
 - [x] Admin remains separate from player Nakama sessions and uses Lynx audit.
 
@@ -720,7 +747,7 @@ scoped Clippy, and formatting pass with the PostgreSQL test configuration.
 ## PST-013 — Content version pinning and migration
 
 - **Priority:** P2
-- **Status:** Blocked — `CNT-014`
+- **Status:** In progress — manifest-backed runtime loading, exact snapshot pins, component migration, world-wide dry-run/apply, entity quarantine, and rollback checkpoints are implemented; operational validation and remaining instance-version coverage are still needed
 - **Depends on:** `CNT-014`
 - **References:** [architecture §Persistence model](../architecture.md#persistence-model),
   ADR 0017
@@ -729,6 +756,43 @@ scoped Clippy, and formatting pass with the PostgreSQL test configuration.
 from, and obsolete component data must migrate or quarantine. The content
 pipeline versions bundles, but persisted entities need an enforced link to that
 version.
+
+**Progress (2026-11-12):** `lynx-world serve --content-bundle <PATH>` now loads
+the manifest-backed bundle, checks engine compatibility, validates authored
+definitions, and verifies manifest identities, versions, paths, and SHA-256
+hashes. Authored behavior definitions merge into the installed AI policy, and
+`/metrics` reports the loaded bundle version. New snapshots record the content
+version and SHA-256 of the exact manifest bytes; startup refuses a snapshot if
+either identity differs. This exact-bundle guard prevents silent
+reinterpretation but does not yet run persisted-instance migrations or
+quarantine affected entities. `ContentMigrationPlan` edits authored definition
+documents, while restored entities have typed fields and independently
+versioned components. [ADR 0033](../adr/0033-persisted-instance-migration-and-quarantine.md)
+defines exact-manifest transitions, component-versioned operations, complete
+entity quarantine, transactional migration checkpoints, and the rollback
+cutoff before accepting gameplay. Implement that contract inside persistence
+and startup before restoring the migrated world. See the
+[remaining local work](../agents/issue-tracker.md#2026-11-12).
+
+**Persisted component plan slice (2026-11-12):** `engine_content` now exposes
+`PersistedInstanceMigrationPlan` and `PersistedComponentMigration`. Plans pin
+both manifest hashes and content versions, reject ambiguous or stale version
+transitions, and apply preconditioned operations atomically to a matching
+prototype/component value. `lynx-world serve --content-migration-plan <FILE>`
+now validates that plan against the exact source snapshot and target bundle,
+validates transformed components against the target registry, and creates a
+world-wide candidate. `--dry-run-content-migration` prints the migration and
+quarantine report without writing the candidate. Apply commits the migrated
+snapshot, complete prior snapshot, and quarantine report together in one
+snapshot-store write. Quarantined entities and dependent links are omitted from
+the active candidate while their exact source payload remains in the rollback
+checkpoint. `--rollback-content-migration` restores that source snapshot only
+while the target world's persisted state fingerprint still matches the
+post-migration candidate. File snapshots use atomic replacement; PostgreSQL
+uses the snapshot/event transaction under the zone lease. The service carries
+the checkpoint forward across normal snapshots. Remaining work is operational
+rehearsal against both stores and fuller coverage for authored per-instance
+component version provenance.
 
 **Scope**
 
@@ -748,14 +812,20 @@ version.
 - [ ] The deployed content version is visible in readiness/metrics.
 - [ ] Rollback restores the previous compatible pair.
 
+Build a manifest with `lynx content build --project <PROJECT>
+--content-version <SEMVER> --engine <REQ> --output <BUNDLE>/manifest.json`, then
+start with `lynx-world serve --content-bundle <BUNDLE>`. Without that option the
+service reports content integration as absent and uses the built-in demo.
+
 ---
 
 ## PST-014 — Economy and audit ledger
 
 - **Priority:** P2
-- **Status:** Ready
+- **Status:** Blocked — live database migration and reconciliation validation; implementation and operator query are in place
 - **Depends on:** `PST-002`
-- **References:** migration `0004_factions.sql` treasury ledger,
+- **References:** migrations `0004_factions.sql`, `0016_player_inventory_value_ledger.sql`,
+  [ADR 0032](../adr/0032-player-inventory-value-ledger.md),
   [security §Audit](../security.md)
 
 **Scope**
@@ -774,3 +844,15 @@ version.
 - [ ] Replaying a grant cannot duplicate value.
 - [ ] Reconciliation detects drift between aggregate balances and ledger sums.
 - [ ] Operators can query by account, character, correlation ID, and time.
+
+**Progress (2026-11-12):** Migration 0016 defines a backfill of each player inventory as an
+explicit system opening balance. PostgreSQL snapshot replacements and
+idempotent player transfers write signed per-item entries in the same
+transaction as inventory state; transfer entries retain the source character,
+source, reason, and request correlation key. `reconcile_character` compares
+current per-item quantities with opening balances plus deltas and returns each
+drifted item. ADR 0032 records that this ledger counts item quantities only;
+the game has no currency balance or item pricing contract yet. The PostgreSQL
+test target compiled but skipped its integration scenario because this
+environment has no configured `LYNX_PG_DATABASE`, `LYNX_PG_USER`, and
+`LYNX_PG_PASSWORD`; live migration and drift-query validation remain open.

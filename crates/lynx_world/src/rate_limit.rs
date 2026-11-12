@@ -65,6 +65,7 @@ impl TokenBucketConfig {
 pub struct AdmissionLimitConfig {
     handshake: TokenBucketConfig,
     failed_auth: TokenBucketConfig,
+    resume_attempt: TokenBucketConfig,
     connection_churn: TokenBucketConfig,
     max_ips: usize,
     idle_ttl: Duration,
@@ -94,10 +95,21 @@ impl AdmissionLimitConfig {
         Ok(Self {
             handshake,
             failed_auth,
+            resume_attempt: TokenBucketConfig {
+                capacity: 10,
+                refill_per_second: 2,
+            },
             connection_churn,
             max_ips,
             idle_ttl,
         })
+    }
+
+    /// Override the per-IP bucket for resume-token attempts.
+    #[must_use]
+    pub const fn with_resume_attempts(mut self, attempts: TokenBucketConfig) -> Self {
+        self.resume_attempt = attempts;
+        self
     }
 }
 
@@ -111,6 +123,10 @@ impl Default for AdmissionLimitConfig {
             failed_auth: TokenBucketConfig {
                 capacity: 5,
                 refill_per_second: 1,
+            },
+            resume_attempt: TokenBucketConfig {
+                capacity: 10,
+                refill_per_second: 2,
             },
             connection_churn: TokenBucketConfig {
                 capacity: 10,
@@ -262,6 +278,14 @@ impl RateLimitConfig {
         Ok(self)
     }
 
+    /// Override the per-IP resume-token attempt bucket while retaining the
+    /// other bounded admission defaults.
+    #[must_use]
+    pub const fn with_resume_attempts(mut self, attempts: TokenBucketConfig) -> Self {
+        self.admission.resume_attempt = attempts;
+        self
+    }
+
     /// Override only the authenticated total-message bucket while retaining
     /// bounded per-kind defaults. Useful for controlled tests and small shards.
     #[must_use]
@@ -322,6 +346,7 @@ enum RequestClass {
     Ui,
     Handshake,
     FailedAuth,
+    ResumeAttempt,
     ConnectionChurn,
     AdmissionCapacity,
 }
@@ -338,6 +363,7 @@ impl RequestClass {
             Self::Ui => "ui",
             Self::Handshake => "handshake",
             Self::FailedAuth => "failed_auth",
+            Self::ResumeAttempt => "resume_attempt",
             Self::ConnectionChurn => "connection_churn",
             Self::AdmissionCapacity => "admission_capacity",
         }
@@ -434,6 +460,7 @@ impl TokenBucket {
 struct IpBudget {
     handshake: TokenBucket,
     failed_auth: TokenBucket,
+    resume_attempt: TokenBucket,
     churn: TokenBucket,
     last_seen: Instant,
 }
@@ -443,6 +470,7 @@ impl IpBudget {
         Self {
             handshake: TokenBucket::new(config.handshake, now),
             failed_auth: TokenBucket::new(config.failed_auth, now),
+            resume_attempt: TokenBucket::new(config.resume_attempt, now),
             churn: TokenBucket::new(config.connection_churn, now),
             last_seen: now,
         }
@@ -476,6 +504,12 @@ impl AdmissionLimiter {
     /// Count a rejected credential without exposing it to metrics or logs.
     pub fn failed_auth(&self, ip: IpAddr, now: Instant) -> Result<(), EngineError> {
         self.check(ip, now, RequestClass::FailedAuth)
+    }
+
+    /// Count a syntactically valid resume-token attempt independently of
+    /// ordinary handshakes and failed identity credentials.
+    pub fn resume_attempt(&self, ip: IpAddr, now: Instant) -> Result<(), EngineError> {
+        self.check(ip, now, RequestClass::ResumeAttempt)
     }
 
     /// Count and check a valid upgrade attempt, limiting rapid reconnect churn.
@@ -512,6 +546,7 @@ impl AdmissionLimiter {
         let bucket = match class {
             RequestClass::Handshake => &mut entry.handshake,
             RequestClass::FailedAuth => &mut entry.failed_auth,
+            RequestClass::ResumeAttempt => &mut entry.resume_attempt,
             RequestClass::ConnectionChurn => &mut entry.churn,
             _ => unreachable!("admission limiter only receives admission classes"),
         };
@@ -709,6 +744,7 @@ fn rate_limited(class: RequestClass, retry: Duration) -> EngineError {
         )
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -814,7 +850,8 @@ mod tests {
             2,
             Duration::from_secs(60),
         )
-        .unwrap();
+        .unwrap()
+        .with_resume_attempts(TokenBucketConfig::new(1, 1).unwrap());
         let limiter = AdmissionLimiter::new(config);
         let first = "127.0.0.1".parse().unwrap();
         let second = "127.0.0.2".parse().unwrap();
@@ -835,5 +872,17 @@ mod tests {
             limiter.connection_churn(second, now).unwrap_err().code(),
             ErrorCode::RateLimited
         );
+        limiter.resume_attempt(second, now).unwrap();
+        assert_eq!(
+            limiter.resume_attempt(second, now).unwrap_err().code(),
+            ErrorCode::RateLimited
+        );
+        assert!(limiter.resume_attempt(first, now).is_ok());
+        let metrics = limiter.metrics();
+        assert!(metrics.iter().any(|metric| {
+            metric.kind == "resume_attempt"
+                && metric.code == ErrorCode::RateLimited.as_str()
+                && metric.count == 1
+        }));
     }
 }

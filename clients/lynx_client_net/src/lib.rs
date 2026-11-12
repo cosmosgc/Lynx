@@ -1,3 +1,6 @@
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, allow(unused_features))]
+
 //! Headless WebSocket transport. No gameplay state or rendering is performed here.
 //!
 //! Call [`Client::connect`] inside a Tokio runtime, poll its queues from the

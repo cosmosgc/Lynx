@@ -26,7 +26,7 @@ use std::fmt;
 
 use engine_core::error::{EngineError, ErrorCode};
 use engine_core::faction::FactionWorld;
-use engine_core::id::{DefinitionId, StableId};
+use engine_core::id::{DefinitionId, IdKind, StableId};
 use engine_core::math::Vec3;
 use engine_core::schema::PersistencePolicy;
 use engine_core::time::{DurationMs, Millis, Tick};
@@ -43,7 +43,7 @@ use engine_net::replication::{
 use engine_sim::action::{ActionEffect, ActionRequest, ActionResult, Verb};
 use engine_sim::calendar::CalendarActionRequest;
 use engine_sim::combat::CombatStats;
-use engine_sim::entity::{EntityRecord, MovementProfile};
+use engine_sim::entity::{EntityRecord, MovementProfile, UiAction};
 use engine_sim::mind::{Controller, Mind};
 use engine_sim::movement::MovementIntent;
 use engine_sim::zone::Zone;
@@ -284,6 +284,7 @@ pub struct WorldGateway {
     pending_changes: std::collections::BTreeSet<Change>,
     calendar: Option<CalendarStage>,
     calendar_store: Option<Box<dyn CalendarPersistence + Send>>,
+    player_spawn_point: Option<Vec3>,
     resume_store: Option<std::sync::Arc<dyn ResumeSessionStore>>,
     resume_generations: BTreeMap<SessionId, i64>,
     reply_sequence: u64,
@@ -336,6 +337,7 @@ impl WorldGateway {
             pending_changes: std::collections::BTreeSet::new(),
             calendar: None,
             calendar_store: None,
+            player_spawn_point: None,
             resume_store: None,
             resume_generations: BTreeMap::new(),
             reply_sequence: 0,
@@ -378,6 +380,15 @@ impl WorldGateway {
     #[must_use]
     pub fn with_resume_store(mut self, store: std::sync::Arc<dyn ResumeSessionStore>) -> Self {
         self.resume_store = Some(store);
+        self
+    }
+
+    /// Prefer an authored safe entry point for newly provisioned characters.
+    /// If that cell is occupied, the normal deterministic free-cell search is
+    /// used instead.
+    #[must_use]
+    pub fn with_player_spawn_point(mut self, point: Vec3) -> Self {
+        self.player_spawn_point = Some(point);
         self
     }
 
@@ -460,7 +471,7 @@ impl WorldGateway {
             )
             .with_detail("actor", actor.to_string()));
         }
-        let position = player_spawn_position(&self.zone, principal)?;
+        let position = player_spawn_position(&self.zone, principal, self.player_spawn_point)?;
         let prototype = DefinitionId::new("character.player")?;
         let entity = EntityRecord::new(actor, prototype, position)
             .with_health(100)
@@ -491,6 +502,25 @@ impl WorldGateway {
         self.sessions.get(id).cloned()
     }
 
+    /// Resolve a resume token's owning zone and character without consuming
+    /// it. Multi-zone callers must compare this zone before rotating the token.
+    pub fn resume_location(
+        &self,
+        token: &ResumeToken,
+    ) -> Result<Option<(String, StableId)>, EngineError> {
+        if let Some(store) = &self.resume_store
+            && let Some(record) = store.lookup_token(TokenDigest::of(token.expose_secret()))?
+        {
+            let principal = StableId::parse(&record.principal_id)?;
+            principal.expect_kind(IdKind::Character)?;
+            return Ok(Some((record.zone_id, principal)));
+        }
+        Ok(self
+            .sessions
+            .principal_for_token(token)
+            .map(|principal| (self.zone.config().instance.to_string(), principal)))
+    }
+
     /// The panel currently open for a session, if any.
     ///
     /// This is server state derived from a validated `UiOpened` effect. It is
@@ -511,6 +541,13 @@ impl WorldGateway {
     #[must_use]
     pub fn retained_sessions(&self) -> usize {
         self.sessions.len()
+    }
+
+    /// Whether a retained session conflicts with authenticated `claims` under
+    /// this gateway's duplicate-session policy.
+    #[must_use]
+    pub fn retains_identity(&self, claims: &SessionClaims) -> bool {
+        self.sessions.retains_identity(claims)
     }
 
     /// Revoke a session immediately, invalidating its token and dropping its
@@ -534,6 +571,23 @@ impl WorldGateway {
             ));
         }
         Ok(self.remove_session_local(session))
+    }
+
+    /// Forget a disconnected local session after its durable resume route was
+    /// moved by the zone handoff transaction. The shared resume record and
+    /// bearer token remain valid and point to the destination zone.
+    pub fn forget_handed_off_session(&mut self, session: &SessionId) -> Result<(), EngineError> {
+        let Some(current) = self.sessions.get(session) else {
+            return Err(EngineError::not_found("session", session));
+        };
+        if current.connected {
+            return Err(EngineError::new(
+                ErrorCode::InvalidState,
+                "a handed-off session must be detached before it is forgotten",
+            ));
+        }
+        self.remove_session_local(session);
+        Ok(())
     }
 
     /// Revoke all retained sessions for a principal after a trusted
@@ -589,7 +643,12 @@ impl WorldGateway {
             .sessions
             .connect(claims, actor, negotiated.clone(), now)?;
         if let Some(store) = self.resume_store.as_ref() {
-            let record = resume_record(&session, &token, 0);
+            let record = resume_record(
+                &session,
+                &token,
+                &self.zone.config().instance.to_string(),
+                0,
+            );
             if let Err(error) = store.create(&record) {
                 let _ = self.sessions.remove(&session.id);
                 return Err(error);
@@ -1215,6 +1274,7 @@ impl WorldGateway {
         }
         let mut request =
             ActionRequest::new(scoped_request_id(session, &envelope.id), actor, intent.verb);
+        request.correlation_id = Some(envelope.id.as_str().to_owned());
         request.target = target;
         request.params = intent.params;
         request.client_tick = intent.client_tick;
@@ -1280,15 +1340,28 @@ impl WorldGateway {
             .with_detail("received", intent.schema.to_string());
             return Ok(vec![self.error_reply(envelope, &error)]);
         }
+        let Some(action) = advertised_panel_action(&panel, &intent.action) else {
+            let error = EngineError::new(
+                ErrorCode::Unsupported,
+                "the requested action is not advertised by the open panel",
+            )
+            .with_detail("action", &intent.action);
+            return Ok(vec![self.error_reply(envelope, &error)]);
+        };
         let Some(verb) = Verb::parse(&intent.action) else {
             let error = EngineError::new(ErrorCode::InvalidRequest, "invalid panel action name")
                 .with_detail("action", intent.action);
             return Ok(vec![self.error_reply(envelope, &error)]);
         };
+        let params = match authorized_panel_params(action, intent.params) {
+            Ok(params) => params,
+            Err(error) => return Ok(vec![self.error_reply(envelope, &error)]),
+        };
 
         let mut request = ActionRequest::new(scoped_request_id(session, &envelope.id), actor, verb);
+        request.correlation_id = Some(envelope.id.as_str().to_owned());
         request.target = Some(panel.target);
-        request.params = intent.params;
+        request.params = params;
         request.client_tick = intent.client_tick;
         request.principal = Some(principal);
         let mut result = self.zone.apply_action(&request, now);
@@ -1720,10 +1793,12 @@ impl WorldGateway {
 fn resume_record(
     session: &GatewaySession,
     token: &ResumeToken,
+    zone_id: &str,
     generation: i64,
 ) -> ResumeSessionRecord {
     ResumeSessionRecord {
         session_id: session.id.to_string(),
+        zone_id: zone_id.to_owned(),
         account_id: session.account.to_string(),
         principal_id: session.principal.to_string(),
         actor_id: session.actor.to_string(),
@@ -1802,7 +1877,11 @@ fn record_matches(
             .is_some_and(|expiry| now.value() < expiry)
 }
 
-fn player_spawn_position(zone: &Zone, principal: StableId) -> Result<Vec3, EngineError> {
+fn player_spawn_position(
+    zone: &Zone,
+    principal: StableId,
+    preferred: Option<Vec3>,
+) -> Result<Vec3, EngineError> {
     let nav = zone.nav();
     let total = nav
         .width()
@@ -1811,6 +1890,23 @@ fn player_spawn_position(zone: &Zone, principal: StableId) -> Result<Vec3, Engin
         .ok_or_else(|| {
             EngineError::new(ErrorCode::CapacityExceeded, "the zone has no spawn cells")
         })?;
+    let is_free = |position: Vec3| {
+        if !zone.config().contains(position) {
+            return false;
+        }
+        let Some((x, z)) = nav.cell_of(position) else {
+            return false;
+        };
+        !nav.is_blocked(x, z)
+            && !zone.entities().any(|entity| {
+                entity.movement_profile().is_some_and(|body| {
+                    body.occupies && position.distance_xz(entity.position()) < body.radius_m + 0.35
+                })
+            })
+    };
+    if let Some(point) = preferred.filter(|point| is_free(*point)) {
+        return Ok(point);
+    }
     let total_u128 = u128::try_from(total).map_err(|_| {
         EngineError::new(
             ErrorCode::CapacityExceeded,
@@ -1828,12 +1924,7 @@ fn player_spawn_position(zone: &Zone, principal: StableId) -> Result<Vec3, Engin
             continue;
         }
         let position = nav.cell_center(x, z);
-        let occupied = zone.entities().any(|entity| {
-            entity.movement_profile().is_some_and(|body| {
-                body.occupies && position.distance_xz(entity.position()) < body.radius_m + 0.35
-            })
-        });
-        if !occupied && zone.config().contains(position) {
+        if is_free(position) {
             return Ok(position);
         }
     }
@@ -1890,6 +1981,44 @@ struct UiActionIntent {
     params: BTreeMap<String, String>,
     #[serde(default)]
     client_tick: Tick,
+}
+
+fn advertised_panel_action<'a>(panel: &'a OpenPanel, name: &str) -> Option<&'a UiAction> {
+    let mut matching = panel.actions.iter().filter(|action| action.name == name);
+    let action = matching.next()?;
+    matching.next().is_none().then_some(action)
+}
+
+fn authorized_panel_params(
+    action: &UiAction,
+    supplied: BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, EngineError> {
+    let has_invalid_parameter = supplied.iter().any(|(key, value)| {
+        action
+            .params
+            .get(key)
+            .is_some_and(|expected| expected != value)
+            || (!action.params.contains_key(key) && !action.allowed_params.contains(key))
+    });
+    let missing_fixed_parameter = action
+        .params
+        .iter()
+        .any(|(key, expected)| supplied.get(key) != Some(expected));
+    if has_invalid_parameter || missing_fixed_parameter {
+        return Err(EngineError::new(
+            ErrorCode::InvalidRequest,
+            "UI action parameters do not match the advertised policy",
+        )
+        .with_detail("action", &action.name));
+    }
+
+    let mut authorized = action.params.clone();
+    authorized.extend(
+        supplied
+            .into_iter()
+            .filter(|(key, _)| action.allowed_params.contains(key)),
+    );
+    Ok(authorized)
 }
 
 fn opened_panel(effects: &[ActionEffect]) -> Option<OpenPanel> {

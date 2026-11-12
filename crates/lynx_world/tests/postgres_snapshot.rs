@@ -1019,6 +1019,8 @@ fn postgres_zone_lease_expiry_allows_takeover() -> anyhow::Result<()> {
             .is_none(),
         "an unexpired lease cannot be taken over"
     );
+    // Leave 200 ms beyond the 500 ms lease TTL for scheduler and DB-clock
+    // granularity before checking that another owner can take over.
     std::thread::sleep(std::time::Duration::from_millis(700));
     let second = store
         .acquire(&zone, "owner-b", std::time::Duration::from_secs(10))?

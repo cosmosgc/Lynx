@@ -27,6 +27,7 @@ ureq = { workspace = true }
 
 [dev-dependencies]
 backend_contract_tests = { path = "../backend_contract_tests" }
+proptest = { workspace = true }
 rcgen = { version = "0.14.10", features = ["x509-parser"] }
 tempfile = "3.23"
 time = "0.3.44"

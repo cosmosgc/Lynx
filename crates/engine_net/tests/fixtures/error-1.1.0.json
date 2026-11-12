@@ -1,0 +1,1 @@
+{"v":"1.1.0","id":"res_1","kind":"protocol.error","body":{"code":"version_mismatch","diagnostic":"incompatible protocol version","params":{"client":"2.0.0","kind":"protocol","server":"1.1.0"},"retryable":false},"correlation":"req_1"}

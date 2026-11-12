@@ -16,7 +16,9 @@ use crate::faction::territory::{Territory, TerritoryBook, TerritoryChange, Terri
 use crate::faction::treasury::{
     PowerBreakdown, PowerRules, Treasury, TreasuryEntry, TreasuryEntryKind, TreasuryTransferReceipt,
 };
-use crate::faction::{FactionDefinition, validate_action_key};
+use crate::faction::{
+    Alignment, FactionCatalog, FactionDefinition, FactionRelation, validate_action_key,
+};
 use crate::id::{DefinitionId, StableId};
 use crate::schema::SchemaVersion;
 use crate::time::Millis;
@@ -114,6 +116,9 @@ pub struct FactionSnapshot {
     pub territory_rules: TerritoryRules,
     /// Faction records, ordered by ID.
     pub factions: Vec<Faction>,
+    /// Directional faction-to-faction alignment, ordered by source and target.
+    #[serde(default)]
+    pub relations: Vec<FactionRelation>,
     /// Territory records, ordered by zone.
     pub territories: Vec<Territory>,
     /// Append-only ownership history, oldest first.
@@ -128,6 +133,7 @@ impl Default for FactionSnapshot {
             schema_version: FACTION_WORLD_SCHEMA_VERSION,
             territory_rules: TerritoryRules::default(),
             factions: Vec::new(),
+            relations: Vec::new(),
             territories: Vec::new(),
             territory_history: Vec::new(),
             transfers: Vec::new(),
@@ -146,6 +152,7 @@ impl FactionSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactionWorld {
     factions: BTreeMap<DefinitionId, Faction>,
+    relations: BTreeMap<(DefinitionId, DefinitionId), Alignment>,
     territories: TerritoryBook,
     transfers: BTreeMap<String, TreasuryTransferReceipt>,
 }
@@ -156,6 +163,7 @@ impl FactionWorld {
     pub fn new(rules: TerritoryRules) -> Self {
         Self {
             factions: BTreeMap::new(),
+            relations: BTreeMap::new(),
             territories: TerritoryBook::new(rules),
             transfers: BTreeMap::new(),
         }
@@ -188,6 +196,38 @@ impl FactionWorld {
     /// Every faction, ordered by ID.
     pub fn factions(&self) -> impl Iterator<Item = &Faction> {
         self.factions.values()
+    }
+
+    /// Directional relations, ordered by source and target faction IDs.
+    pub fn relations(&self) -> impl Iterator<Item = FactionRelation> + '_ {
+        self.relations.iter().map(|((source, target), points)| {
+            FactionRelation::new(source.clone(), target.clone(), *points)
+        })
+    }
+
+    /// Build the alignment catalog used by perception and target selection.
+    #[must_use]
+    pub fn relation_catalog(&self) -> FactionCatalog {
+        let mut catalog = FactionCatalog::new();
+        for ((source, target), points) in &self.relations {
+            catalog.set(source.clone(), target.clone(), *points);
+        }
+        catalog
+    }
+
+    /// Replace one directional relation between known factions.
+    pub fn set_relation(&mut self, relation: FactionRelation) -> Result<(), EngineError> {
+        if !self.factions.contains_key(&relation.source) {
+            return Err(EngineError::not_found("source faction", &relation.source));
+        }
+        if !self.factions.contains_key(&relation.target) {
+            return Err(EngineError::not_found("target faction", &relation.target));
+        }
+        self.relations.insert(
+            (relation.source, relation.target),
+            Alignment::new(relation.points.value()),
+        );
+        Ok(())
     }
 
     /// The faction that contains `member`, if any.
@@ -535,6 +575,7 @@ impl FactionWorld {
             schema_version: FACTION_WORLD_SCHEMA_VERSION,
             territory_rules: self.territories.rules().clone(),
             factions: self.factions.values().cloned().collect(),
+            relations: self.relations().collect(),
             territories: self.territories.iter().cloned().collect(),
             territory_history: self.territories.history().to_vec(),
             transfers: self.transfers.values().cloned().collect(),
@@ -565,6 +606,18 @@ impl FactionWorld {
         let mut world = Self::new(snapshot.territory_rules);
         for faction in snapshot.factions {
             world.add_faction(faction)?;
+        }
+        let mut relation_keys = BTreeSet::new();
+        for relation in snapshot.relations {
+            if !relation_keys.insert((relation.source.clone(), relation.target.clone())) {
+                return Err(EngineError::new(
+                    ErrorCode::Conflict,
+                    "faction snapshot contains a duplicate directional relation",
+                )
+                .with_detail("source", relation.source.to_string())
+                .with_detail("target", relation.target.to_string()));
+            }
+            world.set_relation(relation)?;
         }
         world.validate_membership_uniqueness()?;
 
@@ -608,6 +661,16 @@ impl FactionWorld {
             faction.validate()?;
         }
         self.validate_membership_uniqueness()?;
+        for (source, target) in self.relations.keys() {
+            if !self.factions.contains_key(source) || !self.factions.contains_key(target) {
+                return Err(EngineError::new(
+                    ErrorCode::NotFound,
+                    "faction relation references an unknown faction",
+                )
+                .with_detail("source", source.to_string())
+                .with_detail("target", target.to_string()));
+            }
+        }
         self.territories.validate()?;
         for change in self.territories.history() {
             for faction in [&change.from, &change.to].into_iter().flatten() {
@@ -737,6 +800,7 @@ impl Default for FactionWorld {
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

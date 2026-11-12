@@ -34,8 +34,8 @@ fn message(kind: &str, body: serde_json::Value) -> Envelope {
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
-async fn delayed_private_corrections_remain_bounded_over_websocket() {
-    for delay_ms in [100, 200] {
+async fn delayed_or_lost_queue_ack_keeps_prediction_bounded_until_authority() {
+    for (delay_ms, drop_queue_ack) in [(100, false), (200, true)] {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}/world", listener.local_addr().unwrap());
         let (stop, stopped) = oneshot::channel();
@@ -69,12 +69,15 @@ async fn delayed_private_corrections_remain_bounded_over_websocket() {
             };
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             let sequence = request.body["sequence"].as_u64().unwrap();
-            let mut queued = message("movement.queued", serde_json::json!({"sequence":sequence}));
-            queued.correlation = Some(request.id);
-            socket
-                .send(Message::Binary(encode_frame(&queued).unwrap().into()))
-                .await
-                .unwrap();
+            if !drop_queue_ack {
+                let mut queued =
+                    message("movement.queued", serde_json::json!({"sequence":sequence}));
+                queued.correlation = Some(request.id);
+                socket
+                    .send(Message::Binary(encode_frame(&queued).unwrap().into()))
+                    .await
+                    .unwrap();
+            }
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             let correction = message(
                 "world.delta",
@@ -473,6 +476,7 @@ async fn headless_schedule_connects_moves_and_disconnects() {
     assert_eq!(panel.schema.as_str(), "ui.display");
     assert_eq!(panel.fields.len(), 2);
     assert_eq!(panel.actions[0].name, "take");
+    assert_eq!(panel.actions[1].name, "insert");
     #[cfg(feature = "window")]
     {
         app.update();
@@ -507,6 +511,67 @@ async fn headless_schedule_connects_moves_and_disconnects() {
             client.world().inventory().unwrap().total_quantity(&coin),
             27
         );
+    }
+    #[cfg(feature = "window")]
+    click_content_action(&mut app, "content-action-1-insert");
+    #[cfg(not(feature = "window"))]
+    app.world_mut()
+        .resource_mut::<OnlineClient>()
+        .submit_panel_action(&panel, &panel.actions[1])
+        .unwrap();
+    {
+        let mut client = app.world_mut().resource_mut::<OnlineClient>();
+        wait_for_interaction(&mut client).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while client.world().inventory().unwrap().total_quantity(&coin) != 26 {
+                client.poll();
+                assert_eq!(client.status(), OnlineStatus::Active);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            client.world().inventory().unwrap().total_quantity(&coin),
+            26
+        );
+        let before_split = client.world().inventory().unwrap().clone();
+        client.move_inventory_stack("split", 0, 3, 1).unwrap();
+        assert_eq!(client.world().inventory(), Some(&before_split));
+        wait_for_interaction(&mut client).await;
+        assert!(client.inventory_action_pending());
+        assert!(matches!(
+            client.move_inventory_stack("merge", 0, 3, 1),
+            Err(lynx_client::online::OnlineError::Protocol)
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while client.world().inventory().is_none_or(|inventory| {
+                inventory.slot(0).is_none_or(|stack| stack.quantity != 2)
+                    || inventory.slot(3).is_none_or(|stack| stack.quantity != 1)
+            }) {
+                client.poll();
+                assert_eq!(client.status(), OnlineStatus::Active);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!client.inventory_action_pending());
+        client.move_inventory_stack("merge", 3, 0, 1).unwrap();
+        wait_for_interaction(&mut client).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while client.world().inventory().is_none_or(|inventory| {
+                inventory.slot(0).is_none_or(|stack| stack.quantity != 3)
+                    || inventory.slot(3).is_some()
+            }) {
+                client.poll();
+                assert_eq!(client.status(), OnlineStatus::Active);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!client.inventory_action_pending());
         client.reconnect().unwrap();
         tokio::time::timeout(Duration::from_secs(15), async {
             while client.status() != OnlineStatus::Active || !client.resumed() {
@@ -519,8 +584,19 @@ async fn headless_schedule_connects_moves_and_disconnects() {
         .unwrap();
         assert_eq!(
             client.world().inventory().unwrap().total_quantity(&coin),
-            27
+            26
         );
+        assert_eq!(
+            client
+                .world()
+                .inventory()
+                .unwrap()
+                .slot(0)
+                .unwrap()
+                .quantity,
+            3
+        );
+        assert!(client.world().inventory().unwrap().slot(3).is_none());
     }
     #[cfg(feature = "window")]
     {

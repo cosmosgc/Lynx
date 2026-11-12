@@ -1,5 +1,5 @@
 //! PostgreSQL inventory persistence tests require an isolated database with
-//! migrations through 0009 applied. Set `LYNX_REQUIRE_POSTGRES_TEST` to require
+//! current migrations applied. Set `LYNX_REQUIRE_POSTGRES_TEST` to require
 //! configuration rather than skipping these tests.
 
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -11,6 +11,8 @@ use game_api::{
     AccountId, ApiError, CharacterId, InventorySlot, InventoryStore, TransferInventoryUpdate,
 };
 use postgres::{Config, NoTls};
+use proptest::prelude::*;
+use proptest::test_runner::{Config as PropertyConfig, TestRunner};
 
 #[test]
 #[allow(clippy::too_many_lines)] // One isolated fixture exercises the full transfer lifecycle.
@@ -147,7 +149,7 @@ fn versioned_inventory_survives_reconnection_conflicts_and_rolls_back() {
                 slots: &destination_attempt
             },
         ),
-        Err(ApiError::Conflict(_))
+        Err(ApiError::InvalidRequest(_))
     ));
     assert_eq!(reopened.load_versioned_inventory(first).unwrap().version, 1);
     assert_eq!(
@@ -256,10 +258,64 @@ fn versioned_inventory_survives_reconnection_conflicts_and_rolls_back() {
     assert_eq!(source_report.occupied_slots, 0);
     assert_eq!(source_report.total_quantity, 0);
     assert_eq!(source_report.transfer_receipts, 1);
+    assert_eq!(source_report.differences.len(), 0);
     let destination_report = restarted.reconcile_character(second).unwrap();
     assert_eq!(destination_report.occupied_slots, 2);
     assert_eq!(destination_report.total_quantity, 4);
     assert_eq!(destination_report.transfer_receipts, 1);
+    assert_eq!(destination_report.differences.len(), 0);
+    let ledger_rows = db
+        .query(
+            "SELECT event.source, event.actor_kind, event.actor_id, event.reason, \
+                    entry.owner_character_id, entry.item_definition, entry.quantity_delta, \
+                    entry.before_quantity, entry.after_quantity \
+             FROM lynx.inventory_value_events event \
+             JOIN lynx.inventory_value_entries entry USING (event_key) \
+             WHERE event.correlation_id = $1 ORDER BY entry.owner_character_id",
+            &[&receipt.key],
+        )
+        .unwrap();
+    assert_eq!(ledger_rows.len(), 2);
+    assert!(ledger_rows.iter().all(|row| {
+        row.get::<_, String>(0) == "inventory.player_transfer"
+            && row.get::<_, String>(1) == "character"
+            && row.get::<_, String>(2) == first.to_string()
+            && row.get::<_, String>(3) == "player inventory item transfer"
+            && row.get::<_, String>(5) == "item.ore"
+    }));
+    let source_entry = ledger_rows
+        .iter()
+        .find(|row| row.get::<_, String>(4) == first.to_string())
+        .unwrap();
+    assert_eq!(source_entry.get::<_, i64>(6), -3);
+    assert_eq!(source_entry.get::<_, i64>(7), 3);
+    assert_eq!(source_entry.get::<_, i64>(8), 0);
+
+    db.execute(
+        "UPDATE lynx.inventory_slots SET quantity = quantity + 1 \
+         WHERE owner_id = $1 AND item_definition = 'item.ore'",
+        &[&second.to_string()],
+    )
+    .unwrap();
+    let drift = restarted.reconcile_character(second).unwrap();
+    assert_eq!(drift.differences.len(), 1);
+    assert_eq!(drift.differences[0].item_definition, "item.ore");
+    assert_eq!(drift.differences[0].inventory_quantity, 4);
+    assert_eq!(drift.differences[0].ledger_quantity, 3);
+    db.execute(
+        "UPDATE lynx.inventory_slots SET quantity = quantity - 1 \
+         WHERE owner_id = $1 AND item_definition = 'item.ore'",
+        &[&second.to_string()],
+    )
+    .unwrap();
+    assert_eq!(
+        restarted
+            .reconcile_character(second)
+            .unwrap()
+            .differences
+            .len(),
+        0
+    );
     drop(restarted);
 
     let concurrent_left = vec![slot(0, "item.ore", 1)];
@@ -329,6 +385,200 @@ fn slot(index: u16, definition: &str, quantity: u32) -> InventorySlot {
         slot: index,
         stack: ItemStack::new(DefinitionId::new(definition).unwrap(), quantity),
     }
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one generated case spans inventory mutation, ledger replay, reconciliation, and isolated cleanup"
+)]
+fn generated_player_value_transfers_conserve_inventory_and_ledger() {
+    let Some(config) = postgres_config() else {
+        return;
+    };
+    let mut runner = TestRunner::new(PropertyConfig {
+        cases: 12,
+        failure_persistence: None,
+        ..PropertyConfig::default()
+    });
+    runner
+        .run(&prop::collection::vec(1_u32..=8, 1..=6), |quantities| {
+            let mut db = config
+                .connect(NoTls)
+                .expect("connect to isolated test database");
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos();
+            let account = format!("ledger-property-{nonce}");
+            let source_owner = CharacterId::new(StableId::from_parts(IdKind::Character, 0, nonce))
+                .expect("valid source character ID");
+            let destination_owner =
+                CharacterId::new(StableId::from_parts(IdKind::Character, 0, nonce + 1))
+                    .expect("valid destination character ID");
+            db.execute(
+                "INSERT INTO lynx.accounts (account_id, nakama_user_id) VALUES ($1, md5($1)::uuid)",
+                &[&account],
+            )
+            .expect("insert property-test account");
+            for (character, suffix) in
+                [(source_owner, "source"), (destination_owner, "destination")]
+            {
+                db.execute(
+                "INSERT INTO lynx.characters (character_id, account_id, name) VALUES ($1, $2, $3)",
+                &[&character.to_string(), &account, &format!("ledger{nonce}{suffix}")],
+            )
+            .expect("insert property-test character");
+            }
+
+            let total = quantities.iter().copied().sum::<u32>();
+            let source = PostgresInventoryStore::new(config.connect(NoTls).unwrap());
+            prop_assert_eq!(
+                source.replace_inventory_if_version(source_owner, 0, &[slot(0, "item.ore", total)]),
+                Ok(1),
+            );
+            prop_assert_eq!(
+                source.replace_inventory_if_version(destination_owner, 0, &[]),
+                Ok(1)
+            );
+
+            let mut remaining = total;
+            let mut destination_total = 0_u32;
+            for (index, quantity) in quantities.iter().copied().enumerate() {
+                let expected_version =
+                    1 + i64::try_from(index).expect("generated case index fits i64");
+                let next_remaining = remaining - quantity;
+                let next_destination = destination_total + quantity;
+                let source_after = if next_remaining == 0 {
+                    Vec::new()
+                } else {
+                    vec![slot(0, "item.ore", next_remaining)]
+                };
+                let destination_after = vec![slot(0, "item.ore", next_destination)];
+                let key = format!("ledger-property-{nonce}-{index}");
+                let receipt = TransferReceipt {
+                    key: key.clone(),
+                    source: StableId::from_parts(IdKind::Entity, 0, nonce + 2),
+                    source_slot: 0,
+                    destination: StableId::from_parts(IdKind::Entity, 0, nonce + 3),
+                    definition: DefinitionId::new("item.ore").unwrap(),
+                    quantity,
+                    destination_slots: vec![0],
+                };
+                let source_update = TransferInventoryUpdate {
+                    character_id: source_owner,
+                    expected_version,
+                    slots: &source_after,
+                };
+                let destination_update = TransferInventoryUpdate {
+                    character_id: destination_owner,
+                    expected_version,
+                    slots: &destination_after,
+                };
+                prop_assert_eq!(
+                    source.commit_transfer(
+                        &key,
+                        &receipt,
+                        source_update.clone(),
+                        destination_update.clone(),
+                    ),
+                    Ok(receipt.clone()),
+                );
+                // The original request remains idempotent after commit: replaying
+                // its exact versions and snapshots must not append another event.
+                prop_assert_eq!(
+                    source.commit_transfer(&key, &receipt, source_update, destination_update),
+                    Ok(receipt),
+                );
+                let event_key = format!("transfer:{key}");
+                let entries = db
+                    .query_one(
+                        "SELECT COUNT(*), COALESCE(SUM(quantity_delta), 0) \
+                     FROM lynx.inventory_value_entries WHERE event_key = $1",
+                        &[&event_key],
+                    )
+                    .expect("read generated ledger event");
+                prop_assert_eq!(entries.get::<_, i64>(0), 2);
+                prop_assert_eq!(entries.get::<_, i64>(1), 0);
+
+                remaining = next_remaining;
+                destination_total = next_destination;
+            }
+
+            let source_report = source.reconcile_character(source_owner).unwrap();
+            let destination_report = source.reconcile_character(destination_owner).unwrap();
+            prop_assert!(source_report.differences.is_empty());
+            prop_assert!(destination_report.differences.is_empty());
+            prop_assert_eq!(source_report.total_quantity, i64::from(remaining));
+            prop_assert_eq!(
+                destination_report.total_quantity,
+                i64::from(destination_total)
+            );
+            prop_assert_eq!(
+                source_report.total_quantity + destination_report.total_quantity,
+                i64::from(total),
+            );
+
+            let event_keys = db
+                .query(
+                    "SELECT DISTINCT event_key FROM lynx.inventory_value_entries \
+                 WHERE owner_character_id IN ($1, $2)",
+                    &[&source_owner.to_string(), &destination_owner.to_string()],
+                )
+                .expect("list generated ledger events")
+                .into_iter()
+                .map(|row| row.get::<_, String>(0))
+                .collect::<Vec<_>>();
+            let mut cleanup = db.transaction().unwrap();
+            cleanup
+                .batch_execute("SET LOCAL lynx.allow_append_only_purge = 'on'")
+                .unwrap();
+            cleanup
+                .execute(
+                    "DELETE FROM lynx.inventory_transfer_receipts WHERE idempotency_key LIKE $1",
+                    &[&format!("ledger-property-{nonce}-%")],
+                )
+                .unwrap();
+            cleanup
+                .execute(
+                    "DELETE FROM lynx.inventory_value_entries WHERE owner_character_id IN ($1, $2)",
+                    &[&source_owner.to_string(), &destination_owner.to_string()],
+                )
+                .unwrap();
+            for event_key in event_keys {
+                cleanup
+                    .execute(
+                        "DELETE FROM lynx.inventory_value_events WHERE event_key = $1",
+                        &[&event_key],
+                    )
+                    .unwrap();
+            }
+            cleanup.commit().unwrap();
+            for character in [source_owner, destination_owner] {
+                db.execute(
+                    "DELETE FROM lynx.inventory_slots WHERE owner_id = $1",
+                    &[&character.to_string()],
+                )
+                .unwrap();
+                db.execute(
+                    "DELETE FROM lynx.inventory_revisions WHERE owner_id = $1",
+                    &[&character.to_string()],
+                )
+                .unwrap();
+            }
+            db.execute(
+                "DELETE FROM lynx.characters WHERE character_id IN ($1, $2)",
+                &[&source_owner.to_string(), &destination_owner.to_string()],
+            )
+            .unwrap();
+            db.execute(
+                "DELETE FROM lynx.accounts WHERE account_id = $1",
+                &[&account],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .expect("generated inventory value transfers preserve the ledger invariants");
 }
 
 fn postgres_config() -> Option<Config> {

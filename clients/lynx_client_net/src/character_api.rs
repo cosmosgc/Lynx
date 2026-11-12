@@ -4,7 +4,11 @@ use std::fmt;
 use std::net::IpAddr;
 use std::time::Duration;
 
-use game_api::{Character, CharacterCreationReceipt, CreateCharacter, SessionToken};
+use game_api::{
+    Character, CharacterCreationReceipt, ChatChannelTargetPage, CreateCharacter, CreateGroup,
+    Friend, GroupId, GroupMember, GroupMembership, GroupPage, GroupSearch, SessionToken,
+    SocialGroup, validate_group_page,
+};
 use serde::Deserialize;
 use ureq::http::{HeaderValue, Response};
 
@@ -136,6 +140,332 @@ impl CharacterApiClient {
         serde_json::from_str(&checked_body(response)?).map_err(|_| CharacterApiFailure::Protocol)
     }
 
+    /// List the authenticated account's friends, requests, and blocks.
+    pub fn friends(&self, token: &SessionToken) -> Result<Vec<Friend>, CharacterApiFailure> {
+        let response = self
+            .agent
+            .get(self.endpoint("/social/friends"))
+            .header("Authorization", bearer(token)?)
+            .call()
+            .map_err(|_| CharacterApiFailure::Transport)?;
+        let body = checked_body(response)?;
+        let response: FriendList =
+            serde_json::from_str(&body).map_err(|_| CharacterApiFailure::Protocol)?;
+        Ok(response.friends)
+    }
+
+    /// Send a friend request to an account ID.
+    pub fn request_friend(
+        &self,
+        token: &SessionToken,
+        friend: &str,
+    ) -> Result<(), CharacterApiFailure> {
+        self.social_action(token, "/social/friends/request", friend)
+    }
+
+    /// Accept an incoming friend request.
+    pub fn accept_friend_request(
+        &self,
+        token: &SessionToken,
+        friend: &str,
+    ) -> Result<(), CharacterApiFailure> {
+        self.social_action(token, "/social/friends/accept", friend)
+    }
+
+    /// Dismiss an incoming request or cancel an outgoing request.
+    pub fn dismiss_friend_request(
+        &self,
+        token: &SessionToken,
+        friend: &str,
+    ) -> Result<(), CharacterApiFailure> {
+        self.social_action(token, "/social/friends/dismiss", friend)
+    }
+
+    /// Remove a mutual friend.
+    pub fn remove_friend(
+        &self,
+        token: &SessionToken,
+        friend: &str,
+    ) -> Result<(), CharacterApiFailure> {
+        self.social_action(token, "/social/friends/remove", friend)
+    }
+
+    /// Block an account.
+    pub fn block_account(
+        &self,
+        token: &SessionToken,
+        account: &str,
+    ) -> Result<(), CharacterApiFailure> {
+        self.social_action(token, "/social/blocks/block", account)
+    }
+
+    /// Remove a block without restoring any former friendship.
+    pub fn unblock_account(
+        &self,
+        token: &SessionToken,
+        account: &str,
+    ) -> Result<(), CharacterApiFailure> {
+        self.social_action(token, "/social/blocks/unblock", account)
+    }
+
+    /// Discover only direct/group chat targets authorized for this session.
+    pub fn discover_chat_channels(
+        &self,
+        token: &SessionToken,
+        limit: u16,
+        cursor: Option<&str>,
+    ) -> Result<ChatChannelTargetPage, CharacterApiFailure> {
+        validate_group_page(limit, cursor).map_err(|_| CharacterApiFailure::InvalidRequest)?;
+        let query = page_query(limit, cursor);
+        let response = self
+            .agent
+            .get(self.endpoint(&format!("/social/chat/channels?{query}")))
+            .header("Authorization", bearer(token)?)
+            .call()
+            .map_err(|_| CharacterApiFailure::Transport)?;
+        serde_json::from_str(&checked_body(response)?).map_err(|_| CharacterApiFailure::Protocol)
+    }
+
+    /// List the authenticated account's group memberships and pending requests.
+    pub fn my_groups(
+        &self,
+        token: &SessionToken,
+        limit: u16,
+        cursor: Option<&str>,
+    ) -> Result<GroupPage<GroupMembership>, CharacterApiFailure> {
+        validate_group_page(limit, cursor).map_err(|_| CharacterApiFailure::InvalidRequest)?;
+        let query = page_query(limit, cursor);
+        let response = self
+            .agent
+            .get(self.endpoint(&format!("/social/groups?{query}")))
+            .header("Authorization", bearer(token)?)
+            .call()
+            .map_err(|_| CharacterApiFailure::Transport)?;
+        serde_json::from_str(&checked_body(response)?).map_err(|_| CharacterApiFailure::Protocol)
+    }
+
+    /// Search public groups with validated filters and bounded pagination.
+    pub fn discover_groups(
+        &self,
+        token: &SessionToken,
+        search: &GroupSearch,
+        limit: u16,
+        cursor: Option<&str>,
+    ) -> Result<GroupPage<SocialGroup>, CharacterApiFailure> {
+        search
+            .validate()
+            .map_err(|_| CharacterApiFailure::InvalidRequest)?;
+        validate_group_page(limit, cursor).map_err(|_| CharacterApiFailure::InvalidRequest)?;
+        let mut query = page_query(limit, cursor);
+        if let Some(name) = &search.name {
+            query.push_str("&name=");
+            query.push_str(&encode_query_component(name));
+        }
+        if let Some(open) = search.open {
+            query.push_str(&format!("&open={open}"));
+        }
+        if let Some(members) = search.members {
+            query.push_str(&format!("&members={members}"));
+        }
+        let response = self
+            .agent
+            .get(self.endpoint(&format!("/social/groups/discover?{query}")))
+            .header("Authorization", bearer(token)?)
+            .call()
+            .map_err(|_| CharacterApiFailure::Transport)?;
+        serde_json::from_str(&checked_body(response)?).map_err(|_| CharacterApiFailure::Protocol)
+    }
+
+    /// Create a persistent Nakama group.
+    pub fn create_group(
+        &self,
+        token: &SessionToken,
+        request: &CreateGroup,
+    ) -> Result<SocialGroup, CharacterApiFailure> {
+        request
+            .validate()
+            .map_err(|_| CharacterApiFailure::InvalidRequest)?;
+        let body = serde_json::to_vec(request).map_err(|_| CharacterApiFailure::Protocol)?;
+        let response = self
+            .agent
+            .post(self.endpoint("/social/groups"))
+            .header("Authorization", bearer(token)?)
+            .header("Content-Type", "application/json")
+            .send(body)
+            .map_err(|_| CharacterApiFailure::Transport)?;
+        serde_json::from_str(&checked_body(response)?).map_err(|_| CharacterApiFailure::Protocol)
+    }
+
+    /// Join an open group or submit a join request for a closed group.
+    pub fn request_group_join(
+        &self,
+        token: &SessionToken,
+        group: &str,
+    ) -> Result<(), CharacterApiFailure> {
+        self.group_action(token, group, "join")
+    }
+
+    /// Leave a persistent group.
+    pub fn leave_group(
+        &self,
+        token: &SessionToken,
+        group: &str,
+    ) -> Result<(), CharacterApiFailure> {
+        self.group_action(token, group, "leave")
+    }
+
+    /// Read members and pending join requests for a group.
+    pub fn group_members(
+        &self,
+        token: &SessionToken,
+        group: &str,
+        limit: u16,
+        cursor: Option<&str>,
+    ) -> Result<GroupPage<GroupMember>, CharacterApiFailure> {
+        let group =
+            GroupId::new(group.to_owned()).map_err(|_| CharacterApiFailure::InvalidRequest)?;
+        validate_group_page(limit, cursor).map_err(|_| CharacterApiFailure::InvalidRequest)?;
+        let query = page_query(limit, cursor);
+        let response = self
+            .agent
+            .get(self.endpoint(&format!("/social/groups/{group}/members?{query}")))
+            .header("Authorization", bearer(token)?)
+            .call()
+            .map_err(|_| CharacterApiFailure::Transport)?;
+        serde_json::from_str(&checked_body(response)?).map_err(|_| CharacterApiFailure::Protocol)
+    }
+
+    /// Add accounts or approve their pending group join requests.
+    pub fn add_group_members(
+        &self,
+        token: &SessionToken,
+        group: &str,
+        accounts: &[String],
+    ) -> Result<(), CharacterApiFailure> {
+        self.group_member_action(token, group, accounts, "add")
+    }
+
+    /// Remove members or decline their pending join requests.
+    pub fn kick_group_members(
+        &self,
+        token: &SessionToken,
+        group: &str,
+        accounts: &[String],
+    ) -> Result<(), CharacterApiFailure> {
+        self.group_member_action(token, group, accounts, "kick")
+    }
+
+    /// Promote group members.
+    pub fn promote_group_members(
+        &self,
+        token: &SessionToken,
+        group: &str,
+        accounts: &[String],
+    ) -> Result<(), CharacterApiFailure> {
+        self.group_member_action(token, group, accounts, "promote")
+    }
+
+    /// Demote group administrators.
+    pub fn demote_group_members(
+        &self,
+        token: &SessionToken,
+        group: &str,
+        accounts: &[String],
+    ) -> Result<(), CharacterApiFailure> {
+        self.group_member_action(token, group, accounts, "demote")
+    }
+
+    fn group_action(
+        &self,
+        token: &SessionToken,
+        group: &str,
+        action: &str,
+    ) -> Result<(), CharacterApiFailure> {
+        let group =
+            GroupId::new(group.to_owned()).map_err(|_| CharacterApiFailure::InvalidRequest)?;
+        let response = self
+            .agent
+            .post(self.endpoint(&format!("/social/groups/{group}/{action}")))
+            .header("Authorization", bearer(token)?)
+            .send_empty()
+            .map_err(|_| CharacterApiFailure::Transport)?;
+        let body = checked_body(response)?;
+        let response: SocialActionReceipt =
+            serde_json::from_str(&body).map_err(|_| CharacterApiFailure::Protocol)?;
+        if response.ok {
+            Ok(())
+        } else {
+            Err(CharacterApiFailure::Protocol)
+        }
+    }
+
+    fn group_member_action(
+        &self,
+        token: &SessionToken,
+        group: &str,
+        accounts: &[String],
+        action: &str,
+    ) -> Result<(), CharacterApiFailure> {
+        let group =
+            GroupId::new(group.to_owned()).map_err(|_| CharacterApiFailure::InvalidRequest)?;
+        if accounts.is_empty()
+            || accounts.len() > 100
+            || accounts
+                .iter()
+                .any(|account| game_api::AccountId::new(account.clone()).is_err())
+        {
+            return Err(CharacterApiFailure::InvalidRequest);
+        }
+        let unique = accounts.iter().collect::<std::collections::BTreeSet<_>>();
+        if unique.len() != accounts.len() {
+            return Err(CharacterApiFailure::InvalidRequest);
+        }
+        let body = serde_json::to_vec(&serde_json::json!({"account_ids": accounts}))
+            .map_err(|_| CharacterApiFailure::Protocol)?;
+        let response = self
+            .agent
+            .post(self.endpoint(&format!("/social/groups/{group}/members/{action}")))
+            .header("Authorization", bearer(token)?)
+            .header("Content-Type", "application/json")
+            .send(body)
+            .map_err(|_| CharacterApiFailure::Transport)?;
+        let body = checked_body(response)?;
+        let response: SocialActionReceipt =
+            serde_json::from_str(&body).map_err(|_| CharacterApiFailure::Protocol)?;
+        if response.ok {
+            Ok(())
+        } else {
+            Err(CharacterApiFailure::Protocol)
+        }
+    }
+
+    fn social_action(
+        &self,
+        token: &SessionToken,
+        path: &str,
+        account_id: &str,
+    ) -> Result<(), CharacterApiFailure> {
+        game_api::AccountId::new(account_id.to_owned())
+            .map_err(|_| CharacterApiFailure::InvalidRequest)?;
+        let body = serde_json::to_vec(&serde_json::json!({"account_id": account_id}))
+            .map_err(|_| CharacterApiFailure::Protocol)?;
+        let response = self
+            .agent
+            .post(self.endpoint(path))
+            .header("Authorization", bearer(token)?)
+            .header("Content-Type", "application/json")
+            .send(body)
+            .map_err(|_| CharacterApiFailure::Transport)?;
+        let body = checked_body(response)?;
+        let response: SocialActionReceipt =
+            serde_json::from_str(&body).map_err(|_| CharacterApiFailure::Protocol)?;
+        if response.ok {
+            Ok(())
+        } else {
+            Err(CharacterApiFailure::Protocol)
+        }
+    }
+
     fn endpoint(&self, path: &str) -> String {
         format!("{}{path}", self.base_url)
     }
@@ -168,11 +498,44 @@ fn checked_body(mut response: Response<ureq::Body>) -> Result<String, CharacterA
     Ok(body)
 }
 
+fn page_query(limit: u16, cursor: Option<&str>) -> String {
+    let mut query = format!("limit={limit}");
+    if let Some(cursor) = cursor {
+        query.push_str("&cursor=");
+        query.push_str(&encode_query_component(cursor));
+    }
+    query
+}
+
+fn encode_query_component(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            write!(encoded, "%{byte:02X}").expect("writing to a string cannot fail");
+        }
+    }
+    encoded
+}
+
 #[derive(Deserialize)]
 struct CharacterList {
     characters: Vec<Character>,
 }
 
+#[derive(Deserialize)]
+struct FriendList {
+    friends: Vec<Friend>,
+}
+
+#[derive(Deserialize)]
+struct SocialActionReceipt {
+    ok: bool,
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

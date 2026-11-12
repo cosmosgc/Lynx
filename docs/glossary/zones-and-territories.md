@@ -4,6 +4,10 @@ A **zone** is an authored area of the game world and a boundary for content and
 simulation. It has a stable identity, geometry, and connections to other zones.
 A zone does not have to be its own server process.
 
+A **zone travel trigger** is a zone-owned bounded position and radius that
+authorizes a specific authored route. Its destination is a placed zone on the
+same map; the atlas continues to store topology only.
+
 A **territory** is political ownership state associated with one or more zones.
 Capturing a territory changes who controls it; it does not change the zone's
 map, identity, or authored content. A zone can also be explicitly unclaimed.

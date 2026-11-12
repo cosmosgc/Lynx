@@ -9,18 +9,20 @@
 //! work runs in Tokio's blocking section on multi-thread runtimes so the
 //! PostgreSQL sync client can safely drive its connection runtime.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use engine_content::WorldMapDefinition;
 use engine_core::error::{EngineError, ErrorCode};
 use engine_core::id::StableId;
 use engine_core::time::{Millis, Tick};
 use engine_net::envelope::{Envelope, MessageId, MessageKind};
 use engine_net::protocol::{ErrorPayload, Handshake};
 use engine_net::replication::SessionId;
+use engine_sim::ai::AiTickPolicy;
 use engine_sim::entity::EntityRecord;
 use serde::{Deserialize, Serialize};
 use tokio::runtime::{Handle, RuntimeFlavor};
@@ -30,13 +32,17 @@ use world_gateway::{ERROR_KIND, ResumeToken, SessionClaims};
 use world_server::{CloseReason, ConnectionId, Opened, Outbound, WorldServer};
 
 use crate::auth::Grant;
+use crate::authority::ZoneAuthoritySet;
 use crate::authority::{EVENT_WORLD_SNAPSHOT, EVENT_WORLD_STOPPED, ZoneAuthority};
+use crate::content_runtime::ResolvedTravelTrigger;
+use crate::multi_zone::{MultiZoneRuntime, ZoneConnection, ZoneOpened};
 use crate::persistence::{
     EVENT_ACTION_RESULTS_REPLACE, EVENT_CALENDAR_FACTIONS_REPLACE, EVENT_COOLDOWNS_REPLACE,
     EVENT_COUNTERS_REPLACE, EVENT_ENTITY_REMOVE, EVENT_ENTITY_UPSERT, EVENT_LINK_COOLDOWNS_REPLACE,
     EVENT_LINK_RESULTS_REPLACE, EVENT_LINKS_REPLACE, EVENT_TRANSFERS_APPEND, SnapshotStore,
     WorldSnapshot, WorldSnapshotInputs, ZoneEventInput,
 };
+use crate::travel::{PlayerHandoffRequest, ZoneHandoffCoordinator, ZoneHandoffStore};
 
 /// Client handshake message kind. Its body is [`Hello`].
 pub const HELLO_KIND: &str = "session.hello";
@@ -73,6 +79,11 @@ pub enum Credential {
 /// Work sent from one transport task to the authority loop.
 #[derive(Debug)]
 pub enum ServerEvent {
+    /// Atomically replace the server-owned AI policy across all running zones.
+    RefreshAiPolicy {
+        /// Policy rebuilt from the current world faction relation catalog.
+        policy: Option<AiTickPolicy>,
+    },
     /// Finish authentication and create or resume a session.
     Admit {
         /// Verified credential.
@@ -96,6 +107,31 @@ pub enum ServerEvent {
         /// Connection that ended.
         connection: ConnectionId,
     },
+    /// Admit or resume a client in a selected zone.
+    AdmitZone {
+        /// Stable zone instance routing key.
+        zone_id: String,
+        /// Verified credential.
+        credential: Credential,
+        /// Client handshake.
+        hello: Hello,
+        /// Queue for messages addressed to this connection.
+        outbound: mpsc::Sender<ServerFrame>,
+        /// Admission outcome with the zone-local connection address.
+        reply: oneshot::Sender<Result<ZoneAdmitted, EngineError>>,
+    },
+    /// One validated envelope addressed to its zone-local connection.
+    FrameZone {
+        /// Zone and connection returned by `AdmitZone`.
+        route: ZoneConnection,
+        /// Decoded envelope.
+        envelope: Envelope,
+    },
+    /// A zone-addressed transport ended.
+    LeaveZone {
+        /// Zone and connection returned by `AdmitZone`.
+        route: ZoneConnection,
+    },
     /// Revoke sessions after a trusted identity or authorization change.
     RevokePrincipal {
         /// Server-verified principal whose retained sessions must be revoked.
@@ -103,6 +139,19 @@ pub enum ServerEvent {
         /// Number of removed sessions, or the durable-store failure.
         reply: oneshot::Sender<Result<usize, EngineError>>,
     },
+}
+
+/// A successful admission into a multi-zone runtime.
+#[derive(Debug, Clone)]
+pub struct ZoneAdmitted {
+    /// Address to use for subsequent frames and disconnects.
+    pub route: ZoneConnection,
+    /// Gateway-issued session identifier.
+    pub session: SessionId,
+    /// Entity the session may drive.
+    pub actor: StableId,
+    /// Whether an existing session was resumed.
+    pub resumed: bool,
 }
 
 /// Output for one connection.
@@ -128,6 +177,114 @@ pub enum ReplicationKind {
     Snapshot,
     /// Incremental authoritative state delta.
     Delta,
+}
+
+/// Maximum session records returned by the private replication diagnostics
+/// route. Session IDs are never exported as Prometheus labels.
+pub const REPLICATION_DIAGNOSTIC_LIMIT: usize = 256;
+
+/// Bounded diagnostic sample for one opaque gateway session.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReplicationSessionDiagnostic {
+    /// Opaque world-session identifier; not an account, character, or token.
+    pub session_id: String,
+    /// Whether the session currently has an attached transport.
+    pub connected: bool,
+    /// Last sampled queued frame count.
+    pub queue_depth: u64,
+    /// Configured frame capacity for the attached connection.
+    pub queue_capacity: u64,
+    /// Snapshot frames accepted by this session's outbound queue.
+    pub snapshot_enqueued_frames: u64,
+    /// Delta frames accepted by this session's outbound queue.
+    pub delta_enqueued_frames: u64,
+    /// Encoded replication bytes accepted by this session's outbound queue.
+    pub enqueued_bytes: u64,
+    /// Snapshot WebSocket sends completed locally.
+    pub snapshot_socket_write_successes: u64,
+    /// Snapshot WebSocket sends that failed locally.
+    pub snapshot_socket_write_failures: u64,
+    /// Snapshot bytes whose local WebSocket send completed.
+    pub snapshot_socket_written_bytes: u64,
+    /// Delta WebSocket sends completed locally.
+    pub delta_socket_write_successes: u64,
+    /// Delta WebSocket sends that failed locally.
+    pub delta_socket_write_failures: u64,
+    /// Delta bytes whose local WebSocket send completed.
+    pub delta_socket_written_bytes: u64,
+    /// Replication frames rejected because this session's outbound queue was full.
+    pub queue_full_events: u64,
+}
+
+/// Snapshot returned by the bounded admin replication-diagnostics route.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReplicationDiagnosticsSnapshot {
+    /// Maximum number of retained session records.
+    pub limit: usize,
+    /// Number of currently retained records.
+    pub retained: usize,
+    /// Number of older records evicted to preserve the fixed memory bound.
+    pub evicted: u64,
+    /// Most recently active records first.
+    pub sessions: Vec<ReplicationSessionDiagnostic>,
+}
+
+#[derive(Debug, Default)]
+struct ReplicationDiagnostics {
+    sessions: BTreeMap<SessionId, ReplicationSessionDiagnostic>,
+    recency: VecDeque<SessionId>,
+    evicted: u64,
+}
+
+impl ReplicationDiagnostics {
+    fn touch(&mut self, session: &SessionId) -> &mut ReplicationSessionDiagnostic {
+        if !self.sessions.contains_key(session) {
+            if self.sessions.len() == REPLICATION_DIAGNOSTIC_LIMIT
+                && let Some(expired) = self.recency.pop_front()
+            {
+                self.sessions.remove(&expired);
+                self.evicted = self.evicted.saturating_add(1);
+            }
+            self.sessions.insert(
+                session.clone(),
+                ReplicationSessionDiagnostic {
+                    session_id: session.to_string(),
+                    connected: false,
+                    queue_depth: 0,
+                    queue_capacity: 0,
+                    snapshot_enqueued_frames: 0,
+                    delta_enqueued_frames: 0,
+                    enqueued_bytes: 0,
+                    snapshot_socket_write_successes: 0,
+                    snapshot_socket_write_failures: 0,
+                    snapshot_socket_written_bytes: 0,
+                    delta_socket_write_successes: 0,
+                    delta_socket_write_failures: 0,
+                    delta_socket_written_bytes: 0,
+                    queue_full_events: 0,
+                },
+            );
+        }
+        self.recency.retain(|candidate| candidate != session);
+        self.recency.push_back(session.clone());
+        self.sessions
+            .get_mut(session)
+            .expect("replication diagnostic was inserted or already present")
+    }
+
+    fn snapshot(&self) -> ReplicationDiagnosticsSnapshot {
+        ReplicationDiagnosticsSnapshot {
+            limit: REPLICATION_DIAGNOSTIC_LIMIT,
+            retained: self.sessions.len(),
+            evicted: self.evicted,
+            sessions: self
+                .recency
+                .iter()
+                .rev()
+                .filter_map(|session| self.sessions.get(session).cloned())
+                .collect(),
+        }
+    }
 }
 
 /// A successful admission.
@@ -156,6 +313,10 @@ pub struct Service {
     evented_world: Option<WorldSnapshot>,
     /// Stop serving after an event batch cannot be durably appended.
     authority_write_failed: bool,
+    /// Content version attached to snapshots created by this service.
+    content_version: Option<String>,
+    content_manifest_sha256: Option<String>,
+    migration_checkpoint: Option<Box<crate::persistence::ContentMigrationCheckpoint>>,
     metrics: Arc<Metrics>,
 }
 
@@ -185,6 +346,7 @@ pub struct Metrics {
     queue_capacity: AtomicU64,
     queue_depth_high_water: AtomicU64,
     queue_session_depth_high_water: AtomicU64,
+    replication_diagnostics: Mutex<ReplicationDiagnostics>,
     replication_enqueued_bytes: AtomicU64,
     replication_snapshots_enqueued: AtomicU64,
     replication_deltas_enqueued: AtomicU64,
@@ -201,6 +363,8 @@ pub struct Metrics {
     ai_perception_candidate_limit: AtomicU64,
     ai_perception_los_limit: AtomicU64,
     ai_action_budget_exhaustions: AtomicU64,
+    ai_group_aggro_budget_exhaustions: AtomicU64,
+    ai_behavior_step_budget_exhaustions: AtomicU64,
     path_requests: AtomicU64,
     path_expansions: AtomicU64,
     path_failures: AtomicU64,
@@ -332,7 +496,7 @@ impl Metrics {
         );
         let _ = writeln!(
             text,
-            "# HELP lynx_world_ai_ticks_total Enabled AI ticks.\n# TYPE lynx_world_ai_ticks_total counter\nlynx_world_ai_ticks_total {}\n# HELP lynx_world_ai_decisions_total AI controller decisions evaluated.\n# TYPE lynx_world_ai_decisions_total counter\nlynx_world_ai_decisions_total {}\n# HELP lynx_world_ai_budget_exhaustions_total AI budget limits reached by bounded budget class.\n# TYPE lynx_world_ai_budget_exhaustions_total counter\nlynx_world_ai_budget_exhaustions_total{{budget=\"controller_scan\"}} {}\nlynx_world_ai_budget_exhaustions_total{{budget=\"update\"}} {}\nlynx_world_ai_budget_exhaustions_total{{budget=\"perception_candidates\"}} {}\nlynx_world_ai_budget_exhaustions_total{{budget=\"perception_line_of_sight\"}} {}\nlynx_world_ai_budget_exhaustions_total{{budget=\"action\"}} {}",
+            "# HELP lynx_world_ai_ticks_total Enabled AI ticks.\n# TYPE lynx_world_ai_ticks_total counter\nlynx_world_ai_ticks_total {}\n# HELP lynx_world_ai_decisions_total AI controller decisions evaluated.\n# TYPE lynx_world_ai_decisions_total counter\nlynx_world_ai_decisions_total {}\n# HELP lynx_world_ai_budget_exhaustions_total AI budget limits reached by bounded budget class.\n# TYPE lynx_world_ai_budget_exhaustions_total counter\nlynx_world_ai_budget_exhaustions_total{{budget=\"controller_scan\"}} {}\nlynx_world_ai_budget_exhaustions_total{{budget=\"update\"}} {}\nlynx_world_ai_budget_exhaustions_total{{budget=\"perception_candidates\"}} {}\nlynx_world_ai_budget_exhaustions_total{{budget=\"perception_line_of_sight\"}} {}\nlynx_world_ai_budget_exhaustions_total{{budget=\"action\"}} {}\nlynx_world_ai_budget_exhaustions_total{{budget=\"group_aggro_shares\"}} {}\nlynx_world_ai_budget_exhaustions_total{{budget=\"behavior_steps\"}} {}",
             get(&self.ai_ticks),
             get(&self.ai_decisions),
             get(&self.ai_controller_scan_limit),
@@ -340,6 +504,8 @@ impl Metrics {
             get(&self.ai_perception_candidate_limit),
             get(&self.ai_perception_los_limit),
             get(&self.ai_action_budget_exhaustions),
+            get(&self.ai_group_aggro_budget_exhaustions),
+            get(&self.ai_behavior_step_budget_exhaustions),
         );
         let _ = writeln!(
             text,
@@ -456,6 +622,110 @@ impl Metrics {
             failures.fetch_add(1, Ordering::Relaxed);
         }
     }
+
+    /// Record a queue occupancy sample for one opaque gateway session.
+    pub fn record_replication_queue_sample(
+        &self,
+        session: &SessionId,
+        depth: usize,
+        capacity: usize,
+        connected: bool,
+    ) {
+        let mut diagnostics = self.replication_diagnostics.lock().unwrap();
+        let record = diagnostics.touch(session);
+        record.queue_depth = u64::try_from(depth).unwrap_or(u64::MAX);
+        record.queue_capacity = u64::try_from(capacity).unwrap_or(u64::MAX);
+        record.connected = connected;
+    }
+
+    /// Record a replication frame accepted by one session's outbound queue.
+    pub fn record_replication_enqueued(
+        &self,
+        session: &SessionId,
+        kind: ReplicationKind,
+        bytes: usize,
+    ) {
+        let mut diagnostics = self.replication_diagnostics.lock().unwrap();
+        let record = diagnostics.touch(session);
+        match kind {
+            ReplicationKind::Snapshot => {
+                record.snapshot_enqueued_frames = record.snapshot_enqueued_frames.saturating_add(1);
+            }
+            ReplicationKind::Delta => {
+                record.delta_enqueued_frames = record.delta_enqueued_frames.saturating_add(1);
+            }
+        }
+        record.enqueued_bytes = record
+            .enqueued_bytes
+            .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+    }
+
+    /// Record whether one session's encoded replication frame completed its
+    /// local WebSocket send. This is not a client acknowledgement.
+    pub fn record_replication_socket_write_for_session(
+        &self,
+        session: &SessionId,
+        kind: ReplicationKind,
+        bytes: usize,
+        success: bool,
+    ) {
+        self.record_replication_socket_write(kind, bytes, success);
+        let mut diagnostics = self.replication_diagnostics.lock().unwrap();
+        let record = diagnostics.touch(session);
+        match (kind, success) {
+            (ReplicationKind::Snapshot, true) => {
+                record.snapshot_socket_write_successes =
+                    record.snapshot_socket_write_successes.saturating_add(1);
+                record.snapshot_socket_written_bytes = record
+                    .snapshot_socket_written_bytes
+                    .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+            }
+            (ReplicationKind::Snapshot, false) => {
+                record.snapshot_socket_write_failures =
+                    record.snapshot_socket_write_failures.saturating_add(1);
+            }
+            (ReplicationKind::Delta, true) => {
+                record.delta_socket_write_successes =
+                    record.delta_socket_write_successes.saturating_add(1);
+                record.delta_socket_written_bytes = record
+                    .delta_socket_written_bytes
+                    .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+            }
+            (ReplicationKind::Delta, false) => {
+                record.delta_socket_write_failures =
+                    record.delta_socket_write_failures.saturating_add(1);
+            }
+        }
+    }
+
+    /// Record a frame rejected by a session's full outbound queue.
+    pub fn record_replication_queue_full(&self, session: &SessionId) {
+        let mut diagnostics = self.replication_diagnostics.lock().unwrap();
+        let record = diagnostics.touch(session);
+        record.queue_full_events = record.queue_full_events.saturating_add(1);
+    }
+
+    /// Refresh occupancy for tracked sessions without changing their recency.
+    pub fn refresh_replication_queue_samples(&self, active: &BTreeMap<SessionId, (usize, usize)>) {
+        let mut diagnostics = self.replication_diagnostics.lock().unwrap();
+        for (session, record) in &mut diagnostics.sessions {
+            if let Some((depth, capacity)) = active.get(session) {
+                record.queue_depth = u64::try_from(*depth).unwrap_or(u64::MAX);
+                record.queue_capacity = u64::try_from(*capacity).unwrap_or(u64::MAX);
+                record.connected = true;
+            } else if record.connected {
+                record.queue_depth = 0;
+                record.queue_capacity = 0;
+                record.connected = false;
+            }
+        }
+    }
+
+    /// Capture the bounded per-session diagnostic view for the admin listener.
+    #[must_use]
+    pub fn replication_diagnostics(&self) -> ReplicationDiagnosticsSnapshot {
+        self.replication_diagnostics.lock().unwrap().snapshot()
+    }
 }
 
 /// How and when the service writes durable world snapshots.
@@ -492,6 +762,9 @@ impl Service {
             authority: None,
             evented_world: None,
             authority_write_failed: false,
+            content_version: None,
+            content_manifest_sha256: None,
+            migration_checkpoint: None,
             metrics: Arc::new(Metrics::default()),
         };
         service.update_gauges();
@@ -502,6 +775,42 @@ impl Service {
     #[must_use]
     pub fn metrics(&self) -> Arc<Metrics> {
         Arc::clone(&self.metrics)
+    }
+
+    /// Pin snapshots produced by this service to the loaded content bundle.
+    #[must_use]
+    pub fn with_content_version(mut self, version: Option<String>) -> Self {
+        self.content_version = version;
+        self
+    }
+
+    /// Pin snapshots produced by this service to the exact loaded manifest.
+    #[must_use]
+    pub fn with_content_manifest_sha256(mut self, hash: Option<String>) -> Self {
+        self.content_manifest_sha256 = hash;
+        self
+    }
+
+    /// Retain the startup migration checkpoint in every subsequent snapshot.
+    #[must_use]
+    pub fn with_migration_checkpoint(
+        mut self,
+        checkpoint: Option<Box<crate::persistence::ContentMigrationCheckpoint>>,
+    ) -> Self {
+        self.migration_checkpoint = checkpoint;
+        self
+    }
+
+    fn capture_world_snapshot(&self) -> WorldSnapshot {
+        let mut world = WorldSnapshot::capture(&self.snapshot_inputs(), clock().value());
+        world.content_version.clone_from(&self.content_version);
+        world
+            .content_manifest_sha256
+            .clone_from(&self.content_manifest_sha256);
+        world
+            .migration_checkpoint
+            .clone_from(&self.migration_checkpoint);
+        world
     }
 
     fn update_gauges(&self) {
@@ -526,6 +835,23 @@ impl Service {
         self.metrics
             .queue_session_depth_high_water
             .fetch_max(session_depth, Ordering::Relaxed);
+        let active_session_queues = self
+            .server
+            .connections()
+            .filter_map(|(connection, session)| {
+                self.writers.get(&connection).map(|writer| {
+                    (
+                        session.clone(),
+                        (
+                            writer.max_capacity() - writer.capacity(),
+                            writer.max_capacity(),
+                        ),
+                    )
+                })
+            })
+            .collect();
+        self.metrics
+            .refresh_replication_queue_samples(&active_session_queues);
         self.metrics.entities.store(
             self.server.gateway().zone().entity_count() as u64,
             Ordering::Relaxed,
@@ -557,6 +883,12 @@ impl Service {
         self.metrics
             .ai_action_budget_exhaustions
             .store(ai.action_budget_exhaustions, Ordering::Relaxed);
+        self.metrics
+            .ai_group_aggro_budget_exhaustions
+            .store(ai.group_aggro_share_budget_exhaustions, Ordering::Relaxed);
+        self.metrics
+            .ai_behavior_step_budget_exhaustions
+            .store(ai.behavior_step_budget_exhaustions, Ordering::Relaxed);
         let path = self.server.gateway().zone().path_diagnostics();
         self.metrics
             .path_requests
@@ -703,7 +1035,7 @@ impl Service {
             return Ok(());
         };
         let store = Arc::clone(&persistence.store);
-        let world = WorldSnapshot::capture(&self.snapshot_inputs(), clock().value());
+        let world = self.capture_world_snapshot();
         let started = Instant::now();
         let tick = self.server.gateway().zone().tick();
         let result = store.save_at_tick(&world, i64::try_from(tick.0).unwrap_or(i64::MAX));
@@ -745,7 +1077,7 @@ impl Service {
                 "world events cannot precede the initial checkpoint",
             )
         })?;
-        let current = WorldSnapshot::capture(&self.snapshot_inputs(), clock().value());
+        let current = self.capture_world_snapshot();
         let tick = i64::try_from(self.server.gateway().zone().tick().0).map_err(|_| {
             EngineError::new(
                 ErrorCode::InvalidRequest,
@@ -838,6 +1170,12 @@ impl Service {
 
     fn handle(&mut self, event: ServerEvent) {
         match event {
+            ServerEvent::RefreshAiPolicy { policy } => {
+                self.server
+                    .gateway_mut()
+                    .zone_mut()
+                    .set_ai_tick_policy(policy);
+            }
             ServerEvent::Admit {
                 credential,
                 hello,
@@ -869,6 +1207,13 @@ impl Service {
                 envelope,
             } => self.receive(connection, &envelope),
             ServerEvent::Leave { connection } => self.leave(connection),
+            ServerEvent::AdmitZone { reply, .. } => {
+                let _ = reply.send(Err(EngineError::new(
+                    ErrorCode::InvalidState,
+                    "zone-addressed admission requires the multi-zone service",
+                )));
+            }
+            ServerEvent::FrameZone { .. } | ServerEvent::LeaveZone { .. } => {}
             ServerEvent::RevokePrincipal { principal, reply } => {
                 let result = self.revoke_principal_sessions(principal);
                 let _ = reply.send(result);
@@ -971,6 +1316,9 @@ impl Service {
         let started = Instant::now();
         let result = self.server.receive(connection, envelope, clock());
         if action {
+            self.log_action_request(connection, envelope, &result, started.elapsed());
+        }
+        if action {
             self.metrics
                 .action_duration
                 .lock()
@@ -1030,8 +1378,100 @@ impl Service {
         }
     }
 
+    fn log_action_request(
+        &self,
+        connection: ConnectionId,
+        envelope: &Envelope,
+        result: &Result<Vec<Outbound>, EngineError>,
+        elapsed: Duration,
+    ) {
+        let session = self
+            .server
+            .connections()
+            .find_map(|(active, session)| (active == connection).then_some(session));
+        let actor = session
+            .and_then(|session| self.server.gateway().session(session))
+            .map(|session| session.actor);
+        let (outcome, reason) = match result {
+            Err(error) => ("failed", Some(error.code().as_str())),
+            Ok(outbound) => outbound
+                .iter()
+                .find_map(|output| match output {
+                    Outbound::Message { envelope, .. }
+                        if envelope.kind.as_str() == "action.result" =>
+                    {
+                        serde_json::from_value::<engine_sim::action::ActionResult>(
+                            envelope.body.clone(),
+                        )
+                        .ok()
+                        .map(|action| {
+                            if let Some(error) = action.error() {
+                                ("rejected", Some(error.code().as_str()))
+                            } else if action.is_applied() {
+                                ("applied", None)
+                            } else {
+                                ("unknown", None)
+                            }
+                        })
+                    }
+                    _ => None,
+                })
+                .unwrap_or(("no_result", None)),
+        };
+        let correlation_id = envelope.id.as_str();
+        let parent_correlation_id = envelope.correlation.as_ref().map(|id| id.as_str());
+        let zone = self.server.gateway().zone().config().instance.to_string();
+        let duration_ms = elapsed.as_secs_f64() * 1_000.0;
+
+        if outcome == "applied" {
+            tracing::info!(
+                event = "world_action_processed",
+                service = "lynx-world",
+                zone,
+                %connection,
+                session = ?session,
+                actor = ?actor,
+                message_kind = envelope.kind.as_str(),
+                correlation_id,
+                parent_correlation_id,
+                outcome,
+                duration_ms,
+                "world action processed"
+            );
+        } else {
+            tracing::warn!(
+                event = "world_action_processed",
+                service = "lynx-world",
+                zone,
+                %connection,
+                session = ?session,
+                actor = ?actor,
+                message_kind = envelope.kind.as_str(),
+                correlation_id,
+                parent_correlation_id,
+                outcome,
+                reason = reason.unwrap_or("none"),
+                duration_ms,
+                "world action did not apply"
+            );
+        }
+    }
+
     fn leave(&mut self, connection: ConnectionId) {
-        let _ = self.writers.remove(&connection);
+        let session = self
+            .server
+            .connections()
+            .find_map(|(active, session)| (active == connection).then(|| session.clone()));
+        if let Some(writer) = self.writers.remove(&connection)
+            && let Some(session) = &session
+        {
+            self.metrics.record_replication_queue_sample(
+                session,
+                writer.max_capacity() - writer.capacity(),
+                writer.max_capacity(),
+                false,
+            );
+        }
         let last_ack = self.last_ack(connection);
         match self.server.disconnect(connection, last_ack, clock()) {
             Ok(outbound) => self.dispatch(outbound),
@@ -1048,6 +1488,12 @@ impl Service {
 
     fn revoke_principal_sessions(&mut self, principal: StableId) -> Result<usize, EngineError> {
         let (revoked, connections) = self.server.revoke_principal_sessions(principal)?;
+        tracing::info!(
+            event = "world_principal_sessions_revoked",
+            principal = %principal,
+            revoked_sessions = revoked,
+            "world sessions revoked after trusted principal change"
+        );
         for connection in connections {
             if let Some(writer) = self.writers.remove(&connection) {
                 let _ = writer.try_send(ServerFrame::Close);
@@ -1145,6 +1591,10 @@ impl Service {
     }
 
     fn send(&mut self, connection: ConnectionId, frame: ServerFrame) {
+        let session = self
+            .server
+            .connections()
+            .find_map(|(active, session)| (active == connection).then(|| session.clone()));
         let Some(writer) = self.writers.get_mut(&connection) else {
             return;
         };
@@ -1195,14 +1645,38 @@ impl Service {
                         &self.metrics.replication_deltas_enqueued
                     };
                     counter.fetch_add(1, Ordering::Relaxed);
+                    if let Some(session) = &session {
+                        self.metrics.record_replication_enqueued(
+                            session,
+                            kind,
+                            usize::try_from(bytes).unwrap_or(usize::MAX),
+                        );
+                    }
                 }
                 let writer_depth = (writer.max_capacity() - writer.capacity()) as u64;
                 self.metrics
                     .queue_session_depth_high_water
                     .fetch_max(writer_depth, Ordering::Relaxed);
+                if let Some(session) = &session {
+                    self.metrics.record_replication_queue_sample(
+                        session,
+                        usize::try_from(writer_depth).unwrap_or(usize::MAX),
+                        writer.max_capacity(),
+                        true,
+                    );
+                }
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
                 self.metrics.outbound_full.fetch_add(1, Ordering::Relaxed);
+                if let Some(session) = &session {
+                    self.metrics.record_replication_queue_full(session);
+                    self.metrics.record_replication_queue_sample(
+                        session,
+                        writer.max_capacity(),
+                        writer.max_capacity(),
+                        false,
+                    );
+                }
                 self.metrics
                     .queue_session_depth_high_water
                     .fetch_max(writer.max_capacity() as u64, Ordering::Relaxed);
@@ -1215,6 +1689,14 @@ impl Service {
                 self.leave(connection);
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
+                if let Some(session) = &session {
+                    self.metrics.record_replication_queue_sample(
+                        session,
+                        writer.max_capacity() - writer.capacity(),
+                        writer.max_capacity(),
+                        false,
+                    );
+                }
                 self.writers.remove(&connection);
                 self.leave(connection);
             }
@@ -1223,6 +1705,18 @@ impl Service {
 
     fn close(&mut self, connection: ConnectionId) {
         if let Some(writer) = self.writers.remove(&connection) {
+            if let Some(session) = self
+                .server
+                .connections()
+                .find_map(|(active, session)| (active == connection).then(|| session.clone()))
+            {
+                self.metrics.record_replication_queue_sample(
+                    &session,
+                    writer.max_capacity() - writer.capacity(),
+                    writer.max_capacity(),
+                    false,
+                );
+            }
             let _ = writer.try_send(ServerFrame::Close);
         }
     }
@@ -1271,6 +1765,1035 @@ impl Service {
                 tracing::info!(%connection, %session, "world session expired");
             }
         }
+    }
+}
+
+/// Single-threaded authority loop for multiple independently owned zones.
+///
+/// Each transport event carries the zone-local address returned at admission.
+/// The loop serializes admission, frames, disconnects, fair tick batches, and
+/// independent zone checkpoints against one [`MultiZoneRuntime`].
+pub struct MultiZoneService {
+    runtime: MultiZoneRuntime,
+    default_zone: String,
+    tick: Duration,
+    checkpoint_interval: Duration,
+    writers: BTreeMap<ZoneConnection, mpsc::Sender<ServerFrame>>,
+    client_handshakes: BTreeMap<ZoneConnection, Handshake>,
+    travel: Option<TravelContext>,
+    reply_sequence: u64,
+    token_sequence: u64,
+    authority_write_failed: bool,
+    metrics: Arc<Metrics>,
+}
+
+#[derive(Debug)]
+struct TravelContext {
+    atlas: WorldMapDefinition,
+    triggers: BTreeMap<String, Vec<ResolvedTravelTrigger>>,
+    authorities: ZoneAuthoritySet,
+    store: Arc<dyn ZoneHandoffStore>,
+    durable_resume_sessions: bool,
+    coordinator: ZoneHandoffCoordinator,
+}
+
+impl std::fmt::Debug for MultiZoneService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MultiZoneService")
+            .field("zones", &self.runtime.zone_ids().collect::<Vec<_>>())
+            .field("default_zone", &self.default_zone)
+            .field("tick", &self.tick)
+            .field("connections", &self.writers.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl MultiZoneService {
+    /// Create the multi-zone owner and choose its default admission route.
+    pub fn new(
+        runtime: MultiZoneRuntime,
+        default_zone: impl Into<String>,
+        tick: Duration,
+        checkpoint_interval: Duration,
+    ) -> Result<Self, EngineError> {
+        let default_zone = default_zone.into();
+        if !runtime.zone_ids().any(|zone| zone == default_zone) {
+            return Err(EngineError::new(
+                ErrorCode::NotFound,
+                "the default zone is not registered in the multi-zone runtime",
+            )
+            .with_detail("zone_id", default_zone));
+        }
+        if tick.is_zero() || checkpoint_interval < tick {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "multi-zone tick and checkpoint intervals are invalid",
+            ));
+        }
+        let service = Self {
+            runtime,
+            default_zone,
+            tick,
+            checkpoint_interval,
+            writers: BTreeMap::new(),
+            client_handshakes: BTreeMap::new(),
+            travel: None,
+            reply_sequence: 0,
+            token_sequence: 0,
+            authority_write_failed: false,
+            metrics: Arc::new(Metrics::default()),
+        };
+        service.metrics.set_lease_held(true);
+        service.update_gauges();
+        Ok(service)
+    }
+
+    /// Share the multi-zone authority measurements with the HTTP listener.
+    #[must_use]
+    pub fn metrics(&self) -> Arc<Metrics> {
+        Arc::clone(&self.metrics)
+    }
+
+    /// Enable authored, durable travel using triggers resolved from the map
+    /// bundle and a lease-fenced store shared by the registered zones.
+    #[must_use]
+    pub fn with_travel(
+        mut self,
+        atlas: WorldMapDefinition,
+        triggers: BTreeMap<String, Vec<ResolvedTravelTrigger>>,
+        authorities: ZoneAuthoritySet,
+        store: Arc<dyn ZoneHandoffStore>,
+        durable_resume_sessions: bool,
+    ) -> Self {
+        self.travel = Some(TravelContext {
+            atlas,
+            triggers,
+            authorities,
+            store,
+            durable_resume_sessions,
+            coordinator: ZoneHandoffCoordinator::default(),
+        });
+        self
+    }
+
+    /// Drive all zone gateways until shutdown or an authority-wide persistence
+    /// failure. Each scheduled batch gives every registered zone one tick.
+    pub async fn run(
+        mut self,
+        mut events: mpsc::Receiver<ServerEvent>,
+        mut shutdown: watch::Receiver<bool>,
+    ) {
+        let mut ticker = tokio::time::interval(self.tick);
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        ticker.tick().await;
+        let mut next_deadline = Instant::now() + self.tick;
+        let mut ticks_since_checkpoint = 0u64;
+        let checkpoint_every = self
+            .checkpoint_interval
+            .as_nanos()
+            .div_ceil(self.tick.as_nanos())
+            .max(1)
+            .min(u128::from(u64::MAX)) as u64;
+
+        loop {
+            tokio::select! {
+                biased;
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        break;
+                    }
+                }
+                _ = ticker.tick() => {
+                    if Instant::now() > next_deadline {
+                        self.metrics.tick_deadline_misses.fetch_add(1, Ordering::Relaxed);
+                    }
+                    next_deadline += self.tick;
+                    self.advance();
+                    ticks_since_checkpoint = ticks_since_checkpoint.saturating_add(1);
+                    if ticks_since_checkpoint >= checkpoint_every {
+                        ticks_since_checkpoint = 0;
+                        if let Err(error) = self.runtime.checkpoint_all() {
+                            self.authority_write_failed = true;
+                            tracing::error!(
+                                code = ?error.code(),
+                                details = %error,
+                                "multi-zone checkpoint failed; stopping the authority loop"
+                            );
+                        }
+                    }
+                    if self.authority_write_failed {
+                        break;
+                    }
+                }
+                event = events.recv() => {
+                    let Some(event) = event else { break };
+                    self.handle(event);
+                    if self.authority_write_failed {
+                        break;
+                    }
+                }
+            }
+        }
+
+        if self.authority_write_failed {
+            tracing::error!(
+                "skipping shutdown checkpoints after an uncertain durable authority write"
+            );
+        } else if let Err(error) = self.runtime.checkpoint_all() {
+            tracing::error!(code = ?error.code(), details = %error, "multi-zone shutdown checkpoint failed");
+        }
+        self.close_all();
+        self.metrics.set_lease_held(false);
+        tracing::debug!("multi-zone world service loop stopped");
+    }
+
+    fn handle(&mut self, event: ServerEvent) {
+        match event {
+            ServerEvent::RefreshAiPolicy { policy } => {
+                self.runtime.set_ai_tick_policy(policy);
+            }
+            ServerEvent::Admit {
+                credential,
+                hello,
+                outbound,
+                reply,
+            } => {
+                let result = self
+                    .admit_default(&credential, &hello, &outbound)
+                    .map(|admitted| Admitted {
+                        connection: admitted.route.connection,
+                        session: admitted.session,
+                        actor: admitted.actor,
+                        resumed: admitted.resumed,
+                    });
+                self.record_resume_result(&credential, &result);
+                let _ = reply.send(result);
+            }
+            ServerEvent::Frame {
+                connection,
+                envelope,
+            } => self.receive(
+                &ZoneConnection {
+                    zone_id: self.default_zone.clone(),
+                    connection,
+                },
+                &envelope,
+            ),
+            ServerEvent::Leave { connection } => self.leave(&ZoneConnection {
+                zone_id: self.default_zone.clone(),
+                connection,
+            }),
+            ServerEvent::AdmitZone {
+                zone_id,
+                credential,
+                hello,
+                outbound,
+                reply,
+            } => {
+                let result = self.admit_zone(&zone_id, &credential, &hello, &outbound);
+                if let Err(error) = &result {
+                    tracing::info!(
+                        zone = %zone_id,
+                        code = ?error.code(),
+                        "multi-zone admission route rejected"
+                    );
+                }
+                self.record_resume_result(&credential, &result);
+                let _ = reply.send(result);
+            }
+            ServerEvent::FrameZone { route, envelope } => self.receive(&route, &envelope),
+            ServerEvent::LeaveZone { route } => self.leave(&route),
+            ServerEvent::RevokePrincipal { principal, reply } => {
+                let result = self.revoke_principal(principal);
+                let _ = reply.send(result);
+            }
+        }
+        self.update_gauges();
+    }
+
+    fn record_resume_result<T>(&self, credential: &Credential, result: &Result<T, EngineError>) {
+        if !matches!(credential, Credential::Resume(_)) {
+            return;
+        }
+        let counter = if result.is_ok() {
+            &self.metrics.resume_success
+        } else {
+            &self.metrics.resume_failure
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+        if let Err(error) = result {
+            *self
+                .metrics
+                .resume_failure_codes
+                .lock()
+                .unwrap()
+                .entry(error.code().as_str())
+                .or_default() += 1;
+        }
+    }
+
+    fn admit_zone(
+        &mut self,
+        zone_id: &str,
+        credential: &Credential,
+        hello: &Hello,
+        outbound: &mpsc::Sender<ServerFrame>,
+    ) -> Result<ZoneAdmitted, EngineError> {
+        let now = clock();
+        let opened = match credential {
+            Credential::Static(grant) => {
+                let claims = grant.claims()?;
+                self.ensure_character_zone(zone_id, claims.principal)?;
+                self.runtime.open(zone_id, claims, &hello.handshake, now)?
+            }
+            Credential::Identity(claims) => {
+                self.ensure_character_zone(zone_id, claims.principal)?;
+                self.runtime
+                    .open(zone_id, claims.clone(), &hello.handshake, now)?
+            }
+            Credential::Resume(token) => {
+                let owning_zone = self.resume_zone(token)?;
+                if owning_zone != zone_id {
+                    return Err(EngineError::new(
+                        ErrorCode::Conflict,
+                        "the resume token belongs to another zone",
+                    )
+                    .with_detail("zone_id", owning_zone));
+                }
+                self.runtime.resume_in_zone(
+                    zone_id,
+                    token,
+                    &hello.handshake,
+                    hello.last_ack_tick,
+                    now,
+                )?
+            }
+        };
+        let route = opened.route.clone();
+        let session = opened.opened.session.clone();
+        let admitted = ZoneAdmitted {
+            route: route.clone(),
+            session: session.clone(),
+            actor: opened.opened.actor,
+            resumed: opened.opened.resumed,
+        };
+        self.metrics
+            .session_attaches
+            .fetch_add(1, Ordering::Relaxed);
+        self.writers.insert(route.clone(), outbound.clone());
+        self.client_handshakes
+            .insert(route.clone(), hello.handshake.clone());
+        for envelope in &opened.opened.messages {
+            self.send(&route, ServerFrame::Envelope(envelope.clone()));
+        }
+        let token = self.token_envelope(&opened);
+        self.send(&route, ServerFrame::Envelope(token));
+        if let Some(triggers) = self
+            .travel
+            .as_ref()
+            .and_then(|travel| travel.triggers.get(zone_id))
+            .filter(|triggers| !triggers.is_empty())
+        {
+            self.token_sequence = self.token_sequence.wrapping_add(1);
+            let id = MessageId::parse(&format!("travel-meta-{:016x}", self.token_sequence))
+                .expect("generated travel metadata ids are valid");
+            let trigger_metadata: Vec<_> = triggers
+                .iter()
+                .map(|trigger| {
+                    serde_json::json!({
+                        "id": trigger.id,
+                        "position": trigger.position,
+                        "radius_m": trigger.radius_m,
+                    })
+                })
+                .collect();
+            let metadata = Envelope::new(
+                id,
+                message_kind("zone.travel_triggers"),
+                serde_json::json!({ "triggers": trigger_metadata }),
+            );
+            self.send(&route, ServerFrame::Envelope(metadata));
+        }
+        if !self.writers.contains_key(&route) {
+            return Err(EngineError::new(
+                ErrorCode::CapacityExceeded,
+                "the admission output could not be delivered",
+            ));
+        }
+        tracing::info!(
+            zone = %route.zone_id,
+            connection = %route.connection,
+            session = %session,
+            actor = %admitted.actor,
+            resumed = admitted.resumed,
+            connections = self.writers.len(),
+            "world session admitted"
+        );
+        Ok(admitted)
+    }
+
+    fn admit_default(
+        &mut self,
+        credential: &Credential,
+        hello: &Hello,
+        outbound: &mpsc::Sender<ServerFrame>,
+    ) -> Result<ZoneAdmitted, EngineError> {
+        let (zone_id, route_reason) = match credential {
+            Credential::Static(grant) => match self.character_zone(grant.claims()?.principal)? {
+                Some(zone_id) => (zone_id, "character_owner"),
+                None => (self.default_zone.clone(), "new_character_default"),
+            },
+            Credential::Identity(claims) => match self.character_zone(claims.principal)? {
+                Some(zone_id) => (zone_id, "character_owner"),
+                None => (self.default_zone.clone(), "new_character_default"),
+            },
+            Credential::Resume(token) => (self.resume_zone(token)?, "resume_owner"),
+        };
+        tracing::info!(zone = %zone_id, route_reason, "multi-zone admission routed");
+        self.admit_zone(&zone_id, credential, hello, outbound)
+    }
+
+    fn resume_zone(&self, token: &ResumeToken) -> Result<String, EngineError> {
+        for zone_id in self.runtime.zone_ids() {
+            let server = self.runtime.zone_server(zone_id).ok_or_else(|| {
+                EngineError::new(ErrorCode::InvalidState, "a registered zone disappeared")
+            })?;
+            if let Some((owner_zone, principal)) = server.gateway().resume_location(token)? {
+                if !self
+                    .runtime
+                    .zone_ids()
+                    .any(|registered| registered == owner_zone)
+                {
+                    return Err(EngineError::new(
+                        ErrorCode::SessionExpired,
+                        "the resume token belongs to an unavailable zone",
+                    ));
+                }
+                if self.character_zone(principal)?.as_deref() != Some(owner_zone.as_str()) {
+                    return Err(EngineError::new(
+                        ErrorCode::SessionExpired,
+                        "the session character is not present in its owning zone",
+                    ));
+                }
+                return Ok(owner_zone);
+            }
+        }
+        Err(EngineError::new(
+            ErrorCode::SessionExpired,
+            "the world session is unknown or expired",
+        ))
+    }
+
+    fn ensure_character_zone(
+        &mut self,
+        target_zone: &str,
+        principal: StableId,
+    ) -> Result<(), EngineError> {
+        let existing_zone = self.character_zone(principal)?;
+        if existing_zone
+            .as_deref()
+            .is_some_and(|zone| zone != target_zone)
+        {
+            return Err(EngineError::new(
+                ErrorCode::Conflict,
+                "the character is currently located in another zone",
+            ));
+        }
+        if existing_zone.is_none() && target_zone != self.default_zone {
+            return Err(EngineError::new(
+                ErrorCode::Conflict,
+                "a new character must enter through the map's default zone",
+            )
+            .with_detail("zone_id", &self.default_zone));
+        }
+        let server = self.runtime.zone_server_mut(target_zone).ok_or_else(|| {
+            EngineError::new(ErrorCode::NotFound, "the requested zone is not available")
+                .with_detail("zone_id", target_zone)
+        })?;
+        server.gateway_mut().ensure_player_actor(principal)?;
+        self.runtime.checkpoint_zone(target_zone)
+    }
+
+    fn character_zone(&self, principal: StableId) -> Result<Option<String>, EngineError> {
+        let mut existing_zone = None;
+        for zone_id in self.runtime.zone_ids() {
+            let server = self.runtime.zone_server(zone_id).ok_or_else(|| {
+                EngineError::new(ErrorCode::InvalidState, "a registered zone disappeared")
+            })?;
+            match server.gateway().player_actor(principal) {
+                Ok(_) if existing_zone.is_none() => existing_zone = Some(zone_id.to_owned()),
+                Ok(_) => {
+                    return Err(EngineError::new(
+                        ErrorCode::Conflict,
+                        "the character has actors in multiple zones",
+                    ));
+                }
+                Err(error) if error.code() == ErrorCode::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(existing_zone)
+    }
+
+    fn receive(&mut self, route: &ZoneConnection, envelope: &Envelope) {
+        if !self.writers.contains_key(route) || !self.runtime.contains_connection(route) {
+            return;
+        }
+        self.metrics.inputs.fetch_add(1, Ordering::Relaxed);
+        if envelope.kind.as_str() == "zone.travel" {
+            self.handle_travel_request(route, envelope);
+            return;
+        }
+        let action = envelope.kind.as_str() == "action.request";
+        if action {
+            self.metrics.actions.fetch_add(1, Ordering::Relaxed);
+        }
+        let before = self
+            .runtime
+            .zone_server(&route.zone_id)
+            .map(|server| server.gateway().zone().stats().applied_actions)
+            .unwrap_or_default();
+        let started = Instant::now();
+        let result = self.runtime.receive(route, envelope, clock());
+        if action {
+            self.metrics
+                .action_duration
+                .lock()
+                .unwrap()
+                .observe(started.elapsed());
+            let after = self
+                .runtime
+                .zone_server(&route.zone_id)
+                .map(|server| server.gateway().zone().stats().applied_actions)
+                .unwrap_or_default();
+            self.metrics
+                .action_applied
+                .fetch_add(after.saturating_sub(before), Ordering::Relaxed);
+        }
+        match result {
+            Ok(outbound) => self.dispatch(&route.zone_id, outbound),
+            Err(error) => {
+                if action {
+                    self.metrics.reject_action(error.code());
+                }
+                let reply = self.error_reply(envelope, &error);
+                self.send(route, ServerFrame::Envelope(reply));
+                self.close(route);
+            }
+        }
+    }
+
+    fn handle_travel_request(&mut self, route: &ZoneConnection, envelope: &Envelope) {
+        let Some(context) = self.travel.as_ref() else {
+            let error = EngineError::new(
+                ErrorCode::InvalidState,
+                "authored travel is not enabled for this world",
+            );
+            let reply = self.error_reply(envelope, &error);
+            self.send(route, ServerFrame::Envelope(reply));
+            return;
+        };
+        let Some(trigger_id) = envelope
+            .body
+            .get("trigger_id")
+            .and_then(serde_json::Value::as_str)
+        else {
+            let error = EngineError::new(
+                ErrorCode::InvalidRequest,
+                "zone travel requires an authored trigger id",
+            );
+            let reply = self.error_reply(envelope, &error);
+            self.send(route, ServerFrame::Envelope(reply));
+            return;
+        };
+        let Some(session_id) = self.runtime.zone_server(&route.zone_id).and_then(|server| {
+            server.connections().find_map(|(connection, session)| {
+                (connection == route.connection).then(|| session.clone())
+            })
+        }) else {
+            return;
+        };
+        let Some(session) = self
+            .runtime
+            .zone_server(&route.zone_id)
+            .and_then(|server| server.gateway().session(&session_id))
+        else {
+            return;
+        };
+        let Some(trigger) = context
+            .triggers
+            .get(&route.zone_id)
+            .and_then(|triggers| triggers.iter().find(|trigger| trigger.id == trigger_id))
+            .cloned()
+        else {
+            let error = EngineError::new(
+                ErrorCode::NotFound,
+                "the requested travel trigger is not authored in this zone",
+            );
+            let reply = self.error_reply(envelope, &error);
+            self.send(route, ServerFrame::Envelope(reply));
+            return;
+        };
+        let actor_position = self.runtime.zone_server(&route.zone_id).and_then(|server| {
+            server
+                .gateway()
+                .zone()
+                .entities()
+                .find(|entity| entity.id == session.actor)
+                .map(|entity| entity.position())
+        });
+        if !actor_position
+            .is_some_and(|position| position.distance_xz(trigger.position) <= trigger.radius_m)
+        {
+            let error = EngineError::new(
+                ErrorCode::OutOfRange,
+                "the player is outside the authored travel trigger",
+            );
+            let reply = self.error_reply(envelope, &error);
+            self.send(route, ServerFrame::Envelope(reply));
+            return;
+        }
+
+        let destination_zone = trigger.destination_zone.to_string();
+        let request = PlayerHandoffRequest::new(
+            session.principal,
+            trigger.arrival_point,
+            format!("travel-{}-{}", session.id, envelope.id),
+        );
+        let handoff = self
+            .travel
+            .as_mut()
+            .expect("travel context was checked above");
+        let receipt = self.runtime.handoff_player_durable(
+            &mut handoff.coordinator,
+            &handoff.atlas,
+            &handoff.authorities,
+            &route.zone_id,
+            &destination_zone,
+            &request,
+            handoff.store.as_ref(),
+        );
+        let receipt = match receipt {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                if error.code() == ErrorCode::Internal {
+                    self.authority_write_failed = true;
+                }
+                let reply = self.error_reply(envelope, &error);
+                self.send(route, ServerFrame::Envelope(reply));
+                return;
+            }
+        };
+
+        let durable_resume_sessions = self
+            .travel
+            .as_ref()
+            .is_some_and(|travel| travel.durable_resume_sessions);
+        let close_result = self
+            .runtime
+            .zone_server_mut(&route.zone_id)
+            .ok_or_else(|| EngineError::new(ErrorCode::NotFound, "source zone disappeared"))
+            .and_then(|server| {
+                if durable_resume_sessions {
+                    server.handoff_connection(route.connection, session.last_ack_tick, clock())
+                } else {
+                    server.close_connection(route.connection)
+                }
+            });
+        if let Err(error) = close_result {
+            self.authority_write_failed = true;
+            tracing::error!(
+                code = ?error.code(),
+                "durable travel committed but the source session could not be detached"
+            );
+            self.close(route);
+            return;
+        }
+        self.metrics
+            .session_detaches
+            .fetch_add(1, Ordering::Relaxed);
+
+        if !durable_resume_sessions {
+            let Some(handshake) = self.client_handshakes.get(route).cloned() else {
+                self.authority_write_failed = true;
+                self.close(route);
+                return;
+            };
+            let claims = SessionClaims {
+                account: session.account,
+                principal: session.principal,
+                staff: session.staff,
+            };
+            let destination_opened =
+                self.runtime
+                    .open(&destination_zone, claims, &handshake, clock());
+            let destination_opened = match destination_opened {
+                Ok(opened) => opened,
+                Err(error) => {
+                    tracing::error!(
+                        character = %receipt.character,
+                        destination = %destination_zone,
+                        code = ?error.code(),
+                        "durable travel completed but destination session creation failed"
+                    );
+                    let reply = self.error_reply(envelope, &error);
+                    self.send(route, ServerFrame::Envelope(reply));
+                    self.close(route);
+                    return;
+                }
+            };
+            self.metrics
+                .session_attaches
+                .fetch_add(1, Ordering::Relaxed);
+            let opened = ZoneOpened {
+                route: destination_opened.route,
+                opened: destination_opened.opened,
+            };
+            if let Err(error) = self.runtime.disconnect(&opened.route, Tick::ZERO, clock()) {
+                self.authority_write_failed = true;
+                tracing::error!(
+                    code = ?error.code(),
+                    "destination session could not be detached after durable travel"
+                );
+                self.close(route);
+                return;
+            }
+            self.metrics
+                .session_detaches
+                .fetch_add(1, Ordering::Relaxed);
+            let token = self.token_envelope(&opened);
+            self.send(route, ServerFrame::Envelope(token));
+        }
+        self.reply_sequence = self.reply_sequence.wrapping_add(1);
+        let id = MessageId::parse(&format!("travel-{:016x}", self.reply_sequence))
+            .expect("generated travel message ids are valid");
+        let travelled = envelope.reply(
+            id,
+            message_kind("zone.travelled"),
+            serde_json::json!({
+                "destination_zone": destination_zone,
+                "resume_token_retained": durable_resume_sessions,
+            }),
+        );
+        self.send(route, ServerFrame::Envelope(travelled));
+        self.close(route);
+    }
+
+    fn dispatch(&mut self, zone_id: &str, outbound: Vec<Outbound>) {
+        for output in outbound {
+            match output {
+                Outbound::Message {
+                    connection,
+                    envelope,
+                } => self.send(
+                    &ZoneConnection {
+                        zone_id: zone_id.to_owned(),
+                        connection,
+                    },
+                    ServerFrame::Envelope(envelope),
+                ),
+                Outbound::Closed {
+                    connection,
+                    session,
+                    reason,
+                } => {
+                    match reason {
+                        CloseReason::ClientDisconnected => &self.metrics.session_detaches,
+                        CloseReason::SessionExpired => &self.metrics.session_expired_closes,
+                    }
+                    .fetch_add(1, Ordering::Relaxed);
+                    Service::log_close(connection, &session, reason);
+                    self.close(&ZoneConnection {
+                        zone_id: zone_id.to_owned(),
+                        connection,
+                    });
+                }
+            }
+        }
+    }
+
+    fn send(&mut self, route: &ZoneConnection, frame: ServerFrame) {
+        let session = self.runtime.zone_server(&route.zone_id).and_then(|server| {
+            server.connections().find_map(|(connection, session)| {
+                (connection == route.connection).then(|| session.clone())
+            })
+        });
+        let Some(writer) = self.writers.get_mut(route) else {
+            return;
+        };
+        let replication_kind = match &frame {
+            ServerFrame::Envelope(envelope)
+                if envelope.kind.as_str() == world_server::SNAPSHOT_KIND =>
+            {
+                Some(ReplicationKind::Snapshot)
+            }
+            ServerFrame::Envelope(envelope)
+                if envelope.kind.as_str() == world_server::DELTA_KIND =>
+            {
+                Some(ReplicationKind::Delta)
+            }
+            _ => None,
+        };
+        let frame = match frame {
+            ServerFrame::Envelope(envelope)
+                if matches!(
+                    envelope.kind.as_str(),
+                    world_server::SNAPSHOT_KIND | world_server::DELTA_KIND
+                ) =>
+            {
+                match engine_net::framing::encode_frame(&envelope) {
+                    Ok(bytes) => ServerFrame::EncodedReplication {
+                        bytes,
+                        kind: replication_kind.expect("replication kind was matched above"),
+                    },
+                    Err(_) => ServerFrame::Envelope(envelope),
+                }
+            }
+            frame => frame,
+        };
+        let replication_bytes = match &frame {
+            ServerFrame::EncodedReplication { bytes, kind } => Some((bytes.len(), *kind)),
+            _ => None,
+        };
+        match writer.try_send(frame) {
+            Ok(()) => {
+                if let Some((bytes, kind)) = replication_bytes {
+                    self.metrics
+                        .replication_enqueued_bytes
+                        .fetch_add(u64::try_from(bytes).unwrap_or(u64::MAX), Ordering::Relaxed);
+                    let counter = if kind == ReplicationKind::Snapshot {
+                        &self.metrics.replication_snapshots_enqueued
+                    } else {
+                        &self.metrics.replication_deltas_enqueued
+                    };
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    if let Some(session) = &session {
+                        self.metrics
+                            .record_replication_enqueued(session, kind, bytes);
+                    }
+                }
+                self.update_gauges();
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.metrics.outbound_full.fetch_add(1, Ordering::Relaxed);
+                if let Some(session) = &session {
+                    self.metrics.record_replication_queue_full(session);
+                }
+                tracing::warn!(
+                    zone = %route.zone_id,
+                    connection = %route.connection,
+                    reason = "slow_client_outbound_queue_full",
+                    "outbound queue is full; dropping the connection"
+                );
+                self.leave(route);
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => self.leave(route),
+        }
+    }
+
+    fn leave(&mut self, route: &ZoneConnection) {
+        self.client_handshakes.remove(route);
+        let session = self.runtime.zone_server(&route.zone_id).and_then(|server| {
+            server.connections().find_map(|(connection, session)| {
+                (connection == route.connection).then(|| session.clone())
+            })
+        });
+        if let Some(writer) = self.writers.remove(route)
+            && let Some(session) = &session
+        {
+            self.metrics.record_replication_queue_sample(
+                session,
+                writer.max_capacity() - writer.capacity(),
+                writer.max_capacity(),
+                false,
+            );
+        }
+        let last_ack = session
+            .as_ref()
+            .and_then(|session| {
+                self.runtime
+                    .zone_server(&route.zone_id)
+                    .and_then(|server| server.gateway().session(session))
+            })
+            .map_or(Tick::ZERO, |session| session.last_ack_tick);
+        match self.runtime.disconnect(route, last_ack, clock()) {
+            Ok(outbound) => self.dispatch(&route.zone_id, outbound),
+            Err(error) => tracing::warn!(
+                zone = %route.zone_id,
+                connection = %route.connection,
+                code = ?error.code(),
+                "multi-zone disconnect did not complete"
+            ),
+        }
+    }
+
+    fn close(&mut self, route: &ZoneConnection) {
+        if let Some(writer) = self.writers.get(route) {
+            let _ = writer.try_send(ServerFrame::Close);
+        }
+        self.leave(route);
+    }
+
+    fn revoke_principal(&mut self, principal: StableId) -> Result<usize, EngineError> {
+        let zone_ids: Vec<String> = self.runtime.zone_ids().map(str::to_owned).collect();
+        let mut total = 0usize;
+        for zone_id in zone_ids {
+            let Some(server) = self.runtime.zone_server_mut(&zone_id) else {
+                continue;
+            };
+            let (revoked, connections) = server.revoke_principal_sessions(principal)?;
+            total = total.saturating_add(revoked);
+            for connection in connections {
+                let route = ZoneConnection {
+                    zone_id: zone_id.clone(),
+                    connection,
+                };
+                if let Some(writer) = self.writers.remove(&route) {
+                    let _ = writer.try_send(ServerFrame::Close);
+                    self.metrics
+                        .session_expired_closes
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+        tracing::info!(
+            event = "world_principal_sessions_revoked",
+            principal = %principal,
+            revoked_sessions = total,
+            "world sessions revoked after trusted principal change"
+        );
+        Ok(total)
+    }
+
+    fn advance(&mut self) {
+        let started = Instant::now();
+        let interval_ms = u32::try_from(self.tick.as_millis()).unwrap_or(u32::MAX);
+        let budget = self.runtime.zone_ids().len();
+        let outcomes = self.runtime.tick_batch(budget, clock(), interval_ms);
+        for outcome in outcomes {
+            match outcome.result {
+                Ok(outbound) => self.dispatch(&outcome.zone_id, outbound),
+                Err(error) => {
+                    self.metrics.tick_failures.fetch_add(1, Ordering::Relaxed);
+                    tracing::error!(
+                        zone = %outcome.zone_id,
+                        code = ?error.code(),
+                        "authoritative zone tick failed"
+                    );
+                }
+            }
+        }
+        let elapsed = started.elapsed();
+        self.metrics.ticks.fetch_add(1, Ordering::Relaxed);
+        self.metrics.tick_nanos.fetch_add(
+            u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        if elapsed > self.tick {
+            self.metrics.tick_overruns.fetch_add(1, Ordering::Relaxed);
+        }
+        self.update_gauges();
+    }
+
+    fn token_envelope(&mut self, opened: &ZoneOpened) -> Envelope {
+        self.token_sequence = self.token_sequence.wrapping_add(1);
+        let id = MessageId::parse(&format!("tok-{:016x}", self.token_sequence))
+            .expect("generated token message ids are valid");
+        Envelope::new(
+            id,
+            message_kind(TOKEN_KIND),
+            serde_json::json!({ "resume": opened.opened.token.expose_secret() }),
+        )
+    }
+
+    fn error_reply(&mut self, request: &Envelope, error: &EngineError) -> Envelope {
+        self.reply_sequence = self.reply_sequence.wrapping_add(1);
+        let id = MessageId::parse(&format!("err-{:016x}", self.reply_sequence))
+            .expect("generated error message ids are valid");
+        let body = serde_json::to_value(ErrorPayload::from(error))
+            .unwrap_or_else(|_| serde_json::json!({ "code": "internal" }));
+        request.reply(id, message_kind(ERROR_KIND), body)
+    }
+
+    fn close_all(&mut self) {
+        for (route, writer) in std::mem::take(&mut self.writers) {
+            let _ = writer.try_send(ServerFrame::Close);
+            tracing::debug!(zone = %route.zone_id, connection = %route.connection, "closing connection at shutdown");
+        }
+    }
+
+    fn update_gauges(&self) {
+        let (depth, capacity, mut active_queues) = (0u64, 0u64, BTreeMap::new());
+        let mut depth = depth;
+        let mut capacity = capacity;
+        let mut connections = 0u64;
+        let mut entities = 0u64;
+        let mut retained_sessions = 0u64;
+        let mut ai = engine_sim::ai::AiDiagnostics::default();
+        for zone_id in self.runtime.zone_ids() {
+            let Some(server) = self.runtime.zone_server(zone_id) else {
+                continue;
+            };
+            entities = entities.saturating_add(
+                u64::try_from(server.gateway().zone().entity_count()).unwrap_or(u64::MAX),
+            );
+            connections = connections
+                .saturating_add(u64::try_from(server.connection_count()).unwrap_or(u64::MAX));
+            retained_sessions = retained_sessions.saturating_add(
+                u64::try_from(server.gateway().retained_sessions()).unwrap_or(u64::MAX),
+            );
+            let diagnostics = server.gateway().zone().ai_diagnostics();
+            ai.ticks = ai.ticks.saturating_add(diagnostics.ticks);
+            ai.decisions = ai.decisions.saturating_add(diagnostics.decisions);
+            ai.controller_scan_limit_reached = ai
+                .controller_scan_limit_reached
+                .saturating_add(diagnostics.controller_scan_limit_reached);
+            ai.update_limit_reached = ai
+                .update_limit_reached
+                .saturating_add(diagnostics.update_limit_reached);
+            for (connection, session) in server.connections() {
+                let route = ZoneConnection {
+                    zone_id: zone_id.to_owned(),
+                    connection,
+                };
+                if let Some(writer) = self.writers.get(&route) {
+                    let writer_depth = writer.max_capacity() - writer.capacity();
+                    depth = depth.saturating_add(u64::try_from(writer_depth).unwrap_or(u64::MAX));
+                    capacity = capacity
+                        .saturating_add(u64::try_from(writer.max_capacity()).unwrap_or(u64::MAX));
+                    active_queues.insert(session.clone(), (writer_depth, writer.max_capacity()));
+                }
+            }
+        }
+        self.metrics.queue_depth.store(depth, Ordering::Relaxed);
+        self.metrics
+            .queue_capacity
+            .store(capacity, Ordering::Relaxed);
+        self.metrics
+            .queue_depth_high_water
+            .fetch_max(depth, Ordering::Relaxed);
+        self.metrics
+            .queue_session_depth_high_water
+            .fetch_max(depth, Ordering::Relaxed);
+        self.metrics
+            .refresh_replication_queue_samples(&active_queues);
+        self.metrics.entities.store(entities, Ordering::Relaxed);
+        self.metrics
+            .connections
+            .store(connections, Ordering::Relaxed);
+        self.metrics
+            .retained_sessions
+            .store(retained_sessions, Ordering::Relaxed);
+        self.metrics.ai_ticks.store(ai.ticks, Ordering::Relaxed);
+        self.metrics
+            .ai_decisions
+            .store(ai.decisions, Ordering::Relaxed);
+        self.metrics
+            .ai_controller_scan_limit
+            .store(ai.controller_scan_limit_reached, Ordering::Relaxed);
+        self.metrics
+            .ai_update_limit
+            .store(ai.update_limit_reached, Ordering::Relaxed);
     }
 }
 
@@ -1376,11 +2899,16 @@ fn world_delta_events(previous: &WorldSnapshot, current: &WorldSnapshot) -> Vec<
         });
     }
 
-    if previous.zone.action_results != current.zone.action_results {
+    if previous.zone.action_results != current.zone.action_results
+        || previous.zone.action_correlations != current.zone.action_correlations
+    {
         pending.push(PendingWorldEvent {
             actor_id: None,
             kind: EVENT_ACTION_RESULTS_REPLACE,
-            payload: serde_json::json!({ "action_results": current.zone.action_results }),
+            payload: serde_json::json!({
+                "action_results": current.zone.action_results,
+                "action_correlations": current.zone.action_correlations,
+            }),
         });
     }
     if previous.zone.link_results != current.zone.link_results {
@@ -1427,6 +2955,7 @@ fn clock() -> Millis {
     Millis::new(i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1434,7 +2963,11 @@ mod tests {
     use engine_core::id::IdKind;
     use engine_core::time::DurationMs;
     use engine_sim::zone::Zone;
+    use std::sync::Mutex as StdMutex;
     use tokio::sync::watch;
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::layer::Context as LayerContext;
+    use tracing_subscriber::prelude::*;
 
     use crate::auth::{Authenticator, digest};
     use crate::demo;
@@ -1443,6 +2976,32 @@ mod tests {
     use world_server::{READY_KIND, SNAPSHOT_KIND};
 
     const TOKEN: &str = "service-test-token";
+
+    #[derive(Clone)]
+    struct CaptureEvents(Arc<StdMutex<Vec<String>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CaptureEvents {
+        fn on_event(&self, event: &tracing::Event<'_>, _context: LayerContext<'_, S>) {
+            let mut fields = CapturedFields::default();
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(fields.0);
+        }
+    }
+
+    #[derive(Default)]
+    struct CapturedFields(String);
+
+    impl Visit for CapturedFields {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            use std::fmt::Write as _;
+            let _ = write!(self.0, "{}={value:?} ", field.name());
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            use std::fmt::Write as _;
+            let _ = write!(self.0, "{}={value} ", field.name());
+        }
+    }
 
     #[test]
     fn metrics_follow_real_session_input_and_tick() {
@@ -2048,6 +3607,14 @@ mod tests {
         assert_eq!(next(&mut out_rx).await.kind.as_str(), SNAPSHOT_KIND);
         let token = next(&mut out_rx).await;
         assert_eq!(token.kind.as_str(), TOKEN_KIND);
+        const FAKE_TOKEN: &str = "FAKE_LYNX_TEST_TOKEN_DO_NOT_AUTHENTICATE";
+        let fixture = include_str!("../../world_server/tests/fixtures/world-token-1.1.0.json");
+        let expected = Envelope::decode(fixture).unwrap();
+        let mut token_golden = token.clone();
+        token_golden.id = expected.id;
+        token_golden.body["resume"] = FAKE_TOKEN.into();
+        assert_eq!(token_golden.encode().unwrap(), fixture.trim());
+        assert!(!format!("{token_golden:?}").contains(FAKE_TOKEN));
         let resume = ResumeToken::new(
             token.body["resume"]
                 .as_str()
@@ -2418,6 +3985,110 @@ mod tests {
         for id in changed_ids {
             assert!(event_actors.contains(id.to_string().as_str()));
         }
+    }
+
+    #[test]
+    fn action_correlation_connects_wire_id_to_durable_zone_event() {
+        use crate::authority::tests::MemoryLeases;
+        use crate::persistence::ZoneLeaseStore;
+
+        let (service, grant, _) = service();
+        let zone_id = service
+            .server
+            .gateway()
+            .zone()
+            .config()
+            .instance
+            .to_string();
+        let leases = Arc::new(MemoryLeases::default());
+        let lease_store: Arc<dyn ZoneLeaseStore> = leases;
+        let authority = ZoneAuthority::acquire(
+            lease_store,
+            &zone_id,
+            "action-correlation-owner",
+            Duration::from_secs(30),
+        )
+        .unwrap()
+        .unwrap();
+        let mut service = service
+            .with_persistence(
+                Arc::new(TransactionalMemoryStore::default()),
+                Duration::from_secs(1),
+            )
+            .with_zone_authority(authority.clone());
+        service.try_save_snapshot().unwrap();
+
+        let target = service
+            .server
+            .gateway()
+            .zone()
+            .entities()
+            .find(|entity| entity.prototype.as_str() == "prop.door")
+            .unwrap()
+            .id;
+        let (outbound, _receiver) = mpsc::channel(16);
+        let admitted = service
+            .admit(
+                &Credential::Static(grant),
+                &Hello {
+                    handshake: demo::handshake().unwrap(),
+                    last_ack_tick: Tick::ZERO,
+                },
+                &outbound,
+            )
+            .unwrap();
+        let correlation_id = "trace-action-41";
+        let request = Envelope::new(
+            MessageId::parse(correlation_id).unwrap(),
+            message_kind("action.request"),
+            serde_json::json!({
+                "target": target,
+                "verb": "open",
+                "params": {},
+                "client_tick": 0,
+            }),
+        );
+        let captured = Arc::new(StdMutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CaptureEvents(Arc::clone(&captured)));
+        tracing::subscriber::with_default(subscriber, || {
+            service.receive(admitted.connection, &request);
+        });
+        service.advance();
+
+        let rendered = captured.lock().unwrap().join("\n");
+        assert!(rendered.contains("world_action_processed"));
+        assert!(rendered.contains("service=lynx-world"));
+        assert!(rendered.contains("zone="));
+        assert!(rendered.contains("session="));
+        assert!(rendered.contains("actor="));
+        assert!(rendered.contains("message_kind=action.request"));
+        assert!(rendered.contains("correlation_id=trace-action-41"));
+        assert!(rendered.contains("outcome=applied"));
+        assert!(rendered.contains("duration_ms="));
+        assert!(!rendered.contains(TOKEN));
+
+        let correlations = service
+            .server
+            .gateway()
+            .zone()
+            .snapshot()
+            .action_correlations;
+        assert!(correlations.values().any(|id| id == correlation_id));
+        let recovered =
+            demo::restore_zone_quarantining(&service.server.gateway().zone().snapshot()).unwrap();
+        assert_eq!(recovered.zone.snapshot().action_correlations, correlations);
+        let events = authority.events_after(-1).unwrap();
+        let event = events
+            .iter()
+            .find(|event| event.kind == EVENT_ACTION_RESULTS_REPLACE)
+            .expect("the action correlation should be appended to the durable event log");
+        assert!(
+            event.payload["action_correlations"]
+                .as_object()
+                .unwrap()
+                .values()
+                .any(|value| value == correlation_id)
+        );
     }
 
     #[test]

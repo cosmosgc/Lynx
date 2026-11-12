@@ -44,6 +44,12 @@ config_path="$root/server/nakama/local.yml"
 [[ -f "$config_path" ]] || lynx_die "Nakama configuration not found: $config_path"
 
 console_user="${LYNX_NAKAMA_CONSOLE_USER:-}"
+lynx_secret_env LYNX_NAKAMA_CONSOLE_PASSWORD
+lynx_secret_env LYNX_NAKAMA_CONSOLE_SIGNING_KEY
+lynx_secret_env LYNX_NAKAMA_SERVER_KEY
+lynx_secret_env LYNX_NAKAMA_SESSION_ENCRYPTION_KEY
+lynx_secret_env LYNX_NAKAMA_REFRESH_ENCRYPTION_KEY
+lynx_secret_env LYNX_NAKAMA_RUNTIME_HTTP_KEY
 console_password="${LYNX_NAKAMA_CONSOLE_PASSWORD:-}"
 console_signing_key="${LYNX_NAKAMA_CONSOLE_SIGNING_KEY:-}"
 server_key="${LYNX_NAKAMA_SERVER_KEY:-}"

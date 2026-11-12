@@ -96,9 +96,19 @@ servers.
   `Conflict` and keeps its current token.
 - The client's acknowledged tick is clamped to the authoritative tick.
 - Admission is token-bucket limited per peer IP for upgrade handshakes, failed
-  credentials, and connection churn. The limiter has a fixed maximum identity
-  map and evicts idle entries; it uses the TCP peer address, not a forwarding
-  header supplied by an untrusted client.
+  credentials, resume-token attempts, and connection churn. Resume attempts have
+  an independent bucket, so successful identity traffic cannot refill the
+  token-guessing budget. The limiter has a fixed maximum identity map and evicts
+  idle entries; it uses the TCP peer address, not a forwarding header supplied
+  by an untrusted client.
+- Failed credential attempts and rejected resume admissions emit structured
+  `world_admission_denied` / `world_resume_admission_denied` records with the
+  source IP and a stable reason only. Character-selection denial records include
+  the requested character ID. Credential values and backend error text are
+  excluded. Rate-limit and trusted principal-revocation events use stable event
+  names and bounded fields; session identifiers belong in logs, never metric
+  labels. See the [operations security event policy](operations.md#security-event-logs)
+  for collection, access, and retention requirements.
 - After successful admission, total and message-family token buckets are keyed
   by the server-issued session ID. `action.request`, attack actions, chat,
   movement, calendar, and UI control each have separate budgets. A resumed
@@ -118,6 +128,9 @@ servers.
   authorized server-side, regardless of what the UI shows.
 
 ## Admin roles (initial)
+
+Admin identity and the separation between provider authentication and Lynx
+authorization are defined in [ADR 0029](adr/0029-admin-identity-and-roles.md).
 
 | Role | Capabilities |
 |---|---|
@@ -141,6 +154,9 @@ mode for every admin client.
   rejected.
 
 ## Content and user-generated content
+
+The initial publication policy is defined in
+[ADR 0026](adr/0026-user-content-publishing-policy.md).
 
 - User content is data, not code. It is schema-validated, size-bounded, and
   scanned for disallowed asset types before publishing.

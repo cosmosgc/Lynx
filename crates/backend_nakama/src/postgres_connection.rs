@@ -27,7 +27,7 @@ pub fn config_from_env(application_name: &str) -> Result<Config, &'static str> {
         .map_err(|_| "LYNX_PG_PORT is not a valid port")?;
     let database = required_environment("LYNX_PG_DATABASE")?;
     let user = required_environment("LYNX_PG_USER")?;
-    let password = required_environment("LYNX_PG_PASSWORD")?;
+    let password = secret_environment("LYNX_PG_PASSWORD")?;
 
     let mut config = Config::new();
     config
@@ -146,6 +146,51 @@ fn required_environment(name: &str) -> Result<String, &'static str> {
     std::env::var(name).map_err(|_| "a required PostgreSQL environment variable is missing")
 }
 
+fn secret_environment(name: &str) -> Result<String, &'static str> {
+    let file_name = format!("{name}_FILE");
+    match (std::env::var_os(name), std::env::var_os(&file_name)) {
+        (Some(value), Some(path)) => {
+            let value = value
+                .into_string()
+                .map_err(|_| "a PostgreSQL secret environment variable is not valid UTF-8")?;
+            if !value.is_empty() {
+                return Err("a PostgreSQL secret must use either its value or file variable");
+            }
+            let bytes = fs::read(path).map_err(|_| "a PostgreSQL secret file could not be read")?;
+            let value = String::from_utf8(bytes)
+                .map_err(|_| "a PostgreSQL secret file is not valid UTF-8")?;
+            let value = value.trim_end_matches(['\r', '\n']).to_owned();
+            if value.is_empty() {
+                Err("a PostgreSQL secret file is empty")
+            } else {
+                Ok(value)
+            }
+        }
+        (Some(value), None) => {
+            let value = value
+                .into_string()
+                .map_err(|_| "a PostgreSQL secret environment variable is not valid UTF-8")?;
+            if value.is_empty() {
+                Err("a PostgreSQL secret environment variable is empty")
+            } else {
+                Ok(value)
+            }
+        }
+        (None, Some(path)) => {
+            let bytes = fs::read(path).map_err(|_| "a PostgreSQL secret file could not be read")?;
+            let value = String::from_utf8(bytes)
+                .map_err(|_| "a PostgreSQL secret file is not valid UTF-8")?;
+            let value = value.trim_end_matches(['\r', '\n']).to_owned();
+            if value.is_empty() {
+                Err("a PostgreSQL secret file is empty")
+            } else {
+                Ok(value)
+            }
+        }
+        (None, None) => Err("a required PostgreSQL environment variable is missing"),
+    }
+}
+
 fn environment_is_true(name: &str) -> bool {
     std::env::var(name).is_ok_and(|value| is_true_flag(&value))
 }
@@ -154,6 +199,7 @@ fn is_true_flag(value: &str) -> bool {
     value.eq_ignore_ascii_case("true")
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

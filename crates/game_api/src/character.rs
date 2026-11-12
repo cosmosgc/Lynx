@@ -285,6 +285,7 @@ pub trait EphemeralCharacterIntentService: CharacterService {
     ) -> Result<Character, ApiError>;
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;

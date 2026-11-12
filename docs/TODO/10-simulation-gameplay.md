@@ -24,6 +24,7 @@ that authority end to end.
 
 - **Priority:** P0
 - **Status:** Done — queued, collision-checked, rate-limited movement authority
+- **Completion record:** [sim-001-server-authoritative-movement.md](completed/sim-001-server-authoritative-movement.md)
 - **Depends on:** —
 - **References:** [architecture §Simulation model](../architecture.md#simulation-model),
   [networking §Reconnect and recovery](../networking.md#reconnect-and-recovery),
@@ -118,6 +119,7 @@ this task owns the authoritative server side.
 
 - **Priority:** P0
 - **Status:** Done — reconnect and destination-snapshot resets are covered; graphical review remains tracked in `CLT-019`
+- **Completion record:** [sim-002-client-prediction-and-reconciliation-contract.md](completed/sim-002-client-prediction-and-reconciliation-contract.md)
 - **Depends on:** `SIM-001`, `CLT-005`
 - **References:** ADR 0014, `SIM-001`
 
@@ -190,6 +192,7 @@ which requires a controlled correction and a graphical demo environment.
 
 - **Priority:** P0
 - **Status:** Done
+- **Completion record:** [sim-003-server-derived-combat-resolution.md](completed/sim-003-server-derived-combat-resolution.md)
 - **Depends on:** —
 - **References:** [security §Authority invariants](../security.md#authority-invariants),
   `crates/engine_sim/src/action.rs::apply_attack`
@@ -262,7 +265,8 @@ prioritizing tanks). It is a design proposal, not an implementation contract.
 ## SIM-005 — Combat depth: status, mitigation, death, respawn
 
 - **Priority:** P2
-- **Status:** Done — timed effects, typed mitigation, respawn recovery, bounded audit, and reconnect/transfer policy documented
+- **Status:** Done — timed effects, typed mitigation, respawn recovery, bounded audit, and reconnect/transfer policy documented; see [completion record](completed/sim-005-combat-depth.md)
+- **Completion record:** [sim-005-combat-depth.md](completed/sim-005-combat-depth.md)
 - **Depends on:** `SIM-003`
 - **References:** `SIM-003`, `SIM-004`
 
@@ -335,7 +339,7 @@ the bounded audit ring remains the current operator-visible record.
 ## SIM-006 — AI behaviors, schedules, and perception budgets
 
 - **Priority:** P1
-- **Status:** In progress — bounded Guard/GuardChase primitives, typed content bindings, and fair rotating AI scheduling are implemented; behavior graphs, schedules, group aggro, persistent inspection, and a shared action budget remain
+- **Status:** In progress — bounded Guard/GuardChase primitives, validated content behavior graphs with patrol/flee/use instructions, typed content bindings, fair rotating AI scheduling, content-authored UTC daily windows, budgeted group aggro, and a player/AI shared action cap are implemented; seasonal schedules and a privileged persistent inspection surface remain
 - **Depends on:** `SIM-001`
 - **References:** `crates/engine_sim/src/ai.rs`, `mind.rs`,
   [world simulation](../world-simulation.md)
@@ -378,10 +382,11 @@ control, invalid ranges, and no candidate lookahead.
 discovered target through the same `apply_action` pipeline used by players.
 Only current AI controllers are selected; player control is never overridden.
 Controller records scanned, AI updates, per-observer candidates/LOS/targets,
-and AI action attempts (including rejected actions) have deterministic caps.
+same-tick group target shares, and AI action attempts (including rejected
+actions) have deterministic caps.
 The last tick's server-side report includes decisions, perception counts and
-status, targets, and action rejections. Unknown behaviors are reported and do
-not act. Faction reputation expiry uses the policy's explicit simulation epoch
+status, targets, action rejections, and remaining shared action budget. Unknown
+behaviors are reported and do not act. Faction reputation expiry uses the policy's explicit simulation epoch
 and tick duration. Controller selection rotates a runtime-only stable-ID cursor:
 each tick starts after the previous tick's last inspected record and wraps
 around, so low `max_controller_candidates` or `max_ai_updates` limits eventually
@@ -391,26 +396,44 @@ never expose it to clients.
 
 This is opt-in: the running world must install the policy and restore it after
 snapshot reload; the demo installs a bounded GuardChase policy and training
-scenario. `max_actions` caps AI
-attempts here, **not** all player plus AI actions: player actions are currently
-applied immediately without a shared tick counter. The policy epoch must match
-the authoritative reputation timebase. Existing unbounded perception/helper
-APIs are unchanged. Content-defined behavior graphs, scheduling, group aggro,
-persistent inspection, and a shared action budget remain. AI
+scenario. Unique action requests from players and AI share the zone's
+`max_actions` quota between tick boundaries; rejected validation attempts
+consume quota and idempotent retries do not. The quota resets after the tick's
+AI phase. `AiTickReport` exposes the player-plus-AI attempts admitted and quota
+remaining for the completed window. Movement queue admission has its own
+pending-intent bound. The policy epoch must match the authoritative reputation
+timebase. Existing unbounded perception/helper
+APIs are unchanged. The optional behavior graph is evaluated from its entry on
+each decision; `perceive_hostiles`, `attack_target`, `chase_target`,
+`flee_target`, `interact_target` (the validated `use` action), and terminal
+`wait` nodes branch on operation success/failure. Content validation caps graphs
+at 64 nodes and checks IDs and transitions; runtime caps execution at 16 steps
+per actor per tick and reports exhaustion. `flee_target` moves through the same
+authoritative speed, geometry, collision, and dynamic-blocker checks as other AI
+movement. `patrol` uses an authored looping route of 2 to 64 finite positions,
+keeps a runtime-only route cursor, and attempts at most one movement per actor
+per tick through the same authoritative movement checks. Seasonal scheduling
+and a privileged persistent admin inspection surface remain. AI
 policy now accepts server-approved `AiBehaviorDefinition` bindings, allowing a
 content behavior ID to select the bounded Guard or GuardChase primitive and its
 perception range; a test verifies a custom ID and constrained range.
 `engine_content` defines and validates typed behavior semantics and finite
 positive ranges, while `lynx_world::demo::ai_behavior_bindings` maps a loaded
-`ContentSet` into stable runtime bindings; tests verify authored primitive and
-range values cross this seam without changing simulation code. GuardChase
+`ContentSet` into stable runtime bindings. `lynx-world serve --content-bundle`
+loads and verifies those bindings and merges matching IDs into the running AI
+policy. Optional daily windows use UTC
+minutes, support midnight wrap, validate non-empty bounds, and are evaluated
+against the same simulation timestamp used by AI decisions; inactive behaviors
+report `schedule_inactive` without perceiving or acting. Authored `aggro_group`
+keys share a living hostile target only after an ally's attack succeeds, with a
+per-tick reuse cap and hostility recheck for every recipient. GuardChase
 uses the zone's cumulative path budget and per-agent retry state, then moves
 through the same server-side collision and dynamic-obstacle checks as other
 authoritative movement. `cargo test -p engine_sim
 policy_binds_content_behavior_ids_to_bounded_guard_semantics` passes.
-Only the Guard and GuardChase primitives exist, so content-only behavior graphs,
-schedules, group aggro, persistent inspection, and a shared action budget remain
-open. Tests `bounded_controller_scan_rotates_across_all_ai_controllers` and
+The legacy Guard and GuardChase primitives remain available alongside graphs.
+Seasonal schedules and privileged persistent admin inspection remain open. Tests
+`bounded_controller_scan_rotates_across_all_ai_controllers` and
 `rotated_controller_scan_replays_deterministically` prove bounded limits serve
 every AI controller and replay identically. Movement authority is implemented in
 `SIM-001`; visual client reconciliation remains in `SIM-002`.
@@ -421,6 +444,7 @@ every AI controller and replay identically. Movement authority is implemented in
 
 - **Priority:** P1
 - **Status:** Done — cumulative budgets, path diagnostics, replan policy, expiring blockers, shared nav bake, and an opt-in GuardChase consumer
+- **Completion record:** [sim-007-navigation-budgets-and-replan-policy.md](completed/sim-007-navigation-budgets-and-replan-policy.md)
 - **Depends on:** `SIM-001`
 - **References:** ADR 0010, `crates/engine_sim/src/nav.rs`
 
@@ -478,7 +502,7 @@ Use `Zone::add_dynamic_obstacle` for tick-expiring temporary blockers and
 ## SIM-008 — World chat and presence
 
 - **Priority:** P1
-- **Status:** In progress — one authenticated Nakama persistent room is integrated in the client; full Nakama-backed global/direct/group/party chat and world admission binding remain
+- **Status:** In progress — authenticated room chat plus authorized direct/group channel discovery, joins, history, and sends are integrated; party channels, world-admission binding, and live service validation remain
 - **Depends on:** —
 - **References:** `crates/game_api/src/chat.rs`, `social.rs`,
   [README Phase 3](../../README.md#phase-3--interaction-and-mind-system--in-progress),
@@ -532,7 +556,10 @@ volatile across process restarts, and disconnected clients must request it
 again. The gateway fallback caps sends at five messages per session per second
 and presence at 100 entries. `NET-009` moderation/reporting and `CNT-008`
 user-content policy remain unavailable; authenticated routing for direct,
-group, and party conversations remains open. The transport's existing
+party conversations and world-admission binding remain open. Authenticated
+direct and group destinations are now discovered through the account-scoped
+`GET /social/chat/channels` route and exposed as client tabs; the client only
+joins destinations in that server-provided page. The transport's existing
 chat-family limiter is not an authorization or moderation substitute.
 
 ---
@@ -658,7 +685,7 @@ chat-family limiter is not an authorization or moderation substitute.
 ## SIM-014 — Additional zones and travel
 
 - **Priority:** P2
-- **Status:** In progress — authored-route player handoff and multi-zone lease foundations are implemented; durable receipts and runtime scheduling remain
+- **Status:** In progress — authored-map startup, per-zone leases/checkpoints, zone-addressed transport, fair multi-zone ticking, stable static entity placements, patrol behavior bindings, zone-local activation links, and startup-loaded faction targeting are wired; live faction refresh, world aggregate mutation ownership, live travel handoff, and live recovery validation remain
 - **Depends on:** `SIM-001`, `PST-005`
 
 **Scope**
@@ -680,13 +707,15 @@ chat-family limiter is not an authorization or moderation substitute.
 **Foundation:** `WorldMapDefinition::route_kind` resolves only an authored
 directed route (or a declared bidirectional reverse route) and returns no route
 for arbitrary zone pairs. The atlas loader validates route endpoints against
-placed zones. This prevents a future handoff caller from treating an arbitrary
+placed zones. This prevents a handoff caller from treating an arbitrary
 destination as valid, but does not itself move entities. `ZoneAuthoritySet`
 acquires independent per-zone leases in stable zone-ID order and attempts to
-release earlier acquisitions if a later zone is unavailable. The runtime still
-needs to connect this seam to multi-zone scheduling, enforce route-specific
-access and travel cooldowns, write durable handoff receipts, and integrate
-independent recovery.
+release earlier acquisitions if a later zone is unavailable. `ZoneSnapshotStore`
+now writes an independent file or lease-fenced PostgreSQL checkpoint for each
+zone. The executable map mode now connects zone leases, checkpoints, scheduling,
+gateway ownership, and zone-addressed transport. Route-specific access and
+cooldown enforcement in live travel and independent crash-recovery acceptance
+against PostgreSQL remain.
 
 `ZoneHandoffCoordinator` now validates both atlas placement and the authored
 directed/bidirectional route before moving a persistent, living player entity.
@@ -694,18 +723,60 @@ The simulation handoff validates an unblocked, unoccupied destination cell,
 preserves identity and compatible timed combat/action-cooldown state, clears the
 old controller, and rolls back the destination spawn if source removal fails.
 Request receipts are idempotent and bounded in-process; snapshots taken after a
-completed transfer recover with the entity in exactly one zone. These receipts
-are not yet durable, and saving the two zone snapshots is not yet one atomic
-transaction, so crash-window recovery remains open work rather than a promised
-guarantee.
+completed transfer recover with the entity in exactly one zone. Migration 0017
+adds a PostgreSQL handoff store contract that verifies source/destination
+snapshot ownership and commits both snapshot rows plus an integrity-checked,
+idempotent receipt under both zone lease fences in one transaction.
+`handoff_player_durable` stages transfer on private zone copies and replaces
+live state only after commit; a commit-connection failure requires the caller
+to stop and reload because the durable outcome can be uncertain. The executable
+does not yet call this API, and live database recovery remains unverified;
+crash-window recovery is not yet claimed.
 
-`ZoneTickScheduler` defines the initial multi-zone scheduling policy: stable
+`ZoneTickScheduler` defines the multi-zone scheduling policy: stable
 round-robin order, one authoritative zone-tick quantum per zone in each batch,
 and a rotating cursor when the global quantum budget is smaller than the active
-zone set. The current single-zone `Service` loop does not yet consume this
-scheduler; connecting zone ownership, gateways, session routing, and per-zone
-persistence to it remains runtime integration work. It therefore provides a
-testable fairness policy, not a claim that multiple zones are already served.
+zone set. `MultiZoneService` consumes it and routes zone-addressed session
+events while checkpointing zones independently.
+
+**Per-zone checkpoint seam (2026-11-12):** `ZoneSnapshotStore` now has an
+atomic one-file-per-zone adapter and a PostgreSQL adapter backed by the existing
+`lynx.zone_snapshots` history table. PostgreSQL writes require the zone's live
+lease fence in the same transaction, and reads verify the payload hash, tick,
+schema major, and zone identity. The authored-map executable uses the
+PostgreSQL adapter; its recovery path still needs live acceptance.
+
+**Authored zone runtime adapter (2026-11-12):** The `core.zone` component now
+defines grid dimensions, origin, vertical bounds, blocked cells, session/entity
+capacity, and an optional entry point. `content_runtime::build_authored_zones`
+constructs a `Zone` for every map placement, validates the safe entry cell,
+loads stable zone-local entity placements, and derives stable instance IDs from
+the map/definition/placement keys. Static entity instances are reconstructed
+after snapshot restore and remain outside persisted snapshots. The starter
+`core.interactable` schema binds to authoritative interaction behavior; other
+`core.door` binds initial open state and `core.health` binds full hit points.
+`core.movement` binds collision radius and occupancy to simulation collision
+and spawn selection. `core.behavior` assigns bounded content behavior IDs and
+authored-map zones install the AI policy using the directional faction catalog
+loaded from the database-backed world aggregate; patrol and hostile target
+selection run from that startup snapshot. Live faction relation refresh still
+needs shared world ownership. Zone-local `activated` links
+connect placement IDs, reject activation cycles, and are rebuilt after snapshot
+  recovery. Link definitions declare endpoint components and supported events;
+  `activated`, `opened`, and `closed` signals dispatch `toggle_door`,
+  `open_door`, and `close_door` actions to unlocked doors and emit the typed
+  link ID. Pressure-plate/AI signals and cross-zone links remain future work. Because
+  placements are static definitions, health changes reset on
+restart. Locked door policies, other extension bindings, and per-placement
+persistence/overrides remain incomplete.
+
+**Runtime owner slice (2026-11-12):** `MultiZoneRuntime` can register distinct
+`WorldServer`s by stable zone instance ID, reject duplicate authenticated
+identities across gateways, route open/resume/input/disconnect operations with a
+zone-local connection address, fairly tick a bounded batch, and checkpoint one
+or all zones. Failed zone ticks remain isolated in per-zone outcomes. The
+authored-map executable constructs this owner and routes `/world/{zone_id}`;
+the legacy `/world` endpoint selects the stable first zone ID.
 
 Until the multi-zone session router exists, zone chat and history are scoped to
 one gateway/zone: messages are not forwarded to another zone, and disconnected
@@ -803,6 +874,7 @@ action rules are still design-only.
 
 - **Priority:** P1
 - **Status:** Done — release benchmark covers idle, movement, combat, guard, and chase workloads; seeded multi-tick replay covers movement, timed combat effects, and AI
+- **Completion record:** [sim-018-determinism-and-tick-budget.md](completed/sim-018-determinism-and-tick-budget.md)
 - **Depends on:** —
 - **References:** [architecture §Simulation model](../architecture.md#simulation-model),
   `OPS-001`

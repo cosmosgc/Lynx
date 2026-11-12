@@ -14,7 +14,7 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use engine_content::{BehaviorKind, ContentKind, ContentSet};
+use engine_content::{BehaviorInstruction, BehaviorKind, ContentKind, ContentSet};
 use engine_core::error::{EngineError, ErrorCode};
 use engine_core::faction::{Alignment, FactionCatalog, Thresholds};
 use engine_core::faction::{
@@ -31,7 +31,10 @@ use engine_core::world_event::{
 };
 use engine_net::protocol::Handshake;
 use engine_sim::action::Verb;
-use engine_sim::ai::{AiBehaviorDefinition, AiBehaviorKind, AiTickPolicy, PerceptionBudget};
+use engine_sim::ai::{
+    AiBehaviorDefinition, AiBehaviorGraph, AiBehaviorInstruction, AiBehaviorKind, AiBehaviorNode,
+    AiTickPolicy, PerceptionBudget,
+};
 use engine_sim::combat::CombatStats;
 use engine_sim::entity::{
     Door, EntityRecord, FactionMembership, Interactable, TimedSlow, UiAction, UiField, UiProvider,
@@ -248,12 +251,17 @@ fn install_demo_ai_policy(zone: &mut Zone) -> Result<(), EngineError> {
             max_targets: 1,
         },
         max_controller_candidates: 128,
+        max_group_aggro_shares: 32,
         epoch: Millis::new(now_ms()),
         tick_ms: 50,
         behaviors: vec![AiBehaviorDefinition {
             id: definition("behavior.demo_guard_chase")?,
             kind: AiBehaviorKind::GuardChase,
             range_m: 32.0,
+            schedule: None,
+            aggro_group: None,
+            graph: None,
+            patrol_route: Vec::new(),
         }],
         navigation_speed_m_per_s: 3.0,
         navigation_replan: ReplanPolicy::default(),
@@ -286,6 +294,27 @@ pub fn ai_behavior_bindings(
                 )
                 .with_detail("behavior", definition.id.to_string()));
             }
+            if authored
+                .schedule
+                .is_some_and(|schedule| !schedule.is_valid())
+            {
+                return Err(EngineError::new(
+                    ErrorCode::InvalidRequest,
+                    "behavior content has an invalid daily schedule",
+                )
+                .with_detail("behavior", definition.id.to_string()));
+            }
+            if authored
+                .graph
+                .as_ref()
+                .is_some_and(|graph| !graph.is_valid())
+            {
+                return Err(EngineError::new(
+                    ErrorCode::InvalidRequest,
+                    "behavior content has an invalid instruction graph",
+                )
+                .with_detail("behavior", definition.id.to_string()));
+            }
             let kind = match authored.kind {
                 BehaviorKind::Guard => AiBehaviorKind::Guard,
                 BehaviorKind::GuardChase => AiBehaviorKind::GuardChase,
@@ -294,9 +323,89 @@ pub fn ai_behavior_bindings(
                 id: definition.id.clone(),
                 kind,
                 range_m: authored.range_m,
+                schedule: authored.schedule,
+                aggro_group: authored.aggro_group.clone(),
+                patrol_route: authored.patrol_route.clone(),
+                graph: authored.graph.as_ref().map(|graph| AiBehaviorGraph {
+                    entry: graph.entry.clone(),
+                    nodes: graph
+                        .nodes
+                        .iter()
+                        .map(|node| AiBehaviorNode {
+                            id: node.id.clone(),
+                            instruction: match node.instruction {
+                                BehaviorInstruction::PerceiveHostiles => {
+                                    AiBehaviorInstruction::PerceiveHostiles
+                                }
+                                BehaviorInstruction::AttackTarget => {
+                                    AiBehaviorInstruction::AttackTarget
+                                }
+                                BehaviorInstruction::ChaseTarget => {
+                                    AiBehaviorInstruction::ChaseTarget
+                                }
+                                BehaviorInstruction::FleeTarget => {
+                                    AiBehaviorInstruction::FleeTarget
+                                }
+                                BehaviorInstruction::InteractTarget => {
+                                    AiBehaviorInstruction::InteractTarget
+                                }
+                                BehaviorInstruction::Patrol => AiBehaviorInstruction::Patrol,
+                                BehaviorInstruction::Wait => AiBehaviorInstruction::Wait,
+                            },
+                            on_success: node.on_success.clone(),
+                            on_failure: node.on_failure.clone(),
+                        })
+                        .collect(),
+                }),
             })
         })
         .collect()
+}
+
+/// Build the bounded AI tick policy for authored-map zones.
+///
+/// The caller supplies the database-backed directional faction catalog shared
+/// by every zone in the authored map.
+///
+/// # Errors
+/// Returns behavior conversion errors or rejects a zero simulation tick.
+pub fn authored_ai_tick_policy(
+    content: &ContentSet,
+    factions: FactionCatalog,
+    epoch: Millis,
+    tick_ms: u32,
+) -> Result<Option<AiTickPolicy>, EngineError> {
+    if tick_ms == 0 {
+        return Err(EngineError::new(
+            ErrorCode::InvalidRequest,
+            "authored AI tick interval must be positive",
+        ));
+    }
+    let behaviors = ai_behavior_bindings(content)?;
+    if behaviors.is_empty() {
+        return Ok(None);
+    }
+    let range_m = behaviors
+        .iter()
+        .map(|behavior| behavior.range_m)
+        .fold(1.0_f32, f32::max);
+    Ok(Some(AiTickPolicy {
+        factions,
+        thresholds: Thresholds::default(),
+        range_m,
+        perception: PerceptionBudget {
+            max_candidates: 128,
+            max_line_of_sight: 32,
+            max_targets: 1,
+        },
+        max_controller_candidates: 128,
+        max_group_aggro_shares: 32,
+        epoch,
+        tick_ms,
+        behaviors,
+        navigation_speed_m_per_s: 3.0,
+        navigation_replan: ReplanPolicy::default(),
+    }))
 }
 
 fn demo_rules() -> Arc<dyn ItemRules + Send + Sync> {
@@ -361,13 +470,33 @@ fn barrel_ui(schema: DefinitionId) -> UiProvider {
                     ("slot".to_string(), "0".to_string()),
                     ("quantity".to_string(), "2".to_string()),
                 ]),
+                allowed_params: std::collections::BTreeSet::new(),
+            },
+            UiAction {
+                name: "insert".to_string(),
+                label: "Guardar 1 moeda".to_string(),
+                params: std::collections::BTreeMap::from([
+                    ("slot".to_string(), "1".to_string()),
+                    ("quantity".to_string(), "1".to_string()),
+                ]),
+                allowed_params: std::collections::BTreeSet::new(),
             },
             UiAction {
                 name: "inspect".to_string(),
                 label: "Inspecionar".to_string(),
                 params: std::collections::BTreeMap::new(),
+                allowed_params: std::collections::BTreeSet::new(),
             },
         ])
+}
+
+fn lockpick_ui(schema: DefinitionId) -> UiProvider {
+    UiProvider::new(schema, "Vault Lock").with_actions([UiAction {
+        name: "play".to_string(),
+        label: "Tentar combinação".to_string(),
+        params: std::collections::BTreeMap::new(),
+        allowed_params: std::collections::BTreeSet::from(["guess".to_string()]),
+    }])
 }
 
 /// Spawn one player's character and nearby props.
@@ -407,8 +536,17 @@ fn spawn_grant(
         )
         .with_health(100)
         .with_interactable(
-            Interactable::new(4.0, [Verb::Inspect, Verb::Attack, Verb::Use, Verb::Take])
-                .without_line_of_sight(),
+            Interactable::new(
+                4.0,
+                [
+                    Verb::Inspect,
+                    Verb::Attack,
+                    Verb::Use,
+                    Verb::Take,
+                    Verb::Insert,
+                ],
+            )
+            .without_line_of_sight(),
         )
         .with_inventory(barrel_inventory()?)
         .with_ui(barrel_ui(definitions.display_schema.clone()))
@@ -440,10 +578,7 @@ fn spawn_grant(
             locked: true,
             key: None,
         })
-        .with_ui(UiProvider::new(
-            definitions.lockpick_schema.clone(),
-            "Vault Lock",
-        ))
+        .with_ui(lockpick_ui(definitions.lockpick_schema.clone()))
         .with_minigame(Minigame::new(
             definitions.lockpick_minigame.clone(),
             3,
@@ -627,6 +762,7 @@ fn random_seed() -> Result<u64, EngineError> {
     Ok(u64::from_le_bytes(bytes))
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -699,7 +835,18 @@ mod tests {
                         components: std::collections::BTreeMap::default(),
                         presentation: None,
                         tags: std::collections::BTreeSet::default(),
-                        behavior: Some(BehaviorDefinition { kind, range_m }),
+                        travel_triggers: Vec::new(),
+                        entity_placements: Vec::new(),
+                        entity_links: Vec::new(),
+                        link: None,
+                        behavior: Some(BehaviorDefinition {
+                            kind,
+                            range_m,
+                            schedule: None,
+                            aggro_group: None,
+                            graph: None,
+                            patrol_route: Vec::new(),
+                        }),
                     },
                 )
                 .unwrap();

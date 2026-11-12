@@ -3,6 +3,11 @@
 - **Status:** Accepted
 - **Date:** 2026-10-24
 
+**Implementation status (2026-11-12):** Later work added production Nakama
+session admission, PostgreSQL-backed world snapshots and resumable sessions,
+transport rate limits, metrics, and reverse-proxy TLS guidance. The static
+hashed-token path described below remains a development mode.
+
 ## Context
 
 ADR 0013 left `world_gateway` transport-agnostic and tested, but there was no
@@ -59,10 +64,12 @@ development authentication path rather than a client-chosen identity.
 - **Backpressure is explicit.** Each connection has a bounded outbound queue.
   A client that cannot drain it is detached rather than stalling the authority
   loop. The global inbound event channel applies socket backpressure.
-- **No persistence in this increment.** Zone state, sessions, and demo
-  characters are in memory and reset on restart. Nakama token validation,
-  durable character ownership, rate limiting, metrics, and TLS termination
-  remain future work.
+- **No persistence in the initial increment.** At this ADR's date, zone state,
+  sessions, and demo characters reset on restart. Later increments added
+  PostgreSQL world snapshots and durable resume state; active sockets still
+  disconnect during process restart. Nakama validation, durable character
+  ownership, rate limiting, metrics, and reverse-proxy TLS now have separate
+  implementations and operational guidance.
 - **Graceful shutdown drains rather than saves.** On `Ctrl+C`, readiness turns
   false, the listener stops accepting, the authority loop closes connections,
   and the process exits. Because state is in memory, nothing is persisted.
@@ -85,8 +92,9 @@ development authentication path rather than a client-chosen identity.
   exclude from logs, traces, and crash reports; transports must enforce that.
 - Plain WebSocket carries no transport security. Production deployment needs
   TLS termination at a reverse proxy or an equivalent transport.
-- Without persistence, a process restart still logs every player out. This is
-  accepted until the session and snapshot stores land.
+- A process restart closes active sockets. When PostgreSQL snapshots and durable
+  resume state are configured, clients can reconnect within the stored resume
+  window; file-backed world state does not provide durable resume claims.
 - The demo's fixed character mapping means token order is operationally
   significant. Operators must not reorder configured hashes across restarts
   once durable characters exist.

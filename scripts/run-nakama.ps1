@@ -55,12 +55,12 @@ if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
 }
 
 $consoleUser = Get-LynxSetting 'LYNX_NAKAMA_CONSOLE_USER' ''
-$consolePassword = Get-LynxSetting 'LYNX_NAKAMA_CONSOLE_PASSWORD' ''
-$consoleSigningKey = Get-LynxSetting 'LYNX_NAKAMA_CONSOLE_SIGNING_KEY' ''
-$serverKey = Get-LynxSetting 'LYNX_NAKAMA_SERVER_KEY' ''
-$sessionEncryptionKey = Get-LynxSetting 'LYNX_NAKAMA_SESSION_ENCRYPTION_KEY' ''
-$refreshEncryptionKey = Get-LynxSetting 'LYNX_NAKAMA_REFRESH_ENCRYPTION_KEY' ''
-$runtimeHttpKey = Get-LynxSetting 'LYNX_NAKAMA_RUNTIME_HTTP_KEY' ''
+$consolePassword = Get-LynxSecretSetting 'LYNX_NAKAMA_CONSOLE_PASSWORD' ''
+$consoleSigningKey = Get-LynxSecretSetting 'LYNX_NAKAMA_CONSOLE_SIGNING_KEY' ''
+$serverKey = Get-LynxSecretSetting 'LYNX_NAKAMA_SERVER_KEY' ''
+$sessionEncryptionKey = Get-LynxSecretSetting 'LYNX_NAKAMA_SESSION_ENCRYPTION_KEY' ''
+$refreshEncryptionKey = Get-LynxSecretSetting 'LYNX_NAKAMA_REFRESH_ENCRYPTION_KEY' ''
+$runtimeHttpKey = Get-LynxSecretSetting 'LYNX_NAKAMA_RUNTIME_HTTP_KEY' ''
 $metricsPort = Get-LynxSetting 'LYNX_NAKAMA_METRICS_PORT' ''
 $logLevel = Get-LynxSetting 'LYNX_NAKAMA_LOG_LEVEL' ''
 

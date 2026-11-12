@@ -893,9 +893,11 @@ fn deadline(now: Millis, window: DurationMs) -> Millis {
     Millis::new(now.value().saturating_add(window.as_i64()))
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn faction(name: &str) -> DefinitionId {
         DefinitionId::new(name).unwrap()
@@ -1183,6 +1185,59 @@ mod tests {
             )
             .unwrap();
             assert_eq!(restored, book, "recovery disagreed in case {case}");
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn generated_capture_inputs_respect_windows_power_and_atomicity(
+            protection_ms in 0_u64..31,
+            cooldown_ms in 0_u64..37,
+            minimum_power in 0_u64..11,
+            capture_power in 0_u64..11,
+            elapsed_ms in 0_u64..45
+        ) {
+            let rules = TerritoryRules {
+                claim_protection: DurationMs::new(protection_ms),
+                capture_cooldown: DurationMs::new(cooldown_ms),
+                minimum_capture_power: minimum_power,
+                ..TerritoryRules::default()
+            };
+            let (mut book, zone) = book(rules);
+            let guards = faction("faction.guards");
+            let bandits = faction("faction.bandits");
+            let claim = book
+                .claim("generated-claim", actor(1), &guards, &zone, Millis::new(1_000))
+                .unwrap();
+            let before_capture = book.clone();
+            let ready_window = protection_ms.max(cooldown_ms);
+            let eligible = elapsed_ms >= ready_window && capture_power >= minimum_power;
+            let capture_at = Millis::new(1_000 + i64::try_from(elapsed_ms).unwrap());
+
+            let result = book.capture(
+                "generated-capture",
+                actor(2),
+                &bandits,
+                &zone,
+                capture_power,
+                capture_at,
+            );
+
+            if eligible {
+                let change = result.unwrap();
+                prop_assert_eq!(change.from, Some(guards.clone()));
+                prop_assert_eq!(change.to, Some(bandits.clone()));
+                prop_assert_eq!(change.revision, claim.revision + 1);
+                prop_assert_eq!(
+                    book.territory(&zone).unwrap().owner.as_ref(),
+                    Some(&bandits)
+                );
+                prop_assert_eq!(book.history().len(), 2);
+                prop_assert!(book.validate().is_ok());
+            } else {
+                prop_assert!(result.is_err());
+                prop_assert_eq!(&book, &before_capture);
+            }
         }
     }
 }

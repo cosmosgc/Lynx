@@ -53,16 +53,19 @@ recommendation, not a commitment; re-order when a dependency or risk changes.
 
 | Order | Task | Why now |
 | --- | --- | --- |
-| 0 | [CLT-004](40-bevy-client.md#clt-004--scene-camera-and-input-abstraction) — scene, camera, and input | The client workspace exists, but the scene is still an offline placeholder; the vertical slice needs an integrated client. |
-| 1 | [SIM-005](10-simulation-gameplay.md#sim-005--combat-depth-status-mitigation-death-respawn) — combat depth | Timed stun/slow and typed mitigation are in place; DoT, shields, and death/respawn policy are the next playable-combat gaps. Graphical reconciliation validation remains separate in CLT-019. |
+| 0 | [CLT-008](40-bevy-client.md#clt-008--interaction-inventory-and-ui-panels) — interaction and inventory panels | Server-authoritative inventory operations and panel actions are integrated; equipment, localization, and richer authored layouts remain. |
+| 1 | [CLT-014](40-bevy-client.md#clt-014--client-integration-and-protocol-tests) — client integration and protocol tests | Headless multiplayer, reconnect, prediction faults, and versioned fixtures are in place; complete the account-flow integration validation when Nakama is configured. |
 
 The one-zone chat client is delivered by
-[CLT-009](40-bevy-client.md#clt-009--chat-and-presence-ui). Cross-client chat
-validation remains in `CLT-014`; social channels and moderation remain in
-`SIM-008`, `SIM-009`, and `NET-009`.
+[CLT-009](40-bevy-client.md#clt-009--chat-and-presence-ui), and the reusable
+headless multi-client harness is recorded under
+[QUA-014](completed/qua-014-multi-client-headless-harness.md). Graphical
+cross-client chat/presence/history validation remains in `CLT-014`; social
+channels and moderation remain in `SIM-008`, `SIM-009`, and `NET-009`.
 Server-authoritative movement, server-derived combat, and account/character
 persistence are complete under `SIM-001`, `SIM-003`, and `PST-001` respectively.
-The latest workspace-wide Clippy check passed.
+The last recorded workspace-wide Clippy check passed before the current
+uncommitted changes; those changes still need the repository's standard gates.
 
 ## Backlogs
 
@@ -86,18 +89,18 @@ the quick audit; update it when a gap is found or closed.
 
 | Documented gap | Source | Task |
 | --- | --- | --- |
-| Client scene, input, and camera have an offline foundation and early online presentation; latency/rejection validation is tracked separately | [client backlog](40-bevy-client.md#clt-004--scene-camera-and-input-abstraction) | `CLT-004`–`CLT-017` |
-| One-zone gateway and Nakama chat paths are integrated; cross-client validation, social channels, and moderation remain | [client backlog](40-bevy-client.md#clt-014--client-integration-and-protocol-tests), [SIM-008](10-simulation-gameplay.md#sim-008--world-chat-and-presence) | `CLT-014`, `SIM-008`, `SIM-009`, `NET-009` |
+| Client scene, input, and camera have an offline foundation and early online presentation; graphical latency/rejection validation is tracked separately | [client backlog](40-bevy-client.md#clt-004--scene-camera-and-input-abstraction) | `CLT-004`–`CLT-017` |
+| One-zone gateway and Nakama chat paths are integrated; graphical cross-client validation, social channels, and moderation remain; headless protocol coverage is shared by QUA-014 | [client backlog](40-bevy-client.md#clt-014--client-integration-and-protocol-tests), [SIM-008](10-simulation-gameplay.md#sim-008--world-chat-and-presence), [QUA-014](completed/qua-014-multi-client-headless-harness.md) | `CLT-014`, `SIM-008`, `SIM-009`, `NET-009` |
 | Durable inventory and transfer-ledger storage exists behind the trusted persistence seam but is not yet routed by the live world service | [persistence backlog](20-persistence-backend.md#pst-002--inventory-and-transfer-ledger-persistence) | `PST-002` |
-| Production admission requires an already-live actor; authoritative character population is incomplete, and Nakama social/chat/group adapters remain to be connected | [persistence backlog](20-persistence-backend.md#pst-001--account-and-character-persistence), [Nakama coverage](20-persistence-backend.md#pst-010--nakama-adapter-coverage), [networking](../networking.md#world-edge-identity-admission) | `SIM-014`, `PST-010` |
+| Production admission requires an already-live actor; authoritative character population is incomplete; Nakama social/group REST and realtime operations exist but application-level channel/session integration and live contract validation remain | [persistence backlog](20-persistence-backend.md#pst-001--account-and-character-persistence), [Nakama coverage](20-persistence-backend.md#pst-010--nakama-adapter-coverage), [networking](../networking.md#world-edge-identity-admission) | `SIM-014`, `PST-010` |
 | `zone_leases` and `zone_events` fence PostgreSQL authority; checkpoints bound retained history, and entity plus aggregate deltas replay after the checkpoint | [persistence backlog](20-persistence-backend.md#pst-004--zone-leases-fencing-and-event-log) | `PST-004`, `PST-005` |
 | Replay includes every mutable snapshot aggregate, quarantine reporting, dry-run verification, checkpoint retention, and measured recovery timing | [architecture](../architecture.md#failure-and-recovery) | `PST-005` |
 | PostgreSQL resume sessions survive a restart, but Nakama exposes no role-change feed; the integration that receives authoritative role updates must call the trusted revocation hook | [persistence backlog](20-persistence-backend.md#pst-006--durable-sessions-and-resume-windows) | `PST-006` |
 | Session and token abuse defenses, including revocation and attack alerting, remain incomplete | [networking backlog](30-networking-security.md#net-007--session-and-token-abuse-defenses) | `NET-007` |
-| Partial `/metrics` endpoint exists; dashboard definitions and alerts remain missing | [operations](../operations.md#metrics-and-logs) | `OPS-001`, `OPS-002` |
+| Admin Prometheus metrics endpoint is implemented; dashboard definitions and exercised alerts remain missing | [operations](../operations.md#metrics-and-logs) | `OPS-002` |
 | Demo GuardChase is active; authored behavior bindings are not yet hydrated from content | [simulation backlog](10-simulation-gameplay.md#sim-006--ai-behaviors-schedules-and-perception-budgets) | `SIM-006` |
 | No editor, inspector, link graph, or navigation authoring | [content authoring](../content-authoring.md) | `CNT-001`–`CNT-007` |
-| MCP server and external client are planned only | [AI tooling](../ai-tooling.md) | `CNT-009`, `CNT-010` |
+| MCP write/publish tools and external client integration remain planned | [AI tooling](../ai-tooling.md) | `CNT-010` |
 | User content has schemas/moderation requirements but no implementation | [security](../security.md#content-and-user-generated-content) | `CNT-008`, `NET-009` |
 | No staging publish, rollout, rollback, or upgrade workflow | [operations](../operations.md) | `OPS-004`, `OPS-010` |
 | No scheduled, encrypted off-host backups or target-environment restore drills | [operations](../operations.md#backups-and-recovery) | `PST-009`, `OPS-003` |
@@ -138,6 +141,37 @@ is rejected by default.
 
 | Record | Summary |
 | --- | --- |
+| [`completed/qua-003-protocol-golden-compatibility.md`](completed/qua-003-protocol-golden-compatibility.md) | Versioned wire goldens, including a fake-only credential envelope, protocol compatibility coverage, and CI version/changelog enforcement. |
+| [`completed/cnt-009-readonly-mcp-server.md`](completed/cnt-009-readonly-mcp-server.md) | Optional workspace-confined stdio MCP server with read-only project/content diagnostics and bounded JSON results. |
+| [`completed/cnt-014-content-migration-tooling.md`](completed/cnt-014-content-migration-tooling.md) | Reviewed source-hash-bound content plans, validated dry-run/apply, and exact-byte rollback for authored content. |
+| [`completed/cnt-011-cli-expansion.md`](completed/cnt-011-cli-expansion.md) | Stable CLI JSON failures and exit codes, command-tree shell completions, and a CI-checked generated command reference. |
 | [`completed/ops-006-ci-matrix.md`](completed/ops-006-ci-matrix.md) | Hosted OS matrix, live PostgreSQL coverage, headless client smoke, and CI duration/outcome reporting. |
+| [`completed/ops-001-metrics-endpoint.md`](completed/ops-001-metrics-endpoint.md) | Separate admin Prometheus endpoint with tested tick/session/action/pathfinding and adapter metrics; unsupported families documented. |
+| [`completed/ops-013-correlation-observability.md`](completed/ops-013-correlation-observability.md) | Wire action correlation reaches structured logs and replayable action-result events, with documented redaction and unsampled outcomes. |
+| [`completed/ops-008-dependency-audit-sbom.md`](completed/ops-008-dependency-audit-sbom.md) | Pinned cargo-deny policy and CI audit now pair with target-specific CycloneDX SBOMs in release archives and assets. |
+| [`completed/clt-004-scene-camera-input.md`](completed/clt-004-scene-camera-input.md) | Offline zone scene, replaceable camera/input adapters, content checks, and presentation fallback policy. |
+| [`completed/qua-009-docs-consistency.md`](completed/qua-009-docs-consistency.md) | PostgreSQL and README documentation reconciliation, migration-derived CI checks, and Markdown link-check coverage/limitations. |
+| [`completed/sim-005-combat-depth.md`](completed/sim-005-combat-depth.md) | Tick-expiring status, typed mitigation, bounded combat audit, and server-owned death/respawn recovery. |
+| [`completed/pst-007-postgres-hardening.md`](completed/pst-007-postgres-hardening.md) | Verified PostgreSQL TLS, bounded connection retries/pooling, loopback plaintext policy, and split migration/runtime roles. |
+| [`completed/pst-008-schema-migration-gate.md`](completed/pst-008-schema-migration-gate.md) | Startup schema/checksum gate, read-only doctor inspection, and repeatable migration CI coverage. |
+| [`completed/ops-014-docs-changelog-release.md`](completed/ops-014-docs-changelog-release.md) | Release-note and README metadata gates, indexed task completion records, and stale-doc corrections. |
 | [`completed/clt-009-chat-presence-ui.md`](completed/clt-009-chat-presence-ui.md) | One-zone chat feed, composer, bounded history, and connected-member presence. |
 | [`completed/world-persistence-fresh-start.md`](completed/world-persistence-fresh-start.md) | Durable whole-world snapshots and the `--fresh` authored-world reset. |
+| [`completed/sim-001-server-authoritative-movement.md`](completed/sim-001-server-authoritative-movement.md) | Completion record; all 5 acceptance criteria are checked in the source task. |
+| [`completed/sim-002-client-prediction-and-reconciliation-contract.md`](completed/sim-002-client-prediction-and-reconciliation-contract.md) | Completion record; all 4 acceptance criteria are checked in the source task. |
+| [`completed/sim-003-server-derived-combat-resolution.md`](completed/sim-003-server-derived-combat-resolution.md) | Completion record; all 4 acceptance criteria are checked in the source task. |
+| [`completed/sim-007-navigation-budgets-and-replan-policy.md`](completed/sim-007-navigation-budgets-and-replan-policy.md) | Completion record; all 5 acceptance criteria are checked in the source task. |
+| [`completed/sim-018-determinism-and-tick-budget.md`](completed/sim-018-determinism-and-tick-budget.md) | Completion record; all 4 acceptance criteria are checked in the source task. |
+| [`completed/pst-001-account-and-character-persistence.md`](completed/pst-001-account-and-character-persistence.md) | Completion record; all 5 acceptance criteria are checked in the source task. |
+| [`completed/pst-002-inventory-and-transfer-ledger-persistence.md`](completed/pst-002-inventory-and-transfer-ledger-persistence.md) | Completion record; all 5 acceptance criteria are checked in the source task. |
+| [`completed/pst-003-normalized-faction-and-calendar-persistence.md`](completed/pst-003-normalized-faction-and-calendar-persistence.md) | Completion record; all 5 acceptance criteria are checked in the source task. |
+| [`completed/pst-004-zone-leases-fencing-and-event-log.md`](completed/pst-004-zone-leases-fencing-and-event-log.md) | Completion record; all 5 acceptance criteria are checked in the source task. |
+| [`completed/pst-005-snapshot-and-event-replay.md`](completed/pst-005-snapshot-and-event-replay.md) | Completion record; all 6 acceptance criteria are checked in the source task. |
+| [`completed/pst-006-durable-sessions-and-resume-windows.md`](completed/pst-006-durable-sessions-and-resume-windows.md) | Completion record; all 4 acceptance criteria are checked in the source task. |
+| [`completed/net-001-production-authentication-at-the-world-edge.md`](completed/net-001-production-authentication-at-the-world-edge.md) | Completion record; all 6 acceptance criteria are checked in the source task. |
+| [`completed/net-002-rate-limiting-and-message-budgets.md`](completed/net-002-rate-limiting-and-message-budgets.md) | Completion record; all 5 acceptance criteria are checked in the source task. |
+| [`completed/clt-001-client-workspace-and-crate-layout.md`](completed/clt-001-client-workspace-and-crate-layout.md) | Completion record; all 5 acceptance criteria are checked in the source task. |
+| [`completed/clt-005-network-client-loop.md`](completed/clt-005-network-client-loop.md) | Completion record; all 5 acceptance criteria are checked in the source task. |
+| [`completed/clt-006-entity-presentation-and-interpolation.md`](completed/clt-006-entity-presentation-and-interpolation.md) | Completion record; all 9 acceptance criteria are checked in the source task. |
+| [`completed/clt-017-rejected-movement-and-desync-evidence.md`](completed/clt-017-rejected-movement-and-desync-evidence.md) | Completion record; all 3 acceptance criteria are checked in the source task. |
+| [`completed/qua-004-postgresql-integration-matrix.md`](completed/qua-004-postgresql-integration-matrix.md) | Completion record; all 5 acceptance criteria are checked in the source task. |

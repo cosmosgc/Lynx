@@ -1,0 +1,24 @@
+[Unit]
+Description=Lynx authoritative world service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=lynx
+Group=lynx
+WorkingDirectory=/var/lib/lynx-world
+EnvironmentFile=/etc/lynx-world/lynx-world.env
+ExecStart=/usr/local/bin/lynx-world serve --bind 127.0.0.1:8090 --admin-bind 127.0.0.1:8091 --auth-mode nakama --state-postgres
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=60s
+LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target

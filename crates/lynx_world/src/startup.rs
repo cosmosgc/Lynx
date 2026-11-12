@@ -14,7 +14,7 @@ use engine_sim::zone::Zone;
 
 use crate::auth::Grant;
 use crate::demo;
-use crate::persistence::{SnapshotStore, WorldSnapshot};
+use crate::persistence::{ContentMigrationCheckpoint, SnapshotStore, WorldSnapshot};
 
 /// The aggregates a new gateway starts from.
 #[derive(Debug)]
@@ -27,6 +27,8 @@ pub struct StartupWorld {
     pub factions: FactionWorld,
     /// Saved entries isolated during restore instead of being adopted.
     pub quarantined: Vec<QuarantinedRecord>,
+    /// Latest migration checkpoint, retained so regular saves preserve rollback.
+    pub migration_checkpoint: Option<Box<ContentMigrationCheckpoint>>,
 }
 
 /// Build the world the service starts on.
@@ -46,6 +48,50 @@ pub fn load(
     grants: &[Grant],
     now_ms: i64,
 ) -> Result<StartupWorld> {
+    load_with_content_version(store, fresh, grants, now_ms, None)
+}
+
+/// Build the running world and require an exact content version and manifest
+/// hash match before restoring saved entities.
+pub fn load_with_content_identity(
+    store: Option<&dyn SnapshotStore>,
+    fresh: bool,
+    grants: &[Grant],
+    now_ms: i64,
+    content_version: Option<&str>,
+    content_manifest_sha256: Option<&str>,
+) -> Result<StartupWorld> {
+    load_world_with_content_identity(
+        store,
+        fresh,
+        grants,
+        now_ms,
+        content_version,
+        content_manifest_sha256,
+    )
+}
+
+/// Build the running world and require any saved snapshot to match the
+/// configured content version exactly. A version change needs a migration
+/// path; this loader fails closed until that migration is available.
+pub fn load_with_content_version(
+    store: Option<&dyn SnapshotStore>,
+    fresh: bool,
+    grants: &[Grant],
+    now_ms: i64,
+    content_version: Option<&str>,
+) -> Result<StartupWorld> {
+    load_world_with_content_identity(store, fresh, grants, now_ms, content_version, None)
+}
+
+fn load_world_with_content_identity(
+    store: Option<&dyn SnapshotStore>,
+    fresh: bool,
+    grants: &[Grant],
+    now_ms: i64,
+    content_version: Option<&str>,
+    content_manifest_sha256: Option<&str>,
+) -> Result<StartupWorld> {
     let saved = if fresh {
         None
     } else {
@@ -57,7 +103,20 @@ pub fn load(
         }
     };
 
-    let (zone, quarantined) = match saved.as_ref() {
+    if let Some(world) = saved.as_ref()
+        && (world.content_version.as_deref() != content_version
+            || world.content_manifest_sha256.as_deref() != content_manifest_sha256)
+    {
+        anyhow::bail!(
+            "saved world content identity (version {:?}, manifest SHA-256 {:?}) does not match configured identity (version {:?}, manifest SHA-256 {:?}); migrate or reset the snapshot before startup",
+            world.content_version,
+            world.content_manifest_sha256,
+            content_version,
+            content_manifest_sha256,
+        );
+    }
+
+    let (zone, mut quarantined) = match saved.as_ref() {
         Some(world) => {
             tracing::info!(
                 saved_at_ms = world.saved_at_ms,
@@ -82,6 +141,12 @@ pub fn load(
             Vec::new(),
         ),
     };
+    let migration_checkpoint = saved
+        .as_ref()
+        .and_then(|world| world.migration_checkpoint.clone());
+    if let Some(checkpoint) = migration_checkpoint.as_deref() {
+        quarantined.extend(checkpoint.quarantined.iter().cloned());
+    }
 
     let (calendar, factions) = if let Some(WorldSnapshot {
         calendar: Some(calendar),
@@ -111,5 +176,6 @@ pub fn load(
         calendar,
         factions,
         quarantined,
+        migration_checkpoint,
     })
 }

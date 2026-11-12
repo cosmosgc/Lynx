@@ -1,0 +1,25 @@
+[package]
+name = "lynx_load_harness"
+description = "Repeatable local load benchmark for the Lynx world service"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "lynx-load"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+engine_core.workspace = true
+lynx_test_harness = { path = "../test_harness" }
+lynx-world = { path = "../../crates/lynx_world" }
+sysinfo.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
