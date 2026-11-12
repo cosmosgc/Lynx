@@ -30,7 +30,7 @@ repository = "https://github.com/cosmosgc/Lynx"
 
 [workspace.dependencies]
 anyhow = "1.0.104"
-bevy = { version = "=0.20.0", default-features = false }
+bevy = { version = "=0.20.1", default-features = false }
 base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive"] }
 clap_complete = "4.6.11"
