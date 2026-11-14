@@ -469,6 +469,10 @@ impl Zone {
     /// [`ErrorCode::OutOfRange`] for a position outside the zone,
     /// [`ErrorCode::Conflict`] for a duplicate ID, and
     /// [`ErrorCode::CapacityExceeded`] when the zone is full.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "spawn validates the complete persisted entity before mutating zone state"
+    )]
     pub fn spawn(&mut self, mut entity: EntityRecord) -> Result<StableId, EngineError> {
         entity.id.expect_kind(IdKind::Entity)?;
         if entity.stun_until.is_some_and(|until| until <= self.tick) {
@@ -1198,6 +1202,10 @@ impl Zone {
     /// [`ErrorCode::NotFound`] when the source is missing,
     /// [`ErrorCode::InvalidState`] when the source is dead, and
     /// [`ErrorCode::CapacityExceeded`] when one activation fans out too far.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "link activation validates the request and applies its bounded event fanout atomically"
+    )]
     pub fn activate_links(
         &mut self,
         request_id: &str,

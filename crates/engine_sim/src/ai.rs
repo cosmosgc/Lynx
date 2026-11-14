@@ -474,7 +474,7 @@ impl Zone {
                 definition
                     .graph
                     .as_ref()
-                    .is_some_and(|graph| graph.is_valid())
+                    .is_some_and(AiBehaviorGraph::is_valid)
             }) {
                 let graph = definition.graph.as_ref().expect("filtered graph exists");
                 self.run_ai_behavior_graph(
@@ -904,7 +904,7 @@ impl Zone {
                 AiBehaviorInstruction::Wait => unreachable!("wait terminates before evaluation"),
             };
             decision.target = target;
-            decision.perception = perception.clone();
+            decision.perception.clone_from(&perception);
             current = if succeeded { on_success } else { on_failure };
         }
     }

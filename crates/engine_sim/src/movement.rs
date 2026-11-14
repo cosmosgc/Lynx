@@ -343,6 +343,13 @@ impl Zone {
                     .values()
                     .find(|component| component.key.as_str() == "core.trigger")?;
                 let radius = component.data.get("radius_m")?.as_f64()?;
+                if !radius.is_finite() || radius <= 0.0 || radius > f64::from(f32::MAX) {
+                    return None;
+                }
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "trigger radius narrows to the f32 zone geometry after range validation"
+                )]
                 let radius = radius as f32;
                 (radius.is_finite() && radius > 0.0).then_some((
                     entity.id,
@@ -388,7 +395,13 @@ fn distance_to_segment_xz_squared(from: Vec3, to: Vec3, point: Vec3) -> f32 {
     .clamp(0.0, 1.0);
     let offset_x = f64::from(point.x) - (f64::from(from.x) + projection * dx);
     let offset_z = f64::from(point.z) - (f64::from(from.z) + projection * dz);
-    (offset_x * offset_x + offset_z * offset_z) as f32
+    let distance_squared = offset_x * offset_x + offset_z * offset_z;
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "segment distance narrows to f32 zone geometry; overflow intentionally remains infinite"
+    )]
+    let distance_squared = distance_squared as f32;
+    distance_squared
 }
 
 /// Authoritative horizontal facing: zero along +Z, 90 degrees along +X.
