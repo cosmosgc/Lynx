@@ -36,12 +36,18 @@ semantic versioning for engine releases and content bundles.
   zone room from the current admitted world session, verifies character
   ownership, and rejoins the server-returned room after reconnect/token rotation
   (`SIM-008`); expired and ambiguous world-session headers fail closed.
+- `game_api`: redact chat message bodies from `Debug` output for send requests,
+  messages, history pages, and realtime events, with sentinel coverage; normal
+  serialization and delivery are unchanged (`SIM-008`).
 - `lynx-world`: headless multi-zone service travel coverage exercises authored
   trigger/range and commit-failure denial, atomic handoff, source-token
   invalidation, destination-scoped resume routing, and destination reconnect
   with another token rotation; client-selected destination/arrival fields are
-  rejected, missing destinations preserve the source, and uncertain
-  durable-write errors stop the authority loop (`SIM-014`).
+  rejected, missing destinations preserve the source, and a simulated
+  post-commit acknowledgement loss proves the loop stops without checkpointing
+  uncertain live state; restored snapshots retry the receipt without repeating
+  the move. This is headless evidence only; live PostgreSQL acknowledgement-loss
+  acceptance remains open (`SIM-014`).
 - `lynx-world`: add an opt-in PostgreSQL handoff recovery test for atomic
   snapshots, durable resume routing, receipts, independent zone restore,
   stale-session detach, token rotation, idempotent retry, and transaction
@@ -56,6 +62,11 @@ semantic versioning for engine releases and content bundles.
   duplicate resolution under a fresh request ID does not repeat a territory
   change; `engine_core` verifies suspended state survives snapshot recovery
   without permitting a result (`SIM-015`).
+- `engine_core` and `engine_sim`: restrict event participants to character and
+  AI-entity IDs; verify a faction-member NPC enrolls without a player principal,
+  follows faction-side eligibility, and replays once, while non-entity IDs are
+  rejected on enrollment and snapshot recovery even when unaffiliated enrollment
+  is enabled (`SIM-015`).
 - `engine_core`: cover UTC daily-schedule boundaries, midnight wrapping,
   invalid windows, and pre-epoch timestamps (`SIM-006`).
 - `engine_core`: generate territory release/reclaim cooldown cases and verify

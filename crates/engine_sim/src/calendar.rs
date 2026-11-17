@@ -711,6 +711,60 @@ mod tests {
     }
 
     #[test]
+    fn npc_entity_enrolls_through_the_same_faction_rules_and_replay_path() {
+        let (mut world, _, bandits) = world();
+        let npc = StableId::from_parts(IdKind::Entity, 0, 50);
+        world
+            .invite(
+                actor(2),
+                &bandits,
+                npc,
+                engine_core::faction::FactionRole::Member,
+                Millis::new(1),
+            )
+            .unwrap();
+        let (mut calendar, event_id) = opened(&mut world);
+        let mut commands = CalendarCommands::new();
+        let wrong_side = CalendarActionRequest::new(
+            "npc-wrong-side",
+            npc,
+            CalendarAction::Enroll {
+                event: event_id.clone(),
+                side: id("side.defenders"),
+            },
+        );
+        assert_eq!(
+            commands
+                .execute(&mut calendar, &mut world, &wrong_side, Millis::new(11))
+                .error()
+                .unwrap()
+                .code(),
+            ErrorCode::PermissionDenied
+        );
+        assert_eq!(calendar.enrollments(&event_id).count(), 0);
+
+        let request = CalendarActionRequest::new(
+            "npc-enroll",
+            npc,
+            CalendarAction::Enroll {
+                event: event_id.clone(),
+                side: id("side.attackers"),
+            },
+        );
+        let applied = commands.execute(&mut calendar, &mut world, &request, Millis::new(11));
+        assert!(applied.is_applied());
+        assert_eq!(
+            calendar.enrollment(&event_id, npc).unwrap().faction,
+            Some(bandits)
+        );
+        assert_eq!(
+            commands.execute(&mut calendar, &mut world, &request, Millis::new(12)),
+            applied
+        );
+        assert_eq!(calendar.enrollments(&event_id).count(), 1);
+    }
+
+    #[test]
     fn staff_drives_the_full_lifecycle_to_a_capture() {
         let (mut world, _, _) = world();
         let (mut calendar, event_id) = opened(&mut world);

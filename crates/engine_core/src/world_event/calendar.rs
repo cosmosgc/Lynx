@@ -1457,6 +1457,79 @@ mod tests {
     }
 
     #[test]
+    fn faction_member_npc_entity_can_enroll_on_its_faction_side() {
+        let (mut world, _, bandits) = world();
+        let npc = StableId::from_parts(IdKind::Entity, 0, 50);
+        world
+            .invite(
+                actor(2),
+                &bandits,
+                npc,
+                crate::faction::FactionRole::Member,
+                Millis::new(1),
+            )
+            .unwrap();
+        let (mut calendar, id) = opened(&mut world);
+        let attackers = side("side.attackers");
+
+        let enrollment = calendar
+            .enroll(&world, &id, npc, &attackers, Millis::new(11))
+            .unwrap();
+        assert_eq!(enrollment.participant, npc);
+        assert_eq!(enrollment.faction, Some(bandits));
+        assert_eq!(calendar.participants(&id, &attackers), 1);
+        assert_eq!(
+            calendar
+                .enroll(&world, &id, npc, &attackers, Millis::new(12))
+                .unwrap(),
+            enrollment
+        );
+    }
+
+    #[test]
+    fn event_enrollment_rejects_non_character_and_non_entity_ids_on_write_and_restore() {
+        let (world, _, _) = world();
+        let mut definition = event();
+        definition.enrollment.requires_faction_membership = false;
+        definition.enrollment.allow_unaffiliated = true;
+        let mut calendar = WorldCalendar::new();
+        let id = definition.id.clone();
+        calendar
+            .create(definition, actor(9), Millis::new(1))
+            .unwrap();
+        calendar
+            .schedule(&world, &id, actor(9), Millis::new(2))
+            .unwrap();
+        calendar.open(&id, actor(9), Millis::new(10)).unwrap();
+
+        let item = StableId::from_parts(IdKind::Item, 0, 50);
+        assert_eq!(
+            calendar
+                .enroll(&world, &id, item, &side("side.attackers"), Millis::new(11))
+                .unwrap_err()
+                .code(),
+            ErrorCode::InvalidRequest
+        );
+        assert_eq!(calendar.enrollments(&id).count(), 0);
+
+        let mut snapshot = calendar.snapshot();
+        snapshot
+            .enrollments
+            .push(crate::world_event::EventEnrollment {
+                event: id.clone(),
+                participant: item,
+                side: side("side.attackers"),
+                faction: None,
+                at: Millis::new(11),
+                schema_version: crate::world_event::WORLD_EVENT_SCHEMA_VERSION,
+            });
+        assert_eq!(
+            WorldCalendar::from_snapshot(snapshot).unwrap_err().code(),
+            ErrorCode::InvalidRequest
+        );
+    }
+
+    #[test]
     fn sideless_members_cannot_enroll_when_membership_is_required() {
         let (mut world, _, bandits) = world();
         let (mut calendar, id) = opened(&mut world);

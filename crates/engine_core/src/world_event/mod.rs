@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{EngineError, ErrorCode};
 use crate::faction::{MAX_ACTION_KEY_LEN, TerritoryChange};
-use crate::id::{DefinitionId, StableId};
+use crate::id::{DefinitionId, IdKind, StableId};
 use crate::schema::SchemaVersion;
 use crate::time::Millis;
 
@@ -666,6 +666,14 @@ pub struct EventEnrollment {
 impl EventEnrollment {
     /// Validate the enrollment's own fields.
     pub fn validate(&self) -> Result<(), EngineError> {
+        if !matches!(self.participant.kind(), IdKind::Character | IdKind::Entity) {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "event participants must be characters or AI entities",
+            )
+            .with_detail("participant", self.participant.to_string())
+            .with_detail("kind", self.participant.kind().label()));
+        }
         if !self.event.is_in("event") {
             return Err(EngineError::new(
                 ErrorCode::InvalidRequest,

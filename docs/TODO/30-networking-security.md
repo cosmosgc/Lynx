@@ -231,7 +231,7 @@ criteria are complete.
 ## NET-005 — Multi-zone gateway routing
 
 - **Priority:** P2
-- **Status:** In progress — authored-map zone ownership, capacities, identity routing, zone-scoped resume routing, and trigger-driven durable handoff are wired; uncertain durable-write errors stop the authority loop; the opt-in PostgreSQL rollback/restart scenario is not run here, and actual commit-acknowledgement-loss/survivor-service acceptance remains
+- **Status:** In progress — authored-map zone ownership, capacities, identity routing, zone-scoped resume routing, and trigger-driven durable handoff are wired; a headless fake-store lost-acknowledgement simulation proves the authority loop fails closed without checkpointing divergent live state; live PostgreSQL rollback/restart, acknowledgement-loss, and survivor-service acceptance remain unrun
 - **Depends on:** `SIM-014`, `PST-004`
 - **References:** [architecture §Simulation model](../architecture.md#simulation-model),
   `SIM-014`, ADR 0002

@@ -580,6 +580,14 @@ direct and group destinations are now discovered through the account-scoped
 joins destinations in that server-provided page. The transport's existing
 chat-family limiter is not an authorization or moderation substitute.
 
+**Private-content debug redaction (2026-11-17):** Shared chat request and
+message values now redact message bodies in `Debug` output, including when a
+message is nested in a history page or realtime event. A sentinel-based test
+verifies the private text is absent from each representation. This protects
+accidental structured/debug logging at the API seam; message contents remain
+available to authorized serialization and delivery paths. It does not add
+moderation or reporting behavior.
+
 ---
 
 ## SIM-009 — Parties and social graph
@@ -816,24 +824,30 @@ without mutating its entity or tick. A runtime-level test advances a one-zone
 budget across registered zones and verifies each receives exactly one tick
 quantum before any zone receives another.
 
-**Headless service travel (2026-11-16):** A `MultiZoneService` test submits an
-authored trigger through the live service boundary. Unknown trigger IDs,
+**Headless service travel (2026-11-17):** A `MultiZoneService` test submits an
+authored trigger through the service authority loop. Unknown trigger IDs,
 out-of-range activations, client-supplied destination/arrival fields, and an
 injected definitive commit rejection return errors without closing the
-connection or moving the actor. A simulated uncertain durable-write error marks
-the authority loop to stop instead of continuing from a possibly divergent
-state. A valid trigger commits through an atomic in-memory handoff store, leaves
-the actor in exactly the destination zone, returns a
+connection or moving the actor. The in-memory handoff fake also records both
+post-transfer snapshots and the receipt, then simulates losing the commit
+acknowledgement. The regression verifies the durable snapshots show the move
+while live state still has the actor in the source, the authority loop stops,
+and no shutdown checkpoint overwrites the uncertain durable outcome. Restoring
+the fake store's snapshots and retrying with its receipt returns the original
+result without moving the actor twice. This is a headless simulation only, not
+PostgreSQL handoff acceptance. A valid trigger commits through the same
+in-memory store, leaves the actor in exactly the destination zone, returns a
 destination-scoped resume token, invalidates the source token, and reconnects
-through the destination while rotating that token. The opt-in PostgreSQL test
-in `crates/lynx_world/tests/postgres_handoff.rs` checks both persisted snapshots,
-the resume route and receipt, independent zone restores, destination-lease
-stale-session detachment, durable resume/token rotation, and receipt-based retry.
-It also injects a failure at the final receipt insert—after snapshot writes and
-resume-route update—and verifies transaction rollback leaves durable and live
-state unchanged. This scenario was not executed here because
-`LYNX_PG_TEST_DATABASE` is not configured; loss of the commit acknowledgement
-and live survivor-service readiness remain open.
+through the destination while rotating that token.
+The opt-in PostgreSQL test in `crates/lynx_world/tests/postgres_handoff.rs`
+checks both persisted snapshots, the resume route and receipt, independent zone
+restores, destination-lease stale-session detachment, durable resume/token
+rotation, and receipt-based retry. It also injects a failure at the final
+receipt insert—after snapshot writes and resume-route update—and verifies
+transaction rollback leaves durable and live state unchanged. This scenario was
+not executed here because `LYNX_PG_TEST_DATABASE` is not configured; live
+PostgreSQL lost-acknowledgement recovery and survivor-service readiness remain
+open.
 
 Zone chat and history remain scoped to one gateway/zone: messages are not
 forwarded to another zone, and disconnected or traveling players do not receive
@@ -848,7 +862,7 @@ global coordinator and privacy/access rules rather than implicit fanout.
 ## SIM-015 — Calendar objectives and NPC participation
 
 - **Priority:** P2
-- **Status:** In progress — cancellation/suspension and idempotent territory resolution are covered; objectives, NPC participation, and event inspection remain
+- **Status:** In progress — cancellation/suspension, idempotent territory resolution, and enrollment subject validation are covered; objective design, active NPC participation, and event inspection remain
 - **Depends on:** `SIM-001`, `SIM-006`
 - **References:** [world simulation §World calendar](../world-simulation.md#world-calendar-and-conflicts),
   ADR 0021
@@ -880,9 +894,19 @@ rejections leave event status, territory history/ownership, and faction treasury
 balances unchanged. A second resolution under a fresh request ID returns the stored
 result without appending another territory-history entry. A suspended event
 also survives a calendar snapshot round trip as suspended and remains
-unresolvable with the faction aggregate consistent. These tests cover the
-existing bounded-conflict lifecycle only; they do not define event objectives,
-NPC participation, reward delivery, or editor inspection.
+unresolvable with the faction aggregate consistent. These lifecycle tests do
+not define event objectives, active NPC behavior, reward delivery, or editor
+inspection.
+
+**Enrollment subject validation (2026-11-17):** `EventEnrollment` now accepts
+only character and AI-entity IDs, matching its domain contract even when an
+event permits unaffiliated participants. Engine tests verify an item ID cannot
+enroll or be recovered from a calendar snapshot, and the `engine_sim` command
+path verifies a faction-member NPC entity can enroll without a player principal,
+follows the same side eligibility, and replays idempotently. This covers
+participant identity and enrollment, not NPC action execution through the zone
+pipeline; objective/scoring rules, reward delivery, and editor inspection remain
+open.
 
 ---
 

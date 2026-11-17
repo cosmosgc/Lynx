@@ -4,6 +4,8 @@
 //! implement [`ChatService::messages`] without supporting live delivery; a
 //! socket-capable adapter can implement the full contract.
 
+use std::fmt;
+
 use engine_core::time::Millis;
 use serde::{Deserialize, Serialize};
 
@@ -46,7 +48,7 @@ pub struct ChatChannel {
 }
 
 /// One persisted chat message.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
     /// Adapter-issued message identifier.
     pub id: String,
@@ -62,6 +64,19 @@ pub struct ChatMessage {
     /// Creation time, when the adapter records one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<Millis>,
+}
+
+impl fmt::Debug for ChatMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ChatMessage")
+            .field("id", &self.id)
+            .field("channel_id", &self.channel_id)
+            .field("sender_id", &self.sender_id)
+            .field("sender_name", &self.sender_name)
+            .field("content", &"[REDACTED]")
+            .field("created_at", &self.created_at)
+            .finish()
+    }
 }
 
 /// A Nakama-compatible realtime channel destination without provider wire
@@ -211,12 +226,21 @@ pub trait RealtimeChatService {
 }
 
 /// A request to post a message.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SendChatMessage {
     /// Target channel.
     pub channel_id: String,
     /// Message text.
     pub content: String,
+}
+
+impl fmt::Debug for SendChatMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SendChatMessage")
+            .field("channel_id", &self.channel_id)
+            .field("content", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl SendChatMessage {
@@ -319,6 +343,37 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+
+    #[test]
+    fn chat_debug_output_redacts_content_at_all_shared_api_boundaries() {
+        const PRIVATE: &str = "private-chat-debug-sentinel";
+        let message = ChatMessage {
+            id: "message-1".into(),
+            channel_id: "direct:account-2".into(),
+            sender_id: AccountId::new("account-1").unwrap(),
+            sender_name: Some("sender".into()),
+            content: PRIVATE.into(),
+            created_at: Some(Millis::new(42)),
+        };
+        let request = SendChatMessage {
+            channel_id: message.channel_id.clone(),
+            content: PRIVATE.into(),
+        };
+        let page = ChatMessagePage {
+            messages: vec![message.clone()],
+            next_cursor: None,
+            previous_cursor: None,
+        };
+        let event = ChatRealtimeEvent::Message {
+            message: message.clone(),
+        };
+        let debug = format!("{message:?}\n{request:?}\n{page:?}\n{event:?}");
+
+        assert!(!debug.contains(PRIVATE));
+        assert_eq!(debug.matches("[REDACTED]").count(), 4);
+        assert_eq!(serde_json::to_value(&message).unwrap()["content"], PRIVATE);
+        assert_eq!(serde_json::to_value(&request).unwrap()["content"], PRIVATE);
     }
 
     #[test]

@@ -131,15 +131,20 @@ when that dependency is available and the work resumes.
   resume-session, and handoff tests did not execute against PostgreSQL. The
   headless happy path is now exercised through `MultiZoneService` with
   an atomic in-memory handoff store, including rejected trigger/range requests,
-  injected commit failure without live-state mutation, fail-closed handling of
-  an uncertain durable-write error, and destination-token routing, including
-  reconnecting in the destination and rotating its token. An
+  injected commit failure without live-state mutation, and destination-token
+  routing, including reconnecting in the destination and rotating its token.
+  A simulated lost commit acknowledgement is injected after the fake has
+  recorded both moved snapshots and the receipt; the authority loop exits,
+  leaves live state unmoved, and skips its shutdown checkpoint. Reconstructing
+  from those snapshots and retrying the receipt returns the original result
+  without a second move. This is headless simulation evidence only. An
   opt-in PostgreSQL handoff test now checks both snapshots, durable route update,
   receipt, reconstruction, destination-lease stale-session detachment,
   destination-routed token rotation, receipt-based retry, and a final-receipt
   insert failure that verifies SQL rollback after snapshot/route writes; it was
   not run here because `LYNX_PG_TEST_DATABASE` is not configured. Remaining
-  acceptance is lost commit acknowledgement and live survivor-service readiness.
+  acceptance is live PostgreSQL lost-acknowledgement recovery and survivor-
+  service readiness.
   A local file-store regression also corrupts one zone checkpoint and restores
   the other; a missing live destination preserves the registered source zone.
 
@@ -237,9 +242,15 @@ when that dependency is available and the work resumes.
   and insufficient-participation rejection without aggregate mutation, and a
   fresh-request duplicate resolution without a second territory-history entry.
   `engine_core` also verifies suspended status survives calendar snapshot
-  recovery and remains unresolvable. Objective/scoring schemas, NPC participation,
-  reward delivery, and editor inspection still need explicit contracts; no reward
-  behavior is claimed.
+  recovery and remains unresolvable. Enrollment now rejects participant IDs
+  outside the character/AI-entity domain; tests verify faction-member NPC entity
+  enrollment without a player principal follows the same side eligibility and
+  replay rules, while item IDs cannot enroll or be recovered from snapshots
+  even when unaffiliated participation is allowed. This does not implement NPC
+  action execution.
+  Objective/scoring schemas, active NPC participation, reward delivery, and
+  editor inspection still need explicit contracts; no reward behavior is
+  claimed.
 
 - **PST-010 — Live Nakama contract validation:** Authenticated player routes,
   `CharacterApiClient`, and the account UI cover friend request and block
@@ -267,9 +278,11 @@ when that dependency is available and the work resumes.
   The client waits for admission, joins that returned room, and rediscovers it
   after token rotation/reconnect. Headless coverage proves per-zone resolution,
   rejects cross-zone token use, checks account ownership, and exercises resume
-  rotation. Party channels remain absent from `ChatChannelTarget`; run direct,
-  group, and zone-room joins/history against a live Nakama instance before
-  closing SIM-008.
+  rotation. Shared chat request/message `Debug` output now redacts message
+  bodies, with sentinel coverage for requests, messages, history pages, and
+  realtime events; serialization and authorized delivery are unchanged. Party
+  channels remain absent from `ChatChannelTarget`; run direct, group, and
+  zone-room joins/history against a live Nakama instance before closing SIM-008.
 
 - **SIM-009 — Party reconnect contract:** The current `RealtimePartySession`
   explicitly models Nakama parties as transient and ends membership when its

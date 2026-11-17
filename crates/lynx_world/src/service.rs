@@ -1932,6 +1932,14 @@ impl MultiZoneService {
     /// failure. Each scheduled batch gives every registered zone one tick.
     pub async fn run(
         mut self,
+        events: mpsc::Receiver<ServerEvent>,
+        shutdown: watch::Receiver<bool>,
+    ) {
+        self.run_loop(events, shutdown).await;
+    }
+
+    async fn run_loop(
+        &mut self,
         mut events: mpsc::Receiver<ServerEvent>,
         mut shutdown: watch::Receiver<bool>,
     ) {
@@ -3055,7 +3063,9 @@ mod tests {
     use crate::persistence::{
         ZoneEvent, ZoneLeaseStore, ZoneSnapshotStore, replay_world_snapshot_events,
     };
-    use crate::travel::{ZoneHandoffReceipt, ZoneHandoffStore};
+    use crate::travel::{
+        PlayerHandoffRequest, ZoneHandoffCoordinator, ZoneHandoffReceipt, ZoneHandoffStore,
+    };
     use world_gateway::{GatewayConfig, SystemResumeTokens, WorldGateway};
     use world_server::{READY_KIND, SNAPSHOT_KIND};
 
@@ -3075,28 +3085,39 @@ mod tests {
     }
 
     #[derive(Debug, Default)]
+    struct MemoryHandoffState {
+        snapshots: BTreeMap<String, ZoneSnapshot>,
+        receipts: BTreeMap<String, ZoneHandoffReceipt>,
+    }
+
+    #[derive(Debug, Default)]
     struct MemoryHandoffs {
-        receipts: StdMutex<BTreeMap<String, ZoneHandoffReceipt>>,
+        durable: StdMutex<MemoryHandoffState>,
         fail_next_commit: std::sync::atomic::AtomicBool,
         fail_next_commit_uncertain: std::sync::atomic::AtomicBool,
+    }
+
+    #[derive(Debug, Default)]
+    struct MemoryZoneSnapshots(StdMutex<Vec<ZoneSnapshot>>);
+
+    impl ZoneSnapshotStore for MemoryZoneSnapshots {
+        fn load_zone(&self, _zone_id: &str) -> Result<Option<ZoneSnapshot>, EngineError> {
+            Ok(None)
+        }
+
+        fn save_zone(&self, snapshot: &ZoneSnapshot) -> Result<(), EngineError> {
+            self.0.lock().unwrap().push(snapshot.clone());
+            Ok(())
+        }
     }
 
     impl ZoneHandoffStore for MemoryHandoffs {
         fn commit_handoff(
             &self,
-            _source: &ZoneSnapshot,
-            _destination: &ZoneSnapshot,
+            source: &ZoneSnapshot,
+            destination: &ZoneSnapshot,
             receipt: &ZoneHandoffReceipt,
         ) -> Result<ZoneHandoffReceipt, EngineError> {
-            if self
-                .fail_next_commit_uncertain
-                .swap(false, std::sync::atomic::Ordering::SeqCst)
-            {
-                return Err(EngineError::new(
-                    ErrorCode::Internal,
-                    "injected uncertain durable handoff outcome",
-                ));
-            }
             if self
                 .fail_next_commit
                 .swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -3106,8 +3127,8 @@ mod tests {
                     "injected durable handoff rejection",
                 ));
             }
-            let mut receipts = self.receipts.lock().unwrap();
-            if let Some(existing) = receipts.get(&receipt.request_key) {
+            let mut durable = self.durable.lock().unwrap();
+            if let Some(existing) = durable.receipts.get(&receipt.request_key) {
                 return if existing == receipt {
                     Ok(existing.clone())
                 } else {
@@ -3117,7 +3138,24 @@ mod tests {
                     ))
                 };
             }
-            receipts.insert(receipt.request_key.clone(), receipt.clone());
+            let uncertain = self
+                .fail_next_commit_uncertain
+                .swap(false, std::sync::atomic::Ordering::SeqCst);
+            durable
+                .snapshots
+                .insert(source.config.instance.to_string(), source.clone());
+            durable
+                .snapshots
+                .insert(destination.config.instance.to_string(), destination.clone());
+            durable
+                .receipts
+                .insert(receipt.request_key.clone(), receipt.clone());
+            if uncertain {
+                return Err(EngineError::new(
+                    ErrorCode::Internal,
+                    "injected lost acknowledgement after durable handoff commit",
+                ));
+            }
             Ok(receipt.clone())
         }
 
@@ -3125,7 +3163,13 @@ mod tests {
             &self,
             request_key: &str,
         ) -> Result<Option<ZoneHandoffReceipt>, EngineError> {
-            Ok(self.receipts.lock().unwrap().get(request_key).cloned())
+            Ok(self
+                .durable
+                .lock()
+                .unwrap()
+                .receipts
+                .get(request_key)
+                .cloned())
         }
     }
 
@@ -4019,12 +4063,12 @@ mod tests {
         drop(first_outbound);
     }
 
-    #[test]
+    #[tokio::test]
     #[expect(
         clippy::too_many_lines,
         reason = "this verifies an authored handoff through the live multi-zone service boundary"
     )]
-    fn multi_zone_service_travel_moves_the_session_and_issues_a_destination_resume_token() {
+    async fn multi_zone_service_travel_moves_the_session_and_issues_a_destination_resume_token() {
         let authenticator = Authenticator::new(&[
             digest("travel-session-token"),
             digest("travel-session-token-two"),
@@ -4075,6 +4119,7 @@ mod tests {
         )
         .unwrap();
         let arrival = Vec3::new(5.5, 0.0, 5.5);
+        let second_arrival = Vec3::new(8.5, 0.0, 8.5);
         let atlas = travel_atlas(source_definition, destination_definition);
         let lease_store: Arc<dyn ZoneLeaseStore> =
             Arc::new(crate::authority::tests::MemoryLeases::default());
@@ -4097,7 +4142,9 @@ mod tests {
             )
             .unwrap()
         };
-        let mut runtime = MultiZoneRuntime::new(Arc::new(NoopZoneSnapshots));
+        let checkpoints = Arc::new(MemoryZoneSnapshots::default());
+        let snapshot_store: Arc<dyn ZoneSnapshotStore> = checkpoints.clone();
+        let mut runtime = MultiZoneRuntime::new(snapshot_store);
         runtime
             .register(WorldServer::new(make_gateway(source)))
             .unwrap();
@@ -4107,8 +4154,8 @@ mod tests {
         let mut service = MultiZoneService::new(
             runtime,
             source_zone_id.clone(),
-            Duration::from_millis(50),
-            Duration::from_millis(50),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
         )
         .unwrap()
         .with_travel(
@@ -4139,7 +4186,7 @@ mod tests {
                         position: second_position,
                         radius_m: 1.0,
                         destination_zone: destination_instance,
-                        arrival_point: Vec3::new(8.5, 0.0, 8.5),
+                        arrival_point: second_arrival,
                     },
                 ],
             )]),
@@ -4209,7 +4256,7 @@ mod tests {
                 .entity(actor)
                 .is_none()
         );
-        assert_eq!(handoffs.receipts.lock().unwrap().len(), 0);
+        assert_eq!(handoffs.durable.lock().unwrap().receipts.len(), 0);
 
         for (id, trigger_id, expected_code) in [
             ("travel-unknown", "not-authored", "not_found"),
@@ -4359,7 +4406,7 @@ mod tests {
             .entity(actor)
             .expect("the character exists in the destination only");
         assert_eq!(moved.position(), arrival);
-        assert_eq!(handoffs.receipts.lock().unwrap().len(), 1);
+        assert_eq!(handoffs.durable.lock().unwrap().receipts.len(), 1);
 
         handoffs
             .fail_next_commit_uncertain
@@ -4369,26 +4416,44 @@ mod tests {
             message_kind("zone.travel"),
             serde_json::json!({ "trigger_id": "second-gate" }),
         );
-        service.receive(&second_admitted.route, &uncertain_commit);
+        checkpoints.0.lock().unwrap().clear();
+        let (events, event_receiver) = mpsc::channel(1);
+        events
+            .send(ServerEvent::FrameZone {
+                route: second_admitted.route.clone(),
+                envelope: uncertain_commit,
+            })
+            .await
+            .unwrap();
+        let (_shutdown, shutdown_receiver) = watch::channel(false);
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            service.run_loop(event_receiver, shutdown_receiver),
+        )
+        .await
+        .expect("the authority loop exits after the uncertain commit");
         let ServerFrame::Envelope(error) = second_receiver.try_recv().unwrap() else {
             panic!("an uncertain durable handoff must return a correlated error");
         };
         assert_eq!(error.kind.as_str(), ERROR_KIND);
         assert_eq!(error.body["code"].as_str(), Some("internal"));
+        assert!(matches!(
+            second_receiver.try_recv().unwrap(),
+            ServerFrame::Close
+        ));
         assert!(
             service.authority_write_failed,
             "an uncertain commit outcome must stop the authority loop"
         );
-        assert!(
-            service
-                .runtime
-                .zone_server(&source_zone_id)
-                .unwrap()
-                .gateway()
-                .zone()
-                .entity(second_actor)
-                .is_some()
-        );
+        let source_actor = service
+            .runtime
+            .zone_server(&source_zone_id)
+            .unwrap()
+            .gateway()
+            .zone()
+            .entity(second_actor)
+            .expect("live source retains the actor after its commit acknowledgement is lost");
+        assert_eq!(source_actor.position(), second_position);
         assert!(
             service
                 .runtime
@@ -4399,7 +4464,108 @@ mod tests {
                 .entity(second_actor)
                 .is_none()
         );
-        assert_eq!(handoffs.receipts.lock().unwrap().len(), 1);
+        let (committed_source, committed_destination, committed_receipt) = {
+            let durable = handoffs.durable.lock().unwrap();
+            assert_eq!(durable.receipts.len(), 2);
+            let committed_source = durable
+                .snapshots
+                .get(&source_zone_id)
+                .expect("the uncertain commit persisted the source snapshot");
+            assert!(
+                committed_source
+                    .entities
+                    .iter()
+                    .all(|entity| entity.id != second_actor)
+            );
+            let committed_destination = durable
+                .snapshots
+                .get(&destination_zone_id)
+                .expect("the uncertain commit persisted the destination snapshot");
+            let committed_actor = committed_destination
+                .entities
+                .iter()
+                .find(|entity| entity.id == second_actor)
+                .expect("the durable destination snapshot contains the moved actor");
+            assert_eq!(committed_actor.position(), second_arrival);
+            let receipt = durable
+                .receipts
+                .values()
+                .find(|receipt| receipt.entity == second_actor)
+                .expect("the uncertain commit persisted its receipt")
+                .clone();
+            (
+                committed_source.clone(),
+                committed_destination.clone(),
+                receipt,
+            )
+        };
+        assert!(
+            checkpoints.0.lock().unwrap().is_empty(),
+            "the stopped authority loop must not checkpoint uncertain live state"
+        );
+
+        let source_nav = service
+            .runtime
+            .zone_server(&source_zone_id)
+            .unwrap()
+            .gateway()
+            .zone()
+            .nav()
+            .clone();
+        let destination_nav = service
+            .runtime
+            .zone_server(&destination_zone_id)
+            .unwrap()
+            .gateway()
+            .zone()
+            .nav()
+            .clone();
+        let mut recovered_source = Zone::restore(
+            &committed_source,
+            source_nav,
+            Arc::new(UniformItemRules::new(99)),
+        )
+        .unwrap();
+        let mut recovered_destination = Zone::restore(
+            &committed_destination,
+            destination_nav,
+            Arc::new(UniformItemRules::new(99)),
+        )
+        .unwrap();
+        assert!(
+            recovered_source.entity(second_actor).is_none(),
+            "recovery restores the actor out of the source"
+        );
+        assert_eq!(
+            recovered_destination
+                .entity(second_actor)
+                .expect("recovery restores the actor in the destination")
+                .position(),
+            second_arrival
+        );
+
+        let retry_request = PlayerHandoffRequest::new(
+            committed_receipt.character,
+            committed_receipt.destination,
+            committed_receipt.request_key.clone(),
+        );
+        let source_before_retry = recovered_source.snapshot();
+        let destination_before_retry = recovered_destination.snapshot();
+        let mut retry_coordinator = ZoneHandoffCoordinator::default();
+        let travel = service.travel.as_ref().unwrap();
+        let retried = retry_coordinator
+            .handoff_player_durable(
+                &travel.atlas,
+                &travel.authorities,
+                &mut recovered_source,
+                &mut recovered_destination,
+                &retry_request,
+                handoffs.as_ref(),
+            )
+            .unwrap();
+        assert_eq!(retried, committed_receipt);
+        assert_eq!(recovered_source.snapshot(), source_before_retry);
+        assert_eq!(recovered_destination.snapshot(), destination_before_retry);
     }
 
     #[test]
