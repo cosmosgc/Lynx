@@ -305,6 +305,7 @@ impl Plugin for ChatPanelPlugin {
             Update,
             (chat_keyboard, draw)
                 .chain()
+                .after(crate::options::toggle_menu)
                 .after(crate::online::poll_online),
         );
     }
@@ -317,9 +318,14 @@ pub(crate) fn chat_keyboard(
     mut composer: ResMut<ChatComposer>,
     mut panel: ResMut<ChatPanel>,
     mut client: ResMut<OnlineClient>,
+    menu: Option<Res<crate::options::OptionsMenuState>>,
 ) {
     if !windows.single().is_ok_and(|window| window.focused) {
         composer.active = false;
+        return;
+    }
+    if menu.is_some_and(|menu| menu.is_open()) {
+        events.clear();
         return;
     }
     for event in events.read() {

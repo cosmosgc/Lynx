@@ -23,6 +23,7 @@ impl Template {
             ("content/entities/starter_lever.ron", STARTER_LEVER),
             ("content/entities/starter_gate.ron", STARTER_GATE),
             ("content/items/torch.ron", TORCH),
+            ("content/items/sword.ron", SWORD),
             ("content/ui/inventory.ron", INVENTORY_PANEL),
             (
                 "content/localization/pt-BR.ron",
@@ -179,6 +180,16 @@ const TORCH: &str = r#"(
 )
 "#;
 
+const SWORD: &str = r#"(
+    id: "item.sword",
+    version: (major: 1, minor: 0),
+    display: (name: "item.sword.name", description: "item.sword.description"),
+    components: {
+        "core.item": {"stack_max": 1, "weight_kg": 2.0, "equip_slot": "main_hand"},
+    },
+)
+"#;
+
 const INVENTORY_PANEL: &str = r#"(
     id: "ui.inventory",
     version: (major: 1, minor: 0),
@@ -252,6 +263,8 @@ const MINIMAL_CATALOG: &str = r#"(
         "link.lever_to_door.description": "Conexão de ativação da alavanca ao portão.",
         "item.torch.name": "Tocha",
         "item.torch.description": "Ilumina caminhos escuros.",
+        "item.sword.name": "Espada",
+        "item.sword.description": "Uma lâmina equilibrada para a mão principal.",
         "ui.inventory.title": "Inventário",
         "ui.inventory.description": "Itens carregados pelo personagem.",
         "ui.action.close": "Fechar",
@@ -279,6 +292,8 @@ const MMORPG_CATALOG: &str = r#"(
         "link.lever_to_door.description": "Activation link from the lever to the gate.",
         "item.torch.name": "Tocha",
         "item.torch.description": "Ilumina caminhos escuros.",
+        "item.sword.name": "Espada",
+        "item.sword.description": "Uma lâmina equilibrada para a mão principal.",
         "ui.inventory.title": "Inventário",
         "ui.inventory.description": "Itens carregados pelo personagem.",
         "ui.practice.title": "Treinamento",

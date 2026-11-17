@@ -311,7 +311,12 @@ async fn main() -> anyhow::Result<()> {
     let tick_mean_ms = if tick_count_value == 0 {
         0.0
     } else {
-        tick_duration.max(0.0) * 1_000.0 / tick_count_value as f64
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a metric count is converted to f64 to compute a human-readable mean duration"
+        )]
+        let tick_count = tick_count_value as f64;
+        tick_duration.max(0.0) * 1_000.0 / tick_count
     };
     let queue_full_events = counter_delta(
         &starting_metrics,
@@ -377,11 +382,9 @@ async fn main() -> anyhow::Result<()> {
     let connection_count = metric_value(&metrics, "lynx_world_connections")
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or_default();
-    let session_queue_capacity = if connection_count == 0 {
-        0
-    } else {
-        queue_capacity_total / connection_count
-    };
+    let session_queue_capacity = queue_capacity_total
+        .checked_div(connection_count)
+        .unwrap_or_default();
     let reply_samples = results.reply_latency.len();
     let p50 = percentile_ns(&results.reply_latency, 50);
     let p95 = percentile_ns(&results.reply_latency, 95);

@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::equipment::EquipSlot;
 use crate::error::{EngineError, ErrorCode};
 use crate::id::{DefinitionId, IdKind, StableId};
 
@@ -52,10 +53,93 @@ impl ItemStack {
     }
 }
 
-/// Per-item stacking rules. Load these from content in production.
+/// Per-item stacking and equipment rules. Load these from content in production.
 pub trait ItemRules {
     /// Maximum quantity in one slot. Must be at least one.
     fn max_stack(&self, definition: &DefinitionId) -> u32;
+
+    /// The only equipment slot this item may occupy, if it is equippable.
+    ///
+    /// The default is `None`: an item is not equipment unless content says so.
+    fn equip_slot(&self, _definition: &DefinitionId) -> Option<EquipSlot> {
+        None
+    }
+}
+
+/// One item's authored stacking and equipment rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ItemRule {
+    /// Maximum quantity in one slot, always at least one.
+    pub max_stack: u32,
+    /// The only slot this item may occupy, when equippable.
+    pub equip_slot: Option<EquipSlot>,
+}
+
+/// Rules resolved from a content catalog, with a fallback stack limit.
+///
+/// This keeps the simulation free of content parsing while still honouring
+/// authored stack limits and equipment slots at runtime.
+#[derive(Debug, Clone)]
+pub struct TableItemRules {
+    default_max_stack: u32,
+    items: BTreeMap<DefinitionId, ItemRule>,
+}
+
+impl TableItemRules {
+    /// Rules with a fallback stack limit of at least one.
+    #[must_use]
+    pub fn new(default_max_stack: u32) -> Self {
+        Self {
+            default_max_stack: default_max_stack.max(1),
+            items: BTreeMap::new(),
+        }
+    }
+
+    /// Add or replace one item's rule.
+    #[must_use]
+    pub fn with_item(
+        mut self,
+        definition: DefinitionId,
+        max_stack: u32,
+        equip_slot: Option<EquipSlot>,
+    ) -> Self {
+        self.insert(definition, max_stack, equip_slot);
+        self
+    }
+
+    /// Add or replace one item's rule in place.
+    pub fn insert(
+        &mut self,
+        definition: DefinitionId,
+        max_stack: u32,
+        equip_slot: Option<EquipSlot>,
+    ) {
+        self.items.insert(
+            definition,
+            ItemRule {
+                max_stack: max_stack.max(1),
+                equip_slot,
+            },
+        );
+    }
+
+    /// Authored rule for one item, when present.
+    #[must_use]
+    pub fn rule(&self, definition: &DefinitionId) -> Option<&ItemRule> {
+        self.items.get(definition)
+    }
+}
+
+impl ItemRules for TableItemRules {
+    fn max_stack(&self, definition: &DefinitionId) -> u32 {
+        self.items
+            .get(definition)
+            .map_or(self.default_max_stack, |rule| rule.max_stack)
+    }
+
+    fn equip_slot(&self, definition: &DefinitionId) -> Option<EquipSlot> {
+        self.items.get(definition).and_then(|rule| rule.equip_slot)
+    }
 }
 
 /// The same stack limit for every item. Intended for tests and prototypes.

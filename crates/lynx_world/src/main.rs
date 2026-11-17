@@ -719,6 +719,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "authored map startup wires shared policy, authority, persistence, and listeners as one lifecycle"
+)]
 async fn serve_authored_map(
     args: ServeArgs,
     map_id: String,
@@ -1041,14 +1045,13 @@ async fn serve_authored_map(
                 ticker.tick().await;
                 let renew = authorities.clone();
                 let result = tokio::task::spawn_blocking(move || renew.renew_all()).await;
-                match result {
-                    Ok(Ok(true)) => metrics.record_lease_renewal(true),
-                    _ => {
-                        metrics.record_lease_renewal(false);
-                        state.set_ready(false);
-                        let _ = shutdown.send(true);
-                        break;
-                    }
+                if let Ok(Ok(true)) = result {
+                    metrics.record_lease_renewal(true);
+                } else {
+                    metrics.record_lease_renewal(false);
+                    state.set_ready(false);
+                    let _ = shutdown.send(true);
+                    break;
                 }
             }
         })
@@ -1080,7 +1083,7 @@ async fn serve_authored_map(
         Ok(true) => tracing::info!(zones = zone_ids.len(), "authored zone leases released"),
         Ok(false) => tracing::warn!("one or more authored zone leases were lost before release"),
         Err(error) => {
-            tracing::warn!(code = ?error.code(), details = %error, "authored zone leases could not all be released")
+            tracing::warn!(code = ?error.code(), details = %error, "authored zone leases could not all be released");
         }
     }
     tokio::task::block_in_place(|| drop((state, identity_backend, stores)));
@@ -1254,7 +1257,11 @@ fn run_content_migration(
         );
         let restored = current.rollback_content_migration()?;
         store
-            .save_at_tick(&restored, restored.zone.tick.0 as i64)
+            .save_at_tick(
+                &restored,
+                i64::try_from(restored.zone.tick.0)
+                    .context("restored tick exceeds database range")?,
+            )
             .context("failed to atomically restore the pre-migration snapshot")?;
         tracing::info!(
             plan_id = %checkpoint.plan_id,
@@ -1287,7 +1294,11 @@ fn run_content_migration(
     }
 
     store
-        .save_at_tick(&prepared.candidate, prepared.candidate.zone.tick.0 as i64)
+        .save_at_tick(
+            &prepared.candidate,
+            i64::try_from(prepared.candidate.zone.tick.0)
+                .context("migration candidate tick exceeds database range")?,
+        )
         .context("failed to atomically persist the migrated world and rollback checkpoint")?;
     tracing::info!(
         plan_id = %plan.id,
@@ -1320,7 +1331,9 @@ fn initialize_normalized_world(
         // represented in older replay snapshots. Hydrate that field from the
         // normalized store before comparing the remaining aggregate state.
         let mut replayed_factions = factions.clone();
-        replayed_factions.relations = stored_factions.relations.clone();
+        replayed_factions
+            .relations
+            .clone_from(&stored_factions.relations);
         anyhow::ensure!(
             stored_calendar == calendar && stored_factions == replayed_factions,
             "normalized faction/calendar state differs from the replayed world snapshot; reconcile before serving"

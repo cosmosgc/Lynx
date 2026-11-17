@@ -8,6 +8,7 @@
 //! usable from the authoritative server, the client, tools, and tests alike.
 
 pub mod audit;
+pub mod equipment;
 pub mod error;
 pub mod faction;
 pub mod i18n;

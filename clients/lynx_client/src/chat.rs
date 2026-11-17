@@ -102,6 +102,13 @@ impl ChatFeed {
         self.presence_truncated = truncated;
     }
 
+    pub(crate) fn clear_zone(&mut self) {
+        self.messages.retain(|message| message.channel_id != "zone");
+        self.members.clear();
+        self.presence_truncated = false;
+        self.next_before = None;
+    }
+
     pub(crate) fn update_presence(&mut self, joins: Vec<ChatMember>, leaves: &[String]) {
         self.members
             .retain(|member| !leaves.contains(&member.account_id));

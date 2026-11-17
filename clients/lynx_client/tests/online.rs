@@ -536,18 +536,18 @@ async fn headless_schedule_connects_moves_and_disconnects() {
             26
         );
         let before_split = client.world().inventory().unwrap().clone();
-        client.move_inventory_stack("split", 0, 3, 1).unwrap();
+        client.move_inventory_stack("split", 0, 4, 1).unwrap();
         assert_eq!(client.world().inventory(), Some(&before_split));
         wait_for_interaction(&mut client).await;
         assert!(client.inventory_action_pending());
         assert!(matches!(
-            client.move_inventory_stack("merge", 0, 3, 1),
+            client.move_inventory_stack("merge", 0, 4, 1),
             Err(lynx_client::online::OnlineError::Protocol)
         ));
         tokio::time::timeout(Duration::from_secs(5), async {
             while client.world().inventory().is_none_or(|inventory| {
                 inventory.slot(0).is_none_or(|stack| stack.quantity != 2)
-                    || inventory.slot(3).is_none_or(|stack| stack.quantity != 1)
+                    || inventory.slot(4).is_none_or(|stack| stack.quantity != 1)
             }) {
                 client.poll();
                 assert_eq!(client.status(), OnlineStatus::Active);
@@ -557,13 +557,47 @@ async fn headless_schedule_connects_moves_and_disconnects() {
         .await
         .unwrap();
         assert!(!client.inventory_action_pending());
-        client.move_inventory_stack("merge", 3, 0, 1).unwrap();
+        client.move_inventory_stack("merge", 4, 0, 1).unwrap();
         wait_for_interaction(&mut client).await;
         tokio::time::timeout(Duration::from_secs(5), async {
             while client.world().inventory().is_none_or(|inventory| {
                 inventory.slot(0).is_none_or(|stack| stack.quantity != 3)
-                    || inventory.slot(3).is_some()
+                    || inventory.slot(4).is_some()
             }) {
+                client.poll();
+                assert_eq!(client.status(), OnlineStatus::Active);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!client.inventory_action_pending());
+        // The demo starts with a sword in slot 3; equip and unequip it through
+        // the same authoritative owner-state path.
+        client.equip_item(3).unwrap();
+        wait_for_interaction(&mut client).await;
+        assert!(client.inventory_action_pending());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !client.world().equipment().is_some_and(|equipment| {
+                equipment
+                    .slot(engine_core::equipment::EquipSlot::MainHand)
+                    .is_some()
+            }) {
+                client.poll();
+                assert_eq!(client.status(), OnlineStatus::Active);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!client.inventory_action_pending());
+        client
+            .unequip_item(engine_core::equipment::EquipSlot::MainHand)
+            .unwrap();
+        wait_for_interaction(&mut client).await;
+        assert!(client.inventory_action_pending());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while client.world().equipment().is_some() {
                 client.poll();
                 assert_eq!(client.status(), OnlineStatus::Active);
                 tokio::time::sleep(Duration::from_millis(5)).await;
@@ -596,7 +630,15 @@ async fn headless_schedule_connects_moves_and_disconnects() {
                 .quantity,
             3
         );
-        assert!(client.world().inventory().unwrap().slot(3).is_none());
+        assert_eq!(
+            client
+                .world()
+                .inventory()
+                .unwrap()
+                .slot(3)
+                .map(|stack| stack.definition.clone()),
+            Some(DefinitionId::new("item.sword").unwrap())
+        );
     }
     #[cfg(feature = "window")]
     {
@@ -608,14 +650,15 @@ async fn headless_schedule_connects_moves_and_disconnects() {
             .resource::<OnlineClient>()
             .world()
             .entities()
-            .map(|e| (e.position.x * 32.0, -e.position.z * 32.0))
+            .map(|e| (e.position.x, e.position.z))
             .collect();
         assert_ne!(expected.len(), 0);
         let world = app.world_mut();
+        assert_eq!(world.query::<&Camera3d>().iter(world).count(), 1);
         let displayed: Vec<_> = world
-            .query_filtered::<(&Sprite, &Transform), Without<ChildOf>>()
+            .query_filtered::<&Transform, With<lynx_client::windowed::OnlineEntity>>()
             .iter(world)
-            .map(|(_, t)| (t.translation.x, t.translation.y))
+            .map(|t| (t.translation.x, t.translation.z))
             .collect();
         assert_eq!(displayed.len(), expected.len());
         // Remote actors may already be interpolating toward a newer tick.
@@ -1046,10 +1089,15 @@ async fn headless_schedule_connects_moves_and_disconnects() {
     }
     #[cfg(feature = "window")]
     {
-        use bevy::prelude::*;
         app.update();
         let world = app.world_mut();
-        assert_eq!(world.query::<&Sprite>().iter(world).count(), 0);
+        assert_eq!(
+            world
+                .query::<&lynx_client::windowed::OnlineEntity>()
+                .iter(world)
+                .count(),
+            0
+        );
     }
     let _ = shutdown.send(true);
     let _ = stop.send(());

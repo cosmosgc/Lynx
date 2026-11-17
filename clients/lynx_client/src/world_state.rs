@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
+use engine_core::equipment::Equipment;
 use engine_core::id::{DefinitionId, StableId};
 use engine_core::inventory::{Inventory, UniformItemRules};
 use engine_net::envelope::{Envelope, MessageId, MessageKind};
@@ -125,10 +126,13 @@ struct Update {
     movement: Option<Movement>,
 }
 
-/// Private owner-state payload; the inventory is never retained for other entities.
+/// Private owner-state payload; the inventory and equipment are never retained
+/// for other entities.
 #[derive(Debug, Deserialize)]
-struct OwnerInventory {
+struct OwnerStatePayload {
     inventory: Inventory,
+    #[serde(default)]
+    equipment: Option<Equipment>,
 }
 
 #[derive(Clone)]
@@ -136,6 +140,7 @@ struct OwnedInventory {
     sequence: u64,
     tick: u64,
     inventory: Inventory,
+    equipment: Option<Equipment>,
 }
 
 // Owner state is private. Keep it out of diagnostics even if the surrounding
@@ -250,6 +255,14 @@ impl WorldState {
     /// Owner state for other entities is never retained.
     pub fn inventory(&self) -> Option<&Inventory> {
         self.owner_inventory.as_ref().map(|owned| &owned.inventory)
+    }
+    /// The controlled actor's equipped items, once the server replicated them.
+    ///
+    /// `None` means either no owner state has arrived or nothing is equipped.
+    pub fn equipment(&self) -> Option<&Equipment> {
+        self.owner_inventory
+            .as_ref()
+            .and_then(|owned| owned.equipment.as_ref())
     }
     pub fn tick(&self) -> Option<u64> {
         self.tick
@@ -498,12 +511,17 @@ impl WorldState {
         if id != actor {
             return Ok(());
         }
-        let state: OwnerInventory =
+        let state: OwnerStatePayload =
             serde_json::from_value(item.payload.clone()).map_err(|_| Error::InvalidMessage)?;
         state
             .inventory
             .validate(&UniformItemRules::new(u32::MAX))
             .map_err(|_| Error::InvalidMessage)?;
+        if let Some(equipment) = &state.equipment {
+            equipment
+                .validate_structure()
+                .map_err(|_| Error::InvalidMessage)?;
+        }
         let order = (item.sequence, item.tick.0);
         if owner_inventory
             .as_ref()
@@ -513,6 +531,7 @@ impl WorldState {
                 sequence: order.0,
                 tick: order.1,
                 inventory: state.inventory,
+                equipment: state.equipment,
             });
         }
         Ok(())
@@ -646,6 +665,13 @@ mod tests {
     fn owner(id: StableId, tick: u64, sequence: u64, slots: &[Value]) -> Value {
         json!({"category": "owner_only", "entity": id, "tick": tick, "sequence": sequence,
             "payload": {"inventory": {"capacity": slots.len(), "slots": slots}}})
+    }
+    fn sword() -> Value {
+        json!({
+            "definition": "item.sword",
+            "quantity": 1,
+            "instance": StableId::from_parts(IdKind::Item, 1, 7).to_string(),
+        })
     }
     fn pos(x: f32) -> Position {
         Position { x, y: 0.0, z: 0.0 }
@@ -1225,6 +1251,84 @@ mod tests {
             5
         );
         assert_eq!(state.tick(), Some(14));
+    }
+
+    #[test]
+    fn owner_equipment_is_decoded_and_can_be_cleared() {
+        let (mut state, g) = start();
+        assert!(state.equipment().is_none());
+
+        let equipped = json!({
+            "category": "owner_only", "entity": actor(1), "tick": 11, "sequence": 1,
+            "payload": {
+                "inventory": {"capacity": 1, "slots": [torch(2)]},
+                "equipment": {"slots": {"main_hand": sword()}},
+            },
+        });
+        state
+            .receive(
+                g,
+                &world(
+                    "world.delta",
+                    11,
+                    &[actor(1), actor(2)],
+                    &json!([equipped]),
+                    &Value::Null,
+                ),
+            )
+            .unwrap();
+        let equipment = state.equipment().expect("equipment is replicated");
+        assert_eq!(
+            equipment
+                .slot(engine_core::equipment::EquipSlot::MainHand)
+                .map(|stack| stack.definition.clone()),
+            Some(definition("item.sword"))
+        );
+
+        // Omitting equipment is authoritative: the item was unequipped.
+        state
+            .receive(
+                g,
+                &world(
+                    "world.delta",
+                    12,
+                    &[actor(1), actor(2)],
+                    &json!([owner(actor(1), 12, 2, &[torch(3)])]),
+                    &Value::Null,
+                ),
+            )
+            .unwrap();
+        assert!(state.equipment().is_none());
+    }
+
+    #[test]
+    fn invalid_owner_equipment_rejects_the_whole_update_atomically() {
+        let (mut state, g) = start();
+        let bad = json!({
+            "category": "owner_only", "entity": actor(1), "tick": 11, "sequence": 1,
+            "payload": {
+                "inventory": {"capacity": 2, "slots": [torch(2), null]},
+                "equipment": {"slots": {
+                    "main_hand": {"definition": "item.sword", "quantity": 2, "instance": null}
+                }},
+            },
+        });
+        assert!(
+            state
+                .receive(
+                    g,
+                    &world(
+                        "world.delta",
+                        11,
+                        &[actor(1), actor(2)],
+                        &json!([bad]),
+                        &Value::Null,
+                    ),
+                )
+                .is_err()
+        );
+        assert!(state.inventory().is_none());
+        assert!(state.equipment().is_none());
     }
 
     #[test]

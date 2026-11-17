@@ -55,6 +55,13 @@ STATUS_LABELS = {
     "unspecified": "Unspecified",
 }
 HISTORY_TIMEZONE = timezone(timedelta(hours=-3), name="GMT-3")
+HISTORY_EVENT_FILTERS = (
+    ("status", "Status changed"),
+    ("task", "New task"),
+    ("task_updated", "Task updated"),
+    ("file", "New file"),
+    ("file_updated", "File updated"),
+)
 PHASE_LINE = re.compile(
     r"^Phase\s+(\d+)\s+(.+?)\s+\[([█░]+)\]\s+(\d+)%\s+(.+?)\s*$",
     re.MULTILINE,
@@ -800,6 +807,167 @@ def load_queue(queue_path: Path) -> list[dict[str, Any]]:
     return [section for section in sections if section["items"]]
 
 
+def _plain_issue_text(value: str) -> str:
+    value = re.sub(r"\[([^]]+)\]\([^)]+\)", r"\1", value)
+    value = re.sub(r"`([^`]+)`", r"\1", value)
+    value = re.sub(r"\*\*(.+?)\*\*|\*(.+?)\*", lambda match: match.group(1) or match.group(2), value)
+    return value.strip()
+
+
+def _issue_sections(lines: list[str]) -> list[dict[str, Any]]:
+    sections: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    body_lines: list[str] = []
+
+    def flush() -> None:
+        if current is None:
+            return
+        content: list[str] = []
+        acceptance: list[dict[str, Any]] = []
+        for line in body_lines:
+            stripped = line.strip()
+            match = re.match(r"- \[([ xX])\]\s*(.+)", stripped)
+            if match:
+                acceptance.append(
+                    {"text": _plain_issue_text(match.group(2)), "complete": match.group(1).casefold() == "x"}
+                )
+            elif stripped:
+                if stripped.startswith("- "):
+                    content.append(f"• {_plain_issue_text(stripped[2:])}")
+                else:
+                    content.append(_plain_issue_text(stripped))
+            elif content and content[-1] != "":
+                content.append("")
+        current["body"] = "\n".join(content).strip()
+        current["acceptance"] = acceptance
+        sections.append(current)
+
+    for line in lines:
+        heading = re.match(r"^##\s+(.+?)\s*$", line)
+        if heading:
+            flush()
+            current = {"title": heading.group(1).strip()}
+            body_lines = []
+        elif current is not None:
+            body_lines.append(line)
+    flush()
+    return sections
+
+
+def load_issue_records(repository_root: Path) -> list[dict[str, Any]]:
+    """Load local issue specifications and dated completion-blocker records."""
+    records: list[dict[str, Any]] = []
+    issue_directory = repository_root / "docs" / "issues"
+    issue_heading = re.compile(
+        r"^#\s+([A-Z]{2,5}(?:-\d{3})?(?:\s*/\s*[A-Z]{2,5}-\d{3})?)\s+[—–-]\s+(.+?)\s*$"
+    )
+    for source in sorted(issue_directory.glob("*.md")) if issue_directory.is_dir() else []:
+        lines = source.read_text(encoding="utf-8").splitlines()
+        if not lines:
+            continue
+        heading = issue_heading.match(lines[0])
+        if not heading:
+            continue
+        metadata: dict[str, str] = {}
+        for line in lines[1:]:
+            if line.startswith("## "):
+                break
+            match = re.match(r"^- \*\*(.+?):\*\*\s*(.*)$", line)
+            if match:
+                metadata[match.group(1).strip().casefold().replace(" ", "_")] = match.group(2).strip()
+            elif line.startswith("  ") and metadata:
+                key = next(reversed(metadata))
+                metadata[key] = f"{metadata[key]} {line.strip()}".strip()
+        relative = source.relative_to(repository_root).as_posix()
+        status = metadata.get("status", "Unspecified")
+        status_prefix = status.casefold()
+        if status_prefix.startswith("resolved"):
+            status_label = "Resolved"
+        elif status_prefix.startswith("open"):
+            status_label = "Open"
+        elif status_prefix.startswith("fixed") or status_prefix.startswith("in progress"):
+            status_label = "In progress"
+        else:
+            status_label = status.split(" — ", 1)[0].split(" - ", 1)[0].strip()
+        records.append(
+            {
+                "key": f"issue:{relative}",
+                "id": heading.group(1).strip(),
+                "title": heading.group(2).strip(),
+                "status": status,
+                "status_label": status_label,
+                "source_type": "Issue specification",
+                "source": relative,
+                "line": 1,
+                "reported": metadata.get("reported", ""),
+                "resolved": metadata.get("resolved", ""),
+                "affected_workflow": _plain_issue_text(metadata.get("affected_workflow", "")),
+                "related_ids": list(dict.fromkeys(TASK_ID.findall(metadata.get("related_tasks", "")))),
+                "sections": _issue_sections(lines[1:]),
+                "record_body": "",
+            }
+        )
+
+    tracker = repository_root / "docs" / "agents" / "issue-tracker.md"
+    if tracker.is_file():
+        lines = tracker.read_text(encoding="utf-8").splitlines()
+        local_heading = next(
+            (index for index, line in enumerate(lines) if line.strip() == "## Local completion blockers"),
+            None,
+        )
+        if local_heading is not None:
+            active_date = ""
+            current: dict[str, Any] | None = None
+            body_lines: list[str] = []
+
+            def flush_blocker() -> None:
+                if current is None:
+                    return
+                body = " ".join(_plain_issue_text(line.strip()) for line in body_lines if line.strip())
+                records.append({**current, "record_body": body, "sections": []})
+
+            blocker_heading = re.compile(
+                r"^- \*\*([A-Z][A-Z0-9-]*(?:\s*/\s*[A-Z][A-Z0-9-]*)*)\s+[—–-]\s+(.+?):\*\*\s*(.*)$"
+            )
+            for index in range(local_heading + 1, len(lines)):
+                line = lines[index]
+                date_heading = re.match(r"^###\s+(\d{4}-\d{2}-\d{2})\s*$", line)
+                if date_heading:
+                    flush_blocker()
+                    current = None
+                    body_lines = []
+                    active_date = date_heading.group(1)
+                    continue
+                match = blocker_heading.match(line)
+                if match:
+                    flush_blocker()
+                    current = {
+                        "key": f"blocker:{active_date}:{index + 1}",
+                        "id": match.group(1).strip(),
+                        "title": match.group(2).strip(),
+                        "status": "Blocked",
+                        "status_label": "Blocked",
+                        "source_type": "Local completion blocker",
+                        "source": "docs/agents/issue-tracker.md",
+                        "line": index + 1,
+                        "reported": active_date,
+                        "resolved": "",
+                        "affected_workflow": "",
+                        "related_ids": list(dict.fromkeys(TASK_ID.findall(match.group(1) + " " + match.group(2)))),
+                    }
+                    body_lines = [match.group(3)] if match.group(3) else []
+                elif current is not None:
+                    if line.startswith("- ") or line.startswith("## "):
+                        flush_blocker()
+                        current = None
+                        body_lines = []
+                    else:
+                        body_lines.append(line)
+            flush_blocker()
+
+    return records
+
+
 def _todo_source_files(repository_root: Path):
     """Yield eligible source files without opening their contents."""
     for directory, child_directories, filenames in os.walk(repository_root):
@@ -1046,6 +1214,59 @@ def create_app(
             categories=backlog_categories(items),
         )
 
+    @app.get("/issues")
+    def issues():
+        try:
+            records = load_issue_records(get_repository_root())
+        except (OSError, UnicodeError, ValueError) as error:
+            return render_template("error.html", error=str(error)), 500
+
+        issue_key = request.args.get("issue", "").strip()
+        query = request.args.get("q", "").strip()
+        status_filter = request.args.get("status", "").strip()
+        source_filter = request.args.get("source", "").strip()
+        records_by_key = {record["key"]: record for record in records}
+        if issue_key and issue_key not in records_by_key:
+            abort(404)
+
+        def searchable(record: dict[str, Any]) -> str:
+            return " ".join(
+                [
+                    record["id"],
+                    record["title"],
+                    record["status"],
+                    record["source_type"],
+                    record["affected_workflow"],
+                    record["record_body"],
+                    *(section["title"] + " " + section["body"] for section in record["sections"]),
+                    *(criterion["text"] for section in record["sections"] for criterion in section["acceptance"]),
+                ]
+            ).casefold()
+
+        needle = query.casefold()
+        visible_records = [
+            record
+            for record in records
+            if (not needle or needle in searchable(record))
+            and (not status_filter or record["status_label"] == status_filter)
+            and (not source_filter or record["source_type"] == source_filter)
+        ]
+        selected_issue = records_by_key.get(issue_key) if issue_key else None
+        if selected_issue is None and visible_records:
+            selected_issue = visible_records[0]
+
+        return render_template(
+            "issues.html",
+            items=visible_records,
+            selected_issue=selected_issue,
+            query=query,
+            status_filter=status_filter,
+            source_filter=source_filter,
+            statuses=sorted({record["status_label"] for record in records}),
+            sources=sorted({record["source_type"] for record in records}),
+            total_count=len(records),
+        )
+
     @app.get("/dependencies")
     def dependencies():
         try:
@@ -1094,7 +1315,7 @@ def create_app(
     def history():
         try:
             items = get_items()
-            changes = get_history(items)
+            all_changes = get_history(items)
         except (OSError, sqlite3.Error, UnicodeError, ValueError) as error:
             return render_template("error.html", error=str(error)), 500
         selected_id = request.args.get("task", "").strip()
@@ -1102,10 +1323,30 @@ def create_app(
         selected_task = items_by_id.get(selected_id) if selected_id else None
         if selected_id and selected_task is None:
             abort(404)
+        available_kinds = {kind for kind, _ in HISTORY_EVENT_FILTERS}
+        kind_filter_active = "kind" in request.args
+        if kind_filter_active:
+            selected_kinds = {
+                kind for kind in request.args.getlist("kind") if kind in available_kinds
+            }
+        else:
+            selected_kinds = available_kinds
+        changes = [
+            change for change in all_changes if change["kind"] in selected_kinds
+        ]
+        history_kind_query = (
+            sorted(selected_kinds)
+            if kind_filter_active and selected_kinds
+            else ([""] if kind_filter_active else [])
+        )
         return render_template(
             "history.html",
             changes=changes,
+            total_changes=len(all_changes),
             selected_task=selected_task,
+            event_filters=HISTORY_EVENT_FILTERS,
+            selected_kinds=selected_kinds,
+            history_kind_query=history_kind_query,
         )
 
     @app.get("/todos")

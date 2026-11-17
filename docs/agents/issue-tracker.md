@@ -55,6 +55,16 @@ Record backlog work that cannot be completed in the current environment here,
 with the missing external dependency and the next action needed. Remove an entry
 when that dependency is available and the work resumes.
 
+### 2026-11-15
+
+- **CLT-008 — Equipment UI graphical review:** The authoritative equip/unequip
+  contract, persistence, owner-only replication, and the headless client flow are
+  covered by workspace tests, but this session has not opened the live Windows
+  client to visually confirm the equipment section, Portuguese slot labels, and
+  the equip/unequip controls. Run the online client with a demo character, equip
+  the starting sword, unequip it, and confirm both rows update only after
+  authoritative owner replication.
+
 ### 2026-11-12
 
 - **NET-006 — Measured replication delivery budgets:** A bounded admin route
@@ -243,18 +253,23 @@ when that dependency is available and the work resumes.
 - **PST-013 — PostgreSQL content-migration rehearsal:** Reviewed persisted-
   instance plans now prepare and validate a whole-world candidate, preserve
   quarantined payloads in a rollback checkpoint, and commit through the snapshot
-  transaction. The local environment has no configured PostgreSQL database, so
-  the lease-fenced save, restart recovery, and rollback path cannot be exercised
-  against PostgreSQL here. Run dry-run, apply, restart, and pre-gameplay rollback
-  with an isolated database migrated to head, then remove this blocker.
+  transaction. Although the general snapshot integration target runs against the
+  repository `.env` database, the dedicated scratch database needed for this
+  rehearsal is not configured; the lease-fenced save, restart recovery, and
+  rollback path have not been validated for PST-013. Run dry-run, apply, restart,
+  and pre-gameplay rollback with an isolated database migrated to head, then
+  remove this blocker.
 
-- **SIM-008 — Party chat and zone binding validation:** The client now discovers
-  account-authorized direct and group destinations through the world API and
-  joins those Nakama channels on demand. Party channels are absent from the
-  `ChatChannelTarget` contract, and configured room access is not yet bound to
-  Lynx zone admission. Resolve party channel authorization and zone-admission
-  policy, then validate direct/group joins and history against a live Nakama
-  instance before closing SIM-008.
+- **SIM-008 — Party chat and live Nakama validation:** Authenticated chat
+  discovery now requires the current world resume token. The authority loop
+  resolves its character and owning zone; the HTTP edge verifies that the
+  Nakama account owns that character and returns only the derived zone room.
+  The client waits for admission, joins that returned room, and rediscovers it
+  after token rotation/reconnect. Headless coverage proves per-zone resolution,
+  rejects cross-zone token use, checks account ownership, and exercises resume
+  rotation. Party channels remain absent from `ChatChannelTarget`; run direct,
+  group, and zone-room joins/history against a live Nakama instance before
+  closing SIM-008.
 
 - **SIM-009 — Party reconnect contract:** The current `RealtimePartySession`
   explicitly models Nakama parties as transient and ends membership when its
@@ -406,14 +421,6 @@ when that dependency is available and the work resumes.
   persistence. Resume after the client localization contract lands, then add
   completeness/placeholder checks, pseudo-locale generation, and translator
   import/export around the same catalogs.
-- **CLT-008 — Authoritative equipment interaction:** The inventory UI and
-  server-side take/insert/split/merge paths are present, but `Verb::Equip` is
-  explicitly unsupported. The current item schema has stack size and weight,
-  with no equipment-slot compatibility or stat-effect contract, and owner-only
-  replication carries inventory alone. Do not expose an equip button until the
-  item-slot/effect model, character equipment state, persistence representation,
-  and owner replication contract are defined together. Resume with that
-  authoritative simulation/persistence slice, then add the client control.
 - **QUA-011 — Actual Rust/Bevy upgrade rehearsal:** The current pins and CI
   generated-project gate are present, and the upgrade and rollback process is
   documented in `docs/upgrade-rehearsal.md`. This checkout has not changed the
@@ -470,9 +477,10 @@ when that dependency is available and the work resumes.
   `LYNX_REQUIRE_POSTGRES_TEST=1`, and verify the backfill, append-only triggers,
   transfer idempotency, and reconciliation query before closing PST-014 and
   QUA-002's persistent-aggregate criterion.
-- **QUA-013 — Accessibility and localization verification:** Client locale
-  preference and accessibility controls are not implemented, and `CLT-010`
-  remains the declared dependency. The localization catalogs and negotiated
-  error rendering exist, but pseudo-locale/layout, text scaling, keyboard and
-  screen-reader flows, and persisted accessibility settings cannot be verified
-  until the client surfaces land. Resume QUA-013 after `CLT-010`.
+- **QUA-013 — Accessibility and localization verification:** `CLT-010` is in
+  progress. The client now persists `pt-BR`/`en`, negotiates the selected locale,
+  and localizes inventory/equipment, interaction status, and options-menu text.
+  Remaining chat/account/widget coverage, pseudo-locale/layout, text scaling,
+  colorblind-safe indicators, remappable keys, reduced motion, and keyboard and
+  screen-reader flows still block verification. Resume QUA-013 when the broader
+  localization and accessibility surfaces are ready.

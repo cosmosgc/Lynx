@@ -31,8 +31,8 @@ use engine_net::envelope::Envelope;
 use engine_net::framing::{FRAME_HEADER_BYTES, MAX_FRAME_BYTES, decode_frame, encode_frame};
 use engine_net::protocol::ErrorPayload;
 use game_api::{
-    AccountId, ApiError, CharacterCreationKey, CharacterId, CreateCharacter, CreateGroup, GroupId,
-    GroupSearch, SessionToken, validate_group_page,
+    AccountId, ApiError, CharacterCreationKey, CharacterId, ChatChannelTarget, CreateCharacter,
+    CreateGroup, GroupId, GroupSearch, SessionToken, validate_group_page,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -70,6 +70,8 @@ const AUTHORITY_QUEUE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Required production selection header. It is a character identifier, not an
 /// authority grant: ownership is resolved from the authenticated session.
 pub const CHARACTER_HEADER: &str = "x-lynx-character";
+/// Current world resume token used to resolve the server-owned admitted zone.
+pub const WORLD_SESSION_HEADER: &str = "x-lynx-world-session";
 /// Maximum aggregate HTTP request header size accepted by the world route.
 pub const MAX_REQUEST_HEADER_BYTES: usize = 16 * 1024;
 
@@ -193,12 +195,12 @@ impl AsyncWrite for LimitedStream {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let result = Pin::new(&mut self.stream).poll_write(cx, buf);
-        if let Poll::Ready(Ok(written)) = &result {
-            if *written > 0 {
-                self.inspect_status_line(&buf[..*written]);
-                if self.header_timeout_active {
-                    self.reset_header_deadline();
-                }
+        if let Poll::Ready(Ok(written)) = &result
+            && *written > 0
+        {
+            self.inspect_status_line(&buf[..*written]);
+            if self.header_timeout_active {
+                self.reset_header_deadline();
             }
         }
         result
@@ -1014,6 +1016,49 @@ fn social_unavailable() -> Response {
         .into_response()
 }
 
+enum ChatDiscoveryFailure {
+    Identity(IdentityError),
+    Api(ApiError),
+}
+
+#[derive(Clone, Copy)]
+enum WorldSessionResolutionError {
+    Unauthorized,
+    Unavailable,
+}
+
+fn chat_identity_error(error: IdentityError) -> Response {
+    match error {
+        IdentityError::InvalidSession => unauthorized(),
+        IdentityError::CharacterForbidden => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "character_not_found"})),
+        )
+            .into_response(),
+        IdentityError::Unavailable => social_unavailable(),
+    }
+}
+
+async fn resolve_world_session(
+    events: &mpsc::Sender<ServerEvent>,
+    token: ResumeToken,
+) -> Result<(String, StableId), WorldSessionResolutionError> {
+    let (reply, receiver) = oneshot::channel();
+    let request = ServerEvent::ResolveWorldSession { token, reply };
+    let result = tokio::time::timeout(AUTHORITY_QUEUE_TIMEOUT, async {
+        events.send(request).await.map_err(|_| ())?;
+        receiver.await.map_err(|_| ())
+    })
+    .await;
+    match result {
+        Ok(Ok(Ok(location))) => Ok(location),
+        Ok(Ok(Err(error))) if error.code() == ErrorCode::SessionExpired => {
+            Err(WorldSessionResolutionError::Unauthorized)
+        }
+        Ok(Ok(Err(_)) | Err(())) | Err(_) => Err(WorldSessionResolutionError::Unavailable),
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct GroupSearchQuery {
     name: Option<String>,
@@ -1066,26 +1111,57 @@ async fn discover_chat_channels(
         )
             .into_response();
     };
-    let token = match SessionToken::new(token.to_owned()) {
-        Ok(token) => token,
-        Err(_) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "unauthorized"})),
-            )
-                .into_response();
+    let Ok(token) = SessionToken::new(token.to_owned()) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "unauthorized"})),
+        )
+            .into_response();
+    };
+    let mut world_tokens = headers.get_all(WORLD_SESSION_HEADER).iter();
+    let Some(world_token) = world_tokens.next().and_then(|value| value.to_str().ok()) else {
+        return unauthorized();
+    };
+    if world_tokens.next().is_some() {
+        return unauthorized();
+    }
+    let Ok(world_token) = ResumeToken::new(world_token.to_owned()) else {
+        return unauthorized();
+    };
+    let identity = match &state.admission {
+        AdmissionAuthenticator::Identity(identity) => Arc::clone(identity),
+        AdmissionAuthenticator::Demo(_) => {
+            return (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response();
         }
     };
+    let (zone_id, principal) = match resolve_world_session(&state.events, world_token).await {
+        Ok(location) => location,
+        Err(WorldSessionResolutionError::Unauthorized) => return unauthorized(),
+        Err(WorldSessionResolutionError::Unavailable) => return social_unavailable(),
+    };
     let backend = Arc::clone(backend);
-    match tokio::task::spawn_blocking(move || {
-        backend.discover_channels(&token, limit, query.cursor.as_deref())
+    let cursor = query.cursor;
+    let page = tokio::task::spawn_blocking(move || {
+        let claims = authenticate_selection(identity.as_ref(), token.expose_secret(), principal)
+            .map_err(ChatDiscoveryFailure::Identity)?;
+        let page = backend
+            .discover_channels(&token, limit, cursor.as_deref())
+            .map_err(ChatDiscoveryFailure::Api)?;
+        Ok::<_, ChatDiscoveryFailure>((claims.principal, page))
     })
-    .await
-    {
-        Ok(Ok(targets)) => (StatusCode::OK, Json(json!(targets))).into_response(),
-        Ok(Err(error)) => social_api_error(&error),
-        Err(_) => social_unavailable(),
+    .await;
+    let mut page = match page {
+        Ok(Ok((resolved_principal, page))) if resolved_principal == principal => page,
+        Ok(Ok(_)) | Err(_) => return social_unavailable(),
+        Ok(Err(ChatDiscoveryFailure::Identity(error))) => return chat_identity_error(error),
+        Ok(Err(ChatDiscoveryFailure::Api(error))) => return social_api_error(&error),
+    };
+    let room = format!("lynx-zone-{zone_id}");
+    if ChatChannelTarget::Room(room.clone()).validate().is_err() {
+        return social_unavailable();
     }
+    page.zone_room = Some(room);
+    (StatusCode::OK, Json(json!(page))).into_response()
 }
 
 async fn discover_groups(
@@ -1523,10 +1599,6 @@ fn encode_transport_metrics(
     text
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "upgrade admission validates bearer, origin, identity, and rate limits before socket acceptance"
-)]
 async fn world(
     State(state): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<PeerAddress>,
@@ -1827,6 +1899,10 @@ fn selected_character(headers: &HeaderMap) -> Result<StableId, IdentityError> {
         .ok_or(IdentityError::CharacterForbidden)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the connection task owns the socket lifecycle and its ordered cleanup path"
+)]
 async fn connection(
     mut socket: WebSocket,
     credential: Credential,
@@ -1971,6 +2047,10 @@ enum End {
     Protocol(EngineError),
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the socket pump coordinates bounded channels, identity, and per-connection state"
+)]
 async fn pump(
     socket: &mut WebSocket,
     state: &Arc<AppState>,
@@ -2104,7 +2184,10 @@ fn audit_outbound_rejection(
     let Some(code) = code else {
         return;
     };
-    let correlation_id = envelope.correlation.as_ref().map(|id| id.as_str());
+    let correlation_id = envelope
+        .correlation
+        .as_ref()
+        .map(engine_net::MessageId::as_str);
     tracing::warn!(
         event = "world_authority_rejected",
         source_ip = %source_ip,
@@ -2222,7 +2305,10 @@ fn error_envelope(error: &EngineError) -> Result<Envelope, EngineError> {
 mod tests {
     use super::*;
     use engine_core::id::{IdKind, StableId};
-    use game_api::{AccountId, Character, CharacterCreationReceipt, CharacterStatus};
+    use game_api::{
+        AccountId, Character, CharacterCreationReceipt, CharacterStatus, ChatChannelTarget,
+        ChatChannelTargetPage,
+    };
     use std::sync::Mutex as StdMutex;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tracing::field::{Field, Visit};
@@ -2271,7 +2357,7 @@ mod tests {
         let error = loop {
             match server.read(&mut byte).await {
                 Ok(0) => panic!("client closed before the HTTP header deadline"),
-                Ok(_) => continue,
+                Ok(_) => {}
                 Err(error) => break error,
             }
         };
@@ -2289,6 +2375,187 @@ mod tests {
     }
 
     const CHARACTER_TOKEN: &str = "character-api-secret";
+
+    struct FakeChatIdentity {
+        owns_character: bool,
+    }
+
+    impl IdentityBackend for FakeChatIdentity {
+        fn validate_session(&self, credential: &str) -> Result<AccountId, IdentityError> {
+            (credential == CHARACTER_TOKEN)
+                .then(|| AccountId::new("account-1").unwrap())
+                .ok_or(IdentityError::InvalidSession)
+        }
+
+        fn owns_character(
+            &self,
+            _account: &AccountId,
+            character: StableId,
+        ) -> Result<bool, IdentityError> {
+            Ok(self.owns_character && character == fake_character().id.as_stable())
+        }
+    }
+
+    struct FakeChatTargets;
+
+    impl ChatManagementBackend for FakeChatTargets {
+        fn discover_channels(
+            &self,
+            token: &SessionToken,
+            _limit: u16,
+            _cursor: Option<&str>,
+        ) -> Result<ChatChannelTargetPage, ApiError> {
+            if token.expose_secret() != CHARACTER_TOKEN {
+                return Err(ApiError::Unauthenticated);
+            }
+            Ok(ChatChannelTargetPage {
+                targets: vec![ChatChannelTarget::Direct(
+                    AccountId::new("friend-1").unwrap(),
+                )],
+                zone_room: None,
+                next_cursor: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_discovery_returns_only_the_authority_resolved_admitted_zone() {
+        const WORLD_TOKEN: &str = "admitted-world-session-token";
+        let principal = fake_character().id.as_stable();
+        let expected_zone = StableId::from_parts(IdKind::Zone, 3, 17).to_string();
+
+        let discover = |owns_character: bool| {
+            let (events, mut receiver) = event_channel();
+            let state = Arc::new(
+                AppState::with_identity_backend(
+                    events,
+                    Arc::new(FakeChatIdentity { owns_character }),
+                )
+                .with_chat_backend(Arc::new(FakeChatTargets)),
+            );
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::AUTHORIZATION,
+                format!("Bearer {CHARACTER_TOKEN}").parse().unwrap(),
+            );
+            headers.insert(WORLD_SESSION_HEADER, WORLD_TOKEN.parse().unwrap());
+            let authority_zone = expected_zone.clone();
+            let authority = tokio::spawn(async move {
+                let Some(ServerEvent::ResolveWorldSession { token, reply }) = receiver.recv().await
+                else {
+                    panic!("chat discovery must resolve its world session");
+                };
+                assert_eq!(token.expose_secret(), WORLD_TOKEN);
+                reply.send(Ok((authority_zone, principal))).unwrap();
+            });
+            let request = discover_chat_channels(
+                State(state),
+                headers,
+                Query(GroupSearchQuery {
+                    name: None,
+                    open: None,
+                    members: None,
+                    limit: Some(50),
+                    cursor: None,
+                }),
+            );
+            (request, authority)
+        };
+
+        let (request, authority) = discover(true);
+        let response = request.await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16_384)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["zone_room"], format!("lynx-zone-{expected_zone}"));
+        assert_eq!(body["targets"][0]["kind"], "direct");
+        authority.await.unwrap();
+
+        let (request, authority) = discover(false);
+        let response = request.await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(response.into_body(), 16_384)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert!(body.get("zone_room").is_none());
+        authority.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn chat_discovery_rejects_expired_and_ambiguous_world_sessions() {
+        let (events, mut receiver) = event_channel();
+        let state = Arc::new(
+            AppState::with_identity_backend(
+                events,
+                Arc::new(FakeChatIdentity {
+                    owns_character: true,
+                }),
+            )
+            .with_chat_backend(Arc::new(FakeChatTargets)),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {CHARACTER_TOKEN}").parse().unwrap(),
+        );
+        headers.insert(
+            WORLD_SESSION_HEADER,
+            "expired-world-session-token".parse().unwrap(),
+        );
+        let expired_authority = tokio::spawn(async move {
+            let Some(ServerEvent::ResolveWorldSession { token, reply }) = receiver.recv().await
+            else {
+                panic!("chat discovery must resolve the presented world session");
+            };
+            assert_eq!(token.expose_secret(), "expired-world-session-token");
+            reply
+                .send(Err(EngineError::new(
+                    ErrorCode::SessionExpired,
+                    "test expired world session",
+                )))
+                .unwrap();
+            receiver
+        });
+        let response = discover_chat_channels(
+            State(Arc::clone(&state)),
+            headers.clone(),
+            Query(GroupSearchQuery {
+                name: None,
+                open: None,
+                members: None,
+                limit: Some(50),
+                cursor: None,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let mut receiver = expired_authority.await.unwrap();
+
+        headers.append(
+            WORLD_SESSION_HEADER,
+            "second-world-session-token".parse().unwrap(),
+        );
+        let response = discover_chat_channels(
+            State(state),
+            headers,
+            Query(GroupSearchQuery {
+                name: None,
+                open: None,
+                members: None,
+                limit: Some(50),
+                cursor: None,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(
+            receiver.try_recv().is_err(),
+            "ambiguous headers must fail before authority resolution"
+        );
+    }
 
     #[test]
     fn resume_denial_audit_uses_only_ip_and_stable_reason() {

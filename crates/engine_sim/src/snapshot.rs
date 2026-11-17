@@ -472,6 +472,32 @@ fn validate_restored_entity(
             .validate(rules)
             .map_err(|error| error.with_detail("entity", entity.id.to_string()))?;
     }
+    if let Some(equipment) = &entity.equipment {
+        equipment
+            .validate(rules)
+            .map_err(|error| error.with_detail("entity", entity.id.to_string()))?;
+        let inventory = entity.inventory.as_ref().ok_or_else(|| {
+            EngineError::new(
+                ErrorCode::InvalidRequest,
+                "snapshot entity has equipment without an inventory",
+            )
+            .with_detail("entity", entity.id.to_string())
+        })?;
+        for (_, stack) in equipment.entries() {
+            if let Some(instance) = stack.instance
+                && inventory
+                    .entries()
+                    .any(|(_, held)| held.instance == Some(instance))
+            {
+                return Err(EngineError::new(
+                    ErrorCode::Conflict,
+                    "an equipped item instance is also in the inventory",
+                )
+                .with_detail("entity", entity.id.to_string())
+                .with_detail("instance", instance.to_string()));
+            }
+        }
+    }
     if let Some(health) = entity.health
         && (health.max < 1 || health.current < 0 || health.current > health.max)
     {
@@ -513,8 +539,9 @@ mod tests {
     use super::*;
     use crate::entity::{Door, RespawnPolicy};
     use crate::mind::{Controller, Mind};
+    use engine_core::equipment::{EquipSlot, Equipment};
     use engine_core::id::DefinitionId;
-    use engine_core::inventory::{Inventory, ItemStack, UniformItemRules};
+    use engine_core::inventory::{Inventory, ItemStack, TableItemRules, UniformItemRules};
     use engine_core::math::Vec3;
     use proptest::prelude::*;
 
@@ -693,6 +720,68 @@ mod tests {
         assert_eq!(restored.entity(target).unwrap().shields[0].remaining, 4);
         assert_eq!(restored.combat_audit(), source.combat_audit());
         assert_eq!(restored.snapshot(), snapshot);
+    }
+
+    #[test]
+    fn equipment_survives_snapshot_restore_and_is_revalidated() {
+        let rules: Arc<dyn ItemRules + Send + Sync> = Arc::new(TableItemRules::new(9).with_item(
+            DefinitionId::new("item.sword").unwrap(),
+            1,
+            Some(EquipSlot::MainHand),
+        ));
+        let config = ZoneConfig::new(
+            DefinitionId::new("zone.test").unwrap(),
+            StableId::from_parts(IdKind::Zone, 1, 1),
+            Vec3::ZERO,
+            Vec3::new(20.0, 4.0, 20.0),
+        )
+        .unwrap()
+        .with_max_entities(4);
+        let mut source = Zone::new(config, nav(), rules.clone()).unwrap();
+        let sword = ItemStack::unique(
+            DefinitionId::new("item.sword").unwrap(),
+            StableId::from_parts(IdKind::Item, 1, 5),
+        );
+        let mut equipment = Equipment::new();
+        equipment
+            .equip(EquipSlot::MainHand, sword.clone(), rules.as_ref())
+            .unwrap();
+        let actor = source
+            .spawn(
+                entity(1, PersistencePolicy::PersistentEntity)
+                    .with_inventory(Inventory::with_capacity(4).unwrap())
+                    .with_equipment(equipment),
+            )
+            .unwrap();
+
+        let snapshot: ZoneSnapshot =
+            serde_json::from_slice(&serde_json::to_vec(&source.snapshot()).unwrap()).unwrap();
+        let restored = Zone::restore(&snapshot, nav(), rules.clone()).unwrap();
+        assert_eq!(
+            restored
+                .entity(actor)
+                .unwrap()
+                .equipment
+                .as_ref()
+                .unwrap()
+                .slot(EquipSlot::MainHand),
+            Some(&sword)
+        );
+        assert_eq!(restored.snapshot(), snapshot);
+
+        let mut corrupt = serde_json::to_value(&snapshot).unwrap();
+        let entity = corrupt["entities"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|entity| entity["id"] == actor.to_string())
+            .unwrap();
+        entity["equipment"]["slots"]["main_hand"]["quantity"] = serde_json::Value::from(2);
+        let corrupt: ZoneSnapshot = serde_json::from_value(corrupt).unwrap();
+        assert_eq!(
+            Zone::restore(&corrupt, nav(), rules).unwrap_err().code(),
+            ErrorCode::InvalidRequest
+        );
     }
 
     #[test]

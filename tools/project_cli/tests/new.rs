@@ -43,7 +43,7 @@ fn has_file(report: &Value, path: &Path) -> bool {
 #[test]
 fn templates_generate_and_validate_their_starter_content() {
     let temp = temp_dir();
-    for (template, definitions, panels, minigames) in [("minimal", 4, 1, 0), ("mmorpg", 5, 2, 1)] {
+    for (template, definitions, panels, minigames) in [("minimal", 8, 1, 0), ("mmorpg", 9, 2, 1)] {
         let project = temp.join(template);
         let project_str = project.to_string_lossy().into_owned();
         let created = run(&[
@@ -63,6 +63,7 @@ fn templates_generate_and_validate_their_starter_content() {
             "content/zones/market.ron",
             "content/entities/tavern_keeper.ron",
             "content/items/torch.ron",
+            "content/items/sword.ron",
             "content/ui/inventory.ron",
             "content/localization/pt-BR.ron",
         ] {

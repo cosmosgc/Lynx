@@ -10,9 +10,10 @@ use engine_content::{
     LinkAction as AuthoredLinkAction, PersistedInstanceMigrationPlan, ZoneLinkEvent, sha256_hex,
     starter_component_registry,
 };
+use engine_core::equipment::EquipSlot;
 use engine_core::error::{EngineError, ErrorCode};
 use engine_core::id::{DefinitionId, IdKind, StableId};
-use engine_core::inventory::UniformItemRules;
+use engine_core::inventory::TableItemRules;
 use engine_core::math::Vec3;
 use engine_core::schema::{
     ComponentInstance, ComponentKey, ComponentRegistry, PersistencePolicy, SchemaVersion,
@@ -76,6 +77,45 @@ pub struct ResolvedTravelTrigger {
     pub arrival_point: Vec3,
 }
 
+/// Resolve per-item stacking and equipment rules from authored `core.item`
+/// data.
+///
+/// Definitions outside the item namespace, and items without a `core.item`
+/// component, fall back to the default stack limit and are never equippable.
+fn item_rules(content: &RuntimeContent) -> Result<TableItemRules, EngineError> {
+    let key = ComponentKey::new("core.item")?;
+    let mut rules = TableItemRules::new(99);
+    for (id, definition) in &content.set.definitions {
+        if ContentKind::infer(id) != ContentKind::Item {
+            continue;
+        }
+        let Some(data) = definition.components.get(&key) else {
+            continue;
+        };
+        let stack_max = data
+            .get("stack_max")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| {
+                EngineError::new(
+                    ErrorCode::InvalidState,
+                    "an item definition has no usable stack_max",
+                )
+                .with_detail("item", id.to_string())
+            })?;
+        let equip_slot = match data.get("equip_slot").and_then(serde_json::Value::as_str) {
+            Some(raw) => Some(EquipSlot::parse(raw).ok_or_else(|| {
+                EngineError::new(ErrorCode::InvalidState, "an item has an unknown equip_slot")
+                    .with_detail("item", id.to_string())
+                    .with_detail("slot", raw.to_owned())
+            })?),
+            None => None,
+        };
+        rules.insert(id.clone(), stack_max, equip_slot);
+    }
+    Ok(rules)
+}
+
 /// Build every placed zone in a validated map using its authored `core.zone`
 /// configuration.
 ///
@@ -88,6 +128,10 @@ pub struct ResolvedTravelTrigger {
 /// Returns an error when the map or a referenced definition is missing, when a
 /// zone has no valid `core.zone` component, when geometry exceeds the runtime
 /// grid bounds, or when an entry point is outside/inside a blocked cell.
+#[expect(
+    clippy::too_many_lines,
+    reason = "building each authored zone applies linked topology, spawn, and runtime policy as one validated conversion"
+)]
 pub fn build_authored_zones(
     content: &RuntimeContent,
     map_id: &DefinitionId,
@@ -98,6 +142,7 @@ pub fn build_authored_zones(
         .get(map_id)
         .ok_or_else(|| EngineError::not_found("world map", map_id))?;
     let component_key = ComponentKey::new("core.zone")?;
+    let item_rules = Arc::new(item_rules(content)?);
     let mut instances = BTreeSet::new();
     let mut zones = Vec::with_capacity(map.zones.len());
     for placement in &map.zones {
@@ -221,7 +266,7 @@ pub fn build_authored_zones(
         if nav.is_blocked(entry_x, entry_z) || !config.contains(entry_point) {
             return Err(invalid_zone_field(&placement.zone, "entry_point"));
         }
-        let mut zone = Zone::new(config, nav, Arc::new(UniformItemRules::default()))?;
+        let mut zone = Zone::new(config, nav, item_rules.clone())?;
         let placements = definition.entity_placements.iter().collect::<Vec<_>>();
         let mut occupied_cells = BTreeSet::new();
         for entity_placement in placements {
@@ -255,7 +300,7 @@ pub fn build_authored_zones(
             .with_persistence(PersistencePolicy::StaticDefinition);
             entity.transform =
                 Transform::new(entity_placement.position).with_yaw(entity_placement.yaw_degrees);
-            entity.tags = entity_definition.tags.clone();
+            entity.tags.clone_from(&entity_definition.tags);
             for (key, data) in &entity_definition.components {
                 let schema = content.component_registry.get(key).ok_or_else(|| {
                     EngineError::new(
@@ -821,6 +866,10 @@ struct LoadedFile {
 ///
 /// Returns an error when the manifest or content is invalid, engine versions
 /// are incompatible, or a manifest file is missing or differs from its hash.
+#[expect(
+    clippy::too_many_lines,
+    reason = "bundle loading validates manifest metadata, loaded content, and hashes in one transaction"
+)]
 pub fn load_bundle(root: impl AsRef<Path>) -> Result<RuntimeContent> {
     let root = root.as_ref();
     let manifest_path = ContentManifest::path_in(root);
@@ -831,7 +880,7 @@ pub fn load_bundle(root: impl AsRef<Path>) -> Result<RuntimeContent> {
     let manifest_sha256 = sha256_hex(&manifest_bytes);
     let manifest_report = manifest.validate();
     if manifest_report.has_errors() {
-        bail!("content manifest validation failed: {}", manifest_report);
+        bail!("content manifest validation failed: {manifest_report}");
     }
     let engine_version = semver::Version::parse(env!("CARGO_PKG_VERSION"))
         .context("lynx-world has an invalid package version")?;
@@ -896,14 +945,16 @@ pub fn load_bundle(root: impl AsRef<Path>) -> Result<RuntimeContent> {
     );
     for entry in &manifest.definitions {
         let relative_path = PathBuf::from(&entry.path);
-        let loaded = loaded_files.get(&relative_path).with_context(|| {
+        let loaded_entry = loaded_files.get(&relative_path).with_context(|| {
             format!(
                 "manifest entry {} is not a loaded content definition",
                 entry.path
             )
         })?;
         ensure!(
-            loaded.id == entry.id && loaded.kind == entry.kind && loaded.version == entry.version,
+            loaded_entry.id == entry.id
+                && loaded_entry.kind == entry.kind
+                && loaded_entry.version == entry.version,
             "content manifest metadata does not match {}",
             entry.path
         );

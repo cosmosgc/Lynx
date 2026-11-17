@@ -395,7 +395,7 @@ jobs:
         run: |
           LYNX_TEST_SCHEMA_SCENARIO=missing cargo test -p lynx-world --test schema_gate
           set +e
-          cargo run --quiet -p project_cli -- --json doctor --backend > "$RUNNER_TEMP/doctor-missing.json"
+          cargo run --quiet -p project_cli --bin lynx -- --json doctor --backend > "$RUNNER_TEMP/doctor-missing.json"
           doctor_status=$?
           set -e
           test "$doctor_status" -eq 1
@@ -434,7 +434,7 @@ jobs:
           LYNX_TEST_SCHEMA_SCENARIO=newer cargo test -p lynx-world --test schema_gate
           before="$(psql "${psql_args[@]}" -c "$history_query")"
           set +e
-          cargo run --quiet -p project_cli -- --json doctor --backend > "$RUNNER_TEMP/doctor-newer.json"
+          cargo run --quiet -p project_cli --bin lynx -- --json doctor --backend > "$RUNNER_TEMP/doctor-newer.json"
           doctor_status=$?
           set -e
           test "$doctor_status" -eq 1
@@ -447,7 +447,7 @@ jobs:
           LYNX_TEST_SCHEMA_SCENARIO=checksum cargo test -p lynx-world --test schema_gate
           before="$(psql "${psql_args[@]}" -c "$history_query")"
           set +e
-          cargo run --quiet -p project_cli -- --json doctor --backend > "$RUNNER_TEMP/doctor-checksum.json"
+          cargo run --quiet -p project_cli --bin lynx -- --json doctor --backend > "$RUNNER_TEMP/doctor-checksum.json"
           doctor_status=$?
           set -e
           test "$doctor_status" -eq 1

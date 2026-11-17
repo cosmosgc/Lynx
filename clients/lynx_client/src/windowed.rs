@@ -1,9 +1,13 @@
-//! Window-only keyboard and 2D presentation adapters for the offline foundation.
+//! Window-only keyboard and presentation adapters for the client.
 
+use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
+use crate::entity_info::{
+    EntityInfoAssets, EntityInfoBackend, EntityInfoPlugin, EntityInfoSet, spawn_entity_info,
+};
 use crate::offline::{CameraPose, Control, OfflineScene, OfflineSet, PressedControls};
 use crate::online::{OnlineClient, OnlineStatus};
 use crate::reconciliation::Position;
@@ -14,9 +18,8 @@ use engine_core::id::StableId;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
-const SCALE: f32 = 32.0;
 const INTERPOLATION_RATE: f32 = 14.0;
-const SNAP_DISTANCE: f32 = 8.0 * SCALE;
+const SNAP_DISTANCE: f32 = 8.0;
 
 /// Read-only presentation of the current server-owned public interest set.
 #[derive(Debug)]
@@ -24,23 +27,56 @@ pub struct OnlineWindowPlugin;
 
 impl Plugin for OnlineWindowPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ChatComposer>()
+        app.add_plugins(EntityInfoPlugin)
+            .init_resource::<MouseCamera>()
+            .init_resource::<bevy::input::mouse::AccumulatedMouseMotion>()
+            .init_resource::<bevy::input::mouse::AccumulatedMouseScroll>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .add_systems(
+                Update,
+                mouse_controls
+                    .after(crate::options::toggle_menu)
+                    .before(select_target),
+            )
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<ChatComposer>()
             .init_resource::<LockComposer>()
             .init_resource::<SelectedTarget>()
             // InputPlugin provides this in the windowed app; headless tests add
             // the same resource so the shared keyboard system can run.
             .init_resource::<bevy::ecs::message::Messages<KeyboardInput>>()
             .add_systems(Startup, setup_online)
-            .add_systems(Update, select_target.after(crate::online::poll_online).before(chat_keyboard))
-            .add_systems(Update, interaction_keyboard.after(select_target).before(chat_keyboard))
+            .add_systems(
+                Update,
+                select_target
+                    .after(crate::options::toggle_menu)
+                    .after(crate::online::poll_online)
+                    .before(chat_keyboard),
+            )
+            .add_systems(
+                Update,
+                interaction_keyboard
+                    .after(crate::options::toggle_menu)
+                    .after(select_target)
+                    .before(chat_keyboard),
+            )
             .add_systems(Update, present_interaction_hud.after(interaction_keyboard))
             .add_systems(
                 Update,
-                online_movement.after(chat_keyboard).after(crate::online::smooth_online).before(present_online),
+                online_movement
+                    .after(crate::options::toggle_menu)
+                    .after(chat_keyboard)
+                    .after(crate::online::smooth_online)
+                    .before(present_online),
             )
             .add_systems(Update, present_online.after(crate::online::poll_online))
             .add_systems(Update, interpolate_online.after(present_online))
-            .add_systems(Update, present_health.after(present_online))
+            // Info follows the interpolated body so bars and labels never lag.
+            .configure_sets(
+                Update,
+                EntityInfoSet.after(present_online).after(interpolate_online),
+            )
             .add_systems(Update, present_interactions.after(present_online))
             .add_systems(Update, present_status.after(present_online))
             .add_systems(Update, present_slow.after(present_online))
@@ -76,12 +112,14 @@ pub(crate) fn interaction_keyboard(
     windows: Query<&Window, With<PrimaryWindow>>,
     composer: Res<ChatComposer>,
     mut lock_input: ResMut<LockComposer>,
+    menu: Option<Res<crate::options::OptionsMenuState>>,
 ) {
     if lock_input.panel.as_ref() != client.interaction().panel() {
         lock_input.panel = client.interaction().panel().cloned();
         lock_input.guess.clear();
     }
     if composer.active
+        || menu.is_some_and(|menu| menu.is_open())
         || !windows.single().is_ok_and(|window| window.focused)
         || client.status() != OnlineStatus::Active
         || client.interaction().pending()
@@ -162,6 +200,13 @@ fn present_interaction_hud(
     if client.interaction().lock().is_none()
         && let Some(target) = selected.0
     {
+        if let Some(entity) = client
+            .world()
+            .entities()
+            .find(|entity| entity.entity == target)
+        {
+            let _ = writeln!(text, "Alvo: {}", prototype_name(&entity.prototype));
+        }
         for (index, verb) in client.target_verbs(target).iter().enumerate() {
             let _ = writeln!(text, "{}: {verb}", index + 1);
         }
@@ -199,8 +244,16 @@ fn present_interaction_hud(
     }
 }
 
-#[derive(Component)]
-struct OnlineEntity(StableId);
+/// Marks a 3D presentation of a server-replicated entity.
+#[derive(Component, Debug)]
+pub struct OnlineEntity(StableId);
+
+impl OnlineEntity {
+    /// Stable id this presentation tracks.
+    pub(crate) fn id(&self) -> StableId {
+        self.0
+    }
+}
 
 #[derive(Component)]
 struct FacingIndicator(StableId);
@@ -211,12 +264,6 @@ pub(crate) struct SelectedTarget(Option<StableId>);
 
 #[derive(Component)]
 struct TargetRing(StableId);
-
-#[derive(Component)]
-struct HealthBar {
-    entity: StableId,
-    fill: bool,
-}
 
 #[derive(Component)]
 struct InteractionMarker(StableId);
@@ -286,58 +333,6 @@ fn status_visibility(active: bool) -> Visibility {
     }
 }
 
-#[allow(clippy::cast_precision_loss)] // Pixel-scale ratio only; authoritative integers stay intact.
-fn health_fraction(health: Option<crate::world_state::PublicHealth>) -> Option<f32> {
-    health
-        .filter(|health| health.max > 0)
-        .map(|health| (health.current as f32 / health.max as f32).clamp(0.0, 1.0))
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn present_health(
-    client: Res<OnlineClient>,
-    mut bars: Query<(&HealthBar, &mut Sprite, &mut Transform, &mut Visibility)>,
-) {
-    let health: BTreeMap<_, _> = client
-        .world()
-        .entities()
-        .map(|entity| (entity.entity, health_fraction(entity.health)))
-        .collect();
-    for (bar, mut sprite, mut transform, mut visibility) in &mut bars {
-        let fraction = health.get(&bar.entity).copied().flatten();
-        *visibility = if fraction.is_some() {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
-        if bar.fill {
-            let width = 40.0 * fraction.unwrap_or(0.0);
-            sprite.custom_size = Some(Vec2::new(width, 4.0));
-            transform.translation.x = (width - 40.0) / 2.0;
-        }
-    }
-}
-
-fn health_bar_bundle(entity: StableId, fill: bool) -> impl Bundle {
-    (
-        HealthBar { entity, fill },
-        Sprite::from_color(
-            if fill {
-                Color::srgb(0.2, 0.85, 0.35)
-            } else {
-                Color::srgb(0.08, 0.08, 0.1)
-            },
-            if fill {
-                Vec2::new(40.0, 4.0)
-            } else {
-                Vec2::new(44.0, 8.0)
-            },
-        ),
-        Transform::from_xyz(0.0, 42.0, if fill { 0.4 } else { 0.3 }),
-        Visibility::Hidden,
-    )
-}
-
 pub(crate) fn prototype_name(prototype: &engine_core::id::DefinitionId) -> String {
     let leaf = prototype
         .as_str()
@@ -381,6 +376,7 @@ fn select_target(
     windows: Query<&Window, With<PrimaryWindow>>,
     composer: Res<ChatComposer>,
     mut selected: ResMut<SelectedTarget>,
+    menu: Option<Res<crate::options::OptionsMenuState>>,
 ) {
     let mut candidates: Vec<_> = client
         .world()
@@ -396,7 +392,10 @@ fn select_target(
     if selected.0.is_some_and(|id| !candidates.contains(&id)) {
         selected.0 = None;
     }
-    if composer.active || !windows.single().is_ok_and(|window| window.focused) {
+    if composer.active
+        || menu.is_some_and(|menu| menu.is_open())
+        || !windows.single().is_ok_and(|window| window.focused)
+    {
         return;
     }
     if keys.just_pressed(KeyCode::Escape) {
@@ -428,8 +427,45 @@ struct OnlineMotion {
     to: Vec3,
 }
 
-fn setup_online(mut commands: Commands) {
-    commands.spawn((Camera2d, SceneCamera));
+fn setup_online(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    commands.spawn((
+        scene_camera(),
+        Transform::from_xyz(0.0, 9.0, 13.0).looking_at(Vec3::ZERO, Vec3::Y),
+        SceneCamera,
+    ));
+    commands.spawn((
+        DirectionalLight {
+            illuminance: 15_000.0,
+            shadow_maps_enabled: true,
+            ..default()
+        },
+        Transform::from_xyz(4.0, 12.0, 6.0).looking_at(Vec3::ZERO, Vec3::Y),
+    ));
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::new(2000.0, 0.1, 2000.0))),
+        MeshMaterial3d(materials.add(Color::srgb(0.16, 0.27, 0.18))),
+        Transform::from_xyz(0.0, -0.1, 0.0),
+    ));
+    let grid_line = meshes.add(Cuboid::new(200.0, 0.015, 0.035));
+    let grid_material = materials.add(Color::srgb(0.24, 0.37, 0.25));
+    for index in -20_i16..=20 {
+        let offset = f32::from(index) * 5.0;
+        commands.spawn((
+            Mesh3d(grid_line.clone()),
+            MeshMaterial3d(grid_material.clone()),
+            Transform::from_xyz(0.0, -0.04, offset),
+        ));
+        commands.spawn((
+            Mesh3d(grid_line.clone()),
+            MeshMaterial3d(grid_material.clone()),
+            Transform::from_xyz(offset, -0.04, 0.0)
+                .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
+        ));
+    }
     commands.spawn((
         InteractionHud,
         Text::new("Interação"),
@@ -461,17 +497,20 @@ fn setup_online(mut commands: Commands) {
 /// Read held movement keys and issue one bounded intent at a time. The server
 /// remains authoritative: every endpoint is a local prediction until the
 /// correlation result arrives. Movement is suppressed while composing chat.
-#[allow(clippy::needless_pass_by_value)] // Bevy systems take resources by value.
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)] // Bevy systems take resources by value.
 fn online_movement(
+    orbit: Res<MouseCamera>,
     keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     composer: Res<ChatComposer>,
     mut client: ResMut<OnlineClient>,
     time: Res<Time>,
     mut cooldown: Local<f32>,
+    menu: Option<Res<crate::options::OptionsMenuState>>,
 ) {
     *cooldown = (*cooldown - time.delta_secs()).max(0.0);
-    if !composer.active
+    if menu.as_ref().is_none_or(|menu| !menu.is_open())
+        && !composer.active
         && windows.single().is_ok_and(|window| window.focused)
         && keys.just_pressed(KeyCode::KeyR)
         && matches!(client.status(), OnlineStatus::Failed(_))
@@ -480,6 +519,7 @@ fn online_movement(
         return;
     }
     if composer.active
+        || menu.is_some_and(|menu| menu.is_open())
         || !windows.single().is_ok_and(|window| window.focused)
         || client.status() != OnlineStatus::Active
         || client.pending_movement()
@@ -490,7 +530,9 @@ fn online_movement(
     let Some(authority) = client.world().reconciliation().authoritative_position() else {
         return;
     };
-    let Some(destination) = movement_destination(authority, &keys, client.movement_step()) else {
+    let Some(destination) =
+        movement_destination(authority, &keys, client.movement_step(), orbit.yaw)
+    else {
         return;
     };
     if client.move_to(destination).is_ok() {
@@ -503,8 +545,9 @@ fn movement_destination(
     position: Position,
     keys: &ButtonInput<KeyCode>,
     step: f32,
+    camera_yaw: f32,
 ) -> Option<Position> {
-    if !step.is_finite() || step <= 0.0 {
+    if !step.is_finite() || step <= 0.0 || !camera_yaw.is_finite() {
         return None;
     }
     let mut x = 0.0_f32;
@@ -525,10 +568,13 @@ fn movement_destination(
         return None;
     }
     let length = x.hypot(z);
+    let (sin, cos) = camera_yaw.sin_cos();
+    let world_x = cos * x + sin * z;
+    let world_z = -sin * x + cos * z;
     Some(Position {
-        x: position.x + x / length * step,
+        x: position.x + world_x / length * step,
         y: position.y,
-        z: position.z + z / length * step,
+        z: position.z + world_z / length * step,
     })
 }
 
@@ -544,13 +590,12 @@ fn refresh_chat_presence(
     }
 }
 
-// Clamp before scaling so even a finite but extreme server coordinate cannot
-// produce an infinite Bevy transform.
-fn screen_position(x: f32, z: f32) -> Vec3 {
+// Keep extreme server coordinates within a bounded presentation space.
+fn screen_position(x: f32, y: f32, z: f32) -> Vec3 {
     Vec3::new(
-        x.clamp(-1_000_000.0, 1_000_000.0) * SCALE,
-        -z.clamp(-1_000_000.0, 1_000_000.0) * SCALE,
-        1.0,
+        x.clamp(-1_000_000.0, 1_000_000.0),
+        y.clamp(-1_000_000.0, 1_000_000.0) + 0.8,
+        z.clamp(-1_000_000.0, 1_000_000.0),
     )
 }
 
@@ -680,11 +725,20 @@ fn present_telemetry(client: Res<OnlineClient>, mut hud: Query<&mut Text, With<T
     }
 }
 
-#[allow(clippy::needless_pass_by_value, clippy::type_complexity)] // Bevy system parameters must be passed by value.
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::type_complexity,
+    clippy::too_many_arguments
+)] // Bevy supplies system parameters independently.
 #[allow(clippy::too_many_lines)] // Spawn bundles stay beside entity synchronization logic.
 fn present_online(
     mut commands: Commands,
     client: Res<OnlineClient>,
+    orbit: Res<MouseCamera>,
+    info_assets: Res<EntityInfoAssets>,
+    backend: Res<EntityInfoBackend>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
     mut entities: Query<
         (Entity, &OnlineEntity, &mut Transform, &mut OnlineMotion),
         Without<SceneCamera>,
@@ -719,11 +773,11 @@ fn present_online(
         let target = if Some(id.0) == actor {
             // Local prediction is already smoothed by reconciliation; keep the
             // avatar and camera locked instead of interpolating it twice.
-            predicted.map(|position| screen_position(position.x, position.z))
+            predicted.map(|position| screen_position(position.x, position.y, position.z))
         } else {
-            public
-                .get(&id.0)
-                .map(|public| screen_position(public.position.x, public.position.z))
+            public.get(&id.0).map(|public| {
+                screen_position(public.position.x, public.position.y, public.position.z)
+            })
         };
         let Some(target) = target else { continue };
         if Some(id.0) == actor {
@@ -738,92 +792,97 @@ fn present_online(
     for public in missing.iter().filter_map(|id| public.get(id)) {
         let target = if Some(public.entity) == actor {
             predicted.map_or_else(
-                || screen_position(public.position.x, public.position.z),
-                |position| screen_position(position.x, position.z),
+                || screen_position(public.position.x, public.position.y, public.position.z),
+                |position| screen_position(position.x, position.y, position.z),
             )
         } else {
-            screen_position(public.position.x, public.position.z)
+            screen_position(public.position.x, public.position.y, public.position.z)
         };
         let local = Some(public.entity) == actor;
+        let prototype = public.prototype.as_str();
         let colour = if local {
             Color::srgb(0.3, 0.85, 1.0)
+        } else if prototype.starts_with("prop.") {
+            Color::srgb(0.55, 0.35, 0.18)
         } else {
             Color::srgb(0.95, 0.75, 0.3)
         };
+        let body = if prototype == "prop.door" {
+            meshes.add(Cuboid::new(1.1, 1.6, 0.18))
+        } else if prototype == "prop.barrel" {
+            meshes.add(Cylinder::new(0.45, 1.4))
+        } else if prototype.starts_with("prop.") {
+            meshes.add(Cuboid::new(0.9, 1.4, 0.9))
+        } else {
+            meshes.add(Capsule3d::new(0.35, 0.9))
+        };
+        let body_material = materials.add(colour);
+        let ring_mesh = meshes.add(Cuboid::new(0.15, 0.04, 0.05));
+        let ring_material = materials.add(Color::srgb(1.0, 0.35, 0.2));
+        let marker_mesh = meshes.add(Cuboid::new(0.18, 0.18, 0.18));
+        let marker_material = materials.add(Color::srgb(1.0, 0.82, 0.25));
+        let stun_material = materials.add(Color::srgb(1.0, 0.35, 0.2));
+        let slow_material = materials.add(Color::srgb(0.45, 0.75, 1.0));
         commands
             .spawn((
-                Sprite::from_color(colour, Vec2::splat(16.0)),
+                Mesh3d(body),
+                MeshMaterial3d(body_material.clone()),
                 Transform::from_translation(target),
                 OnlineEntity(public.entity),
                 OnlineMotion { to: target },
             ))
             .with_children(|parent| {
-                parent.spawn(health_bar_bundle(public.entity, false));
-                parent.spawn(health_bar_bundle(public.entity, true));
-                parent.spawn((
-                    Text2d::new(prototype_name(&public.prototype)),
-                    TextFont {
-                        font_size: bevy::text::FontSize::Px(14.0),
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.95, 0.95, 0.9)),
-                    Transform::from_xyz(0.0, 64.0, 0.6),
-                ));
+                spawn_entity_info(
+                    parent,
+                    public.entity,
+                    &prototype_name(&public.prototype),
+                    &info_assets,
+                    *backend,
+                );
                 parent.spawn((
                     InteractionMarker(public.entity),
-                    Sprite::from_color(Color::srgb(1.0, 0.82, 0.25), Vec2::splat(8.0)),
-                    Transform::from_xyz(0.0, 54.0, 0.5),
+                    Mesh3d(marker_mesh.clone()),
+                    MeshMaterial3d(marker_material),
+                    Transform::from_xyz(0.0, 1.6, 0.0),
                     Visibility::Hidden,
                 ));
                 parent.spawn((
                     StatusMarker(public.entity),
-                    Text2d::new("STUN"),
-                    TextFont {
-                        font_size: bevy::text::FontSize::Px(10.0),
-                        ..default()
-                    },
-                    TextColor(Color::srgb(1.0, 0.35, 0.2)),
-                    Transform::from_xyz(30.0, 52.0, 0.6),
+                    Mesh3d(marker_mesh.clone()),
+                    MeshMaterial3d(stun_material),
+                    Transform::from_xyz(0.5, 1.6, 0.0),
                     Visibility::Hidden,
                 ));
                 parent.spawn((
                     SlowMarker(public.entity),
-                    Text2d::new("SLOW"),
-                    TextFont {
-                        font_size: bevy::text::FontSize::Px(10.0),
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.45, 0.75, 1.0)),
-                    Transform::from_xyz(30.0, 40.0, 0.6),
+                    Mesh3d(marker_mesh.clone()),
+                    MeshMaterial3d(slow_material),
+                    Transform::from_xyz(0.5, 1.35, 0.0),
                     Visibility::Hidden,
                 ));
-                // Segmented ground ring works with the existing sprite renderer.
-                // It is presentation only, not a collision/range boundary.
                 for segment in 0..32_u16 {
                     let angle = f32::from(segment) * std::f32::consts::TAU / 32.0;
                     parent.spawn((
                         TargetRing(public.entity),
-                        Sprite::from_color(Color::srgb(1.0, 0.35, 0.2), Vec2::new(6.0, 3.0)),
-                        ground_ring_transform(angle, 33.0, 0.2),
+                        Mesh3d(ring_mesh.clone()),
+                        MeshMaterial3d(ring_material.clone()),
+                        ground_ring_transform(angle, 0.95, -0.75),
                         Visibility::Hidden,
-                    ));
-                    parent.spawn((
-                        Sprite::from_color(colour, Vec2::new(4.0, 2.0)),
-                        ground_ring_transform(angle, 21.0, -0.1),
                     ));
                 }
                 parent.spawn((
                     FacingIndicator(public.entity),
-                    Sprite::from_color(colour, Vec2::new(5.0, 12.0)),
+                    Mesh3d(marker_mesh),
+                    MeshMaterial3d(body_material),
                     facing_transform(public.yaw_degrees),
                 ));
             });
     }
     if let Some(position) = predicted {
         for mut camera in &mut cameras {
-            let position = screen_position(position.x, position.z);
-            camera.translation.x = position.x;
-            camera.translation.y = position.y;
+            let target = screen_position(position.x, position.y, position.z);
+            *camera =
+                Transform::from_translation(target + orbit.offset()).looking_at(target, Vec3::Y);
         }
     }
     let title = format!(
@@ -838,16 +897,16 @@ fn present_online(
     }
 }
 
-/// World yaw is clockwise from +Z toward +X; screen Y is negative world Z.
+/// World yaw is clockwise from +Z toward +X.
 fn facing_transform(yaw_degrees: f32) -> Transform {
     let angle = yaw_degrees.rem_euclid(360.0).to_radians();
-    Transform::from_xyz(angle.sin() * 26.0, -angle.cos() * 26.0, 0.1)
-        .with_rotation(Quat::from_rotation_z(angle))
+    Transform::from_xyz(angle.sin() * 0.45, 0.15, angle.cos() * 0.45)
+        .with_rotation(Quat::from_rotation_y(angle))
 }
 
 fn ground_ring_transform(angle: f32, radius: f32, depth: f32) -> Transform {
-    Transform::from_xyz(angle.cos() * radius, angle.sin() * radius, depth)
-        .with_rotation(Quat::from_rotation_z(angle + std::f32::consts::FRAC_PI_2))
+    Transform::from_xyz(angle.cos() * radius, depth, angle.sin() * radius)
+        .with_rotation(Quat::from_rotation_y(-angle - std::f32::consts::FRAC_PI_2))
 }
 
 /// Advance remote visuals toward the latest authoritative target. Interpolation
@@ -874,8 +933,15 @@ pub struct OfflineWindowPlugin;
 
 impl Plugin for OfflineWindowPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_scene)
-            .add_systems(Update, keyboard_input.in_set(OfflineSet::Input))
+        app.init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .add_systems(Startup, setup_scene)
+            .add_systems(
+                Update,
+                keyboard_input
+                    .after(crate::options::toggle_menu)
+                    .in_set(OfflineSet::Input),
+            )
             .add_systems(Update, present_scene.in_set(OfflineSet::Presentation));
     }
 }
@@ -884,7 +950,89 @@ impl Plugin for OfflineWindowPlugin {
 struct Avatar;
 
 #[derive(Component)]
-struct SceneCamera;
+pub(crate) struct SceneCamera;
+
+#[derive(Resource)]
+struct MouseCamera {
+    yaw: f32,
+    pitch: f32,
+    distance: f32,
+}
+
+impl Default for MouseCamera {
+    fn default() -> Self {
+        Self {
+            yaw: 0.0,
+            pitch: 0.6,
+            distance: 16.0,
+        }
+    }
+}
+
+impl MouseCamera {
+    fn offset(&self) -> Vec3 {
+        Vec3::new(
+            self.yaw.sin() * self.pitch.cos(),
+            self.pitch.sin(),
+            self.yaw.cos() * self.pitch.cos(),
+        ) * self.distance
+    }
+}
+
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+fn mouse_controls(
+    buttons: Res<ButtonInput<MouseButton>>,
+    motion: Res<bevy::input::mouse::AccumulatedMouseMotion>,
+    scroll: Res<bevy::input::mouse::AccumulatedMouseScroll>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    ui: Query<&bevy::picking::hover::Hovered, With<Node>>,
+    cameras: Query<(&Camera, &GlobalTransform), With<SceneCamera>>,
+    entities: Query<(&OnlineEntity, &GlobalTransform)>,
+    mut orbit: ResMut<MouseCamera>,
+    mut selected: ResMut<SelectedTarget>,
+    client: Res<OnlineClient>,
+    menu: Option<Res<crate::options::OptionsMenuState>>,
+) {
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    if !window.focused
+        || menu.is_some_and(|menu| menu.is_open())
+        || ui.iter().any(|hovered| hovered.0)
+    {
+        return;
+    }
+    if buttons.pressed(MouseButton::Right) {
+        orbit.yaw -= motion.delta.x * 0.005;
+        orbit.pitch = (orbit.pitch + motion.delta.y * 0.005).clamp(0.15, 1.4);
+    }
+    orbit.distance = (orbit.distance * (-scroll.delta.y * 0.1).exp()).clamp(3.0, 45.0);
+    if !buttons.just_pressed(MouseButton::Left) {
+        return;
+    }
+    let (Some(cursor), Ok((camera, transform))) = (window.cursor_position(), cameras.single())
+    else {
+        return;
+    };
+    selected.0 = entities
+        .iter()
+        .filter(|(entity, _)| Some(entity.0) != client.world().actor())
+        .filter_map(|(entity, position)| {
+            camera
+                .world_to_viewport(transform, position.translation())
+                .ok()
+                .map(|point| (entity.0, point.distance_squared(cursor)))
+        })
+        .filter(|(_, distance)| *distance <= 32.0 * 32.0)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(entity, _)| entity);
+}
+
+/// Both scene paths use a tone mapper that needs no optional LUT textures.
+/// Bevy's default uses a magenta placeholder when `tonemapping_luts` is absent.
+fn scene_camera() -> impl Bundle {
+    (Camera3d::default(), Tonemapping::Reinhard)
+}
 
 /// Marks a sprite whose transform is derived from an authored scene position.
 #[derive(Component)]
@@ -900,12 +1048,28 @@ fn object_style(kind: SceneObjectKind) -> (Color, f32, f32) {
 }
 
 #[allow(clippy::needless_pass_by_value)] // Bevy system parameters must be passed by value.
-fn setup_scene(mut commands: Commands, zone: Res<ZoneScene>, mut scene: ResMut<OfflineScene>) {
-    commands.spawn((Camera2d, SceneCamera));
+fn setup_scene(
+    mut commands: Commands,
+    zone: Res<ZoneScene>,
+    mut scene: ResMut<OfflineScene>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    commands.spawn((
+        scene_camera(),
+        Transform::from_xyz(0.0, 12.0, 16.0).looking_at(Vec3::ZERO, Vec3::Y),
+        SceneCamera,
+    ));
+    commands.spawn((
+        DirectionalLight {
+            illuminance: 12_000.0,
+            ..default()
+        },
+        Transform::from_xyz(4.0, 12.0, 6.0).looking_at(Vec3::ZERO, Vec3::Y),
+    ));
     scene.avatar_position = zone.bounds.clamp(zone.spawn);
 
-    // Terrain and authored objects are placeholder sprites for the current 2D
-    // renderer. Assets verified by the content policy are not decoded yet.
+    // Use placeholder geometry until verified authored assets can be loaded.
     for (index, tile) in zone.terrain.iter().enumerate() {
         let colour = if index % 2 == 0 {
             Color::srgb(0.13, 0.22, 0.16)
@@ -913,22 +1077,37 @@ fn setup_scene(mut commands: Commands, zone: Res<ZoneScene>, mut scene: ResMut<O
             Color::srgb(0.15, 0.25, 0.18)
         };
         commands.spawn((
-            Sprite::from_color(colour, Vec2::splat(tile.size * SCALE)),
-            Transform::from_translation(Vec3::new(0.0, 0.0, -1.0)),
+            Mesh3d(meshes.add(Cuboid::new(tile.size, 0.08, tile.size))),
+            MeshMaterial3d(materials.add(colour)),
+            Transform::from_translation(tile.position + Vec3::new(0.0, -0.04, 0.0)),
             WorldPosition(tile.position),
         ));
     }
     for object in &zone.objects {
-        let (colour, size, z) = object_style(object.kind);
+        let (colour, size, _z) = object_style(object.kind);
+        let mesh = match object.kind {
+            SceneObjectKind::Character => meshes.add(Capsule3d::new(size * 0.45, size)),
+            SceneObjectKind::Interactable => meshes.add(Cuboid::new(size, size, size)),
+            SceneObjectKind::Prop => meshes.add(Cuboid::new(size, size * 2.0, size)),
+        };
         commands.spawn((
-            Sprite::from_color(colour, Vec2::splat(size * SCALE)),
-            Transform::from_translation(Vec3::new(0.0, 0.0, z)),
-            WorldPosition(object.position),
+            Mesh3d(mesh),
+            MeshMaterial3d(materials.add(colour)),
+            Transform::from_translation(
+                object.position
+                    + Vec3::Y
+                        * if object.kind == SceneObjectKind::Interactable {
+                            size * 0.5
+                        } else {
+                            size
+                        },
+            ),
         ));
     }
     commands.spawn((
-        Sprite::from_color(Color::srgb(0.3, 0.7, 1.0), Vec2::splat(24.0)),
-        Transform::from_xyz(0.0, 0.0, 1.0),
+        Mesh3d(meshes.add(Capsule3d::new(0.35, 0.8))),
+        MeshMaterial3d(materials.add(Color::srgb(0.3, 0.7, 1.0))),
+        Transform::from_translation(scene.avatar_position + Vec3::Y * 0.75),
         Avatar,
     ));
 }
@@ -939,6 +1118,7 @@ fn keyboard_input(
     replay: Option<Res<ReplayInput>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut pressed: ResMut<PressedControls>,
+    menu: Option<Res<crate::options::OptionsMenuState>>,
 ) {
     const KEYS: [(KeyCode, Control); 8] = [
         (KeyCode::KeyW, Control::W),
@@ -951,6 +1131,10 @@ fn keyboard_input(
         (KeyCode::KeyC, Control::C),
     ];
     if replay.is_some() {
+        return;
+    }
+    if menu.is_some_and(|menu| menu.is_open()) {
+        pressed.0.clear();
         return;
     }
     // Keyboard state is global; do not move the offline avatar while another
@@ -966,18 +1150,11 @@ fn keyboard_input(
         .collect();
 }
 
-/// Project a world position into camera-relative 2D pixels. The primary follow
-/// mode uses the slice's closer scale; the billboard fallback is slightly wider.
-fn project(world: Vec3, pose: &CameraPose) -> Vec3 {
-    let scale = match pose.mode {
-        crate::offline::CameraMode::Follow3d => SCALE,
-        crate::offline::CameraMode::Billboard2d => SCALE * 0.75,
-    };
-    Vec3::new(
-        (world.x - pose.target.x) * scale,
-        -(world.z - pose.target.z) * scale,
-        0.0,
-    )
+fn offline_camera_offset(mode: crate::offline::CameraMode) -> Vec3 {
+    match mode {
+        crate::offline::CameraMode::Follow3d => Vec3::new(0.0, 12.0, 16.0),
+        crate::offline::CameraMode::Billboard2d => Vec3::new(0.0, 22.0, 0.01),
+    }
 }
 
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)] // Bevy system parameters must be passed by value.
@@ -996,19 +1173,16 @@ fn present_scene(
     let scene = scene.into_inner();
     let pose = pose.into_inner();
     for mut transform in &mut avatars {
-        let projected = project(scene.avatar_position, pose);
-        transform.translation.x = projected.x;
-        transform.translation.y = projected.y;
+        transform.translation = scene.avatar_position + Vec3::Y * 0.75;
     }
     for (world, mut transform) in &mut objects {
-        let projected = project(world.0, pose);
-        transform.translation.x = projected.x;
-        transform.translation.y = projected.y;
+        transform.translation.x = world.0.x;
+        transform.translation.z = world.0.z;
     }
     for mut transform in &mut cameras {
-        // Objects are already camera-relative, so the camera stays at the origin.
-        transform.translation.x = 0.0;
-        transform.translation.y = 0.0;
+        let offset = offline_camera_offset(pose.mode);
+        *transform =
+            Transform::from_translation(pose.target + offset).looking_at(pose.target, Vec3::Y);
     }
     if let Some(mut window) = windows.iter_mut().next() {
         let version = zone
@@ -1059,55 +1233,9 @@ mod tests {
     }
 
     #[test]
-    fn public_health_is_optional_and_bar_fraction_is_bounded() {
-        use crate::world_state::PublicHealth;
-        assert_eq!(health_fraction(None), None);
-        assert_eq!(
-            health_fraction(Some(PublicHealth { current: 5, max: 0 })),
-            None
-        );
-        assert_eq!(
-            health_fraction(Some(PublicHealth {
-                current: 5,
-                max: 10
-            })),
-            Some(0.5)
-        );
-        assert_eq!(
-            health_fraction(Some(PublicHealth {
-                current: -1,
-                max: 10
-            })),
-            Some(0.0)
-        );
-        assert_eq!(
-            health_fraction(Some(PublicHealth {
-                current: 20,
-                max: 10
-            })),
-            Some(1.0)
-        );
-    }
-
-    #[test]
     fn status_indicators_follow_authoritative_presence_and_clearing() {
         assert_eq!(status_visibility(true), Visibility::Inherited);
         assert_eq!(status_visibility(false), Visibility::Hidden);
-    }
-
-    #[test]
-    fn prototype_nameplate_fallback_is_readable() {
-        use std::str::FromStr;
-        assert_eq!(
-            prototype_name(
-                &engine_core::id::DefinitionId::from_str("character.demo_guard").unwrap()
-            ),
-            "Demo Guard"
-        );
-        assert_eq!(
-            prototype_name(&engine_core::id::DefinitionId::from_str("npc.wood-worker").unwrap()),
-            "Wood Worker"
-        );
     }
 
     #[test]
@@ -1185,20 +1313,23 @@ mod tests {
     #[test]
     fn facing_projects_server_yaw_into_ground_plane() {
         for (yaw, expected) in [
-            (0.0, Vec2::new(0.0, -26.0)),
-            (90.0, Vec2::new(26.0, 0.0)),
-            (180.0, Vec2::new(0.0, 26.0)),
-            (270.0, Vec2::new(-26.0, 0.0)),
-            (450.0, Vec2::new(26.0, 0.0)),
+            (0.0, Vec2::new(0.0, 0.45)),
+            (90.0, Vec2::new(0.45, 0.0)),
+            (180.0, Vec2::new(0.0, -0.45)),
+            (270.0, Vec2::new(-0.45, 0.0)),
+            (450.0, Vec2::new(0.45, 0.0)),
         ] {
-            assert!(
-                facing_transform(yaw)
-                    .translation
-                    .truncate()
-                    .distance(expected)
-                    < 0.001
-            );
+            assert!(facing_transform(yaw).translation.xz().distance(expected) < 0.001);
         }
+    }
+
+    #[test]
+    fn online_presentation_preserves_world_height_and_bounds_coordinates() {
+        assert_eq!(screen_position(2.0, 3.0, -4.0), Vec3::new(2.0, 3.8, -4.0));
+        assert_eq!(
+            screen_position(f32::MAX, 0.0, -f32::MAX),
+            Vec3::new(1_000_000.0, 0.8, -1_000_000.0)
+        );
     }
     use crate::{
         headless_app,
@@ -1230,12 +1361,12 @@ mod tests {
             .query_filtered::<&Transform, With<Avatar>>()
             .single(world)
             .unwrap();
-        assert_eq!(avatar.translation.y, 0.0);
+        assert_eq!(avatar.translation, Vec3::new(0.0, 0.75, -1.0));
         let camera = world
             .query_filtered::<&Transform, With<SceneCamera>>()
             .single(world)
             .unwrap();
-        assert_eq!(camera.translation.y, 0.0);
+        assert_eq!(camera.translation, Vec3::new(0.0, 12.0, 15.0));
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()
             .release(KeyCode::KeyW);
@@ -1355,25 +1486,36 @@ mod tests {
             .query_filtered::<&Transform, With<Avatar>>()
             .single(world)
             .unwrap();
-        assert_eq!(avatar.translation, Vec3::new(0.0, 0.0, 1.0));
+        assert_eq!(avatar.translation, Vec3::new(0.0, 0.75, 0.0));
     }
 
     #[test]
-    fn billboard_mode_uses_the_documented_fallback_scale() {
-        let follow = CameraPose {
-            target: Vec3::ZERO,
-            ..default()
-        };
-        let billboard = CameraPose {
-            mode: crate::offline::CameraMode::Billboard2d,
-            target: Vec3::ZERO,
-            ..default()
-        };
-        assert_eq!(project(Vec3::X, &follow), Vec3::new(SCALE, 0.0, 0.0));
-        assert_eq!(
-            project(Vec3::X, &billboard),
-            Vec3::new(SCALE * 0.75, 0.0, 0.0)
-        );
+    fn camera_modes_offer_distinct_3d_views() {
+        let follow = offline_camera_offset(crate::offline::CameraMode::Follow3d);
+        let overhead = offline_camera_offset(crate::offline::CameraMode::Billboard2d);
+        assert!(follow.z > follow.y);
+        assert!(overhead.y > follow.y && overhead.z < 0.1);
+    }
+
+    #[test]
+    fn scene_camera_uses_tonemapping_without_optional_lookup_textures() {
+        for online in [false, true] {
+            let mut app = headless_app();
+            app.init_resource::<ButtonInput<KeyCode>>();
+            if online {
+                app.insert_resource(OnlineClient::new(1.0).unwrap())
+                    .add_plugins(OnlineWindowPlugin);
+            } else {
+                app.add_plugins(OfflineWindowPlugin);
+            }
+            app.update();
+            let world = app.world_mut();
+            let tonemapping = world
+                .query_filtered::<&Tonemapping, With<Camera3d>>()
+                .single(world)
+                .unwrap();
+            assert_eq!(*tonemapping, Tonemapping::Reinhard);
+        }
     }
 
     #[test]
@@ -1384,19 +1526,40 @@ mod tests {
             z: 3.0,
         };
         let mut keys = ButtonInput::<KeyCode>::default();
-        assert_eq!(movement_destination(origin, &keys, 0.09), None);
+        assert_eq!(movement_destination(origin, &keys, 0.09, 0.0), None);
         keys.press(KeyCode::KeyW);
-        assert_eq!(movement_destination(origin, &keys, 0.0), None);
-        let up = movement_destination(origin, &keys, 0.09).unwrap();
+        assert_eq!(movement_destination(origin, &keys, 0.0, 0.0), None);
+        let up = movement_destination(origin, &keys, 0.09, 0.0).unwrap();
         assert_eq!(up.y, origin.y);
         assert!((up.z - (origin.z - 0.09)).abs() < 1e-6);
         keys.press(KeyCode::KeyD);
-        let diagonal = movement_destination(origin, &keys, 0.09).unwrap();
+        let diagonal = movement_destination(origin, &keys, 0.09, 0.0).unwrap();
         let dx = diagonal.x - origin.x;
         let dz = diagonal.z - origin.z;
         assert!((dx.hypot(dz) - 0.09).abs() < 1e-6);
         assert!((dx - 0.09 / 2.0_f32.sqrt()).abs() < 1e-6);
         assert!((dz + 0.09 / 2.0_f32.sqrt()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn movement_follows_camera_yaw_without_changing_speed_or_height() {
+        let origin = Position {
+            x: 0.0,
+            y: 2.0,
+            z: 0.0,
+        };
+        let mut keys = ButtonInput::default();
+        keys.press(KeyCode::KeyW);
+        let forward =
+            movement_destination(origin, &keys, 1.0, std::f32::consts::FRAC_PI_2).unwrap();
+        assert!((forward.x + 1.0).abs() < 1e-6);
+        assert!(forward.z.abs() < 1e-6);
+        assert_eq!(forward.y, origin.y);
+        keys.press(KeyCode::KeyD);
+        let diagonal =
+            movement_destination(origin, &keys, 1.0, std::f32::consts::FRAC_PI_2).unwrap();
+        assert!((diagonal.x.hypot(diagonal.z) - 1.0).abs() < 1e-6);
+        assert!(diagonal.x < 0.0 && diagonal.z < 0.0);
     }
 
     #[test]
@@ -1413,17 +1576,17 @@ mod tests {
             .spawn((
                 Transform::from_translation(Vec3::ZERO),
                 OnlineMotion {
-                    to: Vec3::new(10.0, 0.0, 0.0),
+                    to: Vec3::new(4.0, 0.0, 0.0),
                 },
             ))
             .id();
         app.update();
         let transform = app.world().get::<Transform>(entity).unwrap();
         assert!(transform.translation.x >= 0.0);
-        assert!(transform.translation.x <= 10.0);
+        assert!(transform.translation.x <= 4.0);
         app.update();
         let transform = app.world().get::<Transform>(entity).unwrap();
-        assert!(transform.translation.x > 0.0 && transform.translation.x < 10.0);
+        assert!(transform.translation.x > 0.0 && transform.translation.x < 4.0);
         app.world_mut().get_mut::<OnlineMotion>(entity).unwrap().to = Vec3::X * 1000.0;
         app.update();
         assert_eq!(

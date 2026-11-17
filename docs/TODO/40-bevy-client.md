@@ -527,7 +527,7 @@ have not been visually tuned in the Windows demo.
 ## CLT-008 — Interaction, inventory, and UI panels
 
 - **Priority:** P1
-- **Status:** In progress — `bevy_immediate` renders server-described fields/actions, gateway-enforced action/parameter policies, validated take/insert transfers, and server-authoritative split/merge; equip, localization, and broader content-authored layouts remain
+- **Status:** In progress — `bevy_immediate` renders server-described fields/actions, gateway-enforced action/parameter policies, validated take/insert transfers, and server-authoritative split/merge and equip/unequip; localization and broader content-authored layouts remain
 - **Depends on:** `CLT-006`, `SIM-008`
 - **References:** ADR 0015, [content authoring §UI panels](../content-authoring.md#ui-panels)
 
@@ -647,11 +647,26 @@ request, or a non-active connection; they do not fall through to the world
 interaction bindings while a generic panel is open. Actions requiring dynamic
 parameters remain disabled until an authored input widget is available.
 
-**Remaining equipment dependency:** See the [local completion blocker](../agents/issue-tracker.md#local-completion-blockers).
-The current `core.item` content contract has no equipment-slot compatibility
-or stat-effect data, and owner-only state carries inventory only. The client
-will not offer an equip action until the authoritative simulation and persisted
-character-state contract exists.
+**Equipment slice (2026-11-15):** `core.item` now accepts an optional bounded
+`equip_slot` (`main_hand`, `off_hand`, `head`, `chest`, `hands`, `legs`, `feet`),
+and content validation requires equippable definitions to use `stack_max: 1`.
+The simulation implements authoritative `equip` and `unequip` verbs: the server
+resolves the slot from content, moves exactly one item, rejects actions that
+target another entity, and restores a replaced item to the inventory atomically
+or rejects the whole change. Equipment persists in `EntityRecord`, snapshot
+restore revalidates slots and duplicate instances, and owner-only replication
+carries optional equipment beside the inventory. The client validates and
+redacts equipment for the controlled actor, renders an equipment section with
+Portuguese slot names, offers equip on single-item stacks and unequip on filled
+slots, and waits for authoritative owner replication without optimistic
+mutation. Gateway, snapshot, content, and real-socket tests cover slot narrowing,
+atomic replacement, rejected full inventories, persistence, and owner-only
+delivery.
+
+**Remaining equipment scope:** The authoritative contract now covers slot
+compatibility and inventory/equipment movement only. Item stat modifiers,
+two-handed/off-hand exclusivity, and equipment-aware combat resolution remain a
+separate design under [ADR 0022](../adr/0022-dynamic-character-classes-and-combat-targeting.md).
 
 ---
 
@@ -688,9 +703,10 @@ are deferred to `CLT-015`.
 
 **Progress:** The online window shows recent room messages and connected
 members, accepts `T` to compose and Enter to send, and uses PageUp/PageDown for
-bounded history pages. Account sessions with a verified character use the
-configured Nakama room, authenticated realtime socket, and persisted history
-API. Static `--demo-online` sessions use the world gateway's in-memory zone
+bounded history pages. Account sessions with a verified character discover the
+zone room from the active world session, then use the authenticated Nakama
+realtime socket and persisted history API. Static `--demo-online` sessions use
+the world gateway's in-memory zone
 channel and never send their world token to Nakama. Nakama history pages merge
 in chronological order with message-ID deduplication. The client keeps a
 bounded 500-message scrollback and displays safe Portuguese errors without
@@ -713,7 +729,9 @@ for validated behavior and deferred follow-up work.
 ## CLT-010 — Localization and accessibility
 
 - **Priority:** P1
-- **Status:** Blocked — `CLT-008`
+- **Status:** In progress — locale catalogs, persisted selection, and the first
+  localized widgets landed; the remaining surfaces and accessibility controls
+  stay open.
 - **Depends on:** `CLT-008`, `CLT-009`
 - **References:** [internationalization](../internationalization.md), ADR 0011
 
@@ -728,9 +746,25 @@ for validated behavior and deferred follow-up work.
 **Acceptance criteria**
 
 - [ ] No player-facing string is hardcoded in a client widget.
-- [ ] `pt-BR` is the default; an alternate locale can be selected and persists.
+- [x] `pt-BR` is the default; an alternate locale can be selected and persists.
 - [ ] Missing keys are visible in development and fail the release check.
 - [ ] Core flows are usable with keyboard only and at increased text size.
+
+**Progress (2026-11-16):** `localization` embeds the shared `pt-BR` source and
+`en` catalogs, resolves widget text through stable keys with `{parameter}`
+substitution, renders an unknown key as itself, and reports each missing
+`locale:key` once in debug builds. `LocalePreference` defaults to `pt-BR`,
+loads a bounded JSON document from `LYNX_LOCALE_PATH` or the platform
+configuration directory, ignores unsupported or malformed documents, and
+persists a selection through a sibling temporary file. The options menu gained a
+`Language` tab with endonym buttons, retranslates its title, tabs, toggles,
+hints, and resume button in place, and saves the choice. Both world launch paths
+load the preference before plugins run and negotiate it in `Handshake.locale`.
+Inventory, equipment, interaction status, and options text now resolve from
+catalog keys; a unit test enforces key parity between `en` and the source
+catalog. The HUD, chat, lock, content, and account surfaces still contain
+hardcoded strings, and text scaling, colorblind-safe indicators, remappable
+keys, reduced motion, and locale-aware calendar formatting remain open.
 
 ---
 

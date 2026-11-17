@@ -205,7 +205,7 @@ mod tests {
         rows.pop();
         assert_eq!(
             compare(false, &rows).pending,
-            ["0016_player_inventory_value_ledger"]
+            [MIGRATIONS.last().expect("migrations are not empty").0]
         );
         rows[0].1 = "bad".into();
         rows.push(("0007_future".into(), "secret".into()));

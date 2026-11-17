@@ -45,6 +45,7 @@ impl Plugin for ContentPanelPlugin {
             Update,
             (keyboard_actions, draw)
                 .chain()
+                .after(crate::options::toggle_menu)
                 .after(crate::online::poll_online),
         );
     }
@@ -59,8 +60,10 @@ fn keyboard_actions(
     keys: Res<ButtonInput<KeyCode>>,
     chat: Res<ChatComposer>,
     windows: Query<&Window, With<PrimaryWindow>>,
+    menu: Option<Res<crate::options::OptionsMenuState>>,
 ) {
     if chat.active
+        || menu.is_some_and(|menu| menu.is_open())
         || client.status() != OnlineStatus::Active
         || client.interaction().pending()
         || !windows.single().is_ok_and(|window| window.focused)

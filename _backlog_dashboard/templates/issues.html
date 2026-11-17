@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Issues · Lynx backlog</title>
+  <style>
+    :root { color-scheme:dark; --bg:#11151b; --panel:#1a2029; --line:#303a47; --muted:#a3afbd; --text:#edf2f7; --blue:#76b7ff; --green:#66d19e; --yellow:#f0c674; --red:#ff8585; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 system-ui,sans-serif; }
+    main { max-width:1600px; margin:auto; padding:24px 20px 50px; }
+    h1,h2,h3,p { margin-top:0; }
+    h1 { margin-bottom:4px; font-size:clamp(25px,4vw,35px); }
+    h2 { font-size:19px; }
+    a { color:var(--blue); }
+    .muted { color:var(--muted); }
+    .toolbar { display:grid; grid-template-columns:minmax(220px,1fr) 190px 210px auto auto; gap:9px; margin:18px 0 12px; }
+    input,select,button { min-width:0; color:var(--text); background:#11151b; border:1px solid var(--line); border-radius:7px; padding:9px 11px; font:inherit; }
+    button { cursor:pointer; }
+    button:hover,.toolbar select:hover { border-color:var(--blue); }
+    .count { color:var(--muted); align-self:center; }
+    .layout { display:grid; grid-template-columns:minmax(280px,.8fr) minmax(0,1.6fr); gap:14px; align-items:start; }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; min-width:0; }
+    .issue-list { max-height:calc(100vh - 230px); min-height:400px; overflow:auto; }
+    .issue-row { display:block; padding:12px 14px; border-bottom:1px solid var(--line); color:var(--text); text-decoration:none; }
+    .issue-row:last-child { border-bottom:0; }
+    .issue-row:hover,.issue-row[aria-current="true"] { background:#252e39; }
+    .issue-row[aria-current="true"] { box-shadow:inset 3px 0 var(--blue); }
+    .issue-title { display:block; font-weight:650; }
+    .issue-meta { display:flex; flex-wrap:wrap; gap:6px; margin-top:7px; }
+    .badge { display:inline-flex; align-items:center; padding:2px 8px; border:1px solid var(--line); border-radius:99px; white-space:nowrap; font-size:12px; }
+    .priority-p0 { color:#ff9e9e; border-color:#714343; }.priority-p1 { color:var(--yellow); border-color:#665632; }
+    .status-resolved { color:var(--green); }.status-in_progress { color:var(--blue); }.status-blocked { color:var(--red); }.status-open { color:var(--yellow); }
+    .details { padding:20px; }
+    .details h2 { margin:0 0 5px; }
+    .issue-id { color:var(--blue); font-size:13px; font-weight:700; letter-spacing:.03em; }
+    .meta { display:flex; flex-wrap:wrap; gap:7px; margin:13px 0 20px; }
+    .status-detail { border-left:3px solid var(--blue); padding:8px 12px; background:#151c25; color:#c5ced8; }
+    .detail-block { border-top:1px solid var(--line); margin-top:18px; padding-top:15px; }
+    .detail-block h3 { font-size:14px; margin-bottom:8px; }
+    .detail-block ul { margin:0; padding-left:21px; }
+    .detail-block li { margin:7px 0; }
+    .criterion-complete { color:var(--green); }
+    .record-body { white-space:pre-wrap; line-height:1.65; }
+    .links { display:flex; flex-wrap:wrap; gap:7px; }
+    .links a { border:1px solid var(--line); border-radius:6px; padding:3px 8px; text-decoration:none; }
+    .source { color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
+    .empty { padding:20px; color:var(--muted); }
+    @media (max-width:950px) { .layout { grid-template-columns:1fr; }.issue-list { min-height:0; max-height:42vh; } }
+    @media (max-width:650px) { main { padding:18px 10px 38px; }.toolbar { grid-template-columns:1fr 1fr; }.toolbar input { grid-column:1/-1; }.toolbar button { grid-column:span 1; }.details { padding:15px; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Issues</h1>
+    <p class="muted">Browse issue specifications in <code>docs/issues/</code> and local completion blockers recorded in <code>docs/agents/issue-tracker.md</code>.</p>
+    {% set active_page = 'issues' %}{% include '_navbar.html' %}
+  </header>
+
+  <form class="toolbar" method="get" action="{{ url_for('issues') }}">
+    <input type="search" name="q" value="{{ query }}" placeholder="Search ID, title, scope, or criteria" aria-label="Search issues">
+    <select name="status" aria-label="Filter by status">
+      <option value="">All statuses</option>
+      {% for status in statuses %}<option value="{{ status }}"{% if status_filter == status %} selected{% endif %}>{{ status }}</option>{% endfor %}
+    </select>
+    <select name="source" aria-label="Filter by source">
+      <option value="">All sources</option>
+      {% for source in sources %}<option value="{{ source }}"{% if source_filter == source %} selected{% endif %}>{{ source }}</option>{% endfor %}
+    </select>
+    <button type="submit">Filter</button>
+    <a class="count" href="{{ url_for('issues') }}">Reset</a>
+  </form>
+
+  <div class="layout">
+    <nav class="panel issue-list" aria-label="Issue list">
+      {% for item in items %}
+      <a class="issue-row" href="{{ url_for('issues', issue=item.key, q=query, status=status_filter, source=source_filter) }}"{% if selected_issue and selected_issue.key == item.key %} aria-current="true"{% endif %}>
+        <span class="issue-title">{{ item.id }} · {{ item.title }}</span>
+        <span class="issue-meta">
+          <span class="badge status-{{ item.status_label|lower|replace(' ', '_') }}">{{ item.status_label }}</span>
+          <span class="badge">{{ item.source_type }}</span>
+        </span>
+      </a>
+      {% else %}<p class="empty">No issues match these filters.</p>{% endfor %}
+    </nav>
+
+    <article class="panel details" aria-live="polite">
+      {% if selected_issue %}
+      <span class="issue-id">{{ selected_issue.id }} · {{ selected_issue.source_type }}</span>
+      <h2>{{ selected_issue.title }}</h2>
+      <div class="meta">
+        <span class="badge status-{{ selected_issue.status_label|lower|replace(' ', '_') }}">{{ selected_issue.status_label }}</span>
+        {% if selected_issue.reported %}<span class="badge">Reported {{ selected_issue.reported }}</span>{% endif %}
+        {% if selected_issue.resolved %}<span class="badge">Resolved {{ selected_issue.resolved }}</span>{% endif %}
+      </div>
+      {% if selected_issue.affected_workflow %}<p class="status-detail">Affected workflow: {{ selected_issue.affected_workflow }}</p>{% endif %}
+      {% if selected_issue.related_ids %}<section class="detail-block"><h3>Related tasks</h3><div class="links">{% for related in selected_issue.related_ids %}<span class="badge">{{ related }}</span>{% endfor %}</div></section>{% endif %}
+      {% if selected_issue.record_body %}<section class="detail-block"><h3>Blocker details</h3><p class="record-body">{{ selected_issue.record_body }}</p></section>{% endif %}
+      {% for section in selected_issue.sections %}
+      <section class="detail-block">
+        <h3>{{ section.title }}</h3>
+        {% if section.body %}<p class="record-body">{{ section.body }}</p>{% endif %}
+        {% if section.acceptance %}<ul>{% for criterion in section.acceptance %}<li{% if criterion.complete %} class="criterion-complete"{% endif %}>{% if criterion.complete %}✓{% else %}○{% endif %} {{ criterion.text }}</li>{% endfor %}</ul>{% endif %}
+      </section>
+      {% endfor %}
+      <section class="detail-block source"><a href="{{ url_for('source', file=selected_issue.source) }}#L{{ selected_issue.line }}">Open source at {{ selected_issue.source }}:{{ selected_issue.line }}</a></section>
+      {% else %}<p class="empty">No issue details to show. Adjust the filters or reset the view.</p>{% endif %}
+    </article>
+  </div>
+  <p class="count">Showing {{ items|length }} of {{ total_count }} tracked issues</p>
+</main>
+</body>
+</html>

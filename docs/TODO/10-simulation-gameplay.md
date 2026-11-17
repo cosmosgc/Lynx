@@ -385,8 +385,9 @@ same-tick group target shares, and AI action attempts (including rejected
 actions) have deterministic caps.
 The last tick's server-side report includes decisions, perception counts and
 status, targets, action rejections, and remaining shared action budget. Unknown
-behaviors are reported and do not act. Faction reputation expiry uses the policy's explicit simulation epoch
-and tick duration. Controller selection rotates a runtime-only stable-ID cursor:
+behaviors are reported and do not act. Faction reputation expiry uses the
+policy's explicit simulation epoch and tick duration. Controller selection
+rotates a runtime-only stable-ID cursor:
 each tick starts after the previous tick's last inspected record and wraps
 around, so low `max_controller_candidates` or `max_ai_updates` limits eventually
 serve every AI controller instead of starving later IDs. The cursor is
@@ -412,8 +413,8 @@ authoritative speed, geometry, collision, and dynamic-blocker checks as other AI
 movement. `patrol` uses an authored looping route of 2 to 64 finite positions,
 keeps a runtime-only route cursor, and attempts at most one movement per actor
 per tick through the same authoritative movement checks. Seasonal scheduling
-and a privileged persistent admin inspection surface remain. AI
-policy now accepts server-approved `AiBehaviorDefinition` bindings, allowing a
+and a privileged persistent admin inspection surface remain. AI policy now
+accepts server-approved `AiBehaviorDefinition` bindings, allowing a
 content behavior ID to select the bounded Guard or GuardChase primitive and its
 perception range; a test verifies a custom ID and constrained range.
 `engine_content` defines and validates typed behavior semantics and finite
@@ -442,8 +443,8 @@ open. The legacy Guard and GuardChase primitives remain available alongside
 graphs. Tests
 `bounded_controller_scan_rotates_across_all_ai_controllers` and
 `rotated_controller_scan_replays_deterministically` prove bounded limits serve
-every AI controller and replay identically. Movement authority is implemented in
-`SIM-001`; visual client reconciliation remains in `SIM-002`.
+every AI controller and replay identically. Movement authority is implemented
+in `SIM-001`; visual client reconciliation remains in `SIM-002`.
 
 ---
 
@@ -509,7 +510,7 @@ Use `Zone::add_dynamic_obstacle` for tick-expiring temporary blockers and
 ## SIM-008 — World chat and presence
 
 - **Priority:** P1
-- **Status:** In progress — authenticated room chat plus authorized direct/group channel discovery, joins, history, and sends are integrated; party channels, world-admission binding, and live service validation remain
+- **Status:** In progress — authenticated room chat plus authorized direct/group channel discovery, joins, history, and sends are integrated; zone-room discovery now resolves the current world session's admitted zone; party channels and live Nakama validation remain
 - **Depends on:** —
 - **References:** `crates/game_api/src/chat.rs`, `social.rs`,
   [README Phase 3](../../README.md#phase-3--interaction-and-mind-system--in-progress),
@@ -541,17 +542,27 @@ owned by Lynx.
       `NET-009`/`CNT-008`.
 - [x] Chat survives reconnect for the retained window where policy allows.
 - [x] Integration tests cover two sessions in one zone.
+- [x] Authenticated room discovery derives its zone from the current world
+      session; stale/foreign sessions and client-selected zones are rejected.
 
-**Increment:** For account sessions with a verified character, the client joins
-the persistent room named by `LYNX_CHAT_ROOM` (default `lynx-zone`) using the
-authenticated Nakama token. Static `--demo-online` tokens stay on the gateway
-fallback and are never sent to Nakama. The account client sends JSON content
-through the realtime socket and reads persisted history from Nakama's
-channel-history API. Recent-first Nakama pages are
+**Increment:** After world admission, the account client sends its Nakama bearer
+and current world resume token to `GET /social/chat/channels`. The world edge
+resolves that token inside the authority loop to its owning character and zone,
+checks that the Nakama account owns that character, and returns the derived
+`lynx-zone-{zone_instance}` room beside authorized direct/group targets. The
+client does not submit a zone ID and joins only the returned room; the old fixed
+`LYNX_CHAT_ROOM`/`lynx-zone` join is removed. Reconnect uses the newly rotated
+world resume token and rediscovers the owning room, including after a zone
+handoff. Static `--demo-online` tokens stay on the gateway fallback and are
+never sent to Nakama. The account client sends JSON content through the realtime
+socket and reads persisted history from Nakama's channel-history API.
+Expired world sessions and duplicate world-session headers fail before the edge
+returns any room; the transport tests cover both cases in addition to ownership
+and server-resolved zone checks.
+Recent-first Nakama pages are
 reversed into display order and older pages are prepended with ID deduplication.
 Nakama supplies sender identity, live message delivery, persistent history
-with cursor pagination, and room-presence changes. This configured room is not
-currently bound to Lynx world-zone admission. Without Nakama configuration, the
+with cursor pagination, and room-presence changes. Without Nakama configuration, the
 gateway fallback exposes one server-scoped `zone` channel, resolves
 sender account and character from authenticated session claims, validates text,
 retains the latest 500 messages in memory, and serves bounded cursor pages.
@@ -562,8 +573,8 @@ per-session outbox and routes messages only to attached connections. History is
 volatile across process restarts, and disconnected clients must request it
 again. The gateway fallback caps sends at five messages per session per second
 and presence at 100 entries. `NET-009` moderation/reporting and `CNT-008`
-user-content policy remain unavailable; authenticated routing for direct,
-party conversations and world-admission binding remain open. Authenticated
+user-content policy remain unavailable; party conversations and live Nakama
+verification remain open. Authenticated
 direct and group destinations are now discovered through the account-scoped
 `GET /social/chat/channels` route and exposed as client tabs; the client only
 joins destinations in that server-provided page. The transport's existing
@@ -591,7 +602,8 @@ chat-family limiter is not an authorization or moderation substitute.
 
 - [ ] Membership changes are authorized and idempotent.
 - [ ] Party state survives a reconnect and is cleaned up on logout/expiry.
-- [ ] Cross-zone parties degrade to documented behavior until `SIM-014` lands.
+- [ ] Cross-zone party gameplay effects degrade to documented behavior until
+      `SIM-014` provides a global owner.
 - [ ] Invites cannot be used to spam or bypass ignore.
 
 ---
@@ -712,8 +724,12 @@ chat-family limiter is not an authorization or moderation substitute.
       zone checkpoint from restoring.
 - [ ] PostgreSQL zone crash/restart recovers independently without corrupting
       other zones; the opt-in database acceptance remains unrun here.
+- [x] Zone chat remains zone-scoped; the gateway test verifies no cross-zone
+      history or message fanout.
+- [ ] Cross-zone party effects remain disabled until a global coordinator is
+      available; current limitations are documented, but party behavior has no
+      cross-zone integration test yet.
 - [ ] Travel cooldown semantics are defined and enforced by server authority.
-- [x] Cross-zone chat/party behavior is documented and tested.
 
 **Foundation:** `WorldMapDefinition::route_kind` resolves only an authored
 directed route (or a declared bidirectional reverse route) and returns no route
@@ -819,15 +835,13 @@ state unchanged. This scenario was not executed here because
 `LYNX_PG_TEST_DATABASE` is not configured; loss of the commit acknowledgement
 and live survivor-service readiness remain open.
 
-
-Until the multi-zone session router exists, zone chat and history are scoped to
-one gateway/zone: messages are not forwarded to another zone, and disconnected
-or traveling players do not receive a cross-zone backlog. Party membership and
-cross-zone party presence/invites are not implemented; no party state is
-replicated between zones. A gateway integration test sends in one zone and
-checks that another zone's history and delivery outbox remain empty. Cross-zone
-social features require an explicit global coordinator and privacy/access
-rules rather than implicit fanout.
+Zone chat and history remain scoped to one gateway/zone: messages are not
+forwarded to another zone, and disconnected or traveling players do not receive
+a cross-zone backlog. Party membership and cross-zone party presence/invites
+are not implemented; no party state is replicated between zones. A gateway
+integration test sends in one zone and checks that another zone's history and
+delivery outbox remain empty. Cross-zone social features require an explicit
+global coordinator and privacy/access rules rather than implicit fanout.
 
 ---
 

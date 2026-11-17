@@ -3,9 +3,10 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use engine_core::equipment::{EquipSlot, Equipment};
 use engine_core::error::ErrorCode;
 use engine_core::id::{DefinitionId, IdKind, StableId};
-use engine_core::inventory::{Inventory, ItemStack, UniformItemRules};
+use engine_core::inventory::{Inventory, ItemStack, TableItemRules, UniformItemRules};
 use engine_core::math::Vec3;
 use engine_core::time::{Millis, Tick};
 use engine_net::envelope::{Envelope, MessageId, MessageKind};
@@ -2899,6 +2900,10 @@ fn owner_snapshots_include_only_the_owner_inventory() {
         .expect("Alice receives her own inventory");
     let owner: OwnerState = serde_json::from_value(alice_owner.payload.clone()).unwrap();
     assert_eq!(owner.inventory.total_quantity(&fixture.torch), 1);
+    assert!(
+        owner.equipment.is_none(),
+        "an unequipped owner sends no equipment field"
+    );
 
     assert!(
         !bob.snapshot.batch.updates.iter().any(|update| {
@@ -2935,6 +2940,44 @@ fn owner_snapshots_include_only_the_owner_inventory() {
         .expect("an inventory change is replicated to its owner");
     let owner: OwnerState = serde_json::from_value(update.payload.clone()).unwrap();
     assert_eq!(owner.inventory.total_quantity(&fixture.torch), 3);
+
+    // Equipment changes are owner-scoped state too, so they must produce a new
+    // owner update instead of waiting for an inventory change.
+    let mut equipment = Equipment::new();
+    equipment
+        .equip(
+            EquipSlot::MainHand,
+            ItemStack::unique(fixture.torch.clone(), id(IdKind::Item, 7)),
+            &TableItemRules::new(99).with_item(fixture.torch.clone(), 1, Some(EquipSlot::MainHand)),
+        )
+        .unwrap();
+    fixture
+        .gateway
+        .zone_mut()
+        .entity_mut(fixture.alice_actor)
+        .unwrap()
+        .equipment = Some(equipment.clone());
+
+    let deliveries = fixture.gateway.tick(Millis::new(3_000)).unwrap();
+    let alice_delivery = delivery(&deliveries, &alice.session);
+    let update = alice_delivery
+        .batch
+        .updates
+        .iter()
+        .find(|update| {
+            update.entity == Some(fixture.alice_actor)
+                && update.category == engine_net::replication::ReplicationCategory::OwnerOnly
+        })
+        .expect("an equipment change is replicated to its owner");
+    let owner: OwnerState = serde_json::from_value(update.payload.clone()).unwrap();
+    assert_eq!(owner.equipment, Some(equipment));
+    assert!(
+        deliveries
+            .iter()
+            .find(|delivery| delivery.session == bob.session)
+            .is_none_or(|delivery| !batch_has_entity(&delivery.batch, fixture.alice_actor)),
+        "the equipment update must not reach another session"
+    );
     assert!(
         deliveries
             .iter()
@@ -2954,7 +2997,7 @@ fn acknowledgement_cursors_are_clamped_to_the_authoritative_tick() {
     );
 
     let ack = envelope("req_ack_0001", "session.ack", json!({ "tick": 999 }));
-    assert_wire_fixture(&ack, include_str!("fixtures/session-ack-1.1.0.json"));
+    assert_wire_fixture(&ack, include_str!("fixtures/session-ack-1.2.0.json"));
     let replies = fixture
         .gateway
         .handle(&alice.session, &ack, Millis::new(2_000))
@@ -3377,7 +3420,7 @@ fn panel_messages_reject_client_targets_and_schema_mismatches() {
     assert!(fixture.gateway.panel(&alice.session).is_some());
 
     let close_request = envelope("req_ui_close_0002", UI_CLOSE_KIND, json!({}));
-    assert_wire_fixture(&close_request, include_str!("fixtures/ui-close-1.1.0.json"));
+    assert_wire_fixture(&close_request, include_str!("fixtures/ui-close-1.2.0.json"));
     let closed = fixture
         .gateway
         .handle(&alice.session, &close_request, Millis::new(2_004))
@@ -3393,7 +3436,7 @@ fn panel_messages_reject_client_targets_and_schema_mismatches() {
     );
     assert_wire_fixture(
         &ui_action_request,
-        include_str!("fixtures/ui-action-1.1.0.json"),
+        include_str!("fixtures/ui-action-1.2.0.json"),
     );
     let no_panel = fixture
         .gateway

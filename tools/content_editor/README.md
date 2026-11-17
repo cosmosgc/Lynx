@@ -11,8 +11,15 @@ cargo run -p lynx_editor -- D:\path\to\project
 ```
 
 The editor opens the project's `content/` directory, renders the selected world
-map in the scene view, and reports validation findings in the inspector. The
-current authoring slice edits world-map zone placements:
+map in the scene view, and uses egui for its inspector and authoring controls.
+It watches content files and reloads external changes when there are no unsaved
+map edits. If files change while edits are pending, the editor keeps those edits
+and asks before overwriting the changed files.
+
+The inspector provides clickable map selection, zone selection, placement,
+deletion, undo/redo, validation, save, preview, and local play controls. It
+adapts to narrow windows; keyboard shortcuts remain available. The current
+authoring slice edits world-map zone placements:
 
 | Input | Action |
 | --- | --- |

@@ -2,7 +2,7 @@
 
 `cargo run -p lynx_client` starts the built-in local demo zone on Windows (and
 Linux with X11). It renders bounded terrain, props, characters, and
-interactables as 2D placeholder sprites. WASD moves the local blue avatar; it
+interactables as 3D placeholder geometry. WASD moves the local blue avatar; it
 is a presentation preview only, not server-authoritative movement, collision,
 or interaction resolution.
 
@@ -20,9 +20,13 @@ cargo run -p lynx_client -- --content ../my-world --zone zone.starter --describe
 
 Use `--camera follow3d` (the default) or `--camera billboard2d`; `3d`, `2d`,
 `follow`, and `billboard` are accepted aliases. Press `C` in the offline window
-to cycle modes. The present renderer uses camera-relative 2D sprites for both
-modes; `billboard2d` is the selectable wider-scale fallback for clients that
-cannot present the follow view.
+to cycle modes. The follow view uses an elevated 3D camera; `billboard2d`
+selects a top-down camera over the same 3D scene. The online view uses a 3D
+follow camera and placeholder geometry for replicated entities.
+
+Both scene cameras explicitly use Reinhard tone mapping, which works without
+optional lookup textures. Bevy logging is enabled so renderer warnings are
+available in the demo launcher's diagnostic logs.
 
 Inputs resolve from platform-neutral `Control` values into `Action` values.
 Defaults are WASD for movement, E for interact, Enter for chat, I for inventory,
@@ -90,7 +94,15 @@ specified.
 
 Run `cargo run -p lynx_client -- --demo-online`. In the online window:
 
-- **Tab / Shift+Tab** selects targets; **Escape** clears selection.
+- **Tab / Shift+Tab** selects targets; clicking empty ground clears selection.
+- **Escape** opens or closes the options menu. Its Graphics tab has live VSync
+  and fullscreen toggles; Escape or **Resume** returns to the world. When chat
+  is being composed, Escape first closes the composer.
+- **Left-click** an entity to select it; clicking empty ground clears selection.
+- Hold **right mouse button** and drag to orbit the online camera. Use the
+  **mouse wheel** to zoom. Hovering interactive UI controls suppresses world mouse input.
+- **WASD** moves relative to the camera's horizontal direction; camera pitch
+  does not change movement speed or character height.
 - The upper-right interaction HUD lists the target's supported advertised verbs.
   Press its **number key** to send an action. Approach the target with **WASD**
   if the server rejects the distance. The door supports opening; the barrel
@@ -120,9 +132,11 @@ Run `cargo run -p lynx_client -- --demo-online`. In the online window:
   to toggle it and **Escape** or the title-bar **X** to close. It lists the
   controlled actor's server-replicated slots with derived item names, quantities,
   and unique markers; stack rows offer **Separar 1** into an empty slot and
-  **Unir 1** into another compatible stack. Changes appear only after owner-only
-  server replication; equip remains future work. Chat composition and focus loss
-  suppress inventory keyboard/actions.
+  **Unir 1** into another compatible stack. Single-item rows offer **Equipar**,
+  and the equipment section lists the seven slots with Portuguese names and
+  **Desequipar** for filled ones. Every change appears only after owner-only
+  server replication; chat composition and focus loss suppress inventory
+  keyboard/actions.
 - Chat tabs are **Zona** and **Sussurros**, plus **Grupo** and **Party** once
   those channels become active. Inactive tabs show unread counts. **PageUp /
   PageDown** browse history. The gateway currently accepts sends only on the
@@ -132,7 +146,8 @@ The executable embeds full Fira Mono (`assets/fonts/OFL.txt`) so Portuguese
 accents render without depending on system fonts or the working directory.
 
 The lockpick schema uses its native keypad; other schemas use the generic
-server-described fields/actions window. Owner inventory is read-only, while
+server-described fields/actions window. Owner inventory never changes locally:
+stack, equip, and unequip controls only submit server-validated requests, while
 server-validated container transfers can be initiated from a panel.
 `cargo test -p lynx_client --no-default-features` includes real-socket tests for
 these interactions and two-client combat, chat, presence, resume, and history.
@@ -196,7 +211,8 @@ Nakama server key is public client configuration, but must not be confused with
 the private runtime HTTP key.
 
 For an account session, set `LYNX_NAKAMA_URL` to the Nakama HTTP origin and
-optionally set `LYNX_CHAT_ROOM` (default `lynx-zone`). The client uses that
+set `LYNX_NAKAMA_URL`. The client discovers the admitted zone room after the
+world session becomes active and does not accept a client-selected room. The client uses that
 Nakama access token to join the persistent room, send messages, receive
 presence, and request history. `--demo-online` uses a static world-only token,
 so it keeps chat on the world gateway fallback even when Nakama is configured.
@@ -237,6 +253,29 @@ errors are coarse and printed without response bodies or credentials.
 
 ### Static-token demo
 
+On Windows, start a self-contained local demo with:
+
+```powershell
+BAT\run-demo-3d.bat
+```
+
+The launcher uses loopback ports 18090 and 18091, creates a disposable token,
+and stops its world server when the client exits. Move with WASD and select
+objects with Tab.
+
+The launcher builds the optimized `demo` Cargo profile before starting, so it
+uses current binaries from `target/demo`. The first build takes longer because
+it compiles optimized graphics dependencies. Bevy multithreading is enabled.
+Ordinary `cargo run` still uses an unoptimized development build; its frame
+rate is not representative of the playable demo.
+
+The bottom-right overlay shows FPS and frame time. For a repeatable idle-scene
+measurement, run `BAT\run-demo-3d.bat -BenchmarkSeconds 15`. This excludes five
+seconds of startup, measures real frame intervals while connected, prints mean
+FPS and p95 frame time in the renderer log, then closes the client. Frame times
+include presentation pacing/VSync. Use `-Profile debug` to compare the debug
+build or `-Profile release` for the release build.
+
 Start the demo world server with a configured static token hash (see the server
 documentation), then set `LYNX_DEMO_TOKEN` in the client process environment to
 the matching plaintext token and run `cargo run -p lynx_client -- --demo-online`.
@@ -264,9 +303,14 @@ one, and Escape clears selection. An orange-red outer ring marks the target.
 Selection clears when the target leaves visibility or the connection is lost;
 targeting keys are suppressed during chat entry and focus loss.
 Entities with server-provided health now show a green health bar above their
-marker. Missing health hides the bar; updates follow authoritative replication.
-Online entities also show a readable name derived from their replicated
-prototype ID; localized authored display names are not yet wired.
+marker. The mesh bar billboards toward the camera; missing health hides it and
+updates follow authoritative replication. Online entities also show a readable
+screen-space name label projected above each entity, so labels stay camera-facing
+and legible in the 3D view. Names currently derive from replicated prototype IDs;
+localized authored display names are not yet wired. The native health-bar and
+name-label swap points live in `entity_info.rs`; `bevy_health_bar3d` and
+`bevy_slugtext` remain future upgrades because their current releases require
+Bevy 0.19 rather than this workspace's pinned 0.20.0.
 Server-replicated stunned entities display a `STUN` tag and slowed entities
 display a `SLOW` tag. The online demo includes a persistent non-AI raider with
 both public statuses so the indicators can be inspected repeatedly; only the
@@ -275,9 +319,9 @@ Entities with an enabled server-advertised interaction show a small gold marker;
 it is an availability cue only, not authorization or an interaction action.
 Localized authored names and richer contextual affordances remain planned,
 backed by server-approved public data.
-Equip remains future inventory work in CLT-008. Split and merge are requested
-through the authenticated action channel and applied only after owner-only
-replication. The handshake uses this workspace's package version for engine and
+Equip and unequip are requested through the authenticated action channel and
+applied only after owner-only replication, alongside split and merge. The
+handshake uses this workspace's package version for engine and
 content, matching the built-in demo server.
 The Windows online demo was visually confirmed with movement, chat, presence,
 and live diagnostics; the user considers current localhost movement smooth

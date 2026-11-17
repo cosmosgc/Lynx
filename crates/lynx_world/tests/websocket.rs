@@ -85,7 +85,7 @@ async fn admitted_websocket_is_closed_after_the_client_idle_deadline() {
         .await
         .expect("idle connection should close promptly");
     assert!(
-        matches!(closed, None | Some(Err(_)) | Some(Ok(Message::Close(_)))),
+        matches!(closed, None | Some(Err(_) | Ok(Message::Close(_)))),
         "expected the idle transport to close, got {closed:?}"
     );
 

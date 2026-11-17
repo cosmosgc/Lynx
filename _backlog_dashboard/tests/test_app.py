@@ -534,8 +534,8 @@ Phase 1  Engine skeleton             [██████████████
     def test_history_logs_new_tasks_and_repository_files_after_baseline(self):
         client = self.make_app().test_client()
         baseline = client.get("/history")
-        self.assertNotIn(b"New task", baseline.data)
-        self.assertNotIn(b"New file", baseline.data)
+        self.assertNotIn(b'<td class="change">New task</td>', baseline.data)
+        self.assertNotIn(b'<td class="change">New file</td>', baseline.data)
 
         (self.todo / "20-new.md").write_text(
             "## SIM-004 — New task\n\n- **Status:** Proposed\n",
@@ -564,6 +564,21 @@ Phase 1  Engine skeleton             [██████████████
         self.assertIn(b"File updated", updated.data)
         self.assertIn(b"Task details or acceptance criteria updated", updated.data)
         self.assertIn(b"Repository file updated", updated.data)
+
+        file_updates = client.get("/history?kind=file_updated")
+        self.assertIn(b'<td class="change">File updated</td>', file_updates.data)
+        self.assertNotIn(b'<td class="change">Task updated</td>', file_updates.data)
+        self.assertNotIn(b'<td class="change">New file</td>', file_updates.data)
+        self.assertIn(b"value=\"file_updated\" checked", file_updates.data)
+
+        mixed = client.get("/history?kind=task_updated&kind=file")
+        self.assertIn(b'<td class="change">Task updated</td>', mixed.data)
+        self.assertIn(b'<td class="change">New file</td>', mixed.data)
+        self.assertNotIn(b'<td class="change">File updated</td>', mixed.data)
+
+        no_events = client.get("/history?kind=")
+        self.assertIn(b"No history events match these filters.", no_events.data)
+        self.assertIn(b"Showing 0 of 6 events", no_events.data)
 
     def test_flask_app_does_not_expose_a_status_update_endpoint(self):
         client = self.make_app().test_client()

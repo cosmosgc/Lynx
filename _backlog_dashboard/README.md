@@ -10,6 +10,10 @@ recommended next work.
 The `/queue` view presents `docs/TODO/QUEUE.md` as grouped, readable tables,
 preserving its ordering, dependencies, and sequencing notes while linking each
 task to its source document.
+The `/issues` view combines issue specifications in `docs/issues/` with local
+completion blockers from `docs/agents/issue-tracker.md`. It provides a searchable,
+filterable list and a detail panel with issue status, affected workflow,
+acceptance criteria, related tasks, and a direct source link.
 The `/decisions` view lists roadmap decision gates and ADRs, with links to their
 source documents and connected backlog tasks; task details link back to their
 gates and ADRs. JSON endpoints are available for integrations:

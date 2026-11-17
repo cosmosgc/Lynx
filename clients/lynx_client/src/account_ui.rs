@@ -890,6 +890,10 @@ fn poll(mut screen: ResMut<Screen>) {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the account screen is composed in one ordered tree to preserve focus and navigation state"
+)]
 fn render(mut commands: Commands, mut screen: ResMut<Screen>, roots: Query<Entity, With<Root>>) {
     if !screen.dirty {
         return;

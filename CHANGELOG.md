@@ -25,9 +25,17 @@ semantic versioning for engine releases and content bundles.
 
 ### Added
 
+- `lynx_client`: embedded `pt-BR`/`en` message catalogs, a persisted locale
+  selector in Options, locale negotiation in both world launch paths, and
+  localized inventory/equipment, interaction status, and options text
+  (`CLT-010`; broader client localization and accessibility remain in progress).
 - `lynx-world`: headless live-zone coverage proves authored bounded AI graphs
   and UTC daily windows change guard decisions through content bindings
   (`SIM-006`).
+- `lynx-world` and `lynx_client`: authenticated chat discovery resolves the
+  zone room from the current admitted world session, verifies character
+  ownership, and rejoins the server-returned room after reconnect/token rotation
+  (`SIM-008`); expired and ambiguous world-session headers fail closed.
 - `lynx-world`: headless multi-zone service travel coverage exercises authored
   trigger/range and commit-failure denial, atomic handoff, source-token
   invalidation, destination-scoped resume routing, and destination reconnect
@@ -87,6 +95,17 @@ semantic versioning for engine releases and content bundles.
 - `lynx_client`: generic content panels expose number-key shortcuts for fixed
   server-advertised actions and keep those keys from triggering world actions
   while a panel is open (`CLT-008`).
+- `engine_core`, `engine_sim`, `world_gateway`, `lynx_world`, and `lynx_client`:
+  authoritative equip/unequip over a seven-slot, content-driven equipment
+  contract. Items opt in with an optional `core.item.equip_slot` and must be
+  single-item stacks; the simulation resolves the slot from content, moves
+  exactly one item, restores a replaced item to the inventory atomically,
+  rejects a full inventory without partial change, persists equipment in
+  snapshots with restore-time revalidation, and replicates owner-only equipment
+  beside the inventory under protocol **1.2.0**. The client decodes and redacts
+  equipment for the controlled actor, renders the equipment section with
+  Portuguese slot names, and requests equip/unequip without optimistic mutation
+  (`CLT-008`).
 - CI: a scheduled/manual PostgreSQL-backed `cargo-llvm-cov` workflow publishes
   the workspace's per-crate HTML coverage report as an artifact (`QUA-007`).
 - Docs/client: added operator error guidance and `pt-BR`/`en` catalogs that
@@ -169,7 +188,7 @@ semantic versioning for engine releases and content bundles.
   Real-socket demo actions take and insert items; slot controls submit
   server-authoritative one-item split/merge operations, gated until owner
   replication arrives. Socket integration verifies the final inventory after
-  resume. Equip, localization, and richer authored layouts remain (`CLT-008`).
+  resume. Localization and richer authored layouts remain (`CLT-008`).
 - `lynx_client`: account-screen server browser with validated host/IP and port
   profiles, pinning, bounded recent history, atomic OS-config persistence, and
   an explicit local/remote transport policy (`ws://`/`http://` only for loopback

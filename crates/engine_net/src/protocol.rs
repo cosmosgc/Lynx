@@ -10,13 +10,13 @@ use engine_core::i18n::{Locale, MessageKey};
 use serde::{Deserialize, Serialize};
 
 /// The protocol semantic version owned by this crate.
-pub const PROTOCOL_VERSION: &str = "1.1.0";
+pub const PROTOCOL_VERSION: &str = "1.2.0";
 
 /// The protocol major version. A mismatch is rejected.
 pub const PROTOCOL_MAJOR: u16 = 1;
 
 /// The protocol minor version. A mismatch is accepted with degradation.
-pub const PROTOCOL_MINOR: u16 = 1;
+pub const PROTOCOL_MINOR: u16 = 2;
 
 /// The protocol patch version. Informational only.
 pub const PROTOCOL_PATCH: u16 = 0;
@@ -358,8 +358,8 @@ mod tests {
 
     #[test]
     fn protocol_constants_are_consistent() {
-        assert_eq!(PROTOCOL_VERSION, "1.1.0");
-        assert_eq!(protocol_version(), semver::Version::new(1, 1, 0));
+        assert_eq!(PROTOCOL_VERSION, "1.2.0");
+        assert_eq!(protocol_version(), semver::Version::new(1, 2, 0));
     }
 
     #[test]

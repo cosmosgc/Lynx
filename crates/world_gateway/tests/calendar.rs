@@ -287,7 +287,7 @@ fn envelope(id: &str, kind: &str, body: serde_json::Value) -> Envelope {
 
 fn query_calendar(gateway: &mut WorldGateway, session: &SessionId) -> Envelope {
     let request = envelope("q1", CALENDAR_QUERY_KIND, json!({}));
-    let request_fixture = include_str!("fixtures/calendar-query-1.1.0.json");
+    let request_fixture = include_str!("fixtures/calendar-query-1.2.0.json");
     assert_eq!(request.encode().unwrap(), request_fixture.trim());
     assert_eq!(Envelope::decode(request_fixture).unwrap(), request);
     let replies = gateway
@@ -311,7 +311,7 @@ fn open_event_enrolls_a_participant() {
             "action": { "kind": "enroll", "event": "event.demo.assault", "side": "side.attackers" }
         }),
     );
-    let request_fixture = include_str!("fixtures/calendar-command-1.1.0.json");
+    let request_fixture = include_str!("fixtures/calendar-command-1.2.0.json");
     assert_eq!(request.encode().unwrap(), request_fixture.trim());
     assert_eq!(Envelope::decode(request_fixture).unwrap(), request);
     let replies = fixture
@@ -322,7 +322,7 @@ fn open_event_enrolls_a_participant() {
         .iter()
         .find(|envelope| envelope.kind.as_str() == CALENDAR_RESULT_KIND)
         .unwrap();
-    let wire_fixture = include_str!("fixtures/calendar-result-1.1.0.json");
+    let wire_fixture = include_str!("fixtures/calendar-result-1.2.0.json");
     assert_eq!(reply.encode().unwrap(), wire_fixture.trim());
     assert_eq!(Envelope::decode(wire_fixture).unwrap(), *reply);
     assert_eq!(
@@ -345,10 +345,10 @@ fn published_calendar_query_matches_protocol_fixture() {
 
     assert_eq!(
         response.encode().unwrap(),
-        include_str!("fixtures/calendar-state-1.1.0.json").trim()
+        include_str!("fixtures/calendar-state-1.2.0.json").trim()
     );
     assert_eq!(
-        Envelope::decode(include_str!("fixtures/calendar-state-1.1.0.json")).unwrap(),
+        Envelope::decode(include_str!("fixtures/calendar-state-1.2.0.json")).unwrap(),
         response
     );
 }

@@ -2,7 +2,7 @@
 
 ## Protocol versioning
 
-The current server emits protocol **1.1.0** and accepts major **1**, any
+The current server emits protocol **1.2.0** and accepts major **1**, any
 non-negative minor and patch. This is a parser compatibility promise, not a
 claim that future, unimplemented features work. Clients may lag indefinitely
 within the active major; a new major has no overlap window, and the previous
@@ -67,6 +67,13 @@ persisted state or bypass server authority merely to regain compatibility.
 
 ### Protocol changelog
 
+- **1.2.0** — Owner-only state may now carry an optional `equipment` object
+  beside the required `inventory`. Equipment holds at most seven fixed slots
+  (`main_hand`, `off_hand`, `head`, `chest`, `hands`, `legs`, `feet`), each a
+  single-item stack. The field is additive: 1.1 clients ignore it and keep the
+  inventory-only shape, and a server that omits it means nothing is equipped.
+  This accompanies the authoritative `equip`/`unequip` action verbs; action
+  parameters and results keep the existing action contract.
 - **1.1.0** — Protocol errors now include the per-error `retryable` flag and
   only code-specific bounded display parameters; operator diagnostic details
   are no longer copied wholesale into client parameters. Protocol 1.0 clients
@@ -78,7 +85,7 @@ persisted state or bypass server authority merely to regain compatibility.
 
 The `engine_net` golden tests pin the hello and version-error envelopes and the
 negotiated parameters payload. The versioned
-`crates/world_server/tests/fixtures/wire-kinds-1.1.0.json` catalog lists all 27
+`crates/world_server/tests/fixtures/wire-kinds-1.2.0.json` catalog lists all 27
 live message kinds, and CI checks that list. Typed and handler-level golden
 tests compare request and response envelopes against fixtures across
 `engine_net`, `world_gateway`, `world_server`, and `lynx_world`. The token
@@ -94,7 +101,7 @@ Every message is a JSON object:
 
 ```json
 {
-  "v": "1.1.0",
+  "v": "1.2.0",
   "id": "req_01J8Z...",
   "kind": "action.request",
   "body": { },
@@ -158,9 +165,9 @@ is deterministically derived from the character ID. Before the gateway creates
 a session, the service persists a world snapshot containing that actor; admission
 fails closed if durable snapshot storage is unavailable or the write fails. A
 retry therefore reuses the same actor, and a restart restores it from the
-snapshot. Actor placement uses an unblocked, unoccupied navigation cell. The
-demo loader is not used for production characters; multi-zone routing remains
-separate work.
+snapshot. Actor placement uses an unblocked, unoccupied navigation cell. In
+authored-map mode, existing actors and durable resume tokens route to their
+owning zone; new characters use the stable default zone.
 
 `lynx-world` applies bounded token buckets before work reaches the authority
 loop:
@@ -269,19 +276,37 @@ configured bounds are guardrails, not a validated capacity claim.
 | `protocol.error` | server → client | stable code, parameters, correlation ID |
 
 The versioned fixture catalog in
-`crates/world_server/tests/fixtures/wire-kinds-1.1.0.json` covers every kind
+`crates/world_server/tests/fixtures/wire-kinds-1.2.0.json` covers every kind
 in this table and the paired request/response forms. Its CI test asserts the
 catalog is complete and duplicate-free; the credential-bearing token fixture
 uses only the synthetic sentinel described above.
 
+`MultiZoneService` additionally intercepts the authored travel contract before
+zone-local message handling:
+
+| Kind | Direction | Body |
+|---|---|---|
+| `zone.travel_triggers` | server → client | `{ triggers: [{ id, position, radius_m }] }`; destination and arrival remain server-owned |
+| `zone.travel` | client → server | `{ trigger_id }` only; unknown fields, including any client-selected zone or arrival, are rejected |
+| `zone.travelled` | server → client | `{ destination_zone, resume_token_retained }`; the source socket closes after durable handoff |
+
+The authority rechecks the controlled actor's replicated server position,
+authored trigger range, atlas route, and both zone leases before handoff. A
+successful durable commit moves the actor exactly once and routes the retained
+resume token to the destination; the client reconnects through that destination
+route. PostgreSQL commit/restart and survivor-service acceptance is tracked
+separately in `SIM-014`.
+
 For account sessions carrying a verified character, `LYNX_NAKAMA_URL` enables
-Nakama's authenticated realtime socket for a persistent chat room instead of
-the gateway `chat.*` messages. `LYNX_CHAT_ROOM` chooses the room (default
-`lynx-zone`); the client gets history through Nakama's authenticated
-channel-history endpoint and receives membership changes from the room socket.
-Static `--demo-online` tokens are world-only and use the gateway fallback. A
-configured Nakama room is not bound to Lynx world-zone admission. The table
-below documents the gateway chat fallback.
+Nakama's authenticated realtime socket instead of the gateway `chat.*` messages.
+After the world session becomes active, the client sends the current
+`world.token` resume secret in the sensitive `X-Lynx-World-Session` header to
+`GET /social/chat/channels`. The world authority resolves that token to its
+admitted character and zone; the HTTP edge verifies that the Nakama account owns
+the character and returns the zone room derived from the server-owned zone
+instance. The client joins only this returned room and rediscovers it after
+reconnect or token rotation. Static `--demo-online` tokens are world-only and
+use the gateway fallback. The table below documents the gateway chat fallback.
 
 `world.snapshot` and `world.delta` share the `WorldUpdate` body: authoritative
 tick, `InterestUpdate`, and an audience-filtered `ReplicationBatch`. The

@@ -127,14 +127,14 @@ fn config_path(
 }
 
 #[cfg(windows)]
-fn platform_config_dir() -> Option<PathBuf> {
+pub(crate) fn platform_config_dir() -> Option<PathBuf> {
     env::var_os("APPDATA")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
 }
 
 #[cfg(target_os = "macos")]
-fn platform_config_dir() -> Option<PathBuf> {
+pub(crate) fn platform_config_dir() -> Option<PathBuf> {
     env::var_os("HOME")
         .filter(|value| !value.is_empty())
         .map(|home| {
@@ -145,7 +145,7 @@ fn platform_config_dir() -> Option<PathBuf> {
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn platform_config_dir() -> Option<PathBuf> {
+pub(crate) fn platform_config_dir() -> Option<PathBuf> {
     env::var_os("XDG_CONFIG_HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
@@ -157,7 +157,7 @@ fn platform_config_dir() -> Option<PathBuf> {
 }
 
 #[cfg(not(any(windows, unix)))]
-fn platform_config_dir() -> Option<PathBuf> {
+pub(crate) fn platform_config_dir() -> Option<PathBuf> {
     None
 }
 

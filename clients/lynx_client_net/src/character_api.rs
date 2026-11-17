@@ -1,6 +1,7 @@
 //! Authenticated HTTP client for the Lynx character-management endpoints.
 
 use std::fmt;
+use std::fmt::Write as _;
 use std::net::IpAddr;
 use std::time::Duration;
 
@@ -208,19 +209,22 @@ impl CharacterApiClient {
         self.social_action(token, "/social/blocks/unblock", account)
     }
 
-    /// Discover only direct/group chat targets authorized for this session.
+    /// Discover social targets and the zone room bound to this world session.
     pub fn discover_chat_channels(
         &self,
         token: &SessionToken,
+        world_session: &str,
         limit: u16,
         cursor: Option<&str>,
     ) -> Result<ChatChannelTargetPage, CharacterApiFailure> {
         validate_group_page(limit, cursor).map_err(|_| CharacterApiFailure::InvalidRequest)?;
+        let world_session = world_session_header(world_session)?;
         let query = page_query(limit, cursor);
         let response = self
             .agent
             .get(self.endpoint(&format!("/social/chat/channels?{query}")))
             .header("Authorization", bearer(token)?)
+            .header("x-lynx-world-session", world_session)
             .call()
             .map_err(|_| CharacterApiFailure::Transport)?;
         serde_json::from_str(&checked_body(response)?).map_err(|_| CharacterApiFailure::Protocol)
@@ -262,10 +266,10 @@ impl CharacterApiClient {
             query.push_str(&encode_query_component(name));
         }
         if let Some(open) = search.open {
-            query.push_str(&format!("&open={open}"));
+            let _ = write!(query, "&open={open}");
         }
         if let Some(members) = search.members {
-            query.push_str(&format!("&members={members}"));
+            let _ = write!(query, "&members={members}");
         }
         let response = self
             .agent
@@ -478,6 +482,19 @@ fn bearer(token: &SessionToken) -> Result<HeaderValue, CharacterApiFailure> {
     Ok(value)
 }
 
+fn world_session_header(token: &str) -> Result<HeaderValue, CharacterApiFailure> {
+    if !(16..=96).contains(&token.len())
+        || !token.is_ascii()
+        || token.chars().any(|character| !character.is_ascii_graphic())
+    {
+        return Err(CharacterApiFailure::InvalidRequest);
+    }
+    let mut value =
+        HeaderValue::from_str(token).map_err(|_| CharacterApiFailure::InvalidRequest)?;
+    value.set_sensitive(true);
+    Ok(value)
+}
+
 fn checked_body(mut response: Response<ureq::Body>) -> Result<String, CharacterApiFailure> {
     let status = response.status();
     let body = response
@@ -609,6 +626,58 @@ mod tests {
         worker.join().unwrap();
         assert_eq!(character.name, "Hero");
         assert!(!format!("{client:?}").contains("access-secret"));
+    }
+
+    #[test]
+    fn chat_discovery_sends_the_resume_token_in_a_sensitive_header() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0; 1024];
+            let request = loop {
+                let length = stream.read(&mut chunk).unwrap();
+                assert_ne!(length, 0, "client closed before complete request");
+                request.extend_from_slice(&chunk[..length]);
+                if request.windows(4).any(|part| part == b"\r\n\r\n") {
+                    break String::from_utf8(request).unwrap();
+                }
+            };
+            assert!(request.starts_with("GET /social/chat/channels?limit=50 HTTP/1.1"));
+            assert!(
+                request
+                    .lines()
+                    .any(|line| line.eq_ignore_ascii_case("authorization: Bearer access-secret"))
+            );
+            assert!(
+                request.lines().any(|line| {
+                    line.eq_ignore_ascii_case("x-lynx-world-session: current-world-resume-token")
+                }),
+                "the admitted session token must be sent for server-side zone resolution"
+            );
+            let body = br#"{"targets":[],"zone_room":"lynx-zone-zone:one"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(body).unwrap();
+        });
+        let client = CharacterApiClient::new(format!("http://{address}")).unwrap();
+        let token = SessionToken::new("access-secret").unwrap();
+        let page = client
+            .discover_chat_channels(&token, "current-world-resume-token", 50, None)
+            .unwrap();
+        worker.join().unwrap();
+        assert_eq!(page.zone_room.as_deref(), Some("lynx-zone-zone:one"));
+        assert!(
+            world_session_header("current-world-resume-token")
+                .unwrap()
+                .is_sensitive()
+        );
+        assert!(world_session_header("too-short").is_err());
     }
 
     #[test]

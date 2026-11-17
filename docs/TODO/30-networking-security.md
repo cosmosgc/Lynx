@@ -218,7 +218,7 @@ The fixture is in `crates/world_server/tests/protocol_golden.rs` and CI runs it;
 no real bearer token is checked in. Protocol and content major mismatches are
 rejected at negotiation; minor versions within the active major remain
 accepted, and a major cutover has no overlap window.
-`crates/world_server/tests/fixtures/wire-kinds-1.1.0.json` now catalogs all 27
+`crates/world_server/tests/fixtures/wire-kinds-1.2.0.json` now catalogs all 27
 live message kinds, including chat results, `session.ack`, and the synthetic
 token envelope. Versioned goldens now flow through the protocol, gateway,
 calendar, world-server, and world-service production paths. The service token
@@ -231,7 +231,7 @@ criteria are complete.
 ## NET-005 — Multi-zone gateway routing
 
 - **Priority:** P2
-- **Status:** In progress — authored-map zone ownership, capacities, identity routing, and zone-scoped resume routing are wired; live handoff still depends on an authored in-zone trigger contract
+- **Status:** In progress — authored-map zone ownership, capacities, identity routing, zone-scoped resume routing, and trigger-driven durable handoff are wired; uncertain durable-write errors stop the authority loop; the opt-in PostgreSQL rollback/restart scenario is not run here, and actual commit-acknowledgement-loss/survivor-service acceptance remains
 - **Depends on:** `SIM-014`, `PST-004`
 - **References:** [architecture §Simulation model](../architecture.md#simulation-model),
   `SIM-014`, ADR 0002
@@ -250,9 +250,13 @@ criteria are complete.
 - [x] A client cannot join a zone it is not routed to: existing characters
       and durable resumes are resolved to their owning zone, and new
       characters enter only through the map's default zone.
-- [ ] Travel between zones is atomic from the client's perspective: one
-      character exists in exactly one zone.
+- [x] Travel between zones is atomic from the client's perspective: one
+      character exists in exactly one zone; service-level success, rejection,
+      reconnect, and client-selected destination rejection are headlessly
+      covered.
 - [ ] Zone failure produces a recoverable error and does not strand sessions.
+      The missing-destination handoff path is headlessly covered; actual owner
+      crash/readiness recovery still needs the PostgreSQL service scenario.
 - [x] Admission routing and zone-local authority decisions include the zone ID
       in structured logs; handoff-specific observability remains with travel.
 

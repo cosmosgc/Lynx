@@ -1,5 +1,6 @@
 [package]
 name = "lynx_test_harness"
+publish = false
 description = "Reusable headless multiplayer integration-test harness for Lynx"
 version.workspace = true
 edition.workspace = true

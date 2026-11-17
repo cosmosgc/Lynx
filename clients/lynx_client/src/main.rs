@@ -61,8 +61,12 @@ fn main() {
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let first = args.first().map(String::as_str);
+    let locale_preference = lynx_client::localization::LocalePreference::load_default();
     let mut app = App::new();
-    app.add_plugins(DefaultPlugins)
+    app.insert_resource(locale_preference.clone())
+        .add_plugins(DefaultPlugins)
+        .add_plugins(lynx_client::performance::ClientPerformancePlugin)
+        .add_plugins(lynx_client::options::OptionsMenuPlugin)
         .add_plugins(lynx_client::fonts::ClientFontPlugin)
         .add_plugins(LynxClientPlugin);
     let _runtime = if let Some(first) =
@@ -113,7 +117,8 @@ fn main() {
                     url,
                     bearer,
                     character,
-                    handshake: engine_net::protocol::Handshake::new(version.clone(), version),
+                    handshake: engine_net::protocol::Handshake::new(version.clone(), version)
+                        .with_locale(locale_preference.locale().clone()),
                     last_ack_tick: engine_core::time::Tick::ZERO,
                 })
                 .expect("new connection generation");
@@ -224,6 +229,7 @@ fn run_account_world(launch: lynx_client::account_ui::WorldLaunch) {
         credential_scope,
     } = launch;
     let version = semver::Version::parse(env!("CARGO_PKG_VERSION")).expect("valid package version");
+    let locale_preference = lynx_client::localization::LocalePreference::load_default();
     let Ok(runtime) = tokio::runtime::Runtime::new() else {
         eprintln!("Could not initialize the world network runtime.");
         return;
@@ -241,7 +247,8 @@ fn run_account_world(launch: lynx_client::account_ui::WorldLaunch) {
                 url: world_url,
                 bearer,
                 character: Some(character),
-                handshake: engine_net::protocol::Handshake::new(version.clone(), version),
+                handshake: engine_net::protocol::Handshake::new(version.clone(), version)
+                    .with_locale(locale_preference.locale().clone()),
                 last_ack_tick: engine_core::time::Tick::ZERO,
             })
             .is_err()
@@ -251,8 +258,11 @@ fn run_account_world(launch: lynx_client::account_ui::WorldLaunch) {
         }
     }
     let mut app = App::new();
-    app.add_plugins(DefaultPlugins)
+    app.insert_resource(locale_preference)
+        .add_plugins(DefaultPlugins)
         .add_plugins(lynx_client::fonts::ClientFontPlugin)
+        .add_plugins(lynx_client::performance::ClientPerformancePlugin)
+        .add_plugins(lynx_client::options::OptionsMenuPlugin)
         .add_plugins(LynxClientPlugin)
         .insert_resource(client)
         .add_plugins((

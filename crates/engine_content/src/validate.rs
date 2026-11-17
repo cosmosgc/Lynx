@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use engine_core::equipment::EquipSlot;
 use engine_core::i18n::{
     CatalogSet, DEFAULT_LOCALE, Locale, MessageCatalog, MessageKey, validate_placeholders,
 };
@@ -249,6 +250,10 @@ impl ContentSet {
         report
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "map validation checks placement references and route topology together"
+    )]
     fn validate_maps(&self, report: &mut ValidationReport) {
         let zone_ids: BTreeSet<&DefinitionId> = self
             .definitions
@@ -517,6 +522,9 @@ impl ContentSet {
                 }
             }
             self.validate_references(report, definition, key.as_str(), schema, data, path);
+            if key.as_str() == "core.item" {
+                validate_item_semantics(report, data, path);
+            }
         }
     }
 
@@ -763,6 +771,10 @@ fn collect_definition_refs(
 ///
 /// Returns [`EngineError`] when a built-in schema is malformed or duplicates an
 /// existing registration.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the starter registry is a single auditable catalog of built-in component schemas"
+)]
 pub fn starter_component_registry() -> Result<ComponentRegistry, EngineError> {
     let mut registry = ComponentRegistry::new();
     let component_schemas = [
@@ -970,6 +982,15 @@ pub fn starter_component_registry() -> Result<ComponentRegistry, EngineError> {
                         max: 1000.0,
                     },
                 ),
+                FieldSchema::optional(
+                    "equip_slot",
+                    FieldType::Enum {
+                        values: EquipSlot::ALL
+                            .iter()
+                            .map(|slot| slot.as_str().to_owned())
+                            .collect(),
+                    },
+                ),
             ],
             Visibility::Client,
             PersistencePolicy::StaticDefinition,
@@ -979,6 +1000,26 @@ pub fn starter_component_registry() -> Result<ComponentRegistry, EngineError> {
         registry.register(schema)?;
     }
     Ok(registry)
+}
+
+/// Equipment is a single physical item, so an equippable definition cannot be
+/// stackable. The slot name itself is already bounded by the component schema.
+fn validate_item_semantics(
+    report: &mut ValidationReport,
+    data: &serde_json::Map<String, Value>,
+    path: &str,
+) {
+    let Some(slot) = data.get("equip_slot").and_then(Value::as_str) else {
+        return;
+    };
+    let stack_max = data.get("stack_max").and_then(Value::as_i64).unwrap_or(0);
+    if stack_max != 1 {
+        report.error(
+            "content.invalid_item_equipment",
+            format!("{path}:components.core.item"),
+            format!("equippable item using slot {slot} must have stack_max 1, found {stack_max}"),
+        );
+    }
 }
 
 /// Loads definitions and catalogs from a content root and validates them.
@@ -1311,6 +1352,26 @@ mod tests {
                 .warnings()
                 .any(|item| item.code == "i18n.missing_translation")
         );
+    }
+
+    #[test]
+    fn equippable_items_must_be_single_item_stacks() {
+        let mut data = ComponentData::new();
+        data.insert("stack_max".into(), Value::from(1));
+        data.insert("equip_slot".into(), Value::from("main_hand"));
+        let mut report = ValidationReport::new();
+        validate_item_semantics(&mut report, &data, "items/sword");
+        assert!(report.errors().next().is_none(), "{report}");
+
+        data.insert("stack_max".into(), Value::from(8));
+        let mut report = ValidationReport::new();
+        validate_item_semantics(&mut report, &data, "items/sword");
+        let error = report
+            .errors()
+            .next()
+            .expect("stacked equipment is rejected");
+        assert_eq!(error.code, "content.invalid_item_equipment");
+        assert_eq!(error.path, "items/sword:components.core.item");
     }
 
     #[test]

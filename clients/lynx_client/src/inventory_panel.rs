@@ -1,7 +1,9 @@
-//! Presentation and server-requested stack operations for the controlled actor's inventory.
+//! Presentation and server-requested stack/equipment operations for the
+//! controlled actor's inventory.
 //!
 //! Owner state is replicated only to the owning session. Buttons submit
-//! split/merge intents but never change the displayed inventory optimistically.
+//! equip, unequip, split, or merge intents but never change the displayed
+//! inventory or equipment optimistically.
 
 use bevy::input::ButtonState;
 use bevy::input::keyboard::KeyboardInput;
@@ -16,8 +18,11 @@ use bevy_immediate::{
     },
 };
 
+use engine_core::equipment::{EquipSlot, Equipment};
+use engine_core::i18n::Locale;
 use engine_core::inventory::{Inventory, ItemStack};
 
+use crate::localization::{LocalePreference, text, text_with};
 use crate::online::{OnlineClient, OnlineStatus};
 use crate::ui::chat::ChatComposer;
 use crate::ui::window::{ImmediateWindowPlugin, WindowMemory, WindowSpec, label, show_window};
@@ -50,6 +55,7 @@ pub struct InventoryPanelPlugin;
 impl Plugin for InventoryPanelPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<InventoryPanel>()
+            .init_resource::<LocalePreference>()
             .add_plugins(BevyImmediatePlugin::<CapsUi>::new());
         if !app.is_plugin_added::<ImmediateWindowPlugin>() {
             app.add_plugins(ImmediateWindowPlugin);
@@ -61,6 +67,7 @@ impl Plugin for InventoryPanelPlugin {
             Update,
             (inventory_keyboard, draw)
                 .chain()
+                .after(crate::options::toggle_menu)
                 .after(crate::online::poll_online),
         );
     }
@@ -75,8 +82,12 @@ pub(crate) fn inventory_keyboard(
     chat: Res<ChatComposer>,
     mut panel: ResMut<InventoryPanel>,
     client: Res<OnlineClient>,
+    menu: Option<Res<crate::options::OptionsMenuState>>,
 ) {
-    if chat.active || !windows.single().is_ok_and(|window| window.focused) {
+    if chat.active
+        || menu.is_some_and(|menu| menu.is_open())
+        || !windows.single().is_ok_and(|window| window.focused)
+    {
         return;
     }
     for event in events.read() {
@@ -100,6 +111,7 @@ fn draw(
     ctx: ImmCtx<CapsUi>,
     mut client: ResMut<OnlineClient>,
     mut panel: ResMut<InventoryPanel>,
+    preference: Res<LocalePreference>,
     memory: Res<WindowMemory>,
     chat: Res<ChatComposer>,
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -130,6 +142,8 @@ fn draw(
                 panel.open = false;
                 return;
             };
+            let equipment = client.world().equipment().cloned().unwrap_or_default();
+            let locale = preference.locale();
 
             let stored = memory.get(INVENTORY_WINDOW_ID);
             let size = stored.map_or(INVENTORY_DEFAULT_SIZE, |state| state.size);
@@ -152,14 +166,19 @@ fn draw(
                 min_size: INVENTORY_MIN_SIZE,
                 position,
                 size,
-                subtitle: Some(inventory_summary(&inventory)),
-                ..WindowSpec::new(INVENTORY_WINDOW_ID, "Inventário", INVENTORY_DEFAULT_SIZE)
+                subtitle: Some(owner_state_summary(&inventory, &equipment, locale)),
+                ..WindowSpec::new(
+                    INVENTORY_WINDOW_ID,
+                    text(locale, "ui.inventory.title"),
+                    INVENTORY_DEFAULT_SIZE,
+                )
             };
-            let rows = inventory_rows(&inventory);
+            let rows = inventory_rows(&inventory, locale);
             let actions_enabled = inventory_actions_enabled(&client, &chat, &windows);
 
             let outcome = show_window(ui.ch_id("inventory-window"), spec, |ui| {
-                draw_inventory_rows(ui, &rows, &mut client, actions_enabled);
+                draw_equipment(ui, &equipment, locale, &mut client, actions_enabled);
+                draw_inventory_rows(ui, &rows, locale, &mut client, actions_enabled);
             });
             if outcome.close_requested {
                 panel.open = false;
@@ -181,11 +200,18 @@ fn inventory_actions_enabled(
 fn draw_inventory_rows(
     ui: &mut Imm<CapsUi>,
     rows: &[InventoryRow],
+    locale: &Locale,
     client: &mut OnlineClient,
     actions_enabled: bool,
 ) {
+    label(
+        ui,
+        "inventory-title",
+        14.0,
+        text(locale, "ui.inventory.items"),
+    );
     if rows.is_empty() {
-        label(ui, "empty", 13.0, "Inventário vazio.");
+        label(ui, "empty", 13.0, text(locale, "ui.inventory.empty"));
         return;
     }
     for row in rows {
@@ -204,11 +230,21 @@ fn draw_inventory_rows(
                     14.0,
                     row.text.clone(),
                 );
+                if row.can_equip
+                    && inventory_action_button(
+                        ui,
+                        &format!("inventory-action-equip-{}", row.slot),
+                        &text(locale, "ui.inventory.equip"),
+                        actions_enabled,
+                    )
+                {
+                    let _ = client.equip_item(row.slot);
+                }
                 if let Some(destination) = row.split_destination
                     && inventory_action_button(
                         ui,
                         &format!("inventory-action-split-{}", row.slot),
-                        &format!("Separar 1 → {}", destination + 1),
+                        &split_label(locale, "ui.inventory.split", destination),
                         actions_enabled,
                     )
                 {
@@ -218,7 +254,7 @@ fn draw_inventory_rows(
                     && inventory_action_button(
                         ui,
                         &format!("inventory-action-merge-{}", row.slot),
-                        &format!("Unir 1 → {}", destination + 1),
+                        &split_label(locale, "ui.inventory.merge", destination),
                         actions_enabled,
                     )
                 {
@@ -228,15 +264,85 @@ fn draw_inventory_rows(
     }
 }
 
+fn split_label(locale: &Locale, key: &str, destination: usize) -> String {
+    let slot = (destination + 1).to_string();
+    text_with(locale, key, &[("quantity", "1"), ("slot", &slot)])
+}
+
+fn draw_equipment(
+    ui: &mut Imm<CapsUi>,
+    equipment: &Equipment,
+    locale: &Locale,
+    client: &mut OnlineClient,
+    actions_enabled: bool,
+) {
+    label(
+        ui,
+        "equipment-title",
+        14.0,
+        text(locale, "ui.inventory.equipment"),
+    );
+    for slot in EquipSlot::ALL {
+        let equipped = equipment.slot(slot);
+        ui.ch_id(format!("equipment-row-{}", slot.as_str()))
+            .on_spawn_insert(|| Node {
+                display: Display::Flex,
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: px(6),
+                ..default()
+            })
+            .add(|ui| {
+                let slot_name = slot_label(slot, locale);
+                let slot_text = equipped.map_or_else(
+                    || text_with(locale, "ui.inventory.slot_empty", &[("slot", &slot_name)]),
+                    |stack| {
+                        text_with(
+                            locale,
+                            "ui.inventory.slot_item",
+                            &[
+                                ("slot", &slot_name),
+                                ("item", &prototype_name(&stack.definition)),
+                            ],
+                        )
+                    },
+                );
+                label(
+                    ui,
+                    &format!("equipment-slot-{}", slot.as_str()),
+                    14.0,
+                    slot_text,
+                );
+                if equipped.is_some()
+                    && inventory_action_button(
+                        ui,
+                        &format!("equipment-action-unequip-{}", slot.as_str()),
+                        &text(locale, "ui.inventory.unequip"),
+                        actions_enabled,
+                    )
+                {
+                    let _ = client.unequip_item(slot);
+                }
+            });
+    }
+}
+
+/// Localized slot name for the equipment section.
+#[must_use]
+pub fn slot_label(slot: EquipSlot, locale: &Locale) -> String {
+    text(locale, &format!("ui.inventory.slot.{}", slot.as_str()))
+}
+
 #[derive(Debug)]
 struct InventoryRow {
     slot: usize,
     text: String,
+    can_equip: bool,
     split_destination: Option<usize>,
     merge_destination: Option<usize>,
 }
 
-fn inventory_rows(inventory: &Inventory) -> Vec<InventoryRow> {
+fn inventory_rows(inventory: &Inventory, locale: &Locale) -> Vec<InventoryRow> {
     let first_empty = (0..inventory.capacity()).find(|slot| inventory.slot(*slot).is_none());
     let entries: Vec<_> = inventory
         .entries()
@@ -246,7 +352,8 @@ fn inventory_rows(inventory: &Inventory) -> Vec<InventoryRow> {
         .iter()
         .map(|(slot, stack)| InventoryRow {
             slot: *slot,
-            text: describe_slot(*slot, stack),
+            text: describe_slot(*slot, stack, locale),
+            can_equip: stack.quantity == 1,
             split_destination: (!stack.is_unique() && stack.quantity > 1)
                 .then_some(first_empty)
                 .flatten(),
@@ -291,22 +398,62 @@ fn inventory_action_button(ui: &mut Imm<CapsUi>, id: &str, text: &str, enabled: 
 
 /// Human-readable summary of occupied slots for the window subtitle.
 #[must_use]
-pub fn inventory_summary(inventory: &Inventory) -> String {
-    format!(
-        "{} de {} slots ocupados",
-        inventory.occupied_slots(),
-        inventory.capacity()
+pub fn inventory_summary(inventory: &Inventory, locale: &Locale) -> String {
+    text_with(
+        locale,
+        "ui.inventory.slots",
+        &[
+            ("used", &inventory.occupied_slots().to_string()),
+            ("total", &inventory.capacity().to_string()),
+        ],
+    )
+}
+
+/// Window subtitle combining inventory occupancy and equipped-slot count.
+#[must_use]
+pub fn owner_state_summary(
+    inventory: &Inventory,
+    equipment: &Equipment,
+    locale: &Locale,
+) -> String {
+    text_with(
+        locale,
+        "ui.inventory.summary",
+        &[
+            ("slots", &inventory_summary(inventory, locale)),
+            (
+                "equipped",
+                &text_with(
+                    locale,
+                    "ui.inventory.equipped",
+                    &[("count", &equipment.len().to_string())],
+                ),
+            ),
+        ],
     )
 }
 
 /// One display row: slot number, derived item name, and quantity.
 #[must_use]
-pub fn describe_slot(slot: usize, stack: &ItemStack) -> String {
+pub fn describe_slot(slot: usize, stack: &ItemStack, locale: &Locale) -> String {
     let name = prototype_name(&stack.definition);
+    let slot = (slot + 1).to_string();
     if stack.is_unique() {
-        format!("Slot {}: {} (único)", slot + 1, name)
+        text_with(
+            locale,
+            "ui.inventory.row_unique",
+            &[("slot", &slot), ("item", &name)],
+        )
     } else {
-        format!("Slot {}: {} x{}", slot + 1, name, stack.quantity)
+        text_with(
+            locale,
+            "ui.inventory.row",
+            &[
+                ("slot", &slot),
+                ("item", &name),
+                ("quantity", &stack.quantity.to_string()),
+            ],
+        )
     }
 }
 
@@ -320,10 +467,17 @@ mod tests {
         DefinitionId::new(name).unwrap()
     }
 
+    fn locale(tag: &str) -> Locale {
+        Locale::parse(tag).unwrap()
+    }
+
     #[test]
     fn stackable_slots_show_a_readable_name_and_quantity() {
         let stack = ItemStack::new(definition("item.healing_potion"), 4);
-        assert_eq!(describe_slot(0, &stack), "Slot 1: Healing Potion x4");
+        assert_eq!(
+            describe_slot(0, &stack, &locale("en")),
+            "Slot 1: Healing Potion x4"
+        );
     }
 
     #[test]
@@ -332,7 +486,14 @@ mod tests {
             definition("item.vault_key"),
             StableId::from_parts(IdKind::Item, 1, 7),
         );
-        assert_eq!(describe_slot(2, &stack), "Slot 3: Vault Key (único)");
+        assert_eq!(
+            describe_slot(2, &stack, &Locale::default()),
+            "Slot 3: Vault Key (único)"
+        );
+        assert_eq!(
+            describe_slot(2, &stack, &locale("en")),
+            "Slot 3: Vault Key (unique)"
+        );
     }
 
     #[test]
@@ -344,7 +505,14 @@ mod tests {
                 &engine_core::inventory::UniformItemRules::new(99),
             )
             .unwrap();
-        assert_eq!(inventory_summary(&inventory), "1 de 8 slots ocupados");
+        assert_eq!(
+            inventory_summary(&inventory, &Locale::default()),
+            "1 de 8 slots ocupados"
+        );
+        assert_eq!(
+            inventory_summary(&inventory, &locale("en")),
+            "1 of 8 slots used"
+        );
     }
 
     #[test]
@@ -363,13 +531,65 @@ mod tests {
             &engine_core::inventory::UniformItemRules::new(99),
         )
         .unwrap();
-        let rows = inventory_rows(&inventory);
+        let rows = inventory_rows(&inventory, &Locale::default());
         assert_eq!(rows[0].split_destination, Some(2));
         assert_eq!(rows[0].merge_destination, Some(1));
+        assert!(!rows[0].can_equip, "stacked items are never equipment");
         assert_eq!(rows[1].split_destination, Some(2));
         assert_eq!(rows[1].merge_destination, Some(0));
         assert_eq!(rows[2].slot, 3);
         assert_eq!(rows[2].split_destination, None);
         assert_eq!(rows[2].merge_destination, None);
+        assert!(
+            rows[2].can_equip,
+            "a single unique item can be offered for equip"
+        );
+    }
+
+    #[test]
+    fn equipment_summary_counts_equipped_slots_with_localized_slot_names() {
+        let inventory = Inventory::with_capacity(8).unwrap();
+        let mut equipment = Equipment::new();
+        equipment
+            .equip(
+                EquipSlot::MainHand,
+                ItemStack::unique(
+                    definition("item.sword"),
+                    StableId::from_parts(IdKind::Item, 2, 1),
+                ),
+                &engine_core::inventory::TableItemRules::new(99).with_item(
+                    definition("item.sword"),
+                    1,
+                    Some(EquipSlot::MainHand),
+                ),
+            )
+            .unwrap();
+        assert_eq!(
+            owner_state_summary(&inventory, &equipment, &Locale::default()),
+            "0 de 8 slots ocupados · 1 equipados"
+        );
+        assert_eq!(
+            owner_state_summary(&inventory, &equipment, &locale("en")),
+            "0 of 8 slots used · 1 equipped"
+        );
+        assert_eq!(
+            slot_label(EquipSlot::MainHand, &Locale::default()),
+            "Mão principal"
+        );
+        assert_eq!(slot_label(EquipSlot::Feet, &Locale::default()), "Pés");
+        assert_eq!(slot_label(EquipSlot::Feet, &locale("en")), "Feet");
+        assert_eq!(equipment.len(), 1);
+    }
+
+    #[test]
+    fn split_and_merge_labels_are_complete_translated_messages() {
+        assert_eq!(
+            split_label(&Locale::default(), "ui.inventory.split", 2),
+            "Separar 1 → 3"
+        );
+        assert_eq!(
+            split_label(&locale("en"), "ui.inventory.merge", 0),
+            "Merge 1 → 1"
+        );
     }
 }

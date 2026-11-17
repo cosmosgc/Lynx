@@ -427,7 +427,7 @@ fn stunned_and_zero_speed_actors_cannot_advance() {
     assert!(
         z.diagnostics()
             .iter()
-            .any(|diagnostic| diagnostic.code == "movement.rejected")
+            .any(|diagnostic| diagnostic.code == "movement.rejected.position_validation")
     );
 
     z.entity_mut(actor).unwrap().movement = Some(profile(MovementStatus::Mobile, 0.0));

@@ -64,7 +64,7 @@ lynx_secret_env() {
         [[ -n "$value" ]] || lynx_die "$file_name is empty"
     fi
     printf -v "$name" '%s' "$value"
-    export "$name"
+    export "$name=$value"
 }
 
 lynx_require_pg() {

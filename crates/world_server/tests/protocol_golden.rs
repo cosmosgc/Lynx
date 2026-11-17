@@ -33,7 +33,7 @@ fn ready_snapshot_and_delta_envelopes_match_versioned_fixtures() {
         negotiated: negotiate(&handshake, &handshake).unwrap(),
     };
     let ready = envelope("srv_ready", "world.ready", &ready);
-    assert_fixture(&ready, include_str!("fixtures/world-ready-1.1.0.json"));
+    assert_fixture(&ready, include_str!("fixtures/world-ready-1.2.0.json"));
 
     let update = WorldUpdate {
         tick: Tick::ZERO,
@@ -55,10 +55,10 @@ fn ready_snapshot_and_delta_envelopes_match_versioned_fixtures() {
     let snapshot = envelope("srv_snapshot", "world.snapshot", &update);
     assert_fixture(
         &snapshot,
-        include_str!("fixtures/world-snapshot-1.1.0.json"),
+        include_str!("fixtures/world-snapshot-1.2.0.json"),
     );
     let delta = envelope("srv_delta", "world.delta", &update);
-    assert_fixture(&delta, include_str!("fixtures/world-delta-1.1.0.json"));
+    assert_fixture(&delta, include_str!("fixtures/world-delta-1.2.0.json"));
 }
 
 #[test]
@@ -69,7 +69,7 @@ fn world_token_uses_only_the_fake_credential_golden() {
         "world.token",
         &serde_json::json!({"resume": FAKE_TOKEN}),
     );
-    let fixture = include_str!("fixtures/world-token-1.1.0.json");
+    let fixture = include_str!("fixtures/world-token-1.2.0.json");
     assert_fixture(&token, fixture);
 
     // Exact sentinel equality rejects replacing this fixture with a captured
@@ -112,7 +112,7 @@ fn versioned_wire_kind_catalog_is_complete_and_round_trips() {
         "world.token",
     ];
     let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("fixtures/wire-kinds-1.1.0.json")).unwrap();
+        serde_json::from_str(include_str!("fixtures/wire-kinds-1.2.0.json")).unwrap();
     let envelopes = fixture.as_array().expect("catalog is a JSON array");
     let mut actual = envelopes
         .iter()

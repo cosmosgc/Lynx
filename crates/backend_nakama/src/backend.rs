@@ -46,7 +46,7 @@ impl fmt::Debug for NakamaPostgresBackend {
             .field("characters", &self.characters)
             .field("inventories", &self.inventories)
             .field("faction_calendar", &self.faction_calendar)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -200,6 +200,7 @@ impl RealtimeChatService for NakamaPostgresBackend {
         );
         Ok(ChatChannelTargetPage {
             targets: targets.into_iter().collect(),
+            zone_room: None,
             next_cursor: groups.cursor,
         })
     }

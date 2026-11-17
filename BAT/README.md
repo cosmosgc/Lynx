@@ -11,6 +11,7 @@ pauses in the scripts it calls and waits once at the end.
 | `build.bat` | Build the Rust workspace | `BAT\build.bat --release` |
 | `run-server.bat` | Start the local demo world server and show logs | `BAT\run-server.bat` |
 | `run-client.bat` | Launch the local demo client or offline placeholder | `BAT\run-client.bat` |
+| `run-demo-3d.bat` | Build the optimized 3D demo and start its temporary world server | `BAT\run-demo-3d.bat` |
 | `check.bat` | Check all workspace targets without linking | `BAT\check.bat` |
 | `clippy.bat` | Run Clippy with warnings denied | `BAT\clippy.bat` |
 | `clean.bat` | Remove Cargo build artifacts | `BAT\clean.bat` |

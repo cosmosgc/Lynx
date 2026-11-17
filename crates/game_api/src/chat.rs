@@ -69,7 +69,7 @@ pub struct ChatMessage {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "target")]
 pub enum ChatChannelTarget {
-    /// Explicitly configured room channel.
+    /// Room channel authorized by server policy.
     Room(String),
     /// One-to-one channel with an account.
     Direct(AccountId),
@@ -115,8 +115,12 @@ pub struct ChatMessageReceipt {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatChannelTargetPage {
     /// Direct channels for mutual friends and group channels for current
-    /// memberships. Configured rooms are supplied by deployment policy.
+    /// memberships. A room bound to the admitted world session may be supplied
+    /// by the world edge.
     pub targets: Vec<ChatChannelTarget>,
+    /// Room for the zone that owns the authenticated world session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone_room: Option<String>,
     /// Cursor for the next Nakama group-membership page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,

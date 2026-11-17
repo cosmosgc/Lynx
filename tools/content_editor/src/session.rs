@@ -23,6 +23,9 @@ pub enum SessionError {
     /// The requested map or zone is unavailable.
     #[error("editor selection is invalid: {0}")]
     InvalidSelection(String),
+    /// External content cannot replace in-memory edits that have not been saved.
+    #[error("cannot reload external content while map edits are unsaved")]
+    UnsavedExternalChanges,
     /// Filesystem or serialization operation failed.
     #[error("editor project operation failed: {0}")]
     Io(#[from] anyhow::Error),
@@ -82,6 +85,7 @@ pub struct EditorSession {
     undo: Vec<MapEdit>,
     redo: Vec<MapEdit>,
     revision: u64,
+    saved_paths: Vec<PathBuf>,
 }
 
 impl EditorSession {
@@ -126,6 +130,7 @@ impl EditorSession {
             undo: Vec::new(),
             redo: Vec::new(),
             revision: 0,
+            saved_paths: Vec::new(),
         };
         session.recover_if_available()?;
         session.select_first_zone();
@@ -332,6 +337,45 @@ impl EditorSession {
         &self.validation
     }
 
+    /// Reload content changed outside the editor when there are no unsaved edits.
+    ///
+    /// The current map and zone selection are retained when they still exist;
+    /// map edit history is cleared if the authored maps changed on disk.
+    pub fn reload_external_changes(&mut self) -> Result<(), SessionError> {
+        if self.is_dirty() {
+            return Err(SessionError::UnsavedExternalChanges);
+        }
+
+        let loader = ContentLoader::new(starter_component_registry().map_err(anyhow::Error::from)?);
+        let (mut content, validation) = loader.load_project(&self.content_root);
+        let maps_changed = content.maps != self.content.maps;
+        self.content = std::mem::take(&mut content);
+        self.validation = validation;
+
+        let previous_map = self.selected_map.take();
+        self.selected_map = previous_map
+            .filter(|id| self.content.maps.contains_key(id))
+            .or_else(|| self.content.maps.keys().next().cloned());
+
+        let previous_zone = self.selected_zone.take();
+        self.selected_zone = previous_zone
+            .filter(|id| {
+                self.map()
+                    .is_some_and(|map| map.zones.iter().any(|zone| &zone.zone == id))
+            })
+            .or_else(|| {
+                self.map()
+                    .and_then(|map| map.zones.first().map(|zone| zone.zone.clone()))
+            });
+
+        if maps_changed {
+            self.undo.clear();
+            self.redo.clear();
+        }
+        self.revision = self.revision.saturating_add(1);
+        Ok(())
+    }
+
     /// Save changed maps with sibling staging files, preserving the previous
     /// complete file if serialization or writing fails.
     pub fn save(&mut self) -> Result<(), SessionError> {
@@ -339,6 +383,7 @@ impl EditorSession {
         // several map files are being replaced, reopening replays this snapshot
         // over any partially written project files.
         self.autosave()?;
+        self.saved_paths.clear();
         let dirty: Vec<_> = self.dirty_maps.iter().cloned().collect();
         for id in dirty {
             let map = self.content.maps.get(&id).ok_or_else(|| {
@@ -350,6 +395,7 @@ impl EditorSession {
             let path = self.content_root.join(source);
             let text = ron::ser::to_string_pretty(map, ron::ser::PrettyConfig::new())?;
             atomic_write(&path, text.as_bytes())?;
+            self.saved_paths.push(path);
         }
         let recovery_backup = backup_path(&self.recovery_path);
         if self.recovery_path.exists() {
@@ -361,6 +407,14 @@ impl EditorSession {
         self.dirty_maps.clear();
         self.refresh_validation();
         Ok(())
+    }
+
+    /// Files written by the most recent [`EditorSession::save`].
+    ///
+    /// The editor uses these paths to ignore its own filesystem events instead
+    /// of reporting a save as an external content change.
+    pub fn take_saved_paths(&mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.saved_paths)
     }
 
     /// Persist a separate recovery snapshot. It never writes over project content.
@@ -573,4 +627,74 @@ fn restore_atomic_backups(root: &Path) -> Result<(), SessionError> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine_content::{DisplayText, MapPosition};
+    use engine_core::i18n::MessageKey;
+    use engine_core::schema::SchemaVersion;
+
+    fn map(position_x: i32) -> WorldMapDefinition {
+        WorldMapDefinition {
+            id: DefinitionId::new("map.editor_test").unwrap(),
+            version: SchemaVersion::new(1, 0),
+            display: DisplayText {
+                name: MessageKey::parse("map.editor_test.name").unwrap(),
+                description: MessageKey::parse("map.editor_test.description").unwrap(),
+            },
+            zones: vec![MapZone {
+                zone: DefinitionId::new("zone.editor_test").unwrap(),
+                position: MapPosition {
+                    x: position_x,
+                    y: 0,
+                },
+            }],
+            routes: Vec::new(),
+        }
+    }
+
+    fn write_map(content_root: &Path, position_x: i32) {
+        let map_directory = content_root.join("maps");
+        fs::create_dir_all(&map_directory).unwrap();
+        fs::write(
+            map_directory.join("editor_test.ron"),
+            ron::ser::to_string(&map(position_x)).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn external_reload_refreshes_clean_session_and_preserves_unsaved_session() {
+        let project = tempfile::tempdir().unwrap();
+        let content_root = project.path().join("content");
+        fs::create_dir_all(&content_root).unwrap();
+        write_map(&content_root, 0);
+
+        let mut clean = EditorSession::open(project.path()).unwrap();
+        write_map(&content_root, 5);
+        clean.reload_external_changes().unwrap();
+        assert_eq!(clean.map().unwrap().zones[0].position.x, 5);
+
+        let mut saved = EditorSession::open(project.path()).unwrap();
+        saved.move_selected(1, 0).unwrap();
+        saved.save().unwrap();
+        assert!(saved.take_saved_paths()[0].ends_with(Path::new("maps").join("editor_test.ron")));
+        saved.reload_external_changes().unwrap();
+        assert!(saved.undo());
+        assert_eq!(saved.map().unwrap().zones[0].position.x, 5);
+
+        let mut dirty = EditorSession::open(project.path()).unwrap();
+        dirty
+            .dirty_maps
+            .insert(DefinitionId::new("map.editor_test").unwrap());
+        write_map(&content_root, 9);
+        assert!(matches!(
+            dirty.reload_external_changes(),
+            Err(SessionError::UnsavedExternalChanges)
+        ));
+        assert_eq!(dirty.map().unwrap().zones[0].position.x, 6);
+        assert!(dirty.is_dirty());
+    }
 }

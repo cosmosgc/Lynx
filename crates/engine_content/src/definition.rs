@@ -879,6 +879,10 @@ impl ContentDefinition {
     /// Cross-definition references and catalog completeness are checked by
     /// [`crate::validate::ContentSet`].
     #[must_use]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one shape-validation pass accumulates independent diagnostics for a definition"
+    )]
     pub fn validate_shape(&self) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
         let mut placement_ids = BTreeSet::new();

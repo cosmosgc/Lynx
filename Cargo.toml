@@ -82,6 +82,16 @@ debug = 1
 lto = "thin"
 codegen-units = 1
 
+# Playable local client/server builds, without release LTO's long link step.
+[profile.demo]
+inherits = "dev"
+opt-level = 2
+debug = false
+incremental = false
+
+[profile.demo.package."*"]
+opt-level = 3
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_debug_implementations = "warn"

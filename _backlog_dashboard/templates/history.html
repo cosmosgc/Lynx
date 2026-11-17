@@ -14,6 +14,18 @@
     a { color:var(--blue); }
     .muted { color:var(--muted); }
     .panel { margin-top:18px; padding:16px; background:var(--panel); border:1px solid var(--line); border-radius:9px; }
+    .history-filters { display:flex; flex-wrap:wrap; align-items:center; gap:9px; margin:0 0 14px; padding:0 0 14px; border-bottom:1px solid var(--line); }
+    .filter-label { width:100%; margin:0; color:var(--muted); font-size:12px; }
+    .toggle-row { display:flex; flex-wrap:wrap; gap:7px; }
+    .filter-toggle { position:relative; cursor:pointer; }
+    .filter-toggle input { position:absolute; inset:0; width:100%; height:100%; margin:0; opacity:0; cursor:pointer; }
+    .filter-toggle span { display:inline-block; padding:5px 10px; border:1px solid var(--line); border-radius:99px; color:var(--muted); white-space:nowrap; }
+    .filter-toggle input:checked + span { color:var(--text); border-color:var(--blue); background:#17334b; }
+    .filter-toggle input:focus-visible + span { outline:2px solid var(--blue); outline-offset:2px; }
+    .filter-actions { display:flex; align-items:center; gap:10px; }
+    .filter-actions button { color:var(--text); background:#11151b; border:1px solid var(--line); border-radius:7px; padding:5px 10px; font:inherit; cursor:pointer; }
+    .filter-actions button:hover { border-color:var(--blue); }
+    .filter-count { color:var(--muted); font-size:12px; }
     .table-wrap { overflow:auto; }
     table { width:100%; border-collapse:collapse; }
     th,td { padding:10px 8px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
@@ -39,7 +51,7 @@
 <main>
   <header>
     <h1>Project history</h1>
-    <p class="muted">The latest 500 observed events: task status changes, new backlog tasks, and new repository files. This app does not edit task status.</p>
+    <p class="muted">The latest 500 observed events: task status changes, new or updated tasks, and new or updated repository files. This app does not edit task status.</p>
     {% set active_page = 'history' %}{% include '_navbar.html' %}
   </header>
   {% if selected_task %}
@@ -62,7 +74,7 @@
       <h3>Dependencies</h3>
       {% if selected_task.dependency_ids or selected_task.external_dependencies %}
       {% for dependency in selected_task.dependency_ids %}
-      <a href="/history?task={{ dependency|urlencode }}#task-detail">{{ dependency }}</a>{% if not loop.last %}, {% endif %}
+      <a href="{{ url_for('history', task=dependency, kind=history_kind_query) }}#task-detail">{{ dependency }}</a>{% if not loop.last %}, {% endif %}
       {% endfor %}
       {% for dependency in selected_task.external_dependencies %}<span class="badge">{{ dependency }}</span>{% endfor %}
       {% else %}<span class="muted">No listed task dependencies.</span>{% endif %}
@@ -71,7 +83,7 @@
     <div class="detail-block">
       <h3>Dependent tasks</h3>
       {% for dependent in selected_task.dependent_ids %}
-      <a href="/history?task={{ dependent|urlencode }}#task-detail">{{ dependent }}</a>{% if not loop.last %}, {% endif %}
+      <a href="{{ url_for('history', task=dependent, kind=history_kind_query) }}#task-detail">{{ dependent }}</a>{% if not loop.last %}, {% endif %}
       {% endfor %}
     </div>
     {% endif %}
@@ -80,7 +92,7 @@
       <h3>References and files</h3>
       {% if selected_task.references %}<p>{{ selected_task.references }}</p>{% endif %}
       {% if selected_task.reference_ids %}
-      <p>{% for reference in selected_task.reference_ids %}<a href="/history?task={{ reference|urlencode }}#task-detail">{{ reference }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</p>
+      <p>{% for reference in selected_task.reference_ids %}<a href="{{ url_for('history', task=reference, kind=history_kind_query) }}#task-detail">{{ reference }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</p>
       {% endif %}
       {% if selected_task.relevant_files %}
       <ul>{% for file in selected_task.relevant_files %}<li><code>{{ file }}</code></li>{% endfor %}</ul>
@@ -97,10 +109,28 @@
       </ul>
     </div>
     {% endif %}
-    <p><a href="/history">← Back to full history</a></p>
+    <p><a href="{{ url_for('history', kind=history_kind_query) }}">← Back to full history</a></p>
   </section>
   {% endif %}
   <section class="panel">
+    <form class="history-filters" method="get" action="{{ url_for('history') }}" aria-label="Filter history events">
+      {% if selected_task %}<input type="hidden" name="task" value="{{ selected_task.id }}">{% endif %}
+      <input type="hidden" name="kind" value="">
+      <span class="filter-label">Event type</span>
+      <div class="toggle-row" role="group" aria-label="Event types">
+        {% for kind, label in event_filters %}
+        <label class="filter-toggle">
+          <input type="checkbox" name="kind" value="{{ kind }}"{% if kind in selected_kinds %} checked{% endif %}>
+          <span>{{ label }}</span>
+        </label>
+        {% endfor %}
+      </div>
+      <div class="filter-actions">
+        <button class="apply-filters" type="submit">Apply filters</button>
+        <a href="{{ url_for('history', task=selected_task.id if selected_task else None) }}">Clear</a>
+      </div>
+      <span class="filter-count" aria-live="polite">Showing {{ changes|length }} of {{ total_changes }} events</span>
+    </form>
     {% if changes %}
     <div class="table-wrap">
       <table>
@@ -111,7 +141,7 @@
             <td><time class="timestamp" datetime="{{ change.changed_at }}" title="{{ change.changed_at }} UTC"><span class="timestamp-date">{{ change.changed_at_date }}</span><span class="timestamp-time">{{ change.changed_at_time }}</span></time></td>
             <td>
               {% if change.kind.startswith("file") %}<code>{{ change.task_id }}</code>
-              {% elif change.task_exists %}<a href="/history?task={{ change.task_id|urlencode }}#task-detail"><strong>{{ change.task_id }}</strong><br>{{ change.title }}</a>
+              {% elif change.task_exists %}<a href="{{ url_for('history', task=change.task_id, kind=history_kind_query) }}#task-detail"><strong>{{ change.task_id }}</strong><br>{{ change.title }}</a>
               {% else %}<strong>{{ change.task_id }}</strong><br>{{ change.title }}{% endif %}
             </td>
             <td class="change">{% if change.kind == "status" %}{{ change.old_status_label }}<span class="arrow">→</span>{{ change.new_status_label }}{% elif change.kind == "task" %}New task{% elif change.kind == "task_updated" %}Task updated{% elif change.kind == "file_updated" %}File updated{% else %}New file{% endif %}</td>
@@ -122,9 +152,18 @@
       </table>
     </div>
     {% else %}
-    <p class="muted">No history events have been saved yet.</p>
+    {% if total_changes %}<p class="muted">No history events match these filters.</p>{% else %}<p class="muted">No history events have been saved yet.</p>{% endif %}
     {% endif %}
   </section>
 </main>
+<script>
+  const filterForm = document.querySelector(".history-filters");
+  if (filterForm) {
+    filterForm.querySelector(".apply-filters").hidden = true;
+    filterForm.querySelectorAll('input[type="checkbox"]').forEach(toggle => {
+      toggle.addEventListener("change", () => filterForm.requestSubmit());
+    });
+  }
+</script>
 </body>
 </html>

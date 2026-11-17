@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use engine_core::equipment::Equipment;
 use engine_core::error::{EngineError, ErrorCode};
 use engine_core::faction::ReputationBook;
 use engine_core::id::{DefinitionId, StableId};
@@ -470,6 +471,9 @@ pub struct EntityRecord {
     pub respawn_at: Option<Tick>,
     /// Inventory, when the entity can hold items.
     pub inventory: Option<Inventory>,
+    /// Authoritative equipped items, when anything is equipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub equipment: Option<Equipment>,
     /// Faction identity and reputation.
     pub faction: Option<FactionMembership>,
     /// Door state, when the entity is a door.
@@ -508,6 +512,7 @@ impl EntityRecord {
             respawn_policy: None,
             respawn_at: None,
             inventory: None,
+            equipment: None,
             faction: None,
             door: None,
             ui: None,
@@ -585,6 +590,13 @@ impl EntityRecord {
     #[must_use]
     pub fn with_inventory(mut self, inventory: Inventory) -> Self {
         self.inventory = Some(inventory);
+        self
+    }
+
+    /// Attach authoritative equipped items.
+    #[must_use]
+    pub fn with_equipment(mut self, equipment: Equipment) -> Self {
+        self.equipment = Some(equipment);
         self
     }
 

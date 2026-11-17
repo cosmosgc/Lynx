@@ -66,10 +66,10 @@ fn hello_and_version_error_match_wire_fixtures() {
     );
     assert_eq!(
         hello.encode().unwrap(),
-        include_str!("fixtures/hello-1.1.0.json").trim()
+        include_str!("fixtures/hello-1.2.0.json").trim()
     );
     assert_eq!(
-        Envelope::decode(include_str!("fixtures/hello-1.1.0.json")).unwrap(),
+        Envelope::decode(include_str!("fixtures/hello-1.2.0.json")).unwrap(),
         hello
     );
 
@@ -83,10 +83,10 @@ fn hello_and_version_error_match_wire_fixtures() {
     );
     assert_eq!(
         reply.encode().unwrap(),
-        include_str!("fixtures/error-1.1.0.json").trim()
+        include_str!("fixtures/error-1.2.0.json").trim()
     );
     assert_eq!(
-        Envelope::decode(include_str!("fixtures/error-1.1.0.json")).unwrap(),
+        Envelope::decode(include_str!("fixtures/error-1.2.0.json")).unwrap(),
         reply
     );
 }
@@ -121,10 +121,17 @@ fn negotiated_reply_matches_wire_fixture() {
     client.protocol = semver::Version::new(1, 1, 0);
     client.features.insert(Feature::Groups);
     let negotiated = negotiate(&client, &server).unwrap();
-    let fixture = include_str!("fixtures/negotiated-1.1.0.json").trim();
+    let fixture = include_str!("fixtures/negotiated-1.2.0.json").trim();
     assert_eq!(serde_json::to_string(&negotiated).unwrap(), fixture);
     let parsed: Negotiated = serde_json::from_str(fixture).unwrap();
     assert_eq!(parsed, negotiated);
+
+    // Retained 1.1.0 reply stays decodable: older servers negotiated down to
+    // their own protocol and a single feature warning.
+    let older: Negotiated =
+        serde_json::from_str(include_str!("fixtures/negotiated-1.1.0.json")).unwrap();
+    assert_eq!(older.protocol, semver::Version::new(1, 1, 0));
+    assert_eq!(older.warnings.len(), 1);
 }
 
 #[test]
@@ -132,7 +139,7 @@ fn compatibility_matrix_pins_warnings_and_errors() {
     let server = Handshake::new(semver::Version::new(3, 0, 0), semver::Version::new(1, 2, 3));
     for (protocol, content, expected_warnings) in [
         ((1, 0, 99), (1, 2, 99), 1),
-        ((1, 1, 0), (1, 2, 3), 0),
+        ((1, 2, 0), (1, 2, 3), 0),
         ((1, 0, 0), (1, 1, 0), 2),
         ((1, 5, 0), (1, 9, 0), 2),
     ] {

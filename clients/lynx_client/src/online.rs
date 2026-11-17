@@ -7,6 +7,7 @@
 //! its controlling session and is applied only from server replication.
 
 use bevy::prelude::{ResMut, Resource};
+use engine_core::equipment::{EquipSlot, Equipment};
 use engine_core::inventory::Inventory;
 use engine_core::time::Tick;
 use engine_net::envelope::{Envelope, MessageId, MessageKind};
@@ -136,6 +137,7 @@ struct ConnectionSettings {
 struct PendingInventoryAction {
     request_id: MessageId,
     baseline: Inventory,
+    baseline_equipment: Option<Equipment>,
     awaiting_replication: bool,
 }
 
@@ -161,6 +163,10 @@ impl fmt::Debug for ConnectionSettings {
 
 /// Insert this resource to enable polling in the shared Bevy schedule.
 /// Credentials remain in memory only and are redacted from debug output.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the flags track independent protocol and credential refresh outcomes"
+)]
 #[derive(Debug, Resource)]
 pub struct OnlineClient {
     interaction: crate::interaction::InteractionState,
@@ -183,9 +189,8 @@ pub struct OnlineClient {
     nakama_chat: Option<NakamaChatClient>,
     chat_api_url: Option<String>,
     chat_targets: Vec<ChatChannelTarget>,
-    chat_target_refresh: Option<
-        Mutex<mpsc::Receiver<Result<Vec<ChatChannelTarget>, lynx_client_net::CharacterApiFailure>>>,
-    >,
+    chat_targets_loaded: bool,
+    chat_target_refresh: Option<Mutex<ChatTargetRefreshReceiver>>,
     credential_refresher: Option<Arc<CredentialRefresher>>,
     credential_refresh:
         Option<Mutex<mpsc::Receiver<Result<String, crate::nakama_credentials::NakamaLoginError>>>>,
@@ -203,6 +208,9 @@ pub struct OnlineClient {
     movement_step: f32,
     last_movement_applied: Option<bool>,
 }
+
+type ChatTargetRefreshReceiver =
+    mpsc::Receiver<Result<Vec<ChatChannelTarget>, lynx_client_net::CharacterApiFailure>>;
 
 type CredentialRefreshFn =
     dyn Fn() -> Result<String, crate::nakama_credentials::NakamaLoginError> + Send + Sync;
@@ -244,6 +252,7 @@ impl OnlineClient {
             nakama_chat: None,
             chat_api_url: None,
             chat_targets: Vec::new(),
+            chat_targets_loaded: false,
             chat_target_refresh: None,
             credential_refresher: None,
             credential_refresh: None,
@@ -334,45 +343,15 @@ impl OnlineClient {
             || (settings.bearer.clone(), settings.character.clone()),
             |token| (token, None),
         );
-        let authenticated_character = character.is_some();
-        let chat_bearer = bearer.clone();
+        let authenticated_character = settings.character.is_some();
+        let chat_bearer = settings.bearer.clone();
         self.interaction.set_locale(locale);
 
         if authenticated_character
             && self.nakama_chat.is_none()
             && let Ok(nakama_url) = std::env::var("LYNX_NAKAMA_URL")
         {
-            let room = std::env::var("LYNX_CHAT_ROOM").unwrap_or_else(|_| "lynx-zone".to_owned());
-            self.nakama_chat = NakamaChatClient::connect(&nakama_url, &chat_bearer, &room).ok();
-        }
-        if authenticated_character
-            && self.chat_targets.is_empty()
-            && self.chat_target_refresh.is_none()
-            && let Some(api_url) = self.chat_api_url.clone()
-        {
-            let (tx, rx) = mpsc::channel();
-            let token = chat_bearer.clone();
-            runtime.spawn_blocking(move || {
-                let result = (|| {
-                    let api = lynx_client_net::CharacterApiClient::new(api_url)?;
-                    let token = SessionToken::new(token)
-                        .map_err(|_| lynx_client_net::CharacterApiFailure::InvalidConfiguration)?;
-                    let mut targets = Vec::new();
-                    let mut cursor = None;
-                    for _ in 0..20 {
-                        let page: ChatChannelTargetPage =
-                            api.discover_chat_channels(&token, 100, cursor.as_deref())?;
-                        targets.extend(page.targets);
-                        cursor = page.next_cursor;
-                        if cursor.is_none() {
-                            break;
-                        }
-                    }
-                    Ok(targets)
-                })();
-                let _ = tx.send(result);
-            });
-            self.chat_target_refresh = Some(Mutex::new(rx));
+            self.nakama_chat = NakamaChatClient::connect(&nakama_url, &chat_bearer).ok();
         }
 
         let generation = self.world.begin_connection().map_err(OnlineError::State)?;
@@ -382,11 +361,12 @@ impl OnlineClient {
         self.pending_ack = None;
         self.pending_chat.clear();
         self.pending_history.clear();
+        self.chat_targets.clear();
+        self.chat_targets_loaded = false;
+        self.chat_target_refresh = None;
+        self.chat_bootstrapped = false;
         self.movement_sent_at = None;
         self.retry_at = None;
-        if !use_resume {
-            self.chat_bootstrapped = false;
-        }
         self.client = Some(Client::connect(Config {
             url,
             bearer,
@@ -542,6 +522,7 @@ impl OnlineClient {
             return Err(OnlineError::Protocol);
         }
         let baseline = inventory.clone();
+        let baseline_equipment = self.world.equipment().cloned();
         let request_id = self.send_interaction(
             "action.request",
             json!({
@@ -557,6 +538,69 @@ impl OnlineClient {
         self.pending_inventory_action = Some(PendingInventoryAction {
             request_id,
             baseline,
+            baseline_equipment,
+            awaiting_replication: false,
+        });
+        Ok(())
+    }
+
+    /// Request that one inventory slot be equipped.
+    ///
+    /// The client cannot know an item's authored slot, so the server decides
+    /// whether the item may be equipped and where it goes. Local state is
+    /// unchanged until a new owner-only snapshot arrives.
+    pub fn equip_item(&mut self, source_slot: usize) -> Result<(), OnlineError> {
+        let inventory = self.world.inventory().ok_or(OnlineError::Protocol)?;
+        if self.pending_inventory_action.is_some() {
+            return Err(OnlineError::Protocol);
+        }
+        let stack = inventory.slot(source_slot).ok_or(OnlineError::Protocol)?;
+        if stack.quantity != 1 {
+            return Err(OnlineError::Protocol);
+        }
+        let baseline = inventory.clone();
+        let baseline_equipment = self.world.equipment().cloned();
+        let request_id = self.send_interaction(
+            "action.request",
+            json!({
+                "verb": "equip",
+                "params": {"source_slot": source_slot.to_string()},
+                "client_tick": self.world.tick()
+            }),
+        )?;
+        self.pending_inventory_action = Some(PendingInventoryAction {
+            request_id,
+            baseline,
+            baseline_equipment,
+            awaiting_replication: false,
+        });
+        Ok(())
+    }
+
+    /// Request that one equipped slot be returned to the inventory.
+    pub fn unequip_item(&mut self, slot: EquipSlot) -> Result<(), OnlineError> {
+        let equipped = self.world.equipment().ok_or(OnlineError::Protocol)?;
+        if self.pending_inventory_action.is_some() || equipped.slot(slot).is_none() {
+            return Err(OnlineError::Protocol);
+        }
+        let baseline = self
+            .world
+            .inventory()
+            .cloned()
+            .ok_or(OnlineError::Protocol)?;
+        let baseline_equipment = Some(equipped.clone());
+        let request_id = self.send_interaction(
+            "action.request",
+            json!({
+                "verb": "unequip",
+                "params": {"slot": slot.as_str()},
+                "client_tick": self.world.tick()
+            }),
+        )?;
+        self.pending_inventory_action = Some(PendingInventoryAction {
+            request_id,
+            baseline,
+            baseline_equipment,
             awaiting_replication: false,
         });
         Ok(())
@@ -686,10 +730,11 @@ impl OnlineClient {
             .as_ref()
             .is_some_and(|pending| {
                 pending.awaiting_replication
-                    && self
+                    && (self
                         .world
                         .inventory()
                         .is_some_and(|inventory| inventory != &pending.baseline)
+                        || self.world.equipment().cloned() != pending.baseline_equipment)
             });
         if replicated {
             self.pending_inventory_action = None;
@@ -710,16 +755,28 @@ impl OnlineClient {
         };
         request.validate().map_err(|_| OnlineError::Protocol)?;
         if let Some(chat) = &self.nakama_chat {
-            if channel != "zone"
-                && !self
-                    .chat_targets
-                    .iter()
-                    .any(|target| chat_target_alias(target) == channel)
-            {
-                self.chat.show_send_error(Some("invalid_request"));
+            if !self.chat_targets_loaded {
+                self.chat.show_send_error(Some("unavailable"));
                 return Err(OnlineError::Protocol);
             }
-            chat.send(channel, content.trim()).map_err(|error| {
+            let destination = if channel == "zone" {
+                self.chat_targets.iter().find_map(|target| {
+                    matches!(target, ChatChannelTarget::Room(_)).then(|| chat_target_alias(target))
+                })
+            } else if self
+                .chat_targets
+                .iter()
+                .any(|target| chat_target_alias(target) == channel)
+            {
+                Some(channel.to_owned())
+            } else {
+                None
+            };
+            let Some(destination) = destination else {
+                self.chat.show_send_error(Some("invalid_request"));
+                return Err(OnlineError::Protocol);
+            };
+            chat.send(&destination, content.trim()).map_err(|error| {
                 self.chat.show_send_error(Some(match error {
                     NakamaChatFailure::QueueFull => "rate_limited",
                     NakamaChatFailure::Closed | NakamaChatFailure::Transport => "unavailable",
@@ -745,8 +802,18 @@ impl OnlineClient {
             return Err(OnlineError::Protocol);
         }
         if let Some(chat) = &self.nakama_chat {
+            if !self.chat_targets_loaded {
+                return Err(OnlineError::Protocol);
+            }
+            let zone = self
+                .chat_targets
+                .iter()
+                .find_map(|target| {
+                    matches!(target, ChatChannelTarget::Room(_)).then(|| chat_target_alias(target))
+                })
+                .ok_or(OnlineError::Protocol)?;
             chat.history(
-                "zone",
+                &zone,
                 u8::try_from(limit).map_err(|_| OnlineError::Protocol)?,
                 before,
             )
@@ -1021,9 +1088,7 @@ impl OnlineClient {
                     self.fail(OnlineError::Protocol);
                     return;
                 }
-                if let Some(settings) = self.settings.as_mut() {
-                    settings.resume = Some(token.to_owned());
-                }
+                self.remember_world_session_token(token);
                 self.attempt_received_token = true;
                 continue;
             }
@@ -1232,12 +1297,12 @@ impl OnlineClient {
         if self.attempted_travel_trigger.as_deref() == Some(&trigger.id) {
             return;
         }
-        self.interaction_sequence = match self.interaction_sequence.checked_add(1) {
-            Some(sequence) => sequence,
-            None => {
-                self.fail(OnlineError::Protocol);
-                return;
-            }
+        self.interaction_sequence = if let Some(sequence) = self.interaction_sequence.checked_add(1)
+        {
+            sequence
+        } else {
+            self.fail(OnlineError::Protocol);
+            return;
         };
         let Ok(id) = MessageId::parse(&format!("travel-{}", self.interaction_sequence)) else {
             self.fail(OnlineError::Protocol);
@@ -1264,19 +1329,8 @@ impl OnlineClient {
     }
 
     fn poll_nakama_chat(&mut self) {
-        if let Some(receiver) = &self.chat_target_refresh {
-            let result = receiver.lock().ok().map(|receiver| receiver.try_recv());
-            match result {
-                Some(Ok(Ok(targets))) => {
-                    self.chat_targets = targets;
-                    self.chat_target_refresh = None;
-                }
-                Some(Ok(Err(_))) | Some(Err(mpsc::TryRecvError::Disconnected)) | None => {
-                    self.chat_target_refresh = None
-                }
-                Some(Err(mpsc::TryRecvError::Empty)) => {}
-            }
-        }
+        self.start_chat_target_discovery();
+        self.finish_chat_target_discovery();
         let Some(chat) = self.nakama_chat.as_mut() else {
             return;
         };
@@ -1354,11 +1408,139 @@ impl OnlineClient {
             self.chat_bootstrapped = true;
         }
     }
+
+    fn start_chat_target_discovery(&mut self) {
+        if self.status == OnlineStatus::Active
+            && self.nakama_chat.is_some()
+            && !self.chat_targets_loaded
+            && self.chat_target_refresh.is_none()
+        {
+            let discovery = self.chat_api_url.clone().and_then(|api_url| {
+                let settings = self.settings.as_ref()?;
+                Some((api_url, settings.bearer.clone(), settings.resume.clone()?))
+            });
+            if let (Some((api_url, bearer, world_session)), Some(runtime)) =
+                (discovery, self.runtime.clone())
+            {
+                let (tx, rx) = mpsc::channel();
+                runtime.spawn_blocking(move || {
+                    let result = (|| {
+                        let api = lynx_client_net::CharacterApiClient::new(api_url)?;
+                        let token = SessionToken::new(bearer).map_err(|_| {
+                            lynx_client_net::CharacterApiFailure::InvalidConfiguration
+                        })?;
+                        let mut targets = Vec::new();
+                        let mut cursor = None;
+                        for page_index in 0..20 {
+                            let page: ChatChannelTargetPage = api.discover_chat_channels(
+                                &token,
+                                &world_session,
+                                100,
+                                cursor.as_deref(),
+                            )?;
+                            targets.extend(page.targets);
+                            if page_index == 0
+                                && let Some(room) = page.zone_room
+                            {
+                                let room = ChatChannelTarget::Room(room);
+                                room.validate()
+                                    .map_err(|_| lynx_client_net::CharacterApiFailure::Protocol)?;
+                                if !targets.contains(&room) {
+                                    targets.push(room);
+                                }
+                            }
+                            cursor = page.next_cursor;
+                            if cursor.is_none() {
+                                break;
+                            }
+                        }
+                        Ok(targets)
+                    })();
+                    let _ = tx.send(result);
+                });
+                self.chat_target_refresh = Some(Mutex::new(rx));
+            }
+        }
+    }
+
+    fn finish_chat_target_discovery(&mut self) {
+        if let Some(receiver) = &self.chat_target_refresh {
+            let result = receiver.lock().ok().map(|receiver| receiver.try_recv());
+            match result {
+                Some(Ok(Ok(targets))) => {
+                    let previous_room = self.chat_targets.iter().find_map(|target| match target {
+                        ChatChannelTarget::Room(room) => Some(room.as_str()),
+                        ChatChannelTarget::Direct(_) | ChatChannelTarget::Group(_) => None,
+                    });
+                    let next_room = targets.iter().find_map(|target| match target {
+                        ChatChannelTarget::Room(room) => Some(room.as_str()),
+                        ChatChannelTarget::Direct(_) | ChatChannelTarget::Group(_) => None,
+                    });
+                    let zone_changed = previous_room
+                        .zip(next_room)
+                        .is_some_and(|(previous, next)| previous != next);
+                    self.chat_targets = targets;
+                    self.chat_targets_loaded = true;
+                    self.chat_target_refresh = None;
+                    if zone_changed {
+                        self.nakama_chat = None;
+                        self.chat.clear_zone();
+                        self.chat_bootstrapped = false;
+                        self.reconnect_nakama_chat();
+                    }
+                    if let Some(room) = self
+                        .chat_targets
+                        .iter()
+                        .find(|target| matches!(target, ChatChannelTarget::Room(_)))
+                        .cloned()
+                        && let Some(chat) = self.nakama_chat.as_ref()
+                    {
+                        let _ = chat.join(room);
+                    }
+                }
+                Some(Ok(Err(_)) | Err(mpsc::TryRecvError::Disconnected)) | None => {
+                    self.chat_targets.clear();
+                    self.chat_targets_loaded = true;
+                    self.chat_target_refresh = None;
+                }
+                Some(Err(mpsc::TryRecvError::Empty)) => {}
+            }
+        }
+    }
+
+    fn remember_world_session_token(&mut self, token: &str) {
+        let Some(settings) = self.settings.as_mut() else {
+            return;
+        };
+        if settings.resume.as_deref() == Some(token) {
+            return;
+        }
+        settings.resume = Some(token.to_owned());
+        self.chat_targets_loaded = false;
+        self.chat_target_refresh = None;
+    }
+
+    fn reconnect_nakama_chat(&mut self) {
+        let Some(settings) = self.settings.as_ref() else {
+            return;
+        };
+        if settings.character.is_none() {
+            return;
+        }
+        let Ok(nakama_url) = std::env::var("LYNX_NAKAMA_URL") else {
+            return;
+        };
+        let Some(runtime) = self.runtime.clone() else {
+            return;
+        };
+        let _guard = runtime.enter();
+        self.nakama_chat = NakamaChatClient::connect(&nakama_url, &settings.bearer).ok();
+    }
 }
 
 pub fn chat_target_alias(target: &ChatChannelTarget) -> String {
     match target {
-        ChatChannelTarget::Room(room) => room.clone(),
+        ChatChannelTarget::Room(_) => "zone".to_owned(),
         ChatChannelTarget::Direct(account) => format!("direct:{account}"),
         ChatChannelTarget::Group(group) => format!("group:{group}"),
     }
@@ -1478,12 +1660,90 @@ pub(crate) fn smooth_online(client: Option<ResMut<OnlineClient>>) {
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(test)]
 mod movement_tests {
-    use super::slowed_step;
+    use super::*;
+    use game_api::ChatChannelTarget;
 
     #[test]
     fn private_slow_factor_scales_local_prediction_step() {
         assert!((slowed_step(0.09, Some(0.35)) - 0.0315).abs() < f32::EPSILON);
         assert_eq!(slowed_step(0.09, None), 0.09);
         assert_eq!(slowed_step(0.09, Some(0.0)), 0.0);
+    }
+
+    fn test_settings(resume: Option<&str>) -> ConnectionSettings {
+        ConnectionSettings {
+            url: "ws://127.0.0.1:1/world".to_owned(),
+            bearer: "test-bearer".to_owned(),
+            character: None,
+            handshake: Handshake::new(semver::Version::new(1, 0, 0), semver::Version::new(1, 0, 0)),
+            resume: resume.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn rotated_world_token_invalidates_in_flight_chat_discovery() {
+        let mut client = OnlineClient::new(20.0).unwrap();
+        client.settings = Some(test_settings(Some("old-world-session-token")));
+        client.chat_targets = vec![ChatChannelTarget::Room("lynx-zone-zone:old".to_owned())];
+        client.chat_targets_loaded = true;
+        let (_sender, receiver) = mpsc::channel();
+        client.chat_target_refresh = Some(Mutex::new(receiver));
+
+        client.remember_world_session_token("new-world-session-token");
+
+        assert_eq!(
+            client
+                .settings
+                .as_ref()
+                .and_then(|settings| settings.resume.as_deref()),
+            Some("new-world-session-token")
+        );
+        assert!(!client.chat_targets_loaded);
+        assert!(client.chat_target_refresh.is_none());
+        assert_eq!(
+            client.chat_targets,
+            vec![ChatChannelTarget::Room("lynx-zone-zone:old".to_owned())]
+        );
+    }
+
+    #[test]
+    fn changed_zone_room_clears_old_zone_history_and_presence() {
+        let mut client = OnlineClient::new(20.0).unwrap();
+        client.settings = Some(test_settings(Some("current-world-session-token")));
+        client.chat_targets = vec![ChatChannelTarget::Room("lynx-zone-zone:old".to_owned())];
+        client.chat_bootstrapped = true;
+        client.chat.receive_message(ChatMessage {
+            id: "old-zone-message".to_owned(),
+            channel_id: "zone".to_owned(),
+            sender_id: "account".to_owned(),
+            sender_name: "Player".to_owned(),
+            content: "old".to_owned(),
+            created_at_ms: 0,
+        });
+        client.chat.receive_presence(
+            vec![ChatMember {
+                account_id: "account".to_owned(),
+                character_id: "character".to_owned(),
+            }],
+            false,
+        );
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Ok(vec![ChatChannelTarget::Room(
+                "lynx-zone-zone:new".to_owned(),
+            )]))
+            .unwrap();
+        client.chat_target_refresh = Some(Mutex::new(receiver));
+
+        client.finish_chat_target_discovery();
+
+        assert_eq!(
+            client.chat_targets,
+            vec![ChatChannelTarget::Room("lynx-zone-zone:new".to_owned())]
+        );
+        assert!(client.chat_targets_loaded);
+        assert_eq!(client.chat.messages().count(), 0);
+        assert_eq!(client.chat.members(), []);
+        assert!(!client.chat_bootstrapped);
     }
 }

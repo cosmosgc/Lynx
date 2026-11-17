@@ -126,6 +126,9 @@ impl EntitySnapshot {
 pub struct OwnerState {
     /// The owner's full inventory.
     pub inventory: Inventory,
+    /// The owner's equipped items, absent when nothing is equipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub equipment: Option<engine_core::equipment::Equipment>,
 }
 
 /// Session-private movement reconciliation, never part of observer replication.

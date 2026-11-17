@@ -15,13 +15,14 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use engine_content::{BehaviorInstruction, BehaviorKind, ContentKind, ContentSet};
+use engine_core::equipment::EquipSlot;
 use engine_core::error::{EngineError, ErrorCode};
 use engine_core::faction::{Alignment, FactionCatalog, Thresholds};
 use engine_core::faction::{
     Faction, FactionDefinition, FactionWorld, GovernancePolicy, PowerRules, TerritoryRules,
 };
 use engine_core::id::{DefinitionId, IdKind, StableId};
-use engine_core::inventory::{Inventory, ItemRules, ItemStack, UniformItemRules};
+use engine_core::inventory::{Inventory, ItemRules, ItemStack, TableItemRules};
 use engine_core::math::Vec3;
 use engine_core::schema::PersistencePolicy;
 use engine_core::time::{DurationMs, Millis, Tick};
@@ -408,14 +409,29 @@ pub fn authored_ai_tick_policy(
     }))
 }
 
+fn demo_item_rules() -> TableItemRules {
+    TableItemRules::new(99)
+        .with_item(definition("item.torch").expect("static demo id"), 5, None)
+        .with_item(
+            definition("item.vault_key").expect("static demo id"),
+            1,
+            None,
+        )
+        .with_item(
+            definition("item.sword").expect("static demo id"),
+            1,
+            Some(EquipSlot::MainHand),
+        )
+}
+
 fn demo_rules() -> Arc<dyn ItemRules + Send + Sync> {
-    Arc::new(UniformItemRules::new(99))
+    Arc::new(demo_item_rules())
 }
 
 /// Deterministic starting inventory so every demo actor exercises owner-only
-/// replication and the read-only client inventory window.
+/// replication, the read-only client inventory window, and one equippable item.
 fn demo_inventory(seed: u128) -> Result<Inventory, EngineError> {
-    let rules = UniformItemRules::new(99);
+    let rules = demo_item_rules();
     let mut inventory = Inventory::with_capacity(8)?;
     inventory.try_add(ItemStack::new(definition("item.torch")?, 3), &rules)?;
     inventory.try_add(ItemStack::new(definition("item.coin")?, 25), &rules)?;
@@ -423,6 +439,13 @@ fn demo_inventory(seed: u128) -> Result<Inventory, EngineError> {
         ItemStack::unique(
             definition("item.vault_key")?,
             StableId::from_parts(IdKind::Item, 1, seed ^ 0x500),
+        ),
+        &rules,
+    )?;
+    inventory.try_add(
+        ItemStack::unique(
+            definition("item.sword")?,
+            StableId::from_parts(IdKind::Item, 1, seed ^ 0x501),
         ),
         &rules,
     )?;
@@ -445,7 +468,7 @@ fn barrel_inventory() -> Result<Inventory, EngineError> {
     let mut inventory = Inventory::with_capacity(4)?;
     inventory.try_add(
         ItemStack::new(definition("item.coin")?, 5),
-        &UniformItemRules::new(99),
+        &demo_item_rules(),
     )?;
     Ok(inventory)
 }
@@ -813,6 +836,10 @@ mod tests {
             );
             assert_eq!(
                 inventory.total_quantity(&definition("item.vault_key").unwrap()),
+                1
+            );
+            assert_eq!(
+                inventory.total_quantity(&definition("item.sword").unwrap()),
                 1
             );
         }

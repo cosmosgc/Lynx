@@ -1,5 +1,6 @@
 [package]
 name = "lynx_load_harness"
+publish = false
 description = "Repeatable local load benchmark for the Lynx world service"
 version.workspace = true
 edition.workspace = true

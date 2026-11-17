@@ -109,15 +109,17 @@ by a host firewall or private scrape network. See
 
 ## Social and chat boundary
 
-The client joins a configured Nakama room over the authenticated realtime
-socket. It also requests account-authorized direct and group destinations from
-`GET /social/chat/channels` and joins those targets on demand. Nakama derives
-sender identity, persists messages, serves cursor history, and reports room
-presence. Set `LYNX_NAKAMA_URL` and optionally `LYNX_CHAT_ROOM`; the default
-room name is `lynx-zone`. The configured room is not proof of admission to the
-matching Lynx world zone. World admission, movement, and authoritative presence
-remain owned by the Lynx world service. Party chat and zone-admission binding
-remain open.
+After world admission, the client sends the Nakama bearer and current world
+resume token to `GET /social/chat/channels`. The world authority resolves the
+resume token to its admitted character and zone, and the HTTP edge verifies
+current character ownership before returning the server-derived zone room beside
+account-authorized direct and group destinations. The client joins only the
+returned room over Nakama's authenticated realtime socket and rediscovers after
+reconnect or world-token rotation. Set `LYNX_NAKAMA_URL`; there is no
+client-configured room name. Nakama derives sender identity, persists messages,
+serves cursor history, and reports room presence. World admission, movement, and
+authoritative presence remain owned by the Lynx world service. Party chat and
+live Nakama contract validation remain open.
 
 Friend requests and group REST operations use `game_api` contracts that preserve
 incoming/outgoing invitations, join-request roles, and membership state. The
@@ -151,8 +153,9 @@ creation, membership, and join-request moderation use the separate
 remains explicit. Nakama still authorizes each join and mutation.
 
 The current account screen now exposes friend/group discovery and management;
-realtime clients still join only the configured room. Live Nakama contract validation requires a configured test
-service and accounts. Moderation/content policy remains tracked by
+realtime clients join the zone room returned for the active world session and
+authorized direct/group targets on demand. Live Nakama contract validation
+requires a configured test service and accounts. Moderation/content policy remains tracked by
 `NET-009`/`CNT-008`.
 Lynx administration is separate: it uses
 dedicated admin authentication and the Lynx audit log rather than player

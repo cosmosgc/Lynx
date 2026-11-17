@@ -38,4 +38,25 @@ online windows. The standalone example remains a historical fixture. Headless
 no-default-features builds still exclude the dependency. This validates one
 minigame panel; generic authored schemas and inventory remain separate work.
 
-The only straightforward current addition is `bevy-persistent` for **client-local preferences**, if Lynx wants Bevy-resource integration instead of its own settings adapter. `bevy_vector_shapes`, `bevy_immediate`, `bevy_rich_text3d`, Avian, `bevy_voxel_world`, and `dogoap` merit targeted prototypes only when their specific feature need lands. The rest are mismatched, outdated, or add an unrelated network/world model. None should be placed in `engine_sim` merely because it integrates with Bevy.
+`bevy-persistent` remains a candidate for **client-local preferences**, if Lynx wants Bevy-resource integration instead of its own settings adapter. `bevy_vector_shapes`, `bevy_rich_text3d`, Avian, `bevy_voxel_world`, and `dogoap` merit targeted prototypes only when their specific feature need lands. The rest are mismatched, outdated, or add an unrelated network/world model. None should be placed in `engine_sim` merely because it integrates with Bevy.
+
+**Standalone editor adoption (2026-11-13):** `lynx_editor` now pins
+`bevy_egui = 0.43.1` (Bevy 0.20) for its inspector and authoring controls, and
+`notify = 8.2.2` for project-content watching. The watcher reloads external
+changes only when the editor has no unsaved map edits; pending edits are kept,
+and overwriting changed files requires an explicit inspector action. Both
+dependencies are confined to `tools/content_editor`; the player client retains
+its existing UI stack, and no Bevy dependency enters the authoritative engine.
+The inspector was rendered at 1196×799 and 700×600: external edits reload into a
+clean session, unsaved edits raise an explicit conflict with "Keep my edits" or
+"Reload changed files", and the editor no longer reports its own saves as
+external changes.
+
+**Entity-info native backend (2026-11-13):** `lynx_client` now owns the native
+health-bar and name-label implementation in `clients/lynx_client/src/entity_info.rs`.
+Health bars use camera-facing 3D meshes; labels use projected screen-space UI,
+because Bevy 0.20's `Text2d` render path requires a `Camera2d` while the online
+scene uses `Camera3d`. `spawn_health_bar` and `spawn_label` are the localized
+replacement seams. `bevy_health_bar3d` 3.11 requires Bevy `^0.19` and
+`bevy_slugtext` 0.1.1 requires Bevy 0.19, so both remain pending upgrades until
+they support the pinned Bevy 0.20.0 (or the workspace deliberately updates).

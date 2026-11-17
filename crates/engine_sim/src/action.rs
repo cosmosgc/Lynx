@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use engine_core::equipment::EquipSlot;
 use engine_core::error::{EngineError, ErrorCode};
 use engine_core::id::{DefinitionId, StableId};
 use engine_core::inventory::Inventory;
@@ -67,6 +68,8 @@ pub enum Verb {
     Merge,
     /// Equip an item.
     Equip,
+    /// Return an equipped item to the inventory.
+    Unequip,
     /// Start a conversation.
     Talk,
     /// Repair an object.
@@ -97,6 +100,7 @@ impl Verb {
             Self::Split => "split",
             Self::Merge => "merge",
             Self::Equip => "equip",
+            Self::Unequip => "unequip",
             Self::Talk => "talk",
             Self::Repair => "repair",
             Self::Activate => "activate",
@@ -125,6 +129,7 @@ impl Verb {
             "split" => Self::Split,
             "merge" => Self::Merge,
             "equip" => Self::Equip,
+            "unequip" => Self::Unequip,
             "talk" => Self::Talk,
             "repair" => Self::Repair,
             "activate" => Self::Activate,
@@ -349,6 +354,28 @@ pub enum ActionEffect {
         definition: DefinitionId,
         /// Quantity moved into the destination stack.
         quantity: u32,
+    },
+    /// An item was equipped from the actor's inventory.
+    ItemEquipped {
+        /// Inventory and equipment owner.
+        actor: StableId,
+        /// Slot that received the item.
+        slot: EquipSlot,
+        /// Item definition.
+        definition: DefinitionId,
+        /// Item that previously occupied the slot, if any.
+        replaced: Option<DefinitionId>,
+    },
+    /// An equipped item was returned to the actor's inventory.
+    ItemUnequipped {
+        /// Inventory and equipment owner.
+        actor: StableId,
+        /// Slot the item came from.
+        slot: EquipSlot,
+        /// Item definition.
+        definition: DefinitionId,
+        /// Inventory slot that received the item.
+        destination_slot: usize,
     },
     /// A target lost hit points.
     Damaged {
@@ -590,6 +617,9 @@ impl Zone {
         if matches!(&request.verb, Verb::Split | Verb::Merge) {
             return self.apply_inventory_stack_action(request);
         }
+        if matches!(&request.verb, Verb::Equip | Verb::Unequip) {
+            return self.apply_equipment_action(request);
+        }
         let context = self.validate_action(request)?;
 
         let effects = match &request.verb {
@@ -637,7 +667,9 @@ impl Zone {
             Verb::Insert => {
                 self.apply_insert(request, context.target_id, context.target_inventory)?
             }
-            Verb::Split | Verb::Merge => unreachable!("handled before target validation"),
+            Verb::Split | Verb::Merge | Verb::Equip | Verb::Unequip => {
+                unreachable!("handled before target validation")
+            }
             Verb::Play => self.apply_play(request, context.target_id)?,
             Verb::Attack => self.apply_attack(
                 request,
@@ -645,7 +677,7 @@ impl Zone {
                 context.target_health,
                 context.target_combat,
             )?,
-            Verb::Equip | Verb::Repair | Verb::Hack | Verb::Custom(_) => {
+            Verb::Repair | Verb::Hack | Verb::Custom(_) => {
                 return Err(EngineError::new(
                     ErrorCode::Unsupported,
                     "verb is not implemented by this engine build",
@@ -731,6 +763,106 @@ impl Zone {
             },
             _ => unreachable!("only stack operations are routed here"),
         };
+        Ok(vec![effect])
+    }
+
+    /// Move one single item between the actor's inventory and equipment.
+    ///
+    /// Slot compatibility comes from content rules. Both the inventory and the
+    /// equipment are mutated on clones and committed together, so a rejected
+    /// swap or a full inventory leaves the actor unchanged.
+    fn apply_equipment_action(
+        &mut self,
+        request: &ActionRequest,
+    ) -> Result<Vec<ActionEffect>, EngineError> {
+        let (actor_id, _) = self.validate_actor(request)?;
+        if request.target.is_some() {
+            return Err(EngineError::new(
+                ErrorCode::InvalidRequest,
+                "equipment actions cannot target another entity",
+            ));
+        }
+        let mut inventory = self
+            .entities
+            .get(&actor_id)
+            .and_then(|entity| entity.inventory.clone())
+            .ok_or_else(|| {
+                EngineError::new(ErrorCode::InvalidState, "actor has no inventory")
+                    .with_detail("actor", actor_id.to_string())
+            })?;
+        let mut equipment = self
+            .entities
+            .get(&actor_id)
+            .and_then(|entity| entity.equipment.clone())
+            .unwrap_or_default();
+
+        let effect = match &request.verb {
+            Verb::Equip => {
+                if request.params.len() != 1 || !request.params.contains_key("source_slot") {
+                    return Err(EngineError::new(
+                        ErrorCode::InvalidRequest,
+                        "equip requires exactly one source_slot parameter",
+                    ));
+                }
+                let source_slot = required_param_usize(request, "source_slot")?;
+                let stack = inventory
+                    .slot(source_slot)
+                    .cloned()
+                    .ok_or_else(|| EngineError::not_found("inventory slot", source_slot))?;
+                let slot = self.rules.equip_slot(&stack.definition).ok_or_else(|| {
+                    EngineError::new(ErrorCode::Unsupported, "item cannot be equipped")
+                        .with_detail("item", stack.definition.to_string())
+                })?;
+                let removed = inventory.remove(source_slot, 1)?;
+                let definition = removed.definition.clone();
+                let replaced = equipment.equip(slot, removed, self.rules.as_ref())?;
+                let replaced_definition = replaced.as_ref().map(|stack| stack.definition.clone());
+                if let Some(replaced) = replaced {
+                    inventory.try_add(replaced, self.rules.as_ref())?;
+                }
+                ActionEffect::ItemEquipped {
+                    actor: actor_id,
+                    slot,
+                    definition,
+                    replaced: replaced_definition,
+                }
+            }
+            Verb::Unequip => {
+                if request.params.len() != 1 || !request.params.contains_key("slot") {
+                    return Err(EngineError::new(
+                        ErrorCode::InvalidRequest,
+                        "unequip requires exactly one slot parameter",
+                    ));
+                }
+                let raw = request
+                    .params
+                    .get("slot")
+                    .expect("parameter presence was checked above");
+                let slot = EquipSlot::parse(raw).ok_or_else(|| {
+                    EngineError::new(ErrorCode::InvalidRequest, "unknown equipment slot")
+                        .with_detail("slot", raw.clone())
+                })?;
+                let stack = equipment
+                    .unequip(slot)
+                    .ok_or_else(|| EngineError::not_found("equipment slot", slot.as_str()))?;
+                let definition = stack.definition.clone();
+                let report = inventory.try_add(stack, self.rules.as_ref())?;
+                ActionEffect::ItemUnequipped {
+                    actor: actor_id,
+                    slot,
+                    definition,
+                    destination_slot: report.slots.first().copied().unwrap_or(0),
+                }
+            }
+            _ => unreachable!("only equipment operations are routed here"),
+        };
+
+        let entity = self
+            .entities
+            .get_mut(&actor_id)
+            .expect("validated actor still exists");
+        entity.inventory = Some(inventory);
+        entity.equipment = (!equipment.is_empty()).then_some(equipment);
         Ok(vec![effect])
     }
 
@@ -1301,7 +1433,7 @@ fn required_capability(verb: &Verb) -> ControlCapability {
     match verb {
         Verb::Attack => ControlCapability::Attack,
         Verb::Talk => ControlCapability::Speak,
-        Verb::Take | Verb::Insert | Verb::Split | Verb::Merge | Verb::Equip => {
+        Verb::Take | Verb::Insert | Verb::Split | Verb::Merge | Verb::Equip | Verb::Unequip => {
             ControlCapability::Inventory
         }
         Verb::Inspect

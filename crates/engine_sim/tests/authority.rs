@@ -5,10 +5,11 @@
 
 use std::sync::Arc;
 
+use engine_core::equipment::EquipSlot;
 use engine_core::error::ErrorCode;
 use engine_core::faction::{FactionCatalog, Thresholds};
 use engine_core::id::{DefinitionId, IdKind, StableId};
-use engine_core::inventory::{Inventory, ItemStack, UniformItemRules};
+use engine_core::inventory::{Inventory, ItemStack, TableItemRules, UniformItemRules};
 use engine_core::math::Vec3;
 use engine_core::time::Millis;
 use engine_sim::action::{ActionEffect, ActionRequest, Verb};
@@ -532,6 +533,255 @@ fn player_inventory_splits_and_merges_are_authoritative_and_idempotent() {
     assert_eq!(
         zone.entity(actor).unwrap().inventory.as_ref(),
         Some(&after_merge)
+    );
+}
+
+fn equipment_zone() -> Zone {
+    let config = ZoneConfig::new(
+        text("zone.test_room"),
+        StableId::from_parts(IdKind::Zone, 1, 1),
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(20.0, 4.0, 20.0),
+    )
+    .unwrap();
+    let nav = NavGrid::new(20, 20, 1.0, Vec3::ZERO).unwrap();
+    let rules = TableItemRules::new(10)
+        .with_item(text("item.sword"), 1, Some(EquipSlot::MainHand))
+        .with_item(text("item.torch"), 5, None);
+    Zone::new(config, nav, Arc::new(rules)).unwrap()
+}
+
+#[test]
+fn equipping_and_unequipping_move_single_items_authoritatively() {
+    let mut zone = equipment_zone();
+    let (actor, principal) = player_at(&mut zone, 1, Vec3::ZERO, 3);
+    let sword = ItemStack::unique(text("item.sword"), StableId::from_parts(IdKind::Item, 1, 7));
+    let inventory = Inventory::from_slots(
+        vec![
+            Some(ItemStack::new(text("item.torch"), 3)),
+            Some(sword.clone()),
+            None,
+        ],
+        &TableItemRules::new(10).with_item(text("item.torch"), 5, None),
+    )
+    .unwrap();
+    zone.entity_mut(actor).unwrap().inventory = Some(inventory);
+
+    let equip_request = ActionRequest::new("equip-1", actor, Verb::Equip)
+        .by(principal)
+        .with_param("source_slot", "1");
+    let equipped = zone.apply_action(&equip_request, Millis::new(1));
+    assert!(equipped.is_applied(), "{:?}", equipped.error());
+    assert!(matches!(
+        equipped.effects(),
+        [ActionEffect::ItemEquipped {
+            actor: owner,
+            slot: EquipSlot::MainHand,
+            replaced: None,
+            ..
+        }] if *owner == actor
+    ));
+    let entity = zone.entity(actor).unwrap();
+    assert!(entity.inventory.as_ref().unwrap().slot(1).is_none());
+    assert_eq!(
+        entity.equipment.as_ref().unwrap().slot(EquipSlot::MainHand),
+        Some(&sword)
+    );
+
+    // Retrying the applied request returns the stored result and never
+    // equips a second time or resurrects the inventory slot.
+    let replay = zone.apply_action(&equip_request, Millis::new(2));
+    assert_eq!(replay, equipped);
+    assert!(
+        zone.entity(actor)
+            .unwrap()
+            .inventory
+            .as_ref()
+            .unwrap()
+            .slot(1)
+            .is_none()
+    );
+
+    let unequip_request = ActionRequest::new("unequip-1", actor, Verb::Unequip)
+        .by(principal)
+        .with_param("slot", "main_hand");
+    let unequipped = zone.apply_action(&unequip_request, Millis::new(3));
+    assert!(unequipped.is_applied(), "{:?}", unequipped.error());
+    assert!(matches!(
+        unequipped.effects(),
+        [ActionEffect::ItemUnequipped {
+            slot: EquipSlot::MainHand,
+            ..
+        }]
+    ));
+    let entity = zone.entity(actor).unwrap();
+    assert!(entity.equipment.is_none());
+    assert!(
+        entity
+            .inventory
+            .as_ref()
+            .unwrap()
+            .entries()
+            .any(|(_, stack)| stack == &sword)
+    );
+    let repeated = zone.apply_action(&unequip_request, Millis::new(4));
+    assert_eq!(repeated, unequipped);
+}
+
+#[test]
+fn equipment_rejections_leave_inventory_and_slots_unchanged() {
+    let mut zone = equipment_zone();
+    let (actor, principal) = player_at(&mut zone, 1, Vec3::ZERO, 1);
+    let inventory = Inventory::from_slots(
+        vec![Some(ItemStack::new(text("item.torch"), 3))],
+        &TableItemRules::new(10).with_item(text("item.torch"), 5, None),
+    )
+    .unwrap();
+    zone.entity_mut(actor).unwrap().inventory = Some(inventory);
+    let before = zone.entity(actor).unwrap().clone();
+
+    let not_equipment = zone.apply_action(
+        &ActionRequest::new("equip-torch", actor, Verb::Equip)
+            .by(principal)
+            .with_param("source_slot", "0"),
+        Millis::new(1),
+    );
+    assert_eq!(
+        not_equipment.error().unwrap().code(),
+        ErrorCode::Unsupported
+    );
+
+    let missing = zone.apply_action(
+        &ActionRequest::new("equip-empty", actor, Verb::Equip)
+            .by(principal)
+            .with_param("source_slot", "0"),
+        Millis::new(2),
+    );
+    assert_eq!(missing.error().unwrap().code(), ErrorCode::Unsupported);
+
+    let targeted = zone.apply_action(
+        &ActionRequest::new("equip-target", actor, Verb::Equip)
+            .on(entity(9))
+            .by(principal)
+            .with_param("source_slot", "0"),
+        Millis::new(3),
+    );
+    assert_eq!(targeted.error().unwrap().code(), ErrorCode::InvalidRequest);
+
+    let extra_param = zone.apply_action(
+        &ActionRequest::new("equip-extra", actor, Verb::Equip)
+            .by(principal)
+            .with_param("source_slot", "0")
+            .with_param("slot", "main_hand"),
+        Millis::new(4),
+    );
+    assert_eq!(
+        extra_param.error().unwrap().code(),
+        ErrorCode::InvalidRequest
+    );
+
+    let unknown_slot = zone.apply_action(
+        &ActionRequest::new("unequip-unknown", actor, Verb::Unequip)
+            .by(principal)
+            .with_param("slot", "tail"),
+        Millis::new(5),
+    );
+    assert_eq!(
+        unknown_slot.error().unwrap().code(),
+        ErrorCode::InvalidRequest
+    );
+
+    let empty_slot = zone.apply_action(
+        &ActionRequest::new("unequip-empty", actor, Verb::Unequip)
+            .by(principal)
+            .with_param("slot", "head"),
+        Millis::new(6),
+    );
+    assert_eq!(empty_slot.error().unwrap().code(), ErrorCode::NotFound);
+
+    let after = zone.entity(actor).unwrap();
+    assert_eq!(after.inventory, before.inventory);
+    assert_eq!(after.equipment, before.equipment);
+}
+
+#[test]
+fn equipping_a_second_item_returns_the_replaced_one_to_the_freed_slot() {
+    let mut zone = equipment_zone();
+    let (actor, principal) = player_at(&mut zone, 1, Vec3::ZERO, 2);
+    let first = ItemStack::unique(text("item.sword"), StableId::from_parts(IdKind::Item, 2, 1));
+    let second = ItemStack::unique(text("item.sword"), StableId::from_parts(IdKind::Item, 2, 2));
+    // A one-slot inventory holds the candidate. Equipping frees that slot, so
+    // the displaced sword must land there instead of being dropped.
+    let inventory =
+        Inventory::from_slots(vec![Some(second.clone())], &TableItemRules::new(10)).unwrap();
+    let mut equipment = engine_core::equipment::Equipment::new();
+    equipment
+        .equip(
+            EquipSlot::MainHand,
+            first.clone(),
+            &TableItemRules::new(10).with_item(text("item.sword"), 1, Some(EquipSlot::MainHand)),
+        )
+        .unwrap();
+    zone.entity_mut(actor).unwrap().inventory = Some(inventory);
+    zone.entity_mut(actor).unwrap().equipment = Some(equipment);
+
+    let swap = zone.apply_action(
+        &ActionRequest::new("equip-swap", actor, Verb::Equip)
+            .by(principal)
+            .with_param("source_slot", "0"),
+        Millis::new(1),
+    );
+    assert!(swap.is_applied(), "{:?}", swap.error());
+    assert!(matches!(
+        swap.effects(),
+        [ActionEffect::ItemEquipped {
+            slot: EquipSlot::MainHand,
+            replaced: Some(replaced),
+            ..
+        }] if *replaced == text("item.sword")
+    ));
+    let after = zone.entity(actor).unwrap();
+    assert_eq!(
+        after.equipment.as_ref().unwrap().slot(EquipSlot::MainHand),
+        Some(&second)
+    );
+    assert_eq!(after.inventory.as_ref().unwrap().slot(0), Some(&first));
+}
+
+#[test]
+fn a_full_inventory_blocks_unequipping_and_leaves_the_slot_filled() {
+    let mut zone = equipment_zone();
+    let (actor, principal) = player_at(&mut zone, 1, Vec3::ZERO, 1);
+    let sword = ItemStack::unique(text("item.sword"), StableId::from_parts(IdKind::Item, 2, 3));
+    let inventory = Inventory::from_slots(
+        vec![Some(ItemStack::new(text("item.torch"), 1))],
+        &TableItemRules::new(10),
+    )
+    .unwrap();
+    let mut equipment = engine_core::equipment::Equipment::new();
+    equipment
+        .equip(
+            EquipSlot::MainHand,
+            sword.clone(),
+            &TableItemRules::new(10).with_item(text("item.sword"), 1, Some(EquipSlot::MainHand)),
+        )
+        .unwrap();
+    zone.entity_mut(actor).unwrap().inventory = Some(inventory.clone());
+    zone.entity_mut(actor).unwrap().equipment = Some(equipment.clone());
+
+    let unequip = zone.apply_action(
+        &ActionRequest::new("unequip-full", actor, Verb::Unequip)
+            .by(principal)
+            .with_param("slot", "main_hand"),
+        Millis::new(1),
+    );
+    assert_eq!(unequip.error().unwrap().code(), ErrorCode::CapacityExceeded);
+    let after = zone.entity(actor).unwrap();
+    assert_eq!(after.inventory.as_ref(), Some(&inventory));
+    assert_eq!(after.equipment.as_ref(), Some(&equipment));
+    assert_eq!(
+        after.equipment.as_ref().unwrap().slot(EquipSlot::MainHand),
+        Some(&sword)
     );
 }
 

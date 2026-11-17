@@ -1,7 +1,5 @@
 //! Bounded, server-owned interaction presentation. No optimistic gameplay edits.
-use std::sync::OnceLock;
-
-use engine_core::i18n::{CatalogSet, Locale, MessageCatalog, MessageKey};
+use engine_core::i18n::Locale;
 use engine_core::id::{DefinitionId, StableId};
 use engine_net::envelope::{Envelope, MessageId};
 use serde::Deserialize;
@@ -68,7 +66,7 @@ pub struct InteractionState {
     pub(crate) pending: Option<MessageId>,
     panel: Option<Panel>,
     tick: Option<u64>,
-    status: &'static str,
+    status: String,
     lock: Option<LockChallenge>,
     locale: Locale,
 }
@@ -118,8 +116,8 @@ impl InteractionState {
         self.panel.as_ref()
     }
 
-    pub fn status(&self) -> &'static str {
-        self.status
+    pub fn status(&self) -> &str {
+        &self.status
     }
 
     pub fn pending(&self) -> bool {
@@ -128,7 +126,7 @@ impl InteractionState {
 
     pub(crate) fn sent(&mut self, id: MessageId) {
         self.pending = Some(id);
-        self.status = "Aguardando servidor…";
+        self.status = crate::localization::text(&self.locale, "ui.interaction.waiting");
     }
 
     /// Returns whether this is an interaction message. Error means malformed wire data.
@@ -145,7 +143,7 @@ impl InteractionState {
             }
             self.tick = Some(state.tick);
             if self.panel.is_some() && state.panel.is_none() {
-                self.status = "Interface encerrada pelo servidor.";
+                self.status = crate::localization::text(&self.locale, "ui.interaction.closed");
             }
             self.panel = state.panel;
             if self.panel.is_none() {
@@ -153,7 +151,7 @@ impl InteractionState {
             }
             if self.pending.is_some() && message.correlation == self.pending {
                 self.pending = None;
-                self.status = "Interface atualizada.";
+                self.status = crate::localization::text(&self.locale, "ui.interaction.updated");
             }
             return Ok(true);
         }
@@ -161,13 +159,15 @@ impl InteractionState {
             return Ok(false);
         }
         self.status = match message.kind.as_str() {
-            "protocol.error" => rejection(&self.locale, message.body["code"].as_str()),
+            "protocol.error" => {
+                crate::localization::error_text(&self.locale, message.body["code"].as_str())
+            }
             "action.result" => match message.body["outcome"]["status"].as_str() {
                 Some("applied") => {
                     self.apply_effects(&message.body["outcome"]["effects"])?;
-                    "Ação confirmada pelo servidor."
+                    crate::localization::text(&self.locale, "ui.interaction.confirmed")
                 }
-                Some("rejected") => rejection(
+                Some("rejected") => crate::localization::error_text(
                     &self.locale,
                     message.body["outcome"]["error"]["code"].as_str(),
                 ),
@@ -272,40 +272,6 @@ fn valid_panel(panel: &Panel) -> bool {
             && params_are_safe
             && names.insert(action.name.as_str())
     })
-}
-
-fn rejection(locale: &Locale, code: Option<&str>) -> &'static str {
-    let code = match code {
-        Some("forbidden") => "permission_denied",
-        Some("unauthorized") => "session_expired",
-        Some(code) => code,
-        None => "internal",
-    };
-    let key = MessageKey::parse(&format!("error.{code}")).ok();
-    key.and_then(|key| {
-        player_error_catalogs().and_then(|catalogs| catalogs.resolve(&key, locale).map(|m| m.text))
-    })
-    .unwrap_or("A ação não foi concluída. Atualize a interface e tente novamente.")
-}
-
-fn player_error_catalogs() -> Option<&'static CatalogSet> {
-    static CATALOGS: OnceLock<Option<CatalogSet>> = OnceLock::new();
-    CATALOGS
-        .get_or_init(|| {
-            let pt_br = ron::from_str::<MessageCatalog>(include_str!(
-                "../../../content/localization/pt-BR.ron"
-            ))
-            .ok()?;
-            let en = ron::from_str::<MessageCatalog>(include_str!(
-                "../../../content/localization/en.ron"
-            ))
-            .ok()?;
-            let mut catalogs = CatalogSet::new();
-            catalogs.insert(pt_br).ok()?;
-            catalogs.insert(en).ok()?;
-            Some(catalogs)
-        })
-        .as_ref()
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -434,5 +400,36 @@ mod tests {
             .receive(&reply("protocol.error", json!({"code":"conflict"}), "next"))
             .unwrap();
         assert!(!state.pending());
+    }
+
+    #[test]
+    fn interaction_status_and_errors_follow_the_selected_locale() {
+        let mut state = InteractionState::default();
+        state.sent(MessageId::parse("action").unwrap());
+        assert_eq!(state.status(), "Aguardando servidor…");
+
+        state
+            .receive(&reply(
+                "action.result",
+                json!({"outcome":{"status":"rejected","error":{"code":"forbidden"}}}),
+                "action",
+            ))
+            .unwrap();
+        assert_eq!(state.status(), "Você não tem permissão para esta ação.");
+
+        state.set_locale(Locale::parse("en").unwrap());
+        state.sent(MessageId::parse("next").unwrap());
+        assert_eq!(state.status(), "Waiting for the server…");
+        state
+            .receive(&reply(
+                "action.result",
+                json!({"outcome":{"status":"rejected","error":{"code":"forbidden"}}}),
+                "next",
+            ))
+            .unwrap();
+        assert_eq!(
+            state.status(),
+            "You do not have permission to perform this action."
+        );
     }
 }

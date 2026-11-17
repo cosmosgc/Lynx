@@ -260,6 +260,7 @@ pub struct UiState {
 struct TrackedEntity {
     snapshot: EntitySnapshot,
     inventory: Option<engine_core::inventory::Inventory>,
+    equipment: Option<engine_core::equipment::Equipment>,
     slow_multiplier: Option<f32>,
     sequence: u64,
 }
@@ -268,7 +269,7 @@ struct TrackedEntity {
 enum Change {
     Appeared(StableId),
     Changed(StableId),
-    InventoryChanged(StableId),
+    OwnerChanged(StableId),
     SlowChanged(StableId),
 }
 
@@ -1112,7 +1113,7 @@ impl WorldGateway {
                 Change::Changed(entity) => {
                     self.push_snapshot(&mut base, entity, ReplicationCategory::StateSnapshot)?;
                 }
-                Change::InventoryChanged(entity) => {
+                Change::OwnerChanged(entity) => {
                     self.push_owner_state(&mut base, entity)?;
                 }
                 Change::SlowChanged(entity) => {
@@ -1680,30 +1681,32 @@ impl WorldGateway {
         for entity in self.zone.entities() {
             let snapshot = EntitySnapshot::capture(entity);
             let inventory = entity.inventory.clone();
+            let equipment = entity.equipment.clone();
             let slow_multiplier = entity.slow.map(|slow| slow.multiplier);
             world.upsert(interest_entity(entity));
             let sequence = if let Some(previous) = self.tracked.get(&entity.id) {
                 let snapshot_changed = previous.snapshot != snapshot;
-                let inventory_changed = previous.inventory != inventory;
+                let owner_changed =
+                    previous.inventory != inventory || previous.equipment != equipment;
                 let slow_changed = previous.slow_multiplier != slow_multiplier;
                 if snapshot_changed {
                     changes.push(Change::Changed(entity.id));
                 }
-                if inventory_changed {
-                    changes.push(Change::InventoryChanged(entity.id));
+                if owner_changed {
+                    changes.push(Change::OwnerChanged(entity.id));
                 }
                 if slow_changed {
                     changes.push(Change::SlowChanged(entity.id));
                 }
-                if snapshot_changed || inventory_changed || slow_changed {
+                if snapshot_changed || owner_changed || slow_changed {
                     previous.sequence.saturating_add(1)
                 } else {
                     previous.sequence
                 }
             } else {
                 changes.push(Change::Appeared(entity.id));
-                if inventory.is_some() {
-                    changes.push(Change::InventoryChanged(entity.id));
+                if inventory.is_some() || equipment.is_some() {
+                    changes.push(Change::OwnerChanged(entity.id));
                 }
                 1
             };
@@ -1712,6 +1715,7 @@ impl WorldGateway {
                 TrackedEntity {
                     snapshot,
                     inventory,
+                    equipment,
                     slow_multiplier,
                     sequence,
                 },
@@ -1761,8 +1765,11 @@ impl WorldGateway {
         {
             return Ok(());
         }
-        let payload = serde_json::to_value(OwnerState { inventory })
-            .map_err(|error| internal_error(&error))?;
+        let payload = serde_json::to_value(OwnerState {
+            inventory,
+            equipment: tracked.equipment.clone(),
+        })
+        .map_err(|error| internal_error(&error))?;
         let tick = batch.tick;
         batch.push(
             ReplicationUpdate::new(ReplicationCategory::OwnerOnly, tick)

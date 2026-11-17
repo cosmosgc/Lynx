@@ -17,16 +17,19 @@ bevy = { workspace = true, features = [
     "bevy_winit",
     "x11",
     "2d_bevy_render",
-    "bevy_ui",
-    "bevy_ui_render",
     "bevy_text",
     "default_font",
 ] }
+bevy_egui = { version = "=0.43.1", default-features = false, features = ["render", "default_fonts"] }
 engine_content.workspace = true
 engine_core.workspace = true
+notify = "=8.2.2"
 ron.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3.23.0"
 
 [lints]
 workspace = true

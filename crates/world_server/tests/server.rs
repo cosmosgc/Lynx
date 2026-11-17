@@ -442,7 +442,7 @@ fn common_client_requests_have_stable_server_reply_envelopes() {
     );
     assert_golden(
         &action_request,
-        include_str!("fixtures/action-request-1.1.0.json"),
+        include_str!("fixtures/action-request-1.2.0.json"),
     );
     let action_outbound = fixture
         .server
@@ -451,7 +451,7 @@ fn common_client_requests_have_stable_server_reply_envelopes() {
     let action_reply = message_for(&action_outbound, alice.connection).unwrap();
     assert_golden(
         action_reply,
-        include_str!("fixtures/action-result-1.1.0.json"),
+        include_str!("fixtures/action-result-1.2.0.json"),
     );
 
     let movement = Envelope::new(
@@ -464,7 +464,7 @@ fn common_client_requests_have_stable_server_reply_envelopes() {
     );
     assert_golden(
         &movement,
-        include_str!("fixtures/movement-request-1.1.0.json"),
+        include_str!("fixtures/movement-request-1.2.0.json"),
     );
     let movement_outbound = fixture
         .server
@@ -473,7 +473,7 @@ fn common_client_requests_have_stable_server_reply_envelopes() {
     let movement_reply = message_for(&movement_outbound, alice.connection).unwrap();
     assert_golden(
         movement_reply,
-        include_str!("fixtures/movement-queued-1.1.0.json"),
+        include_str!("fixtures/movement-queued-1.2.0.json"),
     );
 
     let chat = Envelope::new(
@@ -481,15 +481,15 @@ fn common_client_requests_have_stable_server_reply_envelopes() {
         MessageKind::parse("chat.send").unwrap(),
         json!({ "channel_id": "zone", "content": "hello golden" }),
     );
-    assert_golden(&chat, include_str!("fixtures/chat-send-1.1.0.json"));
+    assert_golden(&chat, include_str!("fixtures/chat-send-1.2.0.json"));
     let chat_outbound = fixture
         .server
         .receive(alice.connection, &chat, Millis::new(1_003))
         .unwrap();
     for chat_reply in messages_for(&chat_outbound, alice.connection) {
         let golden = match chat_reply.kind.as_str() {
-            "chat.message" => include_str!("fixtures/chat-message-1.1.0.json"),
-            "chat.send.result" => include_str!("fixtures/chat-send-result-1.1.0.json"),
+            "chat.message" => include_str!("fixtures/chat-message-1.2.0.json"),
+            "chat.send.result" => include_str!("fixtures/chat-send-result-1.2.0.json"),
             kind => panic!("unexpected golden chat response kind {kind}"),
         };
         assert_golden(chat_reply, golden);
@@ -506,25 +506,25 @@ fn chat_query_responses_match_versioned_wire_fixtures() {
             "golden-channels",
             "chat.channels",
             json!({}),
-            include_str!("fixtures/chat-channels-1.1.0.json"),
+            include_str!("fixtures/chat-channels-1.2.0.json"),
             "chat.channels.result",
-            include_str!("fixtures/chat-channels-result-1.1.0.json"),
+            include_str!("fixtures/chat-channels-result-1.2.0.json"),
         ),
         (
             "golden-presence",
             "chat.presence",
             json!({}),
-            include_str!("fixtures/chat-presence-1.1.0.json"),
+            include_str!("fixtures/chat-presence-1.2.0.json"),
             "chat.presence.result",
-            include_str!("fixtures/chat-presence-result-1.1.0.json"),
+            include_str!("fixtures/chat-presence-result-1.2.0.json"),
         ),
         (
             "golden-history",
             "chat.history",
             json!({ "channel_id": "zone", "limit": 10 }),
-            include_str!("fixtures/chat-history-1.1.0.json"),
+            include_str!("fixtures/chat-history-1.2.0.json"),
             "chat.history.result",
-            include_str!("fixtures/chat-history-result-1.1.0.json"),
+            include_str!("fixtures/chat-history-result-1.2.0.json"),
         ),
     ] {
         let request = Envelope::new(
@@ -555,7 +555,7 @@ fn panel_state_matches_versioned_wire_fixture() {
     );
     assert_golden(
         &request,
-        include_str!("fixtures/ui-open-request-1.1.0.json"),
+        include_str!("fixtures/ui-open-request-1.2.0.json"),
     );
     let outbound = fixture
         .server
@@ -565,7 +565,7 @@ fn panel_state_matches_versioned_wire_fixture() {
         .into_iter()
         .find(|message| message.kind.as_str() == UI_STATE_KIND)
         .expect("opening the panel emits ui.state");
-    assert_golden(state, include_str!("fixtures/ui-state-1.1.0.json"));
+    assert_golden(state, include_str!("fixtures/ui-state-1.2.0.json"));
 }
 
 fn open(server: &mut WorldServer, account: &str, principal: StableId) -> Opened {

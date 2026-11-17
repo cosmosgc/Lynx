@@ -52,14 +52,10 @@ impl fmt::Debug for NakamaChatClient {
 }
 
 impl NakamaChatClient {
-    /// Connect and join a persistent public room. The caller must use a
-    /// Nakama-issued access token; client-supplied sender identity is ignored.
-    pub fn connect(base_url: &str, bearer: &str, room: &str) -> Result<Self, NakamaChatFailure> {
-        if bearer.is_empty()
-            || room.is_empty()
-            || room.len() > 128
-            || room.chars().any(char::is_control)
-        {
+    /// Connect with a Nakama-issued access token. A room is not joined until
+    /// the world API returns the session's server-authorized zone target.
+    pub fn connect(base_url: &str, bearer: &str) -> Result<Self, NakamaChatFailure> {
+        if bearer.is_empty() {
             return Err(NakamaChatFailure::InvalidConfiguration);
         }
         let socket_url = socket_url(base_url, bearer)?;
@@ -69,7 +65,6 @@ impl NakamaChatClient {
             socket_url,
             base_url.trim_end_matches('/').to_owned(),
             bearer.to_owned(),
-            room.to_owned(),
             out_rx,
             in_tx,
         ));
@@ -83,7 +78,7 @@ impl NakamaChatClient {
     pub fn join(&self, target: ChatChannelTarget) -> Result<(), NakamaChatFailure> {
         self.outgoing
             .try_send(Command::Join(target))
-            .map_err(map_queue_error)
+            .map_err(|error| map_queue_error(&error))
     }
 
     pub fn send(&self, channel: &str, content: &str) -> Result<(), NakamaChatFailure> {
@@ -94,7 +89,7 @@ impl NakamaChatClient {
                 channel: channel.to_owned(),
                 content: message,
             })
-            .map_err(map_queue_error)
+            .map_err(|error| map_queue_error(&error))
     }
 
     pub fn history(
@@ -112,7 +107,7 @@ impl NakamaChatClient {
                 limit,
                 cursor,
             })
-            .map_err(map_queue_error)
+            .map_err(|error| map_queue_error(&error))
     }
 
     pub fn try_recv(&mut self) -> Result<Value, mpsc::error::TryRecvError> {
@@ -120,7 +115,7 @@ impl NakamaChatClient {
     }
 }
 
-fn map_queue_error(error: mpsc::error::TrySendError<Command>) -> NakamaChatFailure {
+fn map_queue_error(error: &mpsc::error::TrySendError<Command>) -> NakamaChatFailure {
     match error {
         mpsc::error::TrySendError::Full(_) => NakamaChatFailure::QueueFull,
         mpsc::error::TrySendError::Closed(_) => NakamaChatFailure::Closed,
@@ -165,7 +160,6 @@ async fn run(
     url: String,
     base_url: String,
     bearer: String,
-    room: String,
     mut outgoing: mpsc::Receiver<Command>,
     incoming: mpsc::Sender<Value>,
 ) {
@@ -186,28 +180,12 @@ async fn run(
         return;
     };
     let (mut sink, mut stream) = socket.split();
-    if sink
-        .send(Message::Text(
-            json!({"cid":"lynx-chat-join", "channel_join": {
-                "target": room, "type": 1, "persistence": true, "hidden": false
-            }})
-            .to_string()
-            .into(),
-        ))
-        .await
-        .is_err()
-    {
-        let _ = incoming.try_send(json!({"error": {"code": "unavailable"}}));
-        return;
-    }
     let mut channels: HashMap<String, String> = HashMap::new();
     let mut aliases: HashMap<String, String> = HashMap::new();
     let mut joins: HashMap<String, String> = HashMap::new();
-    joins.insert("lynx-chat-join".to_owned(), "zone".to_owned());
     let mut sequence = 0_u64;
     let mut pending_messages: HashMap<String, VecDeque<String>> = HashMap::new();
     let mut pending_messages_total = 0_usize;
-    channels.insert("zone".to_owned(), String::new());
     loop {
         tokio::select! {
             incoming_message = stream.next() => {
@@ -227,10 +205,6 @@ async fn run(
                                         if sink.send(Message::Text(outgoing.to_string().into())).await.is_err() { return; }
                                     }
                                 }
-                            } else if joins.contains_key("lynx-chat-join") {
-                                joins.remove("lynx-chat-join");
-                                channels.insert("zone".to_owned(), id.to_owned());
-                                aliases.insert(id.to_owned(), "zone".to_owned());
                             }
                             if let Some(channel) = envelope.get("channel").and_then(Value::as_object) {
                                 let mut channel = channel.clone();
@@ -274,7 +248,7 @@ async fn run(
                 match command {
                     Command::Join(target) => {
                         let (alias, wire_target, channel_type) = match target {
-                            ChatChannelTarget::Room(room) => (room.clone(), room, 1),
+                            ChatChannelTarget::Room(room) => ("zone".to_owned(), room, 1),
                             ChatChannelTarget::Direct(account) => (format!("direct:{account}"), account.to_string(), 2),
                             ChatChannelTarget::Group(group) => (format!("group:{group}"), group.to_string(), 3),
                         };
@@ -344,4 +318,64 @@ async fn run(
         }
     }
     let _ = incoming.try_send(json!({"error": {"code": "unavailable"}}));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::StreamExt;
+    use tokio::sync::oneshot;
+    use tokio_tungstenite::tungstenite::Message;
+
+    #[tokio::test]
+    async fn chat_socket_waits_for_the_server_returned_room_before_joining() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (connected_tx, connected_rx) = oneshot::channel();
+        let (quiet_tx, quiet_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let (_sink, mut stream) = tokio_tungstenite::accept_async(socket)
+                .await
+                .unwrap()
+                .split();
+            connected_tx.send(()).unwrap();
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(50), stream.next())
+                    .await
+                    .is_err(),
+                "the realtime client must not join a configured/default room on connect"
+            );
+            quiet_tx.send(()).unwrap();
+            let Some(Ok(Message::Text(text))) =
+                tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+                    .await
+                    .unwrap()
+            else {
+                panic!("explicit room target should issue a Nakama join");
+            };
+            let request: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(
+                request
+                    .pointer("/channel_join/target")
+                    .and_then(Value::as_str),
+                Some("lynx-zone-zone:one")
+            );
+            assert_eq!(
+                request
+                    .pointer("/channel_join/type")
+                    .and_then(Value::as_i64),
+                Some(1)
+            );
+        });
+
+        let client =
+            NakamaChatClient::connect(&format!("http://{address}"), "nakama-token").unwrap();
+        connected_rx.await.unwrap();
+        quiet_rx.await.unwrap();
+        client
+            .join(ChatChannelTarget::Room("lynx-zone-zone:one".into()))
+            .unwrap();
+        server.await.unwrap();
+    }
 }

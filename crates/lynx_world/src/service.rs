@@ -145,6 +145,14 @@ pub enum ServerEvent {
         /// Number of removed sessions, or the durable-store failure.
         reply: oneshot::Sender<Result<usize, EngineError>>,
     },
+    /// Resolve the owning zone and character from a non-consuming world resume
+    /// token. The token is never used as a client-selected zone identifier.
+    ResolveWorldSession {
+        /// Current gateway-issued resume token.
+        token: ResumeToken,
+        /// Authoritative zone and principal carried by the retained session.
+        reply: oneshot::Sender<Result<(String, StableId), EngineError>>,
+    },
 }
 
 /// A successful admission into a multi-zone runtime.
@@ -1224,8 +1232,39 @@ impl Service {
                 let result = self.revoke_principal_sessions(principal);
                 let _ = reply.send(result);
             }
+            ServerEvent::ResolveWorldSession { token, reply } => {
+                let result = self.resolve_world_session(&token);
+                let _ = reply.send(result);
+            }
         }
         self.update_gauges();
+    }
+
+    fn resolve_world_session(
+        &self,
+        token: &ResumeToken,
+    ) -> Result<(String, StableId), EngineError> {
+        let zone_id = self.server.gateway().zone().config().instance.to_string();
+        let Some((owner_zone, principal)) = self.server.gateway().resume_location(token)? else {
+            return Err(EngineError::new(
+                ErrorCode::SessionExpired,
+                "the world session is unknown or expired",
+            ));
+        };
+        if owner_zone != zone_id {
+            return Err(EngineError::new(
+                ErrorCode::SessionExpired,
+                "the world session belongs to another zone",
+            ));
+        }
+        match self.server.gateway().player_actor(principal) {
+            Ok(_) => Ok((owner_zone, principal)),
+            Err(error) if error.code() == ErrorCode::NotFound => Err(EngineError::new(
+                ErrorCode::SessionExpired,
+                "the world session character is no longer admitted",
+            )),
+            Err(error) => Err(error),
+        }
     }
 
     fn admit(
@@ -1425,7 +1464,10 @@ impl Service {
                 .unwrap_or(("no_result", None)),
         };
         let correlation_id = envelope.id.as_str();
-        let parent_correlation_id = envelope.correlation.as_ref().map(|id| id.as_str());
+        let parent_correlation_id = envelope
+            .correlation
+            .as_ref()
+            .map(engine_net::MessageId::as_str);
         let zone = self.server.gateway().zone().config().instance.to_string();
         let duration_ms = elapsed.as_secs_f64() * 1_000.0;
 
@@ -1596,6 +1638,10 @@ impl Service {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "per-connection send updates bounded queues and applies a consistent slow-client policy"
+    )]
     fn send(&mut self, connection: ConnectionId, frame: ServerFrame) {
         let session = self
             .server
@@ -1899,7 +1945,8 @@ impl MultiZoneService {
             .as_nanos()
             .div_ceil(self.tick.as_nanos())
             .max(1)
-            .min(u128::from(u64::MAX)) as u64;
+            .min(u128::from(u64::MAX));
+        let checkpoint_every = u64::try_from(checkpoint_every).unwrap_or(u64::MAX);
 
         loop {
             tokio::select! {
@@ -2011,6 +2058,10 @@ impl MultiZoneService {
             ServerEvent::LeaveZone { route } => self.leave(&route),
             ServerEvent::RevokePrincipal { principal, reply } => {
                 let result = self.revoke_principal(principal);
+                let _ = reply.send(result);
+            }
+            ServerEvent::ResolveWorldSession { token, reply } => {
+                let result = self.resolve_world_session(&token);
                 let _ = reply.send(result);
             }
         }
@@ -2159,7 +2210,10 @@ impl MultiZoneService {
         self.admit_zone(&zone_id, credential, hello, outbound)
     }
 
-    fn resume_zone(&self, token: &ResumeToken) -> Result<String, EngineError> {
+    fn resolve_world_session(
+        &self,
+        token: &ResumeToken,
+    ) -> Result<(String, StableId), EngineError> {
         for zone_id in self.runtime.zone_ids() {
             let server = self.runtime.zone_server(zone_id).ok_or_else(|| {
                 EngineError::new(ErrorCode::InvalidState, "a registered zone disappeared")
@@ -2181,13 +2235,18 @@ impl MultiZoneService {
                         "the session character is not present in its owning zone",
                     ));
                 }
-                return Ok(owner_zone);
+                return Ok((owner_zone, principal));
             }
         }
         Err(EngineError::new(
             ErrorCode::SessionExpired,
             "the world session is unknown or expired",
         ))
+    }
+
+    fn resume_zone(&self, token: &ResumeToken) -> Result<String, EngineError> {
+        self.resolve_world_session(token)
+            .map(|(zone_id, _principal)| zone_id)
     }
 
     fn ensure_character_zone(
@@ -2830,6 +2889,10 @@ struct PendingWorldEvent {
 ///
 /// Entities are emitted in stable-ID order, followed by fixed-order section
 /// replacements, including retry caches and durable counters.
+#[expect(
+    clippy::too_many_lines,
+    reason = "all persistent sections are compared in stable order to produce one replayable tick batch"
+)]
 fn world_delta_events(previous: &WorldSnapshot, current: &WorldSnapshot) -> Vec<PendingWorldEvent> {
     let previous_entities = entity_records(previous);
     let current_entities = entity_records(current);
@@ -2968,6 +3031,9 @@ fn clock() -> Millis {
 mod tests {
     use super::*;
 
+    use engine_content::{
+        DisplayText, MapPosition, MapZone, RouteKind, WorldMapDefinition, ZoneRoute,
+    };
     use engine_core::id::IdKind;
     use engine_core::inventory::UniformItemRules;
     use engine_core::math::Vec3;
@@ -3362,6 +3428,44 @@ mod tests {
     }
 
     #[test]
+    fn single_zone_world_session_resolves_from_its_resume_token() {
+        let (mut service, grant, _) = service();
+        let zone_id = service
+            .server
+            .gateway()
+            .zone()
+            .config()
+            .instance
+            .to_string();
+        let (outbound, mut receiver) = mpsc::channel(16);
+        service
+            .admit(
+                &Credential::Static(grant.clone()),
+                &Hello {
+                    handshake: demo::handshake().unwrap(),
+                    last_ack_tick: Tick::ZERO,
+                },
+                &outbound,
+            )
+            .unwrap();
+        let token = loop {
+            match receiver.try_recv().unwrap() {
+                ServerFrame::Envelope(envelope) if envelope.kind.as_str() == TOKEN_KIND => {
+                    break ResumeToken::new(envelope.body["resume"].as_str().unwrap()).unwrap();
+                }
+                ServerFrame::Envelope(_) | ServerFrame::EncodedReplication { .. } => {}
+                ServerFrame::Close => panic!("admission unexpectedly closed"),
+            }
+        };
+        let (reply, mut result) = oneshot::channel();
+        service.handle(ServerEvent::ResolveWorldSession { token, reply });
+        assert_eq!(
+            result.try_recv().unwrap().unwrap(),
+            (zone_id, grant.principal)
+        );
+    }
+
+    #[test]
     fn service_uses_configured_interval_for_each_movement_tick() {
         let (mut service, grant, _) = service();
         let (outbound, _receiver) = mpsc::channel(16);
@@ -3708,6 +3812,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_static_token_admits_one_character_and_returns_a_resume_secret() {
+        const FAKE_TOKEN: &str = "FAKE_LYNX_TEST_TOKEN_DO_NOT_AUTHENTICATE";
         let (service, grant, _) = service();
         let (events, receiver) = mpsc::channel(8);
         let (shutdown, shutdown_rx) = watch::channel(false);
@@ -3724,8 +3829,7 @@ mod tests {
         assert_eq!(next(&mut out_rx).await.kind.as_str(), SNAPSHOT_KIND);
         let token = next(&mut out_rx).await;
         assert_eq!(token.kind.as_str(), TOKEN_KIND);
-        const FAKE_TOKEN: &str = "FAKE_LYNX_TEST_TOKEN_DO_NOT_AUTHENTICATE";
-        let fixture = include_str!("../../world_server/tests/fixtures/world-token-1.1.0.json");
+        let fixture = include_str!("../../world_server/tests/fixtures/world-token-1.2.0.json");
         let expected = Envelope::decode(fixture).unwrap();
         let mut token_golden = token.clone();
         token_golden.id = expected.id;
@@ -3790,6 +3894,129 @@ mod tests {
 
         shutdown.send(true).unwrap();
         task.await.unwrap();
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "this headless authority test covers multi-zone routing and resume rotation as one scenario"
+    )]
+    fn authenticated_world_session_resolves_its_admitted_zone_and_rotates_on_resume() {
+        fn admit_and_take_token(
+            service: &mut MultiZoneService,
+            credential: &Credential,
+            hello: &Hello,
+        ) -> (
+            ZoneAdmitted,
+            mpsc::Sender<ServerFrame>,
+            mpsc::Receiver<ServerFrame>,
+            ResumeToken,
+        ) {
+            let (outbound, mut receiver) = mpsc::channel(16);
+            let admitted = service.admit_default(credential, hello, &outbound).unwrap();
+            loop {
+                match receiver.try_recv().unwrap() {
+                    ServerFrame::Envelope(envelope) if envelope.kind.as_str() == TOKEN_KIND => {
+                        let token =
+                            ResumeToken::new(envelope.body["resume"].as_str().unwrap()).unwrap();
+                        return (admitted, outbound, receiver, token);
+                    }
+                    ServerFrame::Envelope(_) | ServerFrame::EncodedReplication { .. } => {}
+                    ServerFrame::Close => panic!("admission unexpectedly closed"),
+                }
+            }
+        }
+
+        let authenticator =
+            Authenticator::new(&[digest("zone-one-token"), digest("zone-two-token")]).unwrap();
+        let grants: Vec<_> = authenticator.grants().cloned().collect();
+        let first_zone = demo::build_zone(&[grants[0].clone()]).unwrap();
+        let first_zone_id = first_zone.config().instance.to_string();
+        let second_zone_original = demo::build_zone(&[grants[1].clone()]).unwrap();
+        let mut second_snapshot = second_zone_original.snapshot();
+        let second_instance = StableId::from_parts(IdKind::Zone, 9, 2);
+        second_snapshot.config.instance = second_instance;
+        let second_zone = Zone::restore(
+            &second_snapshot,
+            second_zone_original.nav().clone(),
+            Arc::new(UniformItemRules::new(99)),
+        )
+        .unwrap();
+        let second_zone_id = second_instance.to_string();
+        let gateway = |zone| {
+            WorldGateway::new(
+                zone,
+                demo::handshake().unwrap(),
+                GatewayConfig::new(DurationMs::new(30_000)),
+                SystemResumeTokens::new(),
+            )
+            .unwrap()
+        };
+        let mut runtime = MultiZoneRuntime::new(Arc::new(NoopZoneSnapshots));
+        runtime
+            .register(WorldServer::new(gateway(first_zone)))
+            .unwrap();
+        runtime
+            .register(WorldServer::new(gateway(second_zone)))
+            .unwrap();
+        let mut service = MultiZoneService::new(
+            runtime,
+            first_zone_id.clone(),
+            Duration::from_millis(50),
+            Duration::from_millis(50),
+        )
+        .unwrap();
+        let hello = Hello {
+            handshake: demo::handshake().unwrap(),
+            last_ack_tick: Tick::ZERO,
+        };
+
+        let (first_admission, first_outbound, _first_receiver, first_token) =
+            admit_and_take_token(&mut service, &Credential::Static(grants[0].clone()), &hello);
+        let (second_admission, _second_outbound, _second_receiver, second_token) =
+            admit_and_take_token(&mut service, &Credential::Static(grants[1].clone()), &hello);
+
+        let resolve = |service: &mut MultiZoneService, token: ResumeToken| {
+            let (reply, mut result) = oneshot::channel();
+            service.handle(ServerEvent::ResolveWorldSession { token, reply });
+            result.try_recv().unwrap()
+        };
+        assert_eq!(
+            resolve(&mut service, first_token.clone()).unwrap(),
+            (first_zone_id.clone(), grants[0].principal)
+        );
+        assert_eq!(
+            resolve(&mut service, second_token.clone()).unwrap(),
+            (second_zone_id.clone(), grants[1].principal)
+        );
+
+        let (cross_zone_outbound, _cross_zone_receiver) = mpsc::channel(16);
+        let cross_zone = service
+            .admit_zone(
+                &second_zone_id,
+                &Credential::Resume(first_token.clone()),
+                &hello,
+                &cross_zone_outbound,
+            )
+            .unwrap_err();
+        assert_eq!(cross_zone.code(), ErrorCode::Conflict);
+
+        service.leave(&first_admission.route);
+        let (_resumed, _resumed_outbound, _resumed_receiver, rotated_token) = admit_and_take_token(
+            &mut service,
+            &Credential::Resume(first_token.clone()),
+            &hello,
+        );
+        assert_eq!(
+            resolve(&mut service, rotated_token).unwrap(),
+            (first_zone_id, grants[0].principal)
+        );
+        assert_eq!(
+            resolve(&mut service, first_token).unwrap_err().code(),
+            ErrorCode::SessionExpired
+        );
+        assert_eq!(second_admission.route.zone_id, second_zone_id);
+        drop(first_outbound);
     }
 
     #[test]
