@@ -767,7 +767,10 @@ fn random_seed() -> Result<u64, EngineError> {
 mod tests {
     use super::*;
     use crate::auth::{Authenticator, digest};
-    use engine_content::{BehaviorDefinition, ContentDefinition, DisplayText};
+    use engine_content::{
+        BehaviorDefinition, BehaviorGraph, BehaviorInstruction, BehaviorNode, ContentDefinition,
+        DisplayText,
+    };
     use engine_core::i18n::MessageKey;
     use engine_core::schema::SchemaVersion;
 
@@ -860,6 +863,101 @@ mod tests {
         assert_eq!(bindings[1].id.as_str(), "behavior.demo_guard");
         assert_eq!(bindings[1].kind, AiBehaviorKind::Guard);
         assert_eq!(bindings[1].range_m, 8.0);
+    }
+
+    #[test]
+    fn authored_graph_and_daily_schedule_change_live_zone_decisions() {
+        let behavior_id = definition("behavior.demo_guard_chase").unwrap();
+        let wait_id = definition("behavior.authored_wait").unwrap();
+        let mut content = ContentSet::new();
+        content
+            .insert_definition(
+                "behaviors/behavior.demo_guard_chase.ron",
+                ContentDefinition {
+                    id: behavior_id,
+                    version: SchemaVersion::new(1, 0),
+                    display: DisplayText {
+                        name: MessageKey::parse("behavior.name").unwrap(),
+                        description: MessageKey::parse("behavior.description").unwrap(),
+                    },
+                    components: std::collections::BTreeMap::default(),
+                    presentation: None,
+                    tags: std::collections::BTreeSet::default(),
+                    travel_triggers: Vec::new(),
+                    entity_placements: Vec::new(),
+                    entity_links: Vec::new(),
+                    link: None,
+                    behavior: Some(BehaviorDefinition {
+                        kind: BehaviorKind::GuardChase,
+                        range_m: 32.0,
+                        schedule: Some(engine_core::time::DailySchedule {
+                            start_minute_utc: 1,
+                            end_minute_utc: 2,
+                        }),
+                        aggro_group: None,
+                        graph: Some(BehaviorGraph {
+                            entry: wait_id.clone(),
+                            nodes: vec![BehaviorNode {
+                                id: wait_id,
+                                instruction: BehaviorInstruction::Wait,
+                                on_success: None,
+                                on_failure: None,
+                            }],
+                        }),
+                        patrol_route: Vec::new(),
+                    }),
+                },
+            )
+            .unwrap();
+
+        let policy_at = |epoch| {
+            let mut factions = FactionCatalog::new();
+            factions.set_bidirectional(
+                definition(DEMO_DEFENDERS).unwrap(),
+                definition(DEMO_ATTACKERS).unwrap(),
+                Alignment::new(-100),
+            );
+            authored_ai_tick_policy(&content, factions, Millis::new(epoch), 50)
+                .unwrap()
+                .expect("authored behavior produces a runtime policy")
+        };
+
+        let mut inactive_zone = build_zone(&[]).unwrap();
+        inactive_zone.set_ai_tick_policy(Some(policy_at(0)));
+        inactive_zone.advance_tick();
+        let inactive_report = inactive_zone.ai_tick_report();
+        let inactive_decision = inactive_report
+            .decisions
+            .iter()
+            .find(|decision| decision.behavior.as_str() == "behavior.demo_guard_chase")
+            .expect("demo guard receives the authored behavior");
+        assert_eq!(inactive_decision.reason, "schedule_inactive");
+        assert_eq!(inactive_decision.behavior_nodes_executed, 0);
+        assert_eq!(inactive_report.action_attempts, 0);
+
+        let mut active_zone = build_zone(&[]).unwrap();
+        active_zone.set_ai_tick_policy(Some(policy_at(60_000)));
+        active_zone.advance_tick();
+        let active_report = active_zone.ai_tick_report();
+        let active_decision = active_report
+            .decisions
+            .iter()
+            .find(|decision| decision.behavior.as_str() == "behavior.demo_guard_chase")
+            .expect("demo guard receives the authored behavior");
+        assert_eq!(active_decision.reason, "behavior_wait");
+        assert_eq!(active_decision.behavior_nodes_executed, 1);
+        assert_eq!(active_report.action_attempts, 0);
+        assert_eq!(
+            active_zone
+                .entity(StableId::from_parts(IdKind::Entity, 1, DEMO_TARGET_ID))
+                .unwrap()
+                .health
+                .as_ref()
+                .unwrap()
+                .current,
+            100,
+            "the authored schedule and wait instruction prevent the default guard attack"
+        );
     }
 
     #[test]

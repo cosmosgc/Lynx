@@ -806,6 +806,7 @@ mod tests {
     use super::*;
     use crate::id::{IdKind, StableId};
     use crate::time::DurationMs;
+    use proptest::prelude::*;
 
     fn faction_id(name: &str) -> DefinitionId {
         DefinitionId::new(name).unwrap()
@@ -1000,6 +1001,94 @@ mod tests {
         assert_eq!(world.faction(&guards).unwrap().treasury.balance(), 7_000);
         assert_eq!(world.faction(&bandits).unwrap().treasury.balance(), 5_000);
         assert_eq!(world.snapshot().transfers.len(), 1);
+    }
+
+    proptest! {
+        #[test]
+        fn generated_transfers_conserve_wealth_replay_once_and_recover(
+            source_balance in 1_u64..=100_000,
+            target_balance in 0_u64..=100_000,
+            amount_seed in 0_u64..=100_000
+        ) {
+            let (mut world, guards, bandits) = world();
+            world
+                .deposit(
+                    "generated-source-seed",
+                    actor(1),
+                    &guards,
+                    source_balance,
+                    "generated source balance",
+                    Millis::new(1),
+                )
+                .unwrap();
+            if target_balance > 0 {
+                world
+                    .deposit(
+                        "generated-target-seed",
+                        actor(2),
+                        &bandits,
+                        target_balance,
+                        "generated target balance",
+                        Millis::new(1),
+                    )
+                    .unwrap();
+            }
+
+            let amount = amount_seed % source_balance + 1;
+            let total_before = source_balance + target_balance;
+            let receipt = world
+                .transfer_treasury(
+                    "generated-transfer",
+                    actor(1),
+                    &guards,
+                    &bandits,
+                    amount,
+                    Millis::new(2),
+                )
+                .unwrap();
+            let source_after = world.faction(&guards).unwrap().treasury.balance();
+            let target_after = world.faction(&bandits).unwrap().treasury.balance();
+            prop_assert_eq!(source_after, source_balance - amount);
+            prop_assert_eq!(target_after, target_balance + amount);
+            prop_assert_eq!(source_after + target_after, total_before);
+            prop_assert_eq!(world.snapshot().transfers.len(), 1);
+            prop_assert!(world.validate().is_ok());
+
+            let after_transfer = world.snapshot();
+            let replay = world
+                .transfer_treasury(
+                    "generated-transfer",
+                    actor(1),
+                    &guards,
+                    &bandits,
+                    amount,
+                    Millis::new(3),
+                )
+                .unwrap();
+            prop_assert_eq!(replay, receipt);
+            prop_assert_eq!(world.snapshot(), after_transfer);
+
+            let before_failed_transfer = world.snapshot();
+            prop_assert_eq!(
+                world
+                    .transfer_treasury(
+                        "generated-insufficient-transfer",
+                        actor(1),
+                        &guards,
+                        &bandits,
+                        source_after + 1,
+                        Millis::new(4),
+                    )
+                    .unwrap_err()
+                    .code(),
+                ErrorCode::InvalidState
+            );
+            prop_assert_eq!(world.snapshot(), before_failed_transfer);
+            prop_assert_eq!(
+                FactionWorld::from_snapshot(world.snapshot()).unwrap().snapshot(),
+                world.snapshot()
+            );
+        }
     }
 
     #[test]

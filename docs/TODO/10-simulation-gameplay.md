@@ -328,11 +328,10 @@ that a persisted death schedule resumes after restart, restoring the server-set
 position and character identity without restoring the old controller. The
 reconnect policy keeps the persistent character and scheduled death/respawn state
 in the zone; resume installs a private snapshot baseline and rebinds control only
-if the actor is alive. A dead actor cannot travel. Once travel is implemented by
-`SIM-014`, handoff must preserve the stable character identity and be idempotent;
-respawn remains owned by the zone where death occurred, and prediction resets
-from the destination's private snapshot. Handoff mechanics belong to `SIM-014`;
-the bounded audit ring remains the current operator-visible record.
+if the actor is alive. A dead actor cannot travel. `SIM-014` handoff preserves
+the stable character identity and is idempotent; respawn remains owned by the
+zone where death occurred, and prediction resets from the destination's private
+snapshot. The bounded audit ring remains the current operator-visible record.
 
 ---
 
@@ -360,7 +359,7 @@ groups without code changes.
 
 **Acceptance criteria**
 
-- [ ] A content-only AI definition changes behavior without an engine fork.
+- [x] A content-only AI definition changes behavior without an engine fork.
 - [x] AI cannot exceed perception/action budgets or act while controlled by a
       player.
 - [x] Deterministic replay produces identical AI decisions for the same inputs.
@@ -421,18 +420,26 @@ perception range; a test verifies a custom ID and constrained range.
 positive ranges, while `lynx_world::demo::ai_behavior_bindings` maps a loaded
 `ContentSet` into stable runtime bindings. `lynx-world serve --content-bundle`
 loads and verifies those bindings and merges matching IDs into the running AI
-policy. Optional daily windows use UTC
-minutes, support midnight wrap, validate non-empty bounds, and are evaluated
-against the same simulation timestamp used by AI decisions; inactive behaviors
-report `schedule_inactive` without perceiving or acting. Authored `aggro_group`
+policy. Optional daily windows use UTC minutes, support midnight wrap, validate
+non-empty bounds, and are evaluated against the same simulation timestamp used
+by AI decisions; boundaries are start-inclusive/end-exclusive, including for
+pre-epoch timestamps. Direct time tests cover ordinary and overnight windows,
+invalid ranges, and those boundaries. Inactive behaviors report
+`schedule_inactive` without perceiving or acting. Authored `aggro_group`
 keys share a living hostile target only after an ally's attack succeeds, with a
 per-tick reuse cap and hostility recheck for every recipient. GuardChase
 uses the zone's cumulative path budget and per-agent retry state, then moves
 through the same server-side collision and dynamic-obstacle checks as other
 authoritative movement. `cargo test -p engine_sim
 policy_binds_content_behavior_ids_to_bounded_guard_semantics` passes.
-The legacy Guard and GuardChase primitives remain available alongside graphs.
-Seasonal schedules and privileged persistent admin inspection remain open. Tests
+`lynx_world::demo::tests::authored_graph_and_daily_schedule_change_live_zone_decisions`
+loads an authored graph and UTC daily window through the content-to-runtime
+binding. It proves an inactive schedule suppresses the decision and the active
+window runs an authored `wait` instruction instead of the built-in guard attack.
+Content-only behavior activation and daily schedule enforcement are covered end
+to end; seasonal schedules and privileged persistent admin inspection remain
+open. The legacy Guard and GuardChase primitives remain available alongside
+graphs. Tests
 `bounded_controller_scan_rotates_across_all_ai_controllers` and
 `rotated_controller_scan_replays_deterministically` prove bounded limits serve
 every AI controller and replay identically. Movement authority is implemented in
@@ -685,7 +692,7 @@ chat-family limiter is not an authorization or moderation substitute.
 ## SIM-014 — Additional zones and travel
 
 - **Priority:** P2
-- **Status:** In progress — authored-map startup, per-zone leases/checkpoints, zone-addressed transport, fair multi-zone ticking, stable static entity placements, patrol behavior bindings, zone-local activation links, and startup-loaded faction targeting are wired; live faction refresh, world aggregate mutation ownership, live travel handoff, and live recovery validation remain
+- **Status:** In progress — authored-map startup, per-zone leases/checkpoints, zone-addressed transport, fair multi-zone ticking, stable static entity placements, patrol behavior bindings, zone-local activation links, serialized faction refresh, and durable live travel handoff are wired; map-wide aggregate ownership and PostgreSQL crash-window validation remain
 - **Depends on:** `SIM-001`, `PST-005`
 
 **Scope**
@@ -701,7 +708,11 @@ chat-family limiter is not an authorization or moderation substitute.
 
 - [x] Travel only follows validated routes and server-owned access rules.
 - [x] A handoff cannot duplicate an entity or leave it in two zones.
-- [ ] A zone crash/restart recovers independently without corrupting others.
+- [x] File-checkpoint corruption in one zone does not prevent an independent
+      zone checkpoint from restoring.
+- [ ] PostgreSQL zone crash/restart recovers independently without corrupting
+      other zones; the opt-in database acceptance remains unrun here.
+- [ ] Travel cooldown semantics are defined and enforced by server authority.
 - [x] Cross-zone chat/party behavior is documented and tested.
 
 **Foundation:** `WorldMapDefinition::route_kind` resolves only an authored
@@ -713,9 +724,13 @@ acquires independent per-zone leases in stable zone-ID order and attempts to
 release earlier acquisitions if a later zone is unavailable. `ZoneSnapshotStore`
 now writes an independent file or lease-fenced PostgreSQL checkpoint for each
 zone. The executable map mode now connects zone leases, checkpoints, scheduling,
-gateway ownership, and zone-addressed transport. Route-specific access and
-cooldown enforcement in live travel and independent crash-recovery acceptance
-against PostgreSQL remain.
+gateway ownership, and zone-addressed transport. The `postgres_snapshot`
+integration target ran against the configured repository `.env` database and
+passed 10/10 snapshot/lease/replay tests, but it does not verify independent
+two-zone recovery or the handoff crash window. Those dedicated tests require
+`LYNX_PG_TEST_DATABASE`, which is not configured here. Travel cooldown duration
+and semantics still need a gameplay decision and are not invented by the
+transport layer.
 
 `ZoneHandoffCoordinator` now validates both atlas placement and the authored
 directed/bidirectional route before moving a persistent, living player entity.
@@ -729,9 +744,10 @@ snapshot ownership and commits both snapshot rows plus an integrity-checked,
 idempotent receipt under both zone lease fences in one transaction.
 `handoff_player_durable` stages transfer on private zone copies and replaces
 live state only after commit; a commit-connection failure requires the caller
-to stop and reload because the durable outcome can be uncertain. The executable
-does not yet call this API, and live database recovery remains unverified;
-crash-window recovery is not yet claimed.
+to stop and reload because the durable outcome can be uncertain. The authored
+map service calls this API and closes the source socket after commit so the
+client reconnects through the destination route. The headless service path is
+covered below; PostgreSQL crash-window recovery is not yet claimed.
 
 `ZoneTickScheduler` defines the multi-zone scheduling policy: stable
 round-robin order, one authoritative zone-tick quantum per zone in each batch,
@@ -744,7 +760,9 @@ atomic one-file-per-zone adapter and a PostgreSQL adapter backed by the existing
 `lynx.zone_snapshots` history table. PostgreSQL writes require the zone's live
 lease fence in the same transaction, and reads verify the payload hash, tick,
 schema major, and zone identity. The authored-map executable uses the
-PostgreSQL adapter; its recovery path still needs live acceptance.
+PostgreSQL adapter; its recovery path still needs live acceptance. A local
+file-store test corrupts one zone checkpoint and verifies the other zone still
+loads and restores its persistent entity independently.
 
 **Authored zone runtime adapter (2026-11-12):** The `core.zone` component now
 defines grid dimensions, origin, vertical bounds, blocked cells, session/entity
@@ -776,7 +794,31 @@ identities across gateways, route open/resume/input/disconnect operations with a
 zone-local connection address, fairly tick a bounded batch, and checkpoint one
 or all zones. Failed zone ticks remain isolated in per-zone outcomes. The
 authored-map executable constructs this owner and routes `/world/{zone_id}`;
-the legacy `/world` endpoint selects the stable first zone ID.
+the legacy `/world` endpoint selects the stable first zone ID. A missing
+destination during transfer returns `not_found` and re-registers the source
+without mutating its entity or tick. A runtime-level test advances a one-zone
+budget across registered zones and verifies each receives exactly one tick
+quantum before any zone receives another.
+
+**Headless service travel (2026-11-16):** A `MultiZoneService` test submits an
+authored trigger through the live service boundary. Unknown trigger IDs,
+out-of-range activations, client-supplied destination/arrival fields, and an
+injected definitive commit rejection return errors without closing the
+connection or moving the actor. A simulated uncertain durable-write error marks
+the authority loop to stop instead of continuing from a possibly divergent
+state. A valid trigger commits through an atomic in-memory handoff store, leaves
+the actor in exactly the destination zone, returns a
+destination-scoped resume token, invalidates the source token, and reconnects
+through the destination while rotating that token. The opt-in PostgreSQL test
+in `crates/lynx_world/tests/postgres_handoff.rs` checks both persisted snapshots,
+the resume route and receipt, independent zone restores, destination-lease
+stale-session detachment, durable resume/token rotation, and receipt-based retry.
+It also injects a failure at the final receipt insert—after snapshot writes and
+resume-route update—and verifies transaction rollback leaves durable and live
+state unchanged. This scenario was not executed here because
+`LYNX_PG_TEST_DATABASE` is not configured; loss of the commit acknowledgement
+and live survivor-service readiness remain open.
+
 
 Until the multi-zone session router exists, zone chat and history are scoped to
 one gateway/zone: messages are not forwarded to another zone, and disconnected
@@ -792,7 +834,7 @@ rules rather than implicit fanout.
 ## SIM-015 — Calendar objectives and NPC participation
 
 - **Priority:** P2
-- **Status:** Blocked — `SIM-001`, `SIM-006`
+- **Status:** In progress — cancellation/suspension and idempotent territory resolution are covered; objectives, NPC participation, and event inspection remain
 - **Depends on:** `SIM-001`, `SIM-006`
 - **References:** [world simulation §World calendar](../world-simulation.md#world-calendar-and-conflicts),
   ADR 0021
@@ -810,17 +852,30 @@ action rules are still design-only.
 
 **Acceptance criteria**
 
-- [ ] Cancelling or suspending an event never applies its victory result.
-- [ ] Duplicate resolution never duplicates rewards or territory changes.
+- [x] Cancelling or suspending an event never applies its victory result.
+- [x] Duplicate resolution never duplicates territory changes; event reward
+      grants are not implemented and still need an event-keyed idempotency
+      contract before rewards are introduced.
 - [ ] NPC participation obeys the same permissions, cooldowns, and range checks.
 - [ ] Objective progress is visible to eligible participants only.
+
+**Lifecycle regression coverage (2026-11-16):** `engine_sim` verifies that both
+cancelling and suspending an active event prevent resolution and leave territory
+ownership and treasury unchanged. Early-resolution and insufficient-participation
+rejections leave event status, territory history/ownership, and faction treasury
+balances unchanged. A second resolution under a fresh request ID returns the stored
+result without appending another territory-history entry. A suspended event
+also survives a calendar snapshot round trip as suspended and remains
+unresolvable with the faction aggregate consistent. These tests cover the
+existing bounded-conflict lifecycle only; they do not define event objectives,
+NPC participation, reward delivery, or editor inspection.
 
 ---
 
 ## SIM-016 — Faction and territory edge hardening
 
 - **Priority:** P2
-- **Status:** In progress — generated territory invariants and persistence recovery checks added; full reconciliation evidence remains
+- **Status:** In progress — generated territory, faction-power, and treasury-transfer invariants are covered; normalized-store reconciliation evidence remains
 - **Depends on:** `PST-003`
 - **References:** ADR 0020, [world simulation](../world-simulation.md#factions-guilds-and-wealth)
 
@@ -836,13 +891,32 @@ action rules are still design-only.
 **Acceptance criteria**
 
 - [x] Generated territory sequences prove eligible ownership changes under
-      configured windows and power, while early failed captures are atomic.
+      configured windows and power, early failed captures are atomic, and
+      released-territory cooldowns expire exactly at their configured deadline.
 - [x] Cancelled/failed calendar resolutions leave ownership and treasury
       unchanged; cancellation and rejection regressions are covered.
 - [ ] Snapshot and normalized-table views agree after backfill/restart in the
-      normalized faction/calendar persistence suite; live database evidence
-      was unavailable in this environment.
+      normalized faction/calendar persistence suite; this dedicated acceptance
+      remains unverified because `LYNX_PG_TEST_DATABASE` is not configured.
 - [x] History remains append-only, validated, and queryable by territory.
+- [x] Generated treasury inputs keep faction power monotonic, reserve-aware, and
+      capped according to the versioned rules.
+- [x] Generated faction transfers conserve total wealth, replay once, leave
+      insufficient-funds failures atomic, and survive aggregate snapshot recovery.
+
+`generated_release_cooldowns_expire_at_the_deadline` exercises release and
+reclaim across generated cooldown durations, proving early attempts leave the
+aggregate unchanged and the exact expiry instant permits a new claim while
+history and revisions remain consistent. `generated_contested_changes_are_atomic`
+varies capture power and attempt time while proving both capture and release
+leave a contested territory and its history untouched.
+`generated_power_breakdowns_are_monotonic_reserve_aware_and_capped` checks
+generated balances against reserve, weight, raw-power, and cap calculations.
+`generated_transfers_conserve_wealth_replay_once_and_recover` varies source and
+target balances and transfer amounts, then checks conservation, idempotent
+replay, failure atomicity, and snapshot reconstruction. These engine-level
+properties complement, but do not replace, the normalized-table
+restart/backfill criterion, which still needs configured PostgreSQL evidence.
 
 ---
 

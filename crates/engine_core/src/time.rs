@@ -151,4 +151,52 @@ mod tests {
         assert_eq!(now.remaining_until(Millis::new(1_250)), 250);
         assert_eq!(now.remaining_until(Millis::new(10)), 0);
     }
+
+    #[test]
+    fn daily_schedule_uses_utc_start_inclusive_end_exclusive_bounds() {
+        let schedule = DailySchedule {
+            start_minute_utc: 60,
+            end_minute_utc: 120,
+        };
+
+        assert!(!schedule.contains(Millis::new(59 * 60_000)));
+        assert!(schedule.contains(Millis::new(60 * 60_000)));
+        assert!(schedule.contains(Millis::new(119 * 60_000 + 59_999)));
+        assert!(!schedule.contains(Millis::new(120 * 60_000)));
+    }
+
+    #[test]
+    fn daily_schedule_wraps_midnight_and_handles_pre_epoch_time() {
+        let overnight = DailySchedule {
+            start_minute_utc: 1_380,
+            end_minute_utc: 60,
+        };
+
+        assert!(overnight.contains(Millis::new(0)));
+        assert!(overnight.contains(Millis::new(59 * 60_000)));
+        assert!(!overnight.contains(Millis::new(60 * 60_000)));
+        assert!(!overnight.contains(Millis::new(12 * 60 * 60_000)));
+        assert!(overnight.contains(Millis::new(-60_000)));
+        assert!(overnight.contains(Millis::new(-60 * 60_000)));
+    }
+
+    #[test]
+    fn invalid_daily_schedule_never_matches() {
+        for schedule in [
+            DailySchedule {
+                start_minute_utc: 0,
+                end_minute_utc: 0,
+            },
+            DailySchedule {
+                start_minute_utc: 1_440,
+                end_minute_utc: 30,
+            },
+            DailySchedule {
+                start_minute_utc: 30,
+                end_minute_utc: 1_440,
+            },
+        ] {
+            assert!(!schedule.contains(Millis::new(0)));
+        }
+    }
 }

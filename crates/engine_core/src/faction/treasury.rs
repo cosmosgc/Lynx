@@ -539,6 +539,21 @@ mod tests {
         DefinitionId::new(name).unwrap()
     }
 
+    fn treasury_with_balance(balance: u64) -> Treasury {
+        let mut treasury = Treasury::new();
+        if balance > 0 {
+            treasury
+                .deposit(
+                    "generated-balance",
+                    balance,
+                    "generated power input",
+                    Millis::new(1),
+                )
+                .unwrap();
+        }
+        treasury
+    }
+
     #[test]
     fn deposits_and_spends_conserve_the_ledger() {
         let mut treasury = Treasury::new();
@@ -769,6 +784,49 @@ mod tests {
                 let encoded = serde_json::to_string(&treasury).unwrap();
                 let decoded: Treasury = serde_json::from_str(&encoded).unwrap();
                 prop_assert_eq!(&decoded, &treasury);
+            }
+        }
+
+        #[test]
+        fn generated_power_breakdowns_are_monotonic_reserve_aware_and_capped(
+            base_power in 0_u64..10_000,
+            cap_extra in 0_u64..10_000,
+            treasury_weight_bps in 0_u16..=10_000,
+            reserve in 0_u64..100_000,
+            balance in 0_u64..100_000,
+            increase in 0_u64..100_000
+        ) {
+            let cap = base_power + cap_extra;
+            let rules = PowerRules {
+                version: SchemaVersion::new(1, 0),
+                base_power,
+                treasury_weight_bps,
+                reserve,
+                cap,
+            };
+            prop_assert!(rules.validate().is_ok());
+
+            let higher_balance = balance + increase;
+            let lower = rules.evaluate(&treasury_with_balance(balance));
+            let higher = rules.evaluate(&treasury_with_balance(higher_balance));
+            prop_assert!(lower.power <= higher.power);
+
+            for (input_balance, breakdown) in [
+                (balance, lower),
+                (higher_balance, higher),
+            ] {
+                let eligible = input_balance.saturating_sub(reserve);
+                let contribution = u64::try_from(
+                    (u128::from(eligible) * u128::from(treasury_weight_bps)) / 10_000,
+                )
+                .unwrap();
+                let raw = base_power.saturating_add(contribution);
+                prop_assert_eq!(breakdown.treasury_balance, input_balance);
+                prop_assert_eq!(breakdown.eligible_treasury, eligible);
+                prop_assert_eq!(breakdown.treasury_power, contribution);
+                prop_assert_eq!(breakdown.raw_power, raw);
+                prop_assert_eq!(breakdown.power, raw.min(cap));
+                prop_assert_eq!(breakdown.applied_cap, raw > cap);
             }
         }
     }

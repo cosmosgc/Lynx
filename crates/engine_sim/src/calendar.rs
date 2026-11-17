@@ -420,6 +420,21 @@ mod tests {
         StableId::from_parts(IdKind::Character, 0, seed)
     }
 
+    fn treasury_balances(world: &FactionWorld) -> (u64, u64) {
+        (
+            world
+                .faction(&id("faction.guards"))
+                .unwrap()
+                .treasury
+                .balance(),
+            world
+                .faction(&id("faction.bandits"))
+                .unwrap()
+                .treasury
+                .balance(),
+        )
+    }
+
     fn world() -> (FactionWorld, DefinitionId, DefinitionId) {
         let mut world = FactionWorld::new(TerritoryRules {
             claim_protection: DurationMs::new(0),
@@ -803,6 +818,7 @@ mod tests {
     #[test]
     fn cancelling_an_event_never_applies_its_result() {
         let (mut world, _, _) = world();
+        let treasury_before = treasury_balances(&world);
         let (mut calendar, event_id) = opened(&mut world);
         let mut commands = CalendarCommands::new();
 
@@ -852,6 +868,7 @@ mod tests {
                 .is_applied()
         );
         assert!(!world.territory(&id("zone.town_square")).unwrap().contested);
+        assert_eq!(treasury_balances(&world), treasury_before);
 
         let rejected = commands.execute(
             &mut calendar,
@@ -871,6 +888,245 @@ mod tests {
         assert_eq!(
             world.territory(&id("zone.town_square")).unwrap().owner,
             Some(id("faction.guards"))
+        );
+        assert_eq!(treasury_balances(&world), treasury_before);
+    }
+
+    #[test]
+    fn failed_early_resolution_leaves_faction_aggregates_unchanged() {
+        let (mut world, _, _) = world();
+        let treasury_before = treasury_balances(&world);
+        let (mut calendar, event_id) = opened(&mut world);
+        let mut commands = CalendarCommands::new();
+        assert!(
+            commands
+                .execute(
+                    &mut calendar,
+                    &mut world,
+                    &lifecycle_request(
+                        "early-resolve-activate",
+                        9,
+                        CalendarAction::Activate {
+                            event: event_id.clone(),
+                        },
+                        true,
+                    ),
+                    Millis::new(20),
+                )
+                .is_applied()
+        );
+        let history_before = world.territory_history().len();
+        let territory_before = world.territory(&id("zone.town_square")).unwrap().clone();
+
+        let rejected = commands.execute(
+            &mut calendar,
+            &mut world,
+            &lifecycle_request(
+                "early-resolve",
+                9,
+                CalendarAction::Resolve {
+                    event: event_id.clone(),
+                },
+                true,
+            ),
+            Millis::new(29),
+        );
+
+        assert_eq!(rejected.error().unwrap().code(), ErrorCode::Conflict);
+        assert_eq!(
+            calendar.event(&event_id).unwrap().status,
+            WorldEventStatus::Active
+        );
+        assert!(calendar.resolution(&event_id).is_none());
+        assert_eq!(
+            world.territory(&id("zone.town_square")),
+            Some(&territory_before)
+        );
+        assert_eq!(world.territory_history().len(), history_before);
+        assert_eq!(treasury_balances(&world), treasury_before);
+        calendar.validate_against(&world).unwrap();
+    }
+
+    #[test]
+    fn failed_participation_check_leaves_faction_aggregates_unchanged() {
+        let (mut world, _, _) = world();
+        let treasury_before = treasury_balances(&world);
+        let mut definition = event();
+        definition.conflict.minimum_participants_per_side = 2;
+        let event_id = definition.id.clone();
+        let mut calendar = WorldCalendar::new();
+        calendar
+            .create(definition, actor(9), Millis::new(1))
+            .unwrap();
+        calendar
+            .schedule(&world, &event_id, actor(9), Millis::new(2))
+            .unwrap();
+        calendar.open(&event_id, actor(9), Millis::new(10)).unwrap();
+        calendar
+            .activate(&mut world, &event_id, actor(9), Millis::new(20))
+            .unwrap();
+        let factions_before = world.clone();
+        let history_before = world.territory_history().len();
+
+        let rejected = calendar
+            .resolve(&mut world, &event_id, actor(9), Millis::new(30))
+            .unwrap_err();
+
+        assert_eq!(rejected.code(), ErrorCode::Conflict);
+        assert_eq!(world, factions_before);
+        assert_eq!(
+            calendar.event(&event_id).unwrap().status,
+            WorldEventStatus::Active
+        );
+        assert!(calendar.resolution(&event_id).is_none());
+        assert_eq!(world.territory_history().len(), history_before);
+        assert_eq!(treasury_balances(&world), treasury_before);
+        calendar.validate_against(&world).unwrap();
+    }
+
+    #[test]
+    fn suspending_an_event_cannot_apply_its_result() {
+        let (mut world, _, _) = world();
+        let treasury_before = treasury_balances(&world);
+        let (mut calendar, event_id) = opened(&mut world);
+        let mut commands = CalendarCommands::new();
+
+        for (request_id, action) in [
+            (
+                "suspend-activate",
+                CalendarAction::Activate {
+                    event: event_id.clone(),
+                },
+            ),
+            (
+                "suspend-event",
+                CalendarAction::Suspend {
+                    event: event_id.clone(),
+                    reason: "severe weather".into(),
+                },
+            ),
+        ] {
+            assert!(
+                commands
+                    .execute(
+                        &mut calendar,
+                        &mut world,
+                        &lifecycle_request(request_id, 9, action, true),
+                        Millis::new(21),
+                    )
+                    .is_applied()
+            );
+        }
+        assert_eq!(
+            calendar.event(&event_id).unwrap().status,
+            WorldEventStatus::Suspended
+        );
+        assert!(!world.territory(&id("zone.town_square")).unwrap().contested);
+        let history_before = world.territory_history().len();
+
+        let rejected = commands.execute(
+            &mut calendar,
+            &mut world,
+            &lifecycle_request(
+                "suspend-resolve",
+                9,
+                CalendarAction::Resolve {
+                    event: event_id.clone(),
+                },
+                true,
+            ),
+            Millis::new(30),
+        );
+        assert_eq!(rejected.error().unwrap().code(), ErrorCode::InvalidState);
+        assert!(calendar.resolution(&event_id).is_none());
+        assert_eq!(
+            calendar.event(&event_id).unwrap().status,
+            WorldEventStatus::Suspended
+        );
+        assert_eq!(world.territory_history().len(), history_before);
+        assert_eq!(
+            world.territory(&id("zone.town_square")).unwrap().owner,
+            Some(id("faction.guards"))
+        );
+        assert_eq!(treasury_balances(&world), treasury_before);
+    }
+
+    #[test]
+    fn a_new_request_cannot_apply_an_event_territory_change_twice() {
+        let (mut world, _, _) = world();
+        let (mut calendar, event_id) = opened(&mut world);
+        let mut commands = CalendarCommands::new();
+
+        assert!(
+            commands
+                .execute(
+                    &mut calendar,
+                    &mut world,
+                    &enroll_request("duplicate-resolution-enroll", 2, "side.attackers"),
+                    Millis::new(11),
+                )
+                .is_applied()
+        );
+        assert!(
+            commands
+                .execute(
+                    &mut calendar,
+                    &mut world,
+                    &lifecycle_request(
+                        "duplicate-resolution-activate",
+                        9,
+                        CalendarAction::Activate {
+                            event: event_id.clone(),
+                        },
+                        true,
+                    ),
+                    Millis::new(20),
+                )
+                .is_applied()
+        );
+
+        let first = commands.execute(
+            &mut calendar,
+            &mut world,
+            &lifecycle_request(
+                "duplicate-resolution-first",
+                9,
+                CalendarAction::Resolve {
+                    event: event_id.clone(),
+                },
+                true,
+            ),
+            Millis::new(30),
+        );
+        assert!(first.is_applied());
+        assert_eq!(world.territory_history().len(), 2);
+        let original_resolution = calendar.resolution(&event_id).unwrap().clone();
+        let original_effects = first.effects().to_vec();
+
+        let retry = commands.execute(
+            &mut calendar,
+            &mut world,
+            &lifecycle_request(
+                "duplicate-resolution-second",
+                9,
+                CalendarAction::Resolve {
+                    event: event_id.clone(),
+                },
+                true,
+            ),
+            Millis::new(31),
+        );
+        assert!(retry.is_applied());
+        assert_eq!(retry.effects(), original_effects);
+        assert_eq!(calendar.resolution(&event_id), Some(&original_resolution));
+        assert_eq!(
+            world.territory_history().len(),
+            2,
+            "a new request ID must not append a second capture"
+        );
+        assert_eq!(
+            world.territory(&id("zone.town_square")).unwrap().owner,
+            Some(id("faction.bandits"))
         );
     }
 

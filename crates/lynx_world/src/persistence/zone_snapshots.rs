@@ -279,6 +279,10 @@ impl ZoneSnapshotStore for PostgresZoneSnapshotStore {
 }
 
 impl ZoneHandoffStore for PostgresZoneSnapshotStore {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the database transaction atomically validates and commits both sides of a durable zone handoff"
+    )]
     fn commit_handoff(
         &self,
         source: &ZoneSnapshot,
@@ -605,4 +609,112 @@ fn file_error(message: &'static str, path: &Path, error: &io::Error) -> EngineEr
 
 fn postgres_unavailable(message: &'static str) -> EngineError {
     EngineError::new(ErrorCode::Internal, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use engine_core::id::{DefinitionId, StableId};
+    use engine_core::inventory::UniformItemRules;
+    use engine_core::math::Vec3;
+    use engine_core::schema::PersistencePolicy;
+    use engine_sim::entity::EntityRecord;
+    use engine_sim::nav::NavGrid;
+    use engine_sim::zone::{Zone, ZoneConfig};
+
+    use super::*;
+
+    static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new() -> Self {
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "lynx-zone-snapshots-{}-{timestamp}-{sequence}",
+                std::process::id()
+            ));
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            if let Err(error) = fs::remove_dir_all(&self.0)
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                eprintln!("could not remove zone snapshot test directory: {error}");
+            }
+        }
+    }
+
+    fn instance(value: u128) -> StableId {
+        StableId::from_parts(IdKind::Zone, 1, value)
+    }
+
+    fn test_zone(instance: StableId, entity: StableId) -> Zone {
+        let config = ZoneConfig::new(
+            DefinitionId::new("zone.snapshot_recovery_test").unwrap(),
+            instance,
+            Vec3::ZERO,
+            Vec3::new(8.0, 4.0, 8.0),
+        )
+        .unwrap();
+        let navigation = NavGrid::new(8, 8, 1.0, Vec3::ZERO).unwrap();
+        let mut zone = Zone::new(config, navigation, Arc::new(UniformItemRules::new(8))).unwrap();
+        zone.spawn(
+            EntityRecord::new(
+                entity,
+                DefinitionId::new("character.snapshot_recovery_test").unwrap(),
+                Vec3::new(1.5, 0.0, 1.5),
+            )
+            .with_persistence(PersistencePolicy::PersistentEntity),
+        )
+        .unwrap();
+        zone
+    }
+
+    #[test]
+    fn corrupting_one_zone_checkpoint_does_not_prevent_another_zone_restore() {
+        let directory = TestDirectory::new();
+        let store = FileZoneSnapshotStore::new(&directory.0);
+        let source_id = instance(1);
+        let destination_id = instance(2);
+        let source_entity = StableId::from_parts(IdKind::Entity, 1, 11);
+        let destination_entity = StableId::from_parts(IdKind::Entity, 1, 22);
+        store
+            .save_zone(&test_zone(source_id, source_entity).snapshot())
+            .unwrap();
+        store
+            .save_zone(&test_zone(destination_id, destination_entity).snapshot())
+            .unwrap();
+
+        fs::write(
+            directory.0.join(format!("{source_id}.json")),
+            b"corrupt checkpoint",
+        )
+        .unwrap();
+
+        assert!(store.load_zone(&source_id.to_string()).is_err());
+        let destination_snapshot = store
+            .load_zone(&destination_id.to_string())
+            .unwrap()
+            .expect("the other zone's checkpoint remains readable");
+        let restored = Zone::restore(
+            &destination_snapshot,
+            NavGrid::new(8, 8, 1.0, Vec3::ZERO).unwrap(),
+            Arc::new(UniformItemRules::new(8)),
+        )
+        .unwrap();
+        assert!(restored.entity(destination_entity).is_some());
+        assert!(restored.entity(source_entity).is_none());
+    }
 }

@@ -297,6 +297,10 @@ impl MultiZoneRuntime {
 
     /// Replace the server-owned AI policy for every zone as one authority-loop
     /// operation, so a faction relation refresh cannot split zones across catalogs.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the owned policy is cloned once for each registered zone"
+    )]
     pub fn set_ai_tick_policy(&mut self, policy: Option<AiTickPolicy>) {
         for server in self.zones.values_mut() {
             server
@@ -309,6 +313,10 @@ impl MultiZoneRuntime {
     /// Commit a durable entity handoff between two registered live zone servers.
     /// The authority loop calls this synchronously, so no tick can observe the
     /// temporary removal of the source server from the registry.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the transaction needs both zone identities, authority, request, coordinator, atlas, and durable store"
+    )]
     pub fn handoff_player_durable(
         &mut self,
         coordinator: &mut ZoneHandoffCoordinator,
@@ -354,5 +362,259 @@ impl MultiZoneRuntime {
         self.zones
             .get(&route.zone_id)
             .is_some_and(|server| server.has_connection(route.connection))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use engine_content::{DisplayText, MapPosition, MapZone, RouteKind, ZoneRoute};
+    use engine_core::id::{DefinitionId, IdKind, StableId};
+    use engine_core::inventory::UniformItemRules;
+    use engine_core::math::Vec3;
+    use engine_core::schema::{PersistencePolicy, SchemaVersion};
+    use engine_core::time::{DurationMs, Millis, Tick};
+    use engine_sim::entity::EntityRecord;
+    use engine_sim::mind::Mind;
+    use engine_sim::nav::NavGrid;
+    use engine_sim::snapshot::ZoneSnapshot;
+    use engine_sim::zone::{Zone, ZoneConfig};
+    use world_gateway::{GatewayConfig, SystemResumeTokens, WorldGateway};
+    use world_server::WorldServer;
+
+    use super::*;
+    use crate::persistence::{ZoneLeaseStore, ZoneSnapshotStore};
+
+    #[derive(Debug)]
+    struct NoSnapshots;
+
+    impl ZoneSnapshotStore for NoSnapshots {
+        fn load_zone(&self, _zone_id: &str) -> Result<Option<ZoneSnapshot>, EngineError> {
+            Ok(None)
+        }
+
+        fn save_zone(&self, _snapshot: &ZoneSnapshot) -> Result<(), EngineError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct UnexpectedHandoff;
+
+    impl ZoneHandoffStore for UnexpectedHandoff {
+        fn commit_handoff(
+            &self,
+            _source: &ZoneSnapshot,
+            _destination: &ZoneSnapshot,
+            _receipt: &ZoneHandoffReceipt,
+        ) -> Result<ZoneHandoffReceipt, EngineError> {
+            panic!("a missing destination must be rejected before durable commit");
+        }
+
+        fn handoff_receipt(
+            &self,
+            _request_key: &str,
+        ) -> Result<Option<ZoneHandoffReceipt>, EngineError> {
+            Ok(None)
+        }
+    }
+
+    fn instance(value: u128) -> StableId {
+        StableId::from_parts(IdKind::Zone, 1, value)
+    }
+
+    fn definition(value: &str) -> DefinitionId {
+        DefinitionId::new(value).unwrap()
+    }
+
+    fn tick_test_server(value: u128) -> WorldServer {
+        let config = ZoneConfig::new(
+            definition("zone.multi_zone_tick_test"),
+            instance(value),
+            Vec3::ZERO,
+            Vec3::new(8.0, 2.0, 8.0),
+        )
+        .unwrap();
+        let zone = Zone::new(
+            config,
+            NavGrid::new(8, 8, 1.0, Vec3::ZERO).unwrap(),
+            Arc::new(UniformItemRules::new(8)),
+        )
+        .unwrap();
+        let gateway = WorldGateway::new(
+            zone,
+            crate::demo::handshake().unwrap(),
+            GatewayConfig::new(DurationMs::new(30_000)),
+            SystemResumeTokens::new(),
+        )
+        .unwrap();
+        WorldServer::new(gateway)
+    }
+
+    fn map() -> WorldMapDefinition {
+        let source = definition("zone.multi_zone_source");
+        let destination = definition("zone.multi_zone_destination");
+        WorldMapDefinition {
+            id: definition("map.multi_zone_runtime_test"),
+            version: SchemaVersion::new(1, 0),
+            display: DisplayText {
+                name: engine_core::i18n::MessageKey::parse("map.multi_zone_test.name").unwrap(),
+                description: engine_core::i18n::MessageKey::parse(
+                    "map.multi_zone_test.description",
+                )
+                .unwrap(),
+            },
+            zones: vec![
+                MapZone {
+                    zone: source.clone(),
+                    position: MapPosition { x: 0, y: 0 },
+                },
+                MapZone {
+                    zone: destination.clone(),
+                    position: MapPosition { x: 1, y: 0 },
+                },
+            ],
+            routes: vec![ZoneRoute {
+                from: source,
+                to: destination,
+                bidirectional: false,
+                kind: RouteKind::Gateway,
+            }],
+        }
+    }
+
+    #[test]
+    fn runtime_tick_batches_rotate_one_quantum_per_zone() {
+        let mut runtime = MultiZoneRuntime::new(Arc::new(NoSnapshots));
+        for value in [1, 2, 3] {
+            runtime.register(tick_test_server(value)).unwrap();
+        }
+        let registered: Vec<String> = runtime.zone_ids().map(str::to_owned).collect();
+        assert_eq!(registered.len(), 3);
+
+        for round in 0..3 {
+            let expected_zone = &registered[round];
+            let outcome = runtime
+                .tick_batch(1, Millis::new(50), 50)
+                .pop()
+                .expect("one zone is scheduled for one tick quantum");
+            assert_eq!(outcome.zone_id, *expected_zone);
+            assert!(outcome.result.is_ok());
+            for (index, zone_id) in registered.iter().enumerate() {
+                let expected_tick = u64::from(index <= round);
+                assert_eq!(
+                    runtime
+                        .zone_server(zone_id)
+                        .unwrap()
+                        .gateway()
+                        .zone()
+                        .tick()
+                        .0,
+                    expected_tick,
+                    "each scheduled batch must tick only its selected zone"
+                );
+            }
+        }
+
+        let outcomes = runtime.tick_batch(8, Millis::new(150), 50);
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(|outcome| outcome.zone_id.as_str())
+                .collect::<Vec<_>>(),
+            registered.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        assert!(outcomes.iter().all(|outcome| outcome.result.is_ok()));
+        for zone_id in &registered {
+            assert_eq!(
+                runtime
+                    .zone_server(zone_id)
+                    .unwrap()
+                    .gateway()
+                    .zone()
+                    .tick(),
+                Tick(2)
+            );
+        }
+    }
+
+    #[test]
+    fn unavailable_destination_does_not_remove_or_mutate_the_source_zone() {
+        let character = StableId::from_parts(IdKind::Character, 1, 11);
+        let actor = StableId::from_parts(IdKind::Entity, 1, 22);
+        let source_instance = instance(1);
+        let destination_instance = instance(2);
+        let source_id = source_instance.to_string();
+        let destination_id = destination_instance.to_string();
+        let config = ZoneConfig::new(
+            definition("zone.multi_zone_source"),
+            source_instance,
+            Vec3::ZERO,
+            Vec3::new(10.0, 2.0, 10.0),
+        )
+        .unwrap();
+        let mut source = Zone::new(
+            config,
+            NavGrid::new(10, 10, 1.0, Vec3::ZERO).unwrap(),
+            Arc::new(UniformItemRules::new(10)),
+        )
+        .unwrap();
+        source
+            .spawn(
+                EntityRecord::new(
+                    actor,
+                    definition("character.multi_zone_test"),
+                    Vec3::new(1.5, 0.0, 1.5),
+                )
+                .with_health(100)
+                .with_mind(Mind::player(character, "source-session"))
+                .with_persistence(PersistencePolicy::PersistentEntity),
+            )
+            .unwrap();
+        let gateway = WorldGateway::new(
+            source,
+            crate::demo::handshake().unwrap(),
+            GatewayConfig::new(DurationMs::new(30_000)),
+            SystemResumeTokens::new(),
+        )
+        .unwrap();
+        let mut runtime = MultiZoneRuntime::new(Arc::new(NoSnapshots));
+        runtime.register(WorldServer::new(gateway)).unwrap();
+
+        let leases = Arc::new(crate::authority::tests::MemoryLeases::default());
+        let lease_store: Arc<dyn ZoneLeaseStore> = leases;
+        let authorities = ZoneAuthoritySet::acquire(
+            &lease_store,
+            [&source_id, &destination_id],
+            "missing-destination-test",
+            Duration::from_secs(30),
+        )
+        .unwrap()
+        .unwrap();
+        let atlas = map();
+        let request =
+            PlayerHandoffRequest::new(character, Vec3::new(5.5, 0.0, 5.5), "missing-destination");
+        let mut coordinator = ZoneHandoffCoordinator::default();
+        let result = runtime.handoff_player_durable(
+            &mut coordinator,
+            &atlas,
+            &authorities,
+            &source_id,
+            &destination_id,
+            &request,
+            &UnexpectedHandoff,
+        );
+
+        assert_eq!(result.unwrap_err().code(), ErrorCode::NotFound);
+        assert_eq!(runtime.zone_ids().collect::<Vec<_>>(), [source_id.as_str()]);
+        let source_zone = runtime
+            .zone_server(&source_id)
+            .expect("the source must be re-registered after rejection")
+            .gateway()
+            .zone();
+        assert!(source_zone.entity(actor).is_some());
+        assert_eq!(source_zone.tick(), Tick::ZERO);
     }
 }

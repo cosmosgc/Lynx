@@ -253,12 +253,15 @@ zone route is rejected before token rotation. Zone IDs are printed at startup.
 Migration `0018_zone_scoped_resume_sessions` revokes durable resume sessions
 created before zone ownership was recorded; clients must authenticate again
 after applying it. Each zone uses its authored player capacity and geometry.
-This mode currently serves
-zone-owned simulation state only;
-world calendar/faction coordination, typed behavior for authored entity
-placements, and live travel
-handoff are not composed into it yet. Do not treat cross-zone travel as enabled
-until those pieces are wired and the PostgreSQL recovery acceptance is run.
+This mode serves zone-owned simulation state with typed runtime bindings for
+authored placements, startup faction targeting/refresh, and trigger-driven
+durable travel handoff. Calendar mutation still lacks one map-wide aggregate
+owner, and cross-zone party effects are not implemented. The travel path is
+headlessly tested, including file-checkpoint isolation and an injected final
+transaction-statement rollback. The opt-in PostgreSQL handoff recovery test
+still needs a configured scratch database; commit-acknowledgement loss and live
+survivor-service acceptance remain open. Do not treat those recovery properties
+as validated until that database acceptance is run.
 
 Nakama validation occurs on every fresh WebSocket admission. Resume tokens are
 local, single-use secrets and do not recontact Nakama; keep

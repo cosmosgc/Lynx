@@ -25,6 +25,41 @@ semantic versioning for engine releases and content bundles.
 
 ### Added
 
+- `lynx-world`: headless live-zone coverage proves authored bounded AI graphs
+  and UTC daily windows change guard decisions through content bindings
+  (`SIM-006`).
+- `lynx-world`: headless multi-zone service travel coverage exercises authored
+  trigger/range and commit-failure denial, atomic handoff, source-token
+  invalidation, destination-scoped resume routing, and destination reconnect
+  with another token rotation; client-selected destination/arrival fields are
+  rejected, missing destinations preserve the source, and uncertain
+  durable-write errors stop the authority loop (`SIM-014`).
+- `lynx-world`: add an opt-in PostgreSQL handoff recovery test for atomic
+  snapshots, durable resume routing, receipts, independent zone restore,
+  stale-session detach, token rotation, idempotent retry, and transaction
+  rollback after an injected final-statement failure (`SIM-014`).
+- `lynx-world`: verify a corrupt file checkpoint for one zone does not prevent
+  an independent zone checkpoint from loading and restoring (`SIM-014`).
+- `lynx-world`: exercise runtime round-robin ticking with a one-quantum budget,
+  confirming every registered zone receives one tick before another receives a
+  second (`SIM-014`).
+- `engine_sim`: verify suspended events cannot resolve, early-resolution and
+  insufficient-participation rejection leave faction aggregates unchanged, and
+  duplicate resolution under a fresh request ID does not repeat a territory
+  change; `engine_core` verifies suspended state survives snapshot recovery
+  without permitting a result (`SIM-015`).
+- `engine_core`: cover UTC daily-schedule boundaries, midnight wrapping,
+  invalid windows, and pre-epoch timestamps (`SIM-006`).
+- `engine_core`: generate territory release/reclaim cooldown cases and verify
+  early rejection is atomic while the exact expiry deadline permits reclaim
+  (`SIM-016`).
+- `engine_core`: generate contested-territory capture/release attempts across
+  varying power and time inputs and verify both remain atomic (`SIM-016`).
+- `engine_core`: generate treasury balances and verify faction-power
+  monotonicity, reserve handling, and configured caps (`SIM-016`).
+- `engine_core`: generate faction treasury transfers and verify wealth
+  conservation, idempotent replay, failure atomicity, and snapshot recovery
+  (`SIM-016`).
 - `lynx-mcp`: optional read-only stdio MCP tools for workspace inspection,
   validation, manifest diff, doctor checks, and content hashing; confined paths
   and bounded results are enforced (`CNT-009`).

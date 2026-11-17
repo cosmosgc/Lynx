@@ -1675,6 +1675,46 @@ mod tests {
     }
 
     #[test]
+    fn suspended_event_recovers_without_becoming_resolvable() {
+        let (mut world, guards, _) = world();
+        let (mut calendar, id) = started(&mut world);
+        calendar
+            .suspend(
+                &mut world,
+                &id,
+                actor(9),
+                Millis::new(21),
+                "scheduled outage",
+            )
+            .unwrap();
+
+        let mut recovered = WorldCalendar::from_snapshot(calendar.snapshot()).unwrap();
+        recovered.validate_against(&world).unwrap();
+        assert_eq!(
+            recovered.event(&id).unwrap().status,
+            WorldEventStatus::Suspended
+        );
+        assert!(recovered.resolution(&id).is_none());
+        assert!(
+            !world
+                .territory(&zone("zone.town_square"))
+                .unwrap()
+                .contested
+        );
+        assert_eq!(world.territory_history().len(), 1);
+
+        let rejected = recovered
+            .resolve(&mut world, &id, actor(9), Millis::new(30))
+            .unwrap_err();
+        assert_eq!(rejected.code(), ErrorCode::InvalidState);
+        assert_eq!(
+            world.territory(&zone("zone.town_square")).unwrap().owner,
+            Some(guards)
+        );
+        assert_eq!(world.territory_history().len(), 1);
+    }
+
+    #[test]
     fn snapshot_round_trip_preserves_history_and_rejects_tampering() {
         let (mut world, _, _) = world();
         let (mut calendar, id) = opened(&mut world);

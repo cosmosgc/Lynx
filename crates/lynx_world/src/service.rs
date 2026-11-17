@@ -64,6 +64,12 @@ pub struct Hello {
     pub last_ack_tick: Tick,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ZoneTravelRequestBody {
+    trigger_id: String,
+}
+
 /// How a peer proved its identity before the upgrade.
 #[derive(Debug, Clone)]
 pub enum Credential {
@@ -2283,6 +2289,10 @@ impl MultiZoneService {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "travel requests validate authority, coordinate durable handoff, and emit one ordered reply"
+    )]
     fn handle_travel_request(&mut self, route: &ZoneConnection, envelope: &Envelope) {
         let Some(context) = self.travel.as_ref() else {
             let error = EngineError::new(
@@ -2293,19 +2303,17 @@ impl MultiZoneService {
             self.send(route, ServerFrame::Envelope(reply));
             return;
         };
-        let Some(trigger_id) = envelope
-            .body
-            .get("trigger_id")
-            .and_then(serde_json::Value::as_str)
+        let Ok(request) = serde_json::from_value::<ZoneTravelRequestBody>(envelope.body.clone())
         else {
             let error = EngineError::new(
                 ErrorCode::InvalidRequest,
-                "zone travel requires an authored trigger id",
+                "zone travel requires only an authored trigger id",
             );
             let reply = self.error_reply(envelope, &error);
             self.send(route, ServerFrame::Envelope(reply));
             return;
         };
+        let trigger_id = request.trigger_id.as_str();
         let Some(session_id) = self.runtime.zone_server(&route.zone_id).and_then(|server| {
             server.connections().find_map(|(connection, session)| {
                 (connection == route.connection).then(|| session.clone())
@@ -2340,7 +2348,7 @@ impl MultiZoneService {
                 .zone()
                 .entities()
                 .find(|entity| entity.id == session.actor)
-                .map(|entity| entity.position())
+                .map(engine_sim::entity::EntityRecord::position)
         });
         if !actor_position
             .is_some_and(|position| position.distance_xz(trigger.position) <= trigger.radius_m)
@@ -2961,8 +2969,13 @@ mod tests {
     use super::*;
 
     use engine_core::id::IdKind;
+    use engine_core::inventory::UniformItemRules;
+    use engine_core::math::Vec3;
+    use engine_core::schema::SchemaVersion;
     use engine_core::time::DurationMs;
-    use engine_sim::zone::Zone;
+    use engine_sim::nav::NavGrid;
+    use engine_sim::snapshot::ZoneSnapshot;
+    use engine_sim::zone::{Zone, ZoneConfig};
     use std::sync::Mutex as StdMutex;
     use tokio::sync::watch;
     use tracing::field::{Field, Visit};
@@ -2970,12 +2983,116 @@ mod tests {
     use tracing_subscriber::prelude::*;
 
     use crate::auth::{Authenticator, digest};
+    use crate::content_runtime::ResolvedTravelTrigger;
     use crate::demo;
-    use crate::persistence::{ZoneEvent, replay_world_snapshot_events};
+    use crate::multi_zone::MultiZoneRuntime;
+    use crate::persistence::{
+        ZoneEvent, ZoneLeaseStore, ZoneSnapshotStore, replay_world_snapshot_events,
+    };
+    use crate::travel::{ZoneHandoffReceipt, ZoneHandoffStore};
     use world_gateway::{GatewayConfig, SystemResumeTokens, WorldGateway};
     use world_server::{READY_KIND, SNAPSHOT_KIND};
 
     const TOKEN: &str = "service-test-token";
+
+    #[derive(Debug)]
+    struct NoopZoneSnapshots;
+
+    impl ZoneSnapshotStore for NoopZoneSnapshots {
+        fn load_zone(&self, _zone_id: &str) -> Result<Option<ZoneSnapshot>, EngineError> {
+            Ok(None)
+        }
+
+        fn save_zone(&self, _snapshot: &ZoneSnapshot) -> Result<(), EngineError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct MemoryHandoffs {
+        receipts: StdMutex<BTreeMap<String, ZoneHandoffReceipt>>,
+        fail_next_commit: std::sync::atomic::AtomicBool,
+        fail_next_commit_uncertain: std::sync::atomic::AtomicBool,
+    }
+
+    impl ZoneHandoffStore for MemoryHandoffs {
+        fn commit_handoff(
+            &self,
+            _source: &ZoneSnapshot,
+            _destination: &ZoneSnapshot,
+            receipt: &ZoneHandoffReceipt,
+        ) -> Result<ZoneHandoffReceipt, EngineError> {
+            if self
+                .fail_next_commit_uncertain
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(EngineError::new(
+                    ErrorCode::Internal,
+                    "injected uncertain durable handoff outcome",
+                ));
+            }
+            if self
+                .fail_next_commit
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(EngineError::new(
+                    ErrorCode::Conflict,
+                    "injected durable handoff rejection",
+                ));
+            }
+            let mut receipts = self.receipts.lock().unwrap();
+            if let Some(existing) = receipts.get(&receipt.request_key) {
+                return if existing == receipt {
+                    Ok(existing.clone())
+                } else {
+                    Err(EngineError::new(
+                        ErrorCode::Conflict,
+                        "handoff idempotency key was reused",
+                    ))
+                };
+            }
+            receipts.insert(receipt.request_key.clone(), receipt.clone());
+            Ok(receipt.clone())
+        }
+
+        fn handoff_receipt(
+            &self,
+            request_key: &str,
+        ) -> Result<Option<ZoneHandoffReceipt>, EngineError> {
+            Ok(self.receipts.lock().unwrap().get(request_key).cloned())
+        }
+    }
+
+    fn travel_atlas(
+        source: engine_core::id::DefinitionId,
+        destination: engine_core::id::DefinitionId,
+    ) -> WorldMapDefinition {
+        WorldMapDefinition {
+            id: engine_core::id::DefinitionId::new("map.travel-test").unwrap(),
+            version: SchemaVersion::new(1, 0),
+            display: DisplayText {
+                name: engine_core::i18n::MessageKey::parse("map.travel_test.name").unwrap(),
+                description: engine_core::i18n::MessageKey::parse("map.travel_test.description")
+                    .unwrap(),
+            },
+            zones: vec![
+                MapZone {
+                    zone: source.clone(),
+                    position: MapPosition { x: 0, y: 0 },
+                },
+                MapZone {
+                    zone: destination.clone(),
+                    position: MapPosition { x: 1, y: 0 },
+                },
+            ],
+            routes: vec![ZoneRoute {
+                from: source,
+                to: destination,
+                bidirectional: false,
+                kind: RouteKind::Gateway,
+            }],
+        }
+    }
 
     #[derive(Clone)]
     struct CaptureEvents(Arc<StdMutex<Vec<String>>>);
@@ -3673,6 +3790,389 @@ mod tests {
 
         shutdown.send(true).unwrap();
         task.await.unwrap();
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "this verifies an authored handoff through the live multi-zone service boundary"
+    )]
+    fn multi_zone_service_travel_moves_the_session_and_issues_a_destination_resume_token() {
+        let authenticator = Authenticator::new(&[
+            digest("travel-session-token"),
+            digest("travel-session-token-two"),
+        ])
+        .unwrap();
+        let mut grants = authenticator.grants();
+        let grant = grants.next().unwrap().clone();
+        let second_grant = grants.next().unwrap().clone();
+        let source = demo::build_zone(&[grant.clone(), second_grant.clone()]).unwrap();
+        let source_zone_id = source.config().instance.to_string();
+        let source_definition = source.config().definition.clone();
+        let (actor, source_position) = source
+            .entities()
+            .find_map(|entity| {
+                entity
+                    .mind
+                    .as_ref()
+                    .is_some_and(|mind| mind.player_character == Some(grant.principal))
+                    .then(|| (entity.id, entity.position()))
+            })
+            .expect("the admitted character has an authored demo actor");
+        let (second_actor, second_position) = source
+            .entities()
+            .find_map(|entity| {
+                entity
+                    .mind
+                    .as_ref()
+                    .is_some_and(|mind| mind.player_character == Some(second_grant.principal))
+                    .then(|| (entity.id, entity.position()))
+            })
+            .expect("the second character has an authored demo actor");
+
+        let destination_definition =
+            engine_core::id::DefinitionId::new("zone.travel_destination").unwrap();
+        let destination_instance = StableId::from_parts(IdKind::Zone, 44, 2);
+        let destination_zone_id = destination_instance.to_string();
+        let destination_config = ZoneConfig::new(
+            destination_definition.clone(),
+            destination_instance,
+            Vec3::ZERO,
+            Vec3::new(20.0, 2.0, 20.0),
+        )
+        .unwrap();
+        let destination = Zone::new(
+            destination_config,
+            NavGrid::new(20, 20, 1.0, Vec3::ZERO).unwrap(),
+            Arc::new(UniformItemRules::new(99)),
+        )
+        .unwrap();
+        let arrival = Vec3::new(5.5, 0.0, 5.5);
+        let atlas = travel_atlas(source_definition, destination_definition);
+        let lease_store: Arc<dyn ZoneLeaseStore> =
+            Arc::new(crate::authority::tests::MemoryLeases::default());
+        let authorities = ZoneAuthoritySet::acquire(
+            &lease_store,
+            [source_zone_id.as_str(), destination_zone_id.as_str()],
+            "service-travel-test",
+            Duration::from_secs(30),
+        )
+        .unwrap()
+        .unwrap();
+        let handoffs = Arc::new(MemoryHandoffs::default());
+        let handoff_store: Arc<dyn ZoneHandoffStore> = handoffs.clone();
+        let make_gateway = |zone| {
+            WorldGateway::new(
+                zone,
+                demo::handshake().unwrap(),
+                GatewayConfig::new(DurationMs::new(30_000)),
+                SystemResumeTokens::new(),
+            )
+            .unwrap()
+        };
+        let mut runtime = MultiZoneRuntime::new(Arc::new(NoopZoneSnapshots));
+        runtime
+            .register(WorldServer::new(make_gateway(source)))
+            .unwrap();
+        runtime
+            .register(WorldServer::new(make_gateway(destination)))
+            .unwrap();
+        let mut service = MultiZoneService::new(
+            runtime,
+            source_zone_id.clone(),
+            Duration::from_millis(50),
+            Duration::from_millis(50),
+        )
+        .unwrap()
+        .with_travel(
+            atlas,
+            BTreeMap::from([(
+                source_zone_id.clone(),
+                vec![
+                    ResolvedTravelTrigger {
+                        id: "north-gate".to_owned(),
+                        position: source_position,
+                        radius_m: 1.0,
+                        destination_zone: destination_instance,
+                        arrival_point: arrival,
+                    },
+                    ResolvedTravelTrigger {
+                        id: "far-gate".to_owned(),
+                        position: Vec3::new(
+                            source_position.x + 10.0,
+                            source_position.y,
+                            source_position.z,
+                        ),
+                        radius_m: 1.0,
+                        destination_zone: destination_instance,
+                        arrival_point: arrival,
+                    },
+                    ResolvedTravelTrigger {
+                        id: "second-gate".to_owned(),
+                        position: second_position,
+                        radius_m: 1.0,
+                        destination_zone: destination_instance,
+                        arrival_point: Vec3::new(8.5, 0.0, 8.5),
+                    },
+                ],
+            )]),
+            authorities,
+            handoff_store,
+            false,
+        );
+        let hello = Hello {
+            handshake: demo::handshake().unwrap(),
+            last_ack_tick: Tick::ZERO,
+        };
+        let (outbound, mut receiver) = mpsc::channel(64);
+        let admitted = service
+            .admit_default(&Credential::Static(grant.clone()), &hello, &outbound)
+            .unwrap();
+        assert_eq!(admitted.route.zone_id, source_zone_id);
+        let mut first_token = None;
+        while let Ok(frame) = receiver.try_recv() {
+            if let ServerFrame::Envelope(envelope) = frame
+                && envelope.kind.as_str() == TOKEN_KIND
+            {
+                first_token = envelope.body["resume"]
+                    .as_str()
+                    .map(|token| ResumeToken::new(token.to_owned()).unwrap());
+            }
+        }
+        assert!(first_token.is_some());
+        let (second_outbound, mut second_receiver) = mpsc::channel(64);
+        let second_admitted = service
+            .admit_default(&Credential::Static(second_grant), &hello, &second_outbound)
+            .unwrap();
+        assert_eq!(second_admitted.route.zone_id, source_zone_id);
+        while second_receiver.try_recv().is_ok() {}
+
+        handoffs
+            .fail_next_commit
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let rejected_handoff = Envelope::new(
+            MessageId::parse("travel-store-rejection").unwrap(),
+            message_kind("zone.travel"),
+            serde_json::json!({ "trigger_id": "north-gate" }),
+        );
+        service.receive(&admitted.route, &rejected_handoff);
+        let ServerFrame::Envelope(rejected_handoff) = receiver.try_recv().unwrap() else {
+            panic!("a failed durable handoff should return a correlated error");
+        };
+        assert_eq!(rejected_handoff.kind.as_str(), ERROR_KIND);
+        assert_eq!(rejected_handoff.body["code"].as_str(), Some("conflict"));
+        assert!(service.writers.contains_key(&admitted.route));
+        assert!(
+            service
+                .runtime
+                .zone_server(&source_zone_id)
+                .unwrap()
+                .gateway()
+                .zone()
+                .entity(actor)
+                .is_some()
+        );
+        assert!(
+            service
+                .runtime
+                .zone_server(&destination_zone_id)
+                .unwrap()
+                .gateway()
+                .zone()
+                .entity(actor)
+                .is_none()
+        );
+        assert_eq!(handoffs.receipts.lock().unwrap().len(), 0);
+
+        for (id, trigger_id, expected_code) in [
+            ("travel-unknown", "not-authored", "not_found"),
+            ("travel-out-of-range", "far-gate", "out_of_range"),
+        ] {
+            let rejected = Envelope::new(
+                MessageId::parse(id).unwrap(),
+                message_kind("zone.travel"),
+                serde_json::json!({ "trigger_id": trigger_id }),
+            );
+            service.receive(&admitted.route, &rejected);
+            let ServerFrame::Envelope(error) = receiver.try_recv().unwrap() else {
+                panic!("invalid travel requests should return a correlated error");
+            };
+            assert_eq!(error.kind.as_str(), ERROR_KIND);
+            assert_eq!(error.body["code"].as_str(), Some(expected_code));
+            assert!(service.writers.contains_key(&admitted.route));
+        }
+        let spoofed_destination = Envelope::new(
+            MessageId::parse("travel-spoofed-destination").unwrap(),
+            message_kind("zone.travel"),
+            serde_json::json!({
+                "trigger_id": "north-gate",
+                "destination_zone": destination_zone_id,
+                "arrival_point": { "x": 1.0, "y": 0.0, "z": 1.0 },
+            }),
+        );
+        service.receive(&admitted.route, &spoofed_destination);
+        let ServerFrame::Envelope(error) = receiver.try_recv().unwrap() else {
+            panic!("client-selected travel destinations must fail closed");
+        };
+        assert_eq!(error.kind.as_str(), ERROR_KIND);
+        assert_eq!(error.body["code"].as_str(), Some("invalid_request"));
+        assert!(service.writers.contains_key(&admitted.route));
+        assert!(
+            service
+                .runtime
+                .zone_server(&source_zone_id)
+                .unwrap()
+                .gateway()
+                .zone()
+                .entity(actor)
+                .is_some()
+        );
+        assert!(
+            service
+                .runtime
+                .zone_server(&destination_zone_id)
+                .unwrap()
+                .gateway()
+                .zone()
+                .entity(actor)
+                .is_none()
+        );
+
+        let request = Envelope::new(
+            MessageId::parse("travel-request-1").unwrap(),
+            message_kind("zone.travel"),
+            serde_json::json!({ "trigger_id": "north-gate" }),
+        );
+        service.receive(&admitted.route, &request);
+
+        let mut destination_token = None;
+        let mut travelled = None;
+        let mut closed = false;
+        while let Ok(frame) = receiver.try_recv() {
+            match frame {
+                ServerFrame::Envelope(envelope) if envelope.kind.as_str() == TOKEN_KIND => {
+                    destination_token = envelope.body["resume"]
+                        .as_str()
+                        .map(|token| ResumeToken::new(token.to_owned()).unwrap());
+                }
+                ServerFrame::Envelope(envelope) if envelope.kind.as_str() == "zone.travelled" => {
+                    travelled = Some(envelope);
+                }
+                ServerFrame::Close => closed = true,
+                ServerFrame::Envelope(_) | ServerFrame::EncodedReplication { .. } => {}
+            }
+        }
+
+        assert!(closed, "the source transport must be closed after handoff");
+        let travelled = travelled.expect("the source receives its correlated travel result");
+        assert_eq!(
+            travelled.body["destination_zone"].as_str(),
+            Some(destination_zone_id.as_str())
+        );
+        assert_eq!(travelled.body["resume_token_retained"], false);
+        let destination_token = destination_token.expect("travel issues a destination token");
+        assert_eq!(
+            service.resume_zone(&destination_token).unwrap(),
+            destination_zone_id
+        );
+        assert_eq!(
+            service
+                .resume_zone(&first_token.unwrap())
+                .unwrap_err()
+                .code(),
+            ErrorCode::SessionExpired
+        );
+        let (reconnect_outbound, mut reconnect_receiver) = mpsc::channel(64);
+        let reconnected = service
+            .admit_default(
+                &Credential::Resume(destination_token.clone()),
+                &hello,
+                &reconnect_outbound,
+            )
+            .unwrap();
+        assert!(reconnected.resumed);
+        assert_eq!(reconnected.actor, actor);
+        assert_eq!(reconnected.route.zone_id, destination_zone_id);
+        let mut rotated_destination_token = None;
+        while let Ok(frame) = reconnect_receiver.try_recv() {
+            if let ServerFrame::Envelope(envelope) = frame
+                && envelope.kind.as_str() == TOKEN_KIND
+            {
+                rotated_destination_token = envelope.body["resume"]
+                    .as_str()
+                    .map(|token| ResumeToken::new(token.to_owned()).unwrap());
+            }
+        }
+        assert_eq!(
+            service.resume_zone(&destination_token).unwrap_err().code(),
+            ErrorCode::SessionExpired
+        );
+        let rotated_destination_token =
+            rotated_destination_token.expect("reconnect rotates the destination token");
+        assert_eq!(
+            service.resume_zone(&rotated_destination_token).unwrap(),
+            destination_zone_id
+        );
+        assert!(
+            service
+                .runtime
+                .zone_server(&source_zone_id)
+                .unwrap()
+                .gateway()
+                .zone()
+                .entity(actor)
+                .is_none()
+        );
+        let moved = service
+            .runtime
+            .zone_server(&destination_zone_id)
+            .unwrap()
+            .gateway()
+            .zone()
+            .entity(actor)
+            .expect("the character exists in the destination only");
+        assert_eq!(moved.position(), arrival);
+        assert_eq!(handoffs.receipts.lock().unwrap().len(), 1);
+
+        handoffs
+            .fail_next_commit_uncertain
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let uncertain_commit = Envelope::new(
+            MessageId::parse("travel-uncertain-commit").unwrap(),
+            message_kind("zone.travel"),
+            serde_json::json!({ "trigger_id": "second-gate" }),
+        );
+        service.receive(&second_admitted.route, &uncertain_commit);
+        let ServerFrame::Envelope(error) = second_receiver.try_recv().unwrap() else {
+            panic!("an uncertain durable handoff must return a correlated error");
+        };
+        assert_eq!(error.kind.as_str(), ERROR_KIND);
+        assert_eq!(error.body["code"].as_str(), Some("internal"));
+        assert!(
+            service.authority_write_failed,
+            "an uncertain commit outcome must stop the authority loop"
+        );
+        assert!(
+            service
+                .runtime
+                .zone_server(&source_zone_id)
+                .unwrap()
+                .gateway()
+                .zone()
+                .entity(second_actor)
+                .is_some()
+        );
+        assert!(
+            service
+                .runtime
+                .zone_server(&destination_zone_id)
+                .unwrap()
+                .gateway()
+                .zone()
+                .entity(second_actor)
+                .is_none()
+        );
+        assert_eq!(handoffs.receipts.lock().unwrap().len(), 1);
     }
 
     #[test]

@@ -1239,5 +1239,117 @@ mod tests {
                 prop_assert_eq!(&book, &before_capture);
             }
         }
+
+        #[test]
+        fn generated_release_cooldowns_expire_at_the_deadline(
+            cooldown_ms in 0_u64..100
+        ) {
+            let rules = TerritoryRules {
+                claim_protection: DurationMs::new(0),
+                capture_cooldown: DurationMs::new(cooldown_ms),
+                ..TerritoryRules::default()
+            };
+            let (mut book, zone) = book(rules);
+            let guards = faction("faction.guards");
+            let bandits = faction("faction.bandits");
+            book.claim("release-claim", actor(1), &guards, &zone, Millis::new(1_000))
+                .unwrap();
+            let cooldown = i64::try_from(cooldown_ms).expect("generated cooldown fits i64");
+            let capture_at = Millis::new(1_000 + cooldown);
+            book.capture(
+                "release-capture",
+                actor(2),
+                &bandits,
+                &zone,
+                0,
+                capture_at,
+            )
+            .unwrap();
+            let release_at = Millis::new(capture_at.value() + cooldown);
+            book.release("release-key", actor(2), &bandits, &zone, release_at)
+                .unwrap();
+            let ready_at = Millis::new(release_at.value() + cooldown);
+
+            if cooldown_ms > 0 {
+                let before_expiry = book.clone();
+                prop_assert_eq!(
+                    book.claim(
+                        "release-early-claim",
+                        actor(1),
+                        &guards,
+                        &zone,
+                        Millis::new(ready_at.value() - 1),
+                    )
+                    .unwrap_err()
+                    .code(),
+                    ErrorCode::Cooldown
+                );
+                prop_assert_eq!(&book, &before_expiry);
+            }
+
+            let reclaimed = book
+                .claim("release-ready-claim", actor(1), &guards, &zone, ready_at)
+                .unwrap();
+            prop_assert_eq!(reclaimed.from, None);
+            prop_assert_eq!(reclaimed.to, Some(guards.clone()));
+            prop_assert_eq!(reclaimed.revision, 5);
+            prop_assert_eq!(book.history().len(), 4);
+            prop_assert!(book.validate().is_ok());
+        }
+
+        #[test]
+        fn generated_contested_changes_are_atomic(
+            faction_power in 0_u64..100,
+            attempt_at in 1_000_i64..10_000
+        ) {
+            let rules = TerritoryRules {
+                claim_protection: DurationMs::new(0),
+                capture_cooldown: DurationMs::new(0),
+                minimum_capture_power: 0,
+                ..TerritoryRules::default()
+            };
+            let (mut book, zone) = book(rules);
+            let guards = faction("faction.guards");
+            let bandits = faction("faction.bandits");
+            book.claim("contested-claim", actor(1), &guards, &zone, Millis::new(1_000))
+                .unwrap();
+            book.set_contested(&zone, true).unwrap();
+            let contested = book.clone();
+
+            prop_assert_eq!(
+                book.capture(
+                    "contested-capture",
+                    actor(2),
+                    &bandits,
+                    &zone,
+                    faction_power,
+                    Millis::new(attempt_at),
+                )
+                .unwrap_err()
+                .code(),
+                ErrorCode::Conflict
+            );
+            prop_assert_eq!(&book, &contested);
+            prop_assert_eq!(
+                book.release(
+                    "contested-release",
+                    actor(1),
+                    &guards,
+                    &zone,
+                    Millis::new(attempt_at),
+                )
+                .unwrap_err()
+                .code(),
+                ErrorCode::Conflict
+            );
+            prop_assert_eq!(&book, &contested);
+            prop_assert_eq!(book.history().len(), 1);
+            prop_assert_eq!(
+                book.territory(&zone).unwrap().owner.as_ref(),
+                Some(&guards)
+            );
+            prop_assert!(book.territory(&zone).unwrap().contested);
+            prop_assert!(book.validate().is_ok());
+        }
     }
 }

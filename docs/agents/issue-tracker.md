@@ -88,15 +88,20 @@ when that dependency is available and the work resumes.
   The bounded graph runtime supports looping `patrol`, `flee_target`, and
   validated `interact_target` instructions. `lynx-world --content-bundle` now
   loads verified behavior definitions and merges matching IDs into the running
-  AI policy. The current world calendar has no season identity or
-  season-boundary contract; define that calendar concept before adding seasonal
-  behavior windows. The retained AI tick report is server-side runtime
-  inspection, but a durable privileged inspection endpoint depends on the
-  production identity, role mapping, and audit path tracked by NET-008. Resume
-  those pieces after NET-008 provides its runtime seam.
+  AI policy; a headless live-zone test proves authored graphs and UTC daily
+  windows change the guard's runtime decision without engine behavior changes.
+  Direct time tests now lock down inclusive/exclusive UTC boundaries, overnight
+  windows, invalid ranges, and pre-epoch timestamps.
+  The current world calendar has no season identity or season-boundary contract;
+  define that calendar concept before adding seasonal behavior windows. The
+  retained AI tick report is server-side runtime inspection, but a durable
+  privileged inspection endpoint depends on the production identity, role
+  mapping, and audit path tracked by NET-008. Resume those pieces after NET-008
+  provides its runtime seam.
 
 - **SIM-014 — Multi-zone runtime and independent crash recovery:** Authored
-  route validation, staged transfer coordination, leases, fair scheduling,
+  route validation, staged transfer coordination, leases, fair scheduling
+  (including a runtime test for one-quantum round-robin batches),
   per-zone snapshot adapters, stable zone construction, and static entity
   placements are present.
   `lynx-world serve --world-map <id> --content-bundle <path> --state-postgres`
@@ -110,12 +115,23 @@ when that dependency is available and the work resumes.
   assigning them to an arbitrary zone. Authored behavior bindings, faction
   relation refresh, and trigger-driven travel through `handoff_player_durable`
   are now connected. Calendar mutation still lacks a map-wide aggregate owner.
-  PostgreSQL 17 migrations 0001–0018 applied cleanly on an isolated cluster;
-  snapshot recovery/lease tests passed 10/10, and resume/session recovery passed
-  6/6. The remaining SIM-014 acceptance is a service-level handoff crash-window
-  run that checks both snapshots, durable route update, receipt, readiness, and
-  survivor-zone continuity; the current database suites do not exercise those
-  handoff commit boundaries together.
+  The `postgres_snapshot` integration target ran against the configured
+  repository `.env` database and passed 10/10 snapshot/lease/replay tests.
+  `LYNX_PG_TEST_DATABASE` is not configured, so dedicated faction/calendar,
+  resume-session, and handoff tests did not execute against PostgreSQL. The
+  headless happy path is now exercised through `MultiZoneService` with
+  an atomic in-memory handoff store, including rejected trigger/range requests,
+  injected commit failure without live-state mutation, fail-closed handling of
+  an uncertain durable-write error, and destination-token routing, including
+  reconnecting in the destination and rotating its token. An
+  opt-in PostgreSQL handoff test now checks both snapshots, durable route update,
+  receipt, reconstruction, destination-lease stale-session detachment,
+  destination-routed token rotation, receipt-based retry, and a final-receipt
+  insert failure that verifies SQL rollback after snapshot/route writes; it was
+  not run here because `LYNX_PG_TEST_DATABASE` is not configured. Remaining
+  acceptance is lost commit acknowledgement and live survivor-service readiness.
+  A local file-store regression also corrupts one zone checkpoint and restores
+  the other; a missing live destination preserves the registered source zone.
 
 - **SIM-014 — Live travel handoff integration:** Zone definitions now carry
   bounded `travel_triggers`; bundle validation requires each destination to be
@@ -128,10 +144,18 @@ when that dependency is available and the work resumes.
   `handoff_player_durable`, and PostgreSQL commits both zone snapshots, the
   receipt, and durable resume-session zone routing in one transaction. The old
   socket closes after commit so the client reconnects through the destination
-  route. Isolated PostgreSQL migration, snapshot recovery, lease-fencing, and
-  resume-session checks passed on 2026-11-12. The service-level handoff crash
-  window and survivor-zone acceptance remains open under the recovery item
-  below.
+  route. The headless service test verifies unknown-trigger and out-of-range
+  denial, client-selected destination/arrival rejection, non-mutating commit
+  failure, one-zone-only movement, destination-scoped resume-token issuance,
+  destination reconnect/token rotation, and rejection of stale
+   source/destination tokens. A missing destination returns a recoverable
+   `not_found` without removing the source zone. The generic PostgreSQL snapshot
+   suite passed as recorded above; the gated handoff commit/restore/retry test
+   is added but awaits
+  `LYNX_PG_TEST_DATABASE`; final-statement rollback is injected, while lost
+  commit acknowledgement and live survivor-zone service readiness remain open
+  under the recovery item below. A travel-cooldown duration and semantics also
+  need a gameplay decision.
 
 - **SIM-014 — Typed runtime bindings for placed entities:** Zone definitions
   can now place stable static instances of entity definitions. Startup validates
@@ -174,27 +198,38 @@ when that dependency is available and the work resumes.
   persisted relations across all zones. Authored-map mode now polls the
   normalized world state every five seconds and submits changed catalogs to the
   authority loop, which replaces every zone's AI policy in one serialized
-  operation. Relations stay out of zone content. Live PostgreSQL verification
-  of propagation after a committed relation edit remains open because this
-  environment has no dedicated database configured for the acceptance run.
+   operation. Relations stay out of zone content. Live PostgreSQL verification
+   of propagation after a committed relation edit remains open because this
+   environment has no `LYNX_PG_TEST_DATABASE` configured for the acceptance run.
 
-- **SIM-014 — Live PostgreSQL recovery acceptance (2026-11-12):** A dedicated
-  local PostgreSQL 17 cluster on port 55439 was migrated through 0018; status
-  reported 18 applied and 0 pending. The snapshot suite passed 10/10, including
-  replay after restart and lease takeover/fencing. The durable resume suite
-  passed 6/6, including process-restart resume and single-use token rotation.
-  The normalized faction/calendar round-trip also passed. Remaining acceptance:
-  run the authored multi-zone service and interrupt a zone owner around the
-  durable handoff commit; verify source/destination snapshots, the durable
-  session route and receipt, readiness, and survivor-zone continuity. Existing
-  PostgreSQL suites do not cover that integrated crash window yet.
+- **SIM-014 — Live PostgreSQL recovery acceptance:** The current
+  `postgres_snapshot` target passed 10/10 against the configured repository
+  `.env` database, covering snapshot/lease/replay cases. The dedicated
+  `LYNX_PG_TEST_DATABASE` variable is not configured, so faction/calendar,
+  resume-session, and handoff targets skip; do not count those skip-path results
+  as live validation. Remaining acceptance: run the authored multi-zone service
+  and interrupt a zone owner around the durable handoff commit; verify
+  source/destination snapshots, the durable session route and receipt,
+  readiness, and survivor-zone continuity. Existing PostgreSQL suites do not
+  cover that integrated crash window yet.
 
-- **CLT-008 — Equipment action contract:** The client inventory can submit
-  split/merge operations, but the authoritative `equip` verb is explicitly
-  unsupported. `ItemStack` has no equipment-slot metadata, and entities have no
-  persisted equipped-state component or owner-only replication shape. Define
-  item slot/compatibility rules and the snapshot/event/replication contract,
-  implement the server transaction, then expose it in the inventory UI.
+- **SIM-016 — Faction invariants and normalized persistence:** Generated
+  engine-level properties now cover territory release-cooldown expiry,
+  contested-operation atomicity, reserve-aware/capped power, and treasury
+  transfer conservation, replay, insufficient-funds atomicity, and snapshot
+  recovery. Snapshot-versus-normalized-table agreement after backfill/restart
+  remains unverified because `LYNX_PG_TEST_DATABASE` is not configured; run the
+  normalized faction/calendar persistence suite with that dedicated database
+  before claiming the evidence.
+
+- **SIM-015 — Calendar lifecycle safety versus event design:** `engine_sim`
+  covers cancellation/suspension without a territory result, early-resolution
+  and insufficient-participation rejection without aggregate mutation, and a
+  fresh-request duplicate resolution without a second territory-history entry.
+  `engine_core` also verifies suspended status survives calendar snapshot
+  recovery and remains unresolvable. Objective/scoring schemas, NPC participation,
+  reward delivery, and editor inspection still need explicit contracts; no reward
+  behavior is claimed.
 
 - **PST-010 — Live Nakama contract validation:** Authenticated player routes,
   `CharacterApiClient`, and the account UI cover friend request and block
