@@ -666,6 +666,56 @@ mod tests {
     }
 
     #[test]
+    fn edit_undo_redo_save_and_reopen_preserves_map() {
+        let project = tempfile::tempdir().unwrap();
+        let content_root = project.path().join("content");
+        write_map(&content_root, 0);
+        let mut session = EditorSession::open(project.path()).unwrap();
+        let original = session.map().unwrap().clone();
+        session.move_selected(3, -2).unwrap();
+        let edited = session.map().unwrap().clone();
+        assert!(session.undo());
+        assert_eq!(session.map(), Some(&original));
+        assert!(session.redo());
+        assert_eq!(session.map(), Some(&edited));
+        session.save().unwrap();
+        drop(session);
+
+        let reopened = EditorSession::open(project.path()).unwrap();
+        assert_eq!(reopened.map(), Some(&edited));
+        assert!(!reopened.is_dirty());
+        assert!(!project.path().join(".lynx/editor-recovery.ron").exists());
+    }
+
+    #[test]
+    fn interrupted_replacement_recovers_autosaved_edits_without_losing_original() {
+        let project = tempfile::tempdir().unwrap();
+        let content_root = project.path().join("content");
+        write_map(&content_root, 0);
+        let source = content_root.join("maps/editor_test.ron");
+        let original_bytes = fs::read(&source).unwrap();
+        let mut session = EditorSession::open(project.path()).unwrap();
+        session.move_selected(7, 2).unwrap();
+        let edited = session.map().unwrap().clone();
+        session.autosave().unwrap();
+        assert_eq!(fs::read(&source).unwrap(), original_bytes);
+        drop(session);
+
+        // Simulate termination after moving the original aside but before
+        // installing the replacement. Opening must restore it before loading.
+        fs::rename(&source, backup_path(&source)).unwrap();
+        let mut recovered = EditorSession::open(project.path()).unwrap();
+        assert_eq!(fs::read(&source).unwrap(), original_bytes);
+        assert_eq!(recovered.map(), Some(&edited));
+        assert!(recovered.is_dirty());
+        recovered.save().unwrap();
+        drop(recovered);
+        let reopened = EditorSession::open(project.path()).unwrap();
+        assert_eq!(reopened.map(), Some(&edited));
+        assert!(!reopened.is_dirty());
+    }
+
+    #[test]
     fn external_reload_refreshes_clean_session_and_preserves_unsaved_session() {
         let project = tempfile::tempdir().unwrap();
         let content_root = project.path().join("content");

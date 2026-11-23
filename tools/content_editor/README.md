@@ -40,5 +40,20 @@ Unsaved map edits are periodically written to
 `.lynx/editor-recovery.ron`. Recovery is loaded when the same project is opened
 again; saving removes that recovery snapshot. Play preview launches the existing
 offline client as a separate process, keeping the editor independent of player
-and simulation crates. End-to-end open/edit/save/reopen and crash-recovery
-verification remains.
+and simulation crates.
+
+Run `cargo test -p lynx_editor --lib` for session-level verification of exact
+undo/redo, save/reopen, external reload, and autosave recovery after an interrupted
+file replacement. These tests use temporary map fixtures.
+
+Run `cargo test -p lynx_editor --test generated_project -- --nocapture` for the
+generated-project workflow. It builds the `lynx` CLI, generates both templates
+in temporary directories, edits their atlases through the editor session, checks
+exact undo/redo and save/reopen state, and runs `lynx validate` before and after.
+It also injects a failure during a two-map save, confirms the partial disk state,
+and verifies that reopening recovers both edits consistently before saving and
+passing CLI validation.
+The diagnostic test introduces an unknown zone reference, checks its map ID and
+file/field path, compares the complete error list with `lynx validate --json`,
+and verifies that repairing the reference clears errors in both paths.
+Rendered control acceptance remains open.

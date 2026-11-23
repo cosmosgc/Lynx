@@ -7,6 +7,13 @@ Terms for authored bundles, their versioned definitions, and controlled upgrades
 **Content bundle**:
 A versioned set of authored definitions and locale catalogs published together.
 
+**Draft content**:
+A user-authored revision visible only to its owner until it is explicitly published after moderation approval.
+
+**Published content**:
+An approved revision explicitly made available to sessions beyond its owner.
+_Avoid_: Approved content (approval permits publication but does not itself publish).
+
 **Content definition**:
 An authored, versioned description of a kind of item, entity, zone, map, behavior, UI, or minigame.
 

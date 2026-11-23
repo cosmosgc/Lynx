@@ -320,6 +320,16 @@ impl PublishingRecord {
         self.state == ModerationState::Approved
     }
 
+    /// Whether `viewer` may receive this record's content.
+    ///
+    /// Approval is permission to publish, not publication itself. Non-owners
+    /// can see content only when it has been explicitly published and remains
+    /// approved; owners can still inspect their drafts and withdrawn revisions.
+    #[must_use]
+    pub fn is_visible_to(&self, viewer: &AuthorId, published: bool) -> bool {
+        viewer == &self.author || (published && self.is_approved())
+    }
+
     /// Submit the current content for review.
     ///
     /// # Errors
@@ -585,6 +595,31 @@ mod tests {
         assert!(record.is_approved());
         record.withdraw().unwrap();
         assert_eq!(record.state, ModerationState::Withdrawn);
+    }
+
+    #[test]
+    fn draft_visibility_is_owner_only_until_approved_and_explicitly_published() {
+        let owner = author("alice");
+        let other = author("bob");
+        let mut record = PublishingRecord::new(owner.clone());
+
+        assert!(record.is_visible_to(&owner, false));
+        assert!(!record.is_visible_to(&other, false));
+        // A caller cannot make a draft public just by claiming it was published.
+        assert!(!record.is_visible_to(&other, true));
+
+        record.submit().unwrap();
+        assert!(record.is_visible_to(&owner, false));
+        assert!(!record.is_visible_to(&other, true));
+
+        record.approve(author("moderator")).unwrap();
+        assert!(record.is_visible_to(&owner, false));
+        assert!(!record.is_visible_to(&other, false));
+        assert!(record.is_visible_to(&other, true));
+
+        record.withdraw().unwrap();
+        assert!(record.is_visible_to(&owner, true));
+        assert!(!record.is_visible_to(&other, true));
     }
 
     #[test]

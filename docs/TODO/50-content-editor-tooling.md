@@ -11,9 +11,17 @@ migration tooling. The `lynx` CLI supports `new`, `doctor`, `validate`, content
 hash/diff/publish checks, and migration workflows. The standalone editor shell
 is in progress; asset import remains unimplemented.
 
+**Editor direction:** Build a standalone game-development IDE with a workflow
+inspired by Unity and Unreal: a 3D zone scene view, hierarchy, inspector,
+transform tools, asset browsing, validation, and local play preview. This is a
+product direction, not a promise of feature parity with those engines. The 2D
+world atlas remains a separate topology editor; it arranges zones and routes but
+does not replace editing a zone's 3D scene.
+
 **Related design:** [content authoring](../content-authoring.md),
 [world simulation](../world-simulation.md), [AI tooling](../ai-tooling.md),
 [platforms](../platforms.md),
+[project guide §13](../lightweight_mmorpg_engine_project_guide.md#13-world-editor-and-executable-tools),
 [ADR 0006](../adr/0006-content-and-protocol-formats.md),
 [ADR 0017](../adr/0017-content-manifest-versioning.md),
 [ADR 0019](../adr/0019-world-map-atlas-and-routes.md).
@@ -23,7 +31,7 @@ is in progress; asset import remains unimplemented.
 ## CNT-001 — Editor application shell
 
 - **Priority:** P1
-- **Status:** In progress — standalone Bevy editor opens projects, edits world-map placements, validates through `engine_content`, supports undo/redo and recovery autosave, and launches the offline client for local play preview; end-to-end authoring verification remains
+- **Status:** In progress — standalone Bevy editor opens projects and edits world-map placements in its current 2D atlas view; shared validation, undo/redo, recovery autosave, and offline play preview exist. The planned 3D zone-authoring IDE view and rendered acceptance remain open.
 - **Depends on:** `CLT-001`
 - **References:** [project guide §23](../lightweight_mmorpg_engine_project_guide.md#23-suggested-implementation-roadmap),
   [content authoring](../content-authoring.md),
@@ -36,7 +44,16 @@ reuses the same validation path.
 **Scope**
 
 - Open/save a project with the canonical manifest and content directories.
-- Scene viewport with selection, transform gizmos, and a docked inspector.
+- 3D zone scene view with orbit/pan/zoom, selection, and focus on the selected
+  object; use temporary primitives/placeholders until `CNT-013` asset import is
+  available.
+- Hierarchy/outliner and docked, type-aware inspector for scene objects and
+  project content.
+- Translation/rotation/scale gizmos, grid snapping, selection filters, and
+  layers; detailed authored placement and component editing is tracked in
+  `CNT-003` and `CNT-005`.
+- Separate 2D world-atlas view for topology and routes (`CNT-002`).
+- Project/content browser and visible validation/diagnostic panel.
 - Central undo/redo command stack that covers placement, property edits, and
   deletion.
 - Validation panel that runs the same gates as `lynx validate`.
@@ -46,10 +63,46 @@ reuses the same validation path.
 **Acceptance criteria**
 
 - [x] D5 is recorded as ADR 0025 before implementation starts.
-- [ ] A creator can open a generated project, edit, undo/redo, save, and reopen.
+- [ ] A creator can open a generated project, view a zone in 3D, select a scene
+      object, and orbit/pan/zoom the viewport.
+- [ ] Hierarchy, transform gizmos, snapping, and inspector edits work together
+      and participate in undo/redo.
+- [ ] A creator can edit, undo/redo, save, and reopen a generated project.
 - [ ] Validation errors point to the offending definition and field.
 - [ ] Autosave/recovery never leaves a half-written project.
 - [ ] Editor code is isolated from engine/runtime crates as D5 requires.
+
+**Validation progress (2026-11-23):** `cargo test -p lynx_editor --lib`
+passes three session tests. The new workflow test checks exact map state across
+edit, undo, redo, save, and reopen. The recovery test checks that autosave leaves
+the authored file byte-for-byte unchanged, simulates interruption between
+renaming the original file and installing its replacement, then verifies
+recovery, save, and a clean reopen. These exercise the editor's real session
+and filesystem code with temporary map fixtures.
+
+`cargo test -p lynx_editor --test generated_project -- --nocapture` also passes:
+the integration test builds the actual `lynx` CLI, generates both `minimal` and
+`mmorpg` projects, opens each in `EditorSession`, translates the atlas while
+preserving passage adjacency, checks exact undo/redo state, saves, and reopens
+with no pending recovery or dirty state. Both the editor's shared validator and
+the actual `lynx validate` command accept the saved content.
+
+The multi-map integration test also passes: it splits a generated atlas into two
+valid maps, edits both, and injects a filesystem failure on the second map during
+the real `save` operation. It confirms the first map reached disk, the second
+retained its original bytes, and recovery remained available. A new session
+recovers both edited maps exactly; saving and reopening clears recovery and
+passes `lynx validate`. This verifies recovery after a partial save, not a
+power-loss durability guarantee.
+
+Diagnostic attribution is verified at the session/CLI boundary by
+`invalid_map_reference_has_matching_editor_and_cli_field_diagnostics`: a
+generated `mmorpg` atlas referencing `zone.missing` reports
+`world.unknown_zone` at `maps/overworld.ron:zones[0].zone`, naming both the
+missing zone and `map.overworld`. The complete editor error list matches
+`lynx validate --json` exactly, with CLI exit code 2. Restoring the reference
+and reloading clears editor errors and passes CLI validation. Rendered controls
+and visual diagnostic presentation still need acceptance verification.
 
 ---
 
@@ -68,6 +121,9 @@ reuses the same validation path.
 - Territory/faction overlays and calendar event locations (`CNT-016`).
 - Snapping, layering, and budget indicators for routes/entities.
 - Preview the route graph and travel paths.
+
+The atlas is a 2D topology view. It arranges zone IDs and routes; detailed zone
+geometry and entity placement belong in the 3D scene view in `CNT-001`/`CNT-003`.
 
 **Acceptance criteria**
 
@@ -202,7 +258,7 @@ reuses the same validation path.
 ## CNT-008 — User-content schemas and moderation states
 
 - **Priority:** P2
-- **Status:** Ready
+- **Status:** In progress — owner-only visibility policy primitive; persistence and delivery enforcement remain
 - **Depends on:** —
 - **References:** [security §Content and user-generated content](../security.md#content-and-user-generated-content),
   migration `0002_content.sql`,
@@ -227,6 +283,15 @@ are not implemented. This must not be improvised after uploads exist.
 - [ ] Publishing requires the configured review/authorization path.
 - [ ] Revocation removes content from new sessions without deleting audit.
 - [ ] Ownership and revision history survive restart and export.
+
+**Progress (2026-11-23):** `PublishingRecord::is_visible_to` codifies the
+owner-only rule for drafts and other unpublished states. Other principals see a
+bundle only when it is both explicitly published and approved; approval alone
+does not expose content, and withdrawal hides it from non-owners. Unit coverage
+tests draft, in-review, approved-but-unpublished, published, and withdrawn
+states. This is a domain-policy primitive only: there is not yet a persisted
+user-content delivery/query path that enforces it, so the end-to-end visibility
+acceptance criterion remains open.
 
 ---
 
