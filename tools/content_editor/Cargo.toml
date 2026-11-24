@@ -17,6 +17,7 @@ bevy = { workspace = true, features = [
     "bevy_winit",
     "x11",
     "2d_bevy_render",
+    "bevy_pbr",
     "bevy_text",
     "default_font",
 ] }

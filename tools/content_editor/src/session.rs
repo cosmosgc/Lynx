@@ -5,10 +5,11 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use engine_content::{
-    ContentLoader, ContentSet, MapPosition, MapZone, ValidationReport, WorldMapDefinition,
-    starter_component_registry,
+    ContentDefinition, ContentLoader, ContentSet, MapPosition, MapZone, ValidationReport,
+    WorldMapDefinition, starter_component_registry,
 };
 use engine_core::id::DefinitionId;
+use engine_core::math::Vec3;
 use serde::{Deserialize, Serialize};
 
 const HISTORY_LIMIT: usize = 128;
@@ -24,7 +25,7 @@ pub enum SessionError {
     #[error("editor selection is invalid: {0}")]
     InvalidSelection(String),
     /// External content cannot replace in-memory edits that have not been saved.
-    #[error("cannot reload external content while map edits are unsaved")]
+    #[error("cannot reload external content while editor changes are unsaved")]
     UnsavedExternalChanges,
     /// Filesystem or serialization operation failed.
     #[error("editor project operation failed: {0}")]
@@ -50,10 +51,17 @@ impl From<ron::error::SpannedError> for SessionError {
 }
 
 #[derive(Debug, Clone)]
-struct MapEdit {
-    map_id: DefinitionId,
-    before: WorldMapDefinition,
-    after: WorldMapDefinition,
+enum Edit {
+    Map {
+        map_id: DefinitionId,
+        before: Box<WorldMapDefinition>,
+        after: Box<WorldMapDefinition>,
+    },
+    Definition {
+        definition_id: DefinitionId,
+        before: Box<ContentDefinition>,
+        after: Box<ContentDefinition>,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -61,10 +69,18 @@ struct RecoverySnapshot {
     version: u32,
     project_root: PathBuf,
     maps: Vec<RecoveryMap>,
+    #[serde(default)]
+    definitions: Vec<RecoveryDefinition>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct RecoveryMap {
+    source: String,
+    contents: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RecoveryDefinition {
     source: String,
     contents: String,
 }
@@ -82,9 +98,11 @@ pub struct EditorSession {
     selected_map: Option<DefinitionId>,
     selected_zone: Option<DefinitionId>,
     dirty_maps: BTreeSet<DefinitionId>,
-    undo: Vec<MapEdit>,
-    redo: Vec<MapEdit>,
+    dirty_definitions: BTreeSet<DefinitionId>,
+    undo: Vec<Edit>,
+    redo: Vec<Edit>,
     revision: u64,
+    content_revision: u64,
     saved_paths: Vec<PathBuf>,
 }
 
@@ -127,9 +145,11 @@ impl EditorSession {
             content: std::mem::take(&mut content),
             validation,
             dirty_maps: BTreeSet::new(),
+            dirty_definitions: BTreeSet::new(),
             undo: Vec::new(),
             redo: Vec::new(),
             revision: 0,
+            content_revision: 0,
             saved_paths: Vec::new(),
         };
         session.recover_if_available()?;
@@ -150,6 +170,13 @@ impl EditorSession {
     /// Current selected zone placement.
     pub fn selected_zone(&self) -> Option<&DefinitionId> {
         self.selected_zone.as_ref()
+    }
+
+    /// Definition data for the selected zone, if it is loaded in the project.
+    pub fn selected_zone_definition(&self) -> Option<&ContentDefinition> {
+        self.selected_zone
+            .as_ref()
+            .and_then(|id| self.content.definitions.get(id))
     }
 
     /// Maps in the loaded project.
@@ -180,12 +207,17 @@ impl EditorSession {
 
     /// Whether any map contains unsaved edits.
     pub fn is_dirty(&self) -> bool {
-        !self.dirty_maps.is_empty()
+        !self.dirty_maps.is_empty() || !self.dirty_definitions.is_empty()
     }
 
     /// Monotonic edit revision for view synchronization.
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// Monotonic reload revision for authored definitions and catalogs.
+    pub fn content_revision(&self) -> u64 {
+        self.content_revision
     }
 
     /// Select a map and its first placement.
@@ -238,6 +270,50 @@ impl EditorSession {
             placement.position.y = placement.position.y.checked_add(dy).ok_or_else(|| {
                 SessionError::InvalidSelection("zone y coordinate overflow".into())
             })?;
+            Ok(())
+        })
+    }
+
+    /// Set the selected zone's authored entity-placement transform as one undoable edit.
+    ///
+    /// Position coordinates and yaw must be finite. The shared content validator
+    /// reports zone bounds and navigation constraints after the edit.
+    pub fn set_selected_entity_placement_transform(
+        &mut self,
+        placement_id: &str,
+        position: Vec3,
+        yaw_degrees: f32,
+    ) -> Result<(), SessionError> {
+        if !position.x.is_finite()
+            || !position.y.is_finite()
+            || !position.z.is_finite()
+            || !yaw_degrees.is_finite()
+        {
+            return Err(SessionError::InvalidSelection(
+                "entity placement transforms must be finite".into(),
+            ));
+        }
+        let definition_id = self
+            .selected_zone
+            .clone()
+            .ok_or_else(|| SessionError::InvalidSelection("no zone selected".into()))?;
+        if !definition_id.is_in("zone") {
+            return Err(SessionError::InvalidSelection(format!(
+                "selected definition {definition_id} is not a zone"
+            )));
+        }
+        self.edit_definition(&definition_id, |definition| {
+            let placement = definition
+                .entity_placements
+                .iter_mut()
+                .find(|placement| placement.id == placement_id)
+                .ok_or_else(|| {
+                    SessionError::InvalidSelection(format!(
+                        "entity placement {placement_id} is not in zone {definition_id}"
+                    ))
+                })?;
+            placement.position = position;
+            placement.yaw_degrees = yaw_degrees;
             Ok(())
         })
     }
@@ -304,10 +380,22 @@ impl EditorSession {
         let Some(edit) = self.undo.pop() else {
             return false;
         };
-        self.content
-            .maps
-            .insert(edit.map_id.clone(), edit.before.clone());
-        self.dirty_maps.insert(edit.map_id.clone());
+        match &edit {
+            Edit::Map { map_id, before, .. } => {
+                self.content.maps.insert(map_id.clone(), (**before).clone());
+                self.dirty_maps.insert(map_id.clone());
+            }
+            Edit::Definition {
+                definition_id,
+                before,
+                ..
+            } => {
+                self.content
+                    .definitions
+                    .insert(definition_id.clone(), (**before).clone());
+                self.dirty_definitions.insert(definition_id.clone());
+            }
+        }
         self.redo.push(edit);
         self.revision = self.revision.saturating_add(1);
         self.refresh_validation();
@@ -315,15 +403,27 @@ impl EditorSession {
         true
     }
 
-    /// Redo the latest undone map edit.
+    /// Redo the latest undone authored-content edit.
     pub fn redo(&mut self) -> bool {
         let Some(edit) = self.redo.pop() else {
             return false;
         };
-        self.content
-            .maps
-            .insert(edit.map_id.clone(), edit.after.clone());
-        self.dirty_maps.insert(edit.map_id.clone());
+        match &edit {
+            Edit::Map { map_id, after, .. } => {
+                self.content.maps.insert(map_id.clone(), (**after).clone());
+                self.dirty_maps.insert(map_id.clone());
+            }
+            Edit::Definition {
+                definition_id,
+                after,
+                ..
+            } => {
+                self.content
+                    .definitions
+                    .insert(definition_id.clone(), (**after).clone());
+                self.dirty_definitions.insert(definition_id.clone());
+            }
+        }
         self.undo.push(edit);
         self.revision = self.revision.saturating_add(1);
         self.refresh_validation();
@@ -340,7 +440,7 @@ impl EditorSession {
     /// Reload content changed outside the editor when there are no unsaved edits.
     ///
     /// The current map and zone selection are retained when they still exist;
-    /// map edit history is cleared if the authored maps changed on disk.
+    /// edit history is cleared if authored maps or definitions changed on disk.
     pub fn reload_external_changes(&mut self) -> Result<(), SessionError> {
         if self.is_dirty() {
             return Err(SessionError::UnsavedExternalChanges);
@@ -348,7 +448,8 @@ impl EditorSession {
 
         let loader = ContentLoader::new(starter_component_registry().map_err(anyhow::Error::from)?);
         let (mut content, validation) = loader.load_project(&self.content_root);
-        let maps_changed = content.maps != self.content.maps;
+        let authored_content_changed =
+            content.maps != self.content.maps || content.definitions != self.content.definitions;
         self.content = std::mem::take(&mut content);
         self.validation = validation;
 
@@ -368,16 +469,17 @@ impl EditorSession {
                     .and_then(|map| map.zones.first().map(|zone| zone.zone.clone()))
             });
 
-        if maps_changed {
+        if authored_content_changed {
             self.undo.clear();
             self.redo.clear();
         }
         self.revision = self.revision.saturating_add(1);
+        self.content_revision = self.content_revision.saturating_add(1);
         Ok(())
     }
 
-    /// Save changed maps with sibling staging files, preserving the previous
-    /// complete file if serialization or writing fails.
+    /// Save changed maps and definitions with sibling staging files, preserving
+    /// the previous complete file if serialization or writing fails.
     pub fn save(&mut self) -> Result<(), SessionError> {
         // Persist the full edited state first. If the process stops while
         // several map files are being replaced, reopening replays this snapshot
@@ -397,6 +499,19 @@ impl EditorSession {
             atomic_write(&path, text.as_bytes())?;
             self.saved_paths.push(path);
         }
+        let dirty_definitions: Vec<_> = self.dirty_definitions.iter().cloned().collect();
+        for id in dirty_definitions {
+            let definition = self.content.definitions.get(&id).ok_or_else(|| {
+                SessionError::InvalidSelection(format!("edited definition {id} disappeared"))
+            })?;
+            let source = self.content.sources.get(&id).ok_or_else(|| {
+                SessionError::InvalidSelection(format!("definition {id} has no source path"))
+            })?;
+            let path = self.content_root.join(source);
+            let text = ron::ser::to_string_pretty(definition, ron::ser::PrettyConfig::new())?;
+            atomic_write(&path, text.as_bytes())?;
+            self.saved_paths.push(path);
+        }
         let recovery_backup = backup_path(&self.recovery_path);
         if self.recovery_path.exists() {
             fs::remove_file(&self.recovery_path)?;
@@ -405,6 +520,7 @@ impl EditorSession {
             fs::remove_file(recovery_backup)?;
         }
         self.dirty_maps.clear();
+        self.dirty_definitions.clear();
         self.refresh_validation();
         Ok(())
     }
@@ -419,7 +535,7 @@ impl EditorSession {
 
     /// Persist a separate recovery snapshot. It never writes over project content.
     pub fn autosave(&self) -> Result<(), SessionError> {
-        if self.dirty_maps.is_empty() {
+        if self.dirty_maps.is_empty() && self.dirty_definitions.is_empty() {
             return Ok(());
         }
         let maps = self
@@ -442,10 +558,34 @@ impl EditorSession {
                 })
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
+        let definitions = self
+            .dirty_definitions
+            .iter()
+            .map(|id| {
+                let definition = self
+                    .content
+                    .definitions
+                    .get(id)
+                    .ok_or_else(|| anyhow::anyhow!("edited definition {id} disappeared"))?;
+                let source = self
+                    .content
+                    .sources
+                    .get(id)
+                    .ok_or_else(|| anyhow::anyhow!("definition {id} has no source path"))?;
+                Ok(RecoveryDefinition {
+                    source: source.clone(),
+                    contents: ron::ser::to_string_pretty(
+                        definition,
+                        ron::ser::PrettyConfig::new(),
+                    )?,
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
         let snapshot = RecoverySnapshot {
             version: RECOVERY_VERSION,
             project_root: self.project_root.clone(),
             maps,
+            definitions,
         };
         let contents = ron::ser::to_string_pretty(&snapshot, ron::ser::PrettyConfig::new())?;
         atomic_write(&self.recovery_path, contents.as_bytes())?;
@@ -473,10 +613,46 @@ impl EditorSession {
         if self.undo.len() == HISTORY_LIMIT {
             self.undo.remove(0);
         }
-        self.undo.push(MapEdit {
+        self.undo.push(Edit::Map {
             map_id: map_id.clone(),
-            before,
-            after,
+            before: Box::new(before),
+            after: Box::new(after),
+        });
+        self.redo.clear();
+        self.revision = self.revision.saturating_add(1);
+        self.refresh_validation();
+        Ok(())
+    }
+
+    fn edit_definition(
+        &mut self,
+        definition_id: &DefinitionId,
+        edit: impl FnOnce(&mut ContentDefinition) -> Result<(), SessionError>,
+    ) -> Result<(), SessionError> {
+        let before = self
+            .content
+            .definitions
+            .get(definition_id)
+            .cloned()
+            .ok_or_else(|| {
+                SessionError::InvalidSelection(format!("unknown definition {definition_id}"))
+            })?;
+        let mut after = before.clone();
+        edit(&mut after)?;
+        if before == after {
+            return Ok(());
+        }
+        self.content
+            .definitions
+            .insert(definition_id.clone(), after.clone());
+        self.dirty_definitions.insert(definition_id.clone());
+        if self.undo.len() == HISTORY_LIMIT {
+            self.undo.remove(0);
+        }
+        self.undo.push(Edit::Definition {
+            definition_id: definition_id.clone(),
+            before: Box::new(before),
+            after: Box::new(after),
         });
         self.redo.clear();
         self.revision = self.revision.saturating_add(1);
@@ -540,6 +716,29 @@ impl EditorSession {
             }
             self.dirty_maps.insert(id.clone());
             self.content.maps.insert(id, map);
+        }
+        for saved in snapshot.definitions {
+            let definition: ContentDefinition = ron::de::from_str(&saved.contents)?;
+            let Some(id) = self
+                .content
+                .definitions
+                .keys()
+                .find(|id| *id == &definition.id)
+                .cloned()
+            else {
+                return Err(SessionError::InvalidProject(format!(
+                    "recovery definition {} is not in this project",
+                    definition.id
+                )));
+            };
+            if self.content.sources.get(&id) != Some(&saved.source) {
+                return Err(SessionError::InvalidProject(format!(
+                    "recovery source path does not match definition {}",
+                    definition.id
+                )));
+            }
+            self.dirty_definitions.insert(id.clone());
+            self.content.definitions.insert(id, definition);
         }
         self.refresh_validation();
         Ok(())
@@ -632,8 +831,10 @@ fn restore_atomic_backups(root: &Path) -> Result<(), SessionError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_content::definition::ZoneEntityPlacement;
     use engine_content::{DisplayText, MapPosition};
     use engine_core::i18n::MessageKey;
+    use engine_core::math::Vec3 as AuthoredVec3;
     use engine_core::schema::SchemaVersion;
 
     fn map(position_x: i32) -> WorldMapDefinition {
@@ -665,6 +866,43 @@ mod tests {
         .unwrap();
     }
 
+    fn write_zone(content_root: &Path) {
+        let zone = ContentDefinition {
+            id: DefinitionId::new("zone.editor_test").unwrap(),
+            version: SchemaVersion::new(1, 0),
+            display: DisplayText {
+                name: MessageKey::parse("zone.editor_test.name").unwrap(),
+                description: MessageKey::parse("zone.editor_test.description").unwrap(),
+            },
+            components: std::collections::BTreeMap::new(),
+            presentation: None,
+            tags: std::collections::BTreeSet::new(),
+            behavior: None,
+            travel_triggers: Vec::new(),
+            entity_placements: vec![ZoneEntityPlacement {
+                id: "stall".into(),
+                definition: DefinitionId::new("entity.stall").unwrap(),
+                position: AuthoredVec3::new(1.0, 0.0, 2.0),
+                yaw_degrees: 15.0,
+            }],
+            entity_links: Vec::new(),
+            link: None,
+        };
+        let directory = content_root.join("zones");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("editor_test.ron"),
+            ron::ser::to_string(&zone).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn write_editor_project(project: &Path) {
+        let content_root = project.join("content");
+        write_map(&content_root, 0);
+        write_zone(&content_root);
+    }
+
     #[test]
     fn edit_undo_redo_save_and_reopen_preserves_map() {
         let project = tempfile::tempdir().unwrap();
@@ -685,6 +923,102 @@ mod tests {
         assert_eq!(reopened.map(), Some(&edited));
         assert!(!reopened.is_dirty());
         assert!(!project.path().join(".lynx/editor-recovery.ron").exists());
+    }
+
+    #[test]
+    fn selected_zone_entity_transform_undo_redo_save_and_reopen() {
+        let project = tempfile::tempdir().unwrap();
+        write_editor_project(project.path());
+        let mut session = EditorSession::open(project.path()).unwrap();
+        let original = session.selected_zone_definition().unwrap().clone();
+
+        session
+            .set_selected_entity_placement_transform(
+                "stall",
+                AuthoredVec3::new(4.5, 1.0, -3.0),
+                270.0,
+            )
+            .unwrap();
+        let edited = session.selected_zone_definition().unwrap().clone();
+        assert_eq!(
+            edited.entity_placements[0].position,
+            AuthoredVec3::new(4.5, 1.0, -3.0)
+        );
+        assert_eq!(edited.entity_placements[0].yaw_degrees, 270.0);
+        assert!(session.is_dirty());
+        assert!(session.undo());
+        assert_eq!(session.selected_zone_definition(), Some(&original));
+        assert!(session.redo());
+        assert_eq!(session.selected_zone_definition(), Some(&edited));
+
+        session.save().unwrap();
+        assert!(
+            session
+                .take_saved_paths()
+                .iter()
+                .any(|path| path.ends_with(Path::new("zones/editor_test.ron")))
+        );
+        drop(session);
+        let reopened = EditorSession::open(project.path()).unwrap();
+        assert_eq!(reopened.selected_zone_definition(), Some(&edited));
+        assert!(!reopened.is_dirty());
+        assert!(!project.path().join(".lynx/editor-recovery.ron").exists());
+    }
+
+    #[test]
+    fn non_finite_zone_entity_transform_is_rejected_without_dirtying_session() {
+        let project = tempfile::tempdir().unwrap();
+        write_editor_project(project.path());
+        let mut session = EditorSession::open(project.path()).unwrap();
+        let original = session.selected_zone_definition().unwrap().clone();
+        let revision = session.revision();
+
+        assert!(
+            session
+                .set_selected_entity_placement_transform(
+                    "stall",
+                    AuthoredVec3::new(f32::NAN, 0.0, 0.0),
+                    0.0,
+                )
+                .is_err()
+        );
+        assert_eq!(session.selected_zone_definition(), Some(&original));
+        assert_eq!(session.revision(), revision);
+        assert!(!session.is_dirty());
+    }
+
+    #[test]
+    fn autosaved_zone_entity_transform_recovers_and_can_be_saved() {
+        let project = tempfile::tempdir().unwrap();
+        write_editor_project(project.path());
+        let mut session = EditorSession::open(project.path()).unwrap();
+        session.move_selected(2, -1).unwrap();
+        let edited_map = session.map().unwrap().clone();
+        session
+            .set_selected_entity_placement_transform(
+                "stall",
+                AuthoredVec3::new(-2.0, 0.5, 8.0),
+                90.0,
+            )
+            .unwrap();
+        let edited = session.selected_zone_definition().unwrap().clone();
+        let source = project.path().join("content/zones/editor_test.ron");
+        let original_bytes = fs::read(&source).unwrap();
+        session.autosave().unwrap();
+        assert_eq!(fs::read(&source).unwrap(), original_bytes);
+        drop(session);
+
+        let mut recovered = EditorSession::open(project.path()).unwrap();
+        assert_eq!(recovered.map(), Some(&edited_map));
+        assert_eq!(recovered.selected_zone_definition(), Some(&edited));
+        assert!(recovered.is_dirty());
+        recovered.save().unwrap();
+        drop(recovered);
+
+        let reopened = EditorSession::open(project.path()).unwrap();
+        assert_eq!(reopened.map(), Some(&edited_map));
+        assert_eq!(reopened.selected_zone_definition(), Some(&edited));
+        assert!(!reopened.is_dirty());
     }
 
     #[test]
@@ -723,12 +1057,15 @@ mod tests {
         write_map(&content_root, 0);
 
         let mut clean = EditorSession::open(project.path()).unwrap();
+        let loaded_content_revision = clean.content_revision();
         write_map(&content_root, 5);
         clean.reload_external_changes().unwrap();
         assert_eq!(clean.map().unwrap().zones[0].position.x, 5);
+        assert_eq!(clean.content_revision(), loaded_content_revision + 1);
 
         let mut saved = EditorSession::open(project.path()).unwrap();
         saved.move_selected(1, 0).unwrap();
+        assert_eq!(saved.content_revision(), loaded_content_revision);
         saved.save().unwrap();
         assert!(saved.take_saved_paths()[0].ends_with(Path::new("maps").join("editor_test.ron")));
         saved.reload_external_changes().unwrap();

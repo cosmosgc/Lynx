@@ -1,0 +1,12 @@
+(
+    id: "map.overworld",
+    version: (major: 1, minor: 0),
+    display: (name: "map.overworld.name", description: "map.overworld.description"),
+    zones: [
+        (zone: "zone.starter", position: (x: 0, y: 0)),
+        (zone: "zone.market", position: (x: 1, y: 0)),
+    ],
+    routes: [
+        (from: "zone.starter", to: "zone.market", bidirectional: true, kind: passage),
+    ],
+)

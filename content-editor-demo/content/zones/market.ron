@@ -1,0 +1,22 @@
+(
+    id: "zone.market",
+    version: (major: 1, minor: 0),
+    display: (name: "zone.market.name", description: "zone.market.description"),
+    components: {
+        "core.zone": {
+            "max_players": 64,
+            "cell_size_m": 1.0,
+            "width_cells": 128,
+            "height_cells": 128,
+            "origin_x_m": 0.0,
+            "origin_z_m": 0.0,
+            "floor_y_m": 0.0,
+            "ceiling_y_m": 4.0,
+            "entry_x_m": 64.5,
+            "entry_y_m": 0.0,
+            "entry_z_m": 64.5,
+            "blocked_cells": [],
+            "max_entities": 1000,
+        },
+    },
+)

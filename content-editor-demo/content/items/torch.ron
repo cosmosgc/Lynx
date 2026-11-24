@@ -1,0 +1,8 @@
+(
+    id: "item.torch",
+    version: (major: 1, minor: 0),
+    display: (name: "item.torch.name", description: "item.torch.description"),
+    components: {
+        "core.item": {"stack_max": 16, "weight_kg": 0.5},
+    },
+)

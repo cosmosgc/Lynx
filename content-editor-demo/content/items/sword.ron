@@ -1,0 +1,8 @@
+(
+    id: "item.sword",
+    version: (major: 1, minor: 0),
+    display: (name: "item.sword.name", description: "item.sword.description"),
+    components: {
+        "core.item": {"stack_max": 1, "weight_kg": 2.0, "equip_slot": "main_hand"},
+    },
+)

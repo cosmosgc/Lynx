@@ -3,10 +3,13 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
 
+use bevy::camera::Viewport;
+use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
-use engine_content::MapPosition;
+use engine_content::definition::ZoneEntityPlacement;
+use engine_content::{ContentDefinition, MapPosition};
 use engine_core::id::DefinitionId;
 use lynx_editor::EditorSession;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -19,6 +22,79 @@ struct Notice(String);
 
 #[derive(Resource, Default)]
 struct PreviewMode(bool);
+
+#[derive(Resource, Default)]
+struct ProjectDialog {
+    open: bool,
+    path: String,
+}
+
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq)]
+enum EditorSurface {
+    #[default]
+    WorldAtlas,
+    ZoneScene,
+}
+
+fn surface_is_active(current: EditorSurface, camera_surface: EditorSurface) -> bool {
+    current == camera_surface
+}
+
+#[derive(Resource)]
+struct EditorPanels {
+    hierarchy: bool,
+    inspector: bool,
+}
+
+impl Default for EditorPanels {
+    fn default() -> Self {
+        Self {
+            hierarchy: true,
+            inspector: true,
+        }
+    }
+}
+
+#[derive(Resource, Default)]
+struct SceneViewport(Option<egui::Rect>);
+
+impl SceneViewport {
+    fn contains(&self, cursor: Vec2) -> bool {
+        self.0
+            .is_some_and(|rect| rect.contains(egui::pos2(cursor.x, cursor.y)))
+    }
+}
+
+#[derive(Resource)]
+struct ZoneSceneView {
+    yaw: f32,
+    pitch: f32,
+    distance: f32,
+    target: Vec3,
+    selected_object: SceneObjectId,
+    focus_selected: bool,
+}
+
+#[derive(Default)]
+struct PlacementTransformDraft {
+    selection: Option<(DefinitionId, String)>,
+    session_revision: u64,
+    position: [f32; 3],
+    yaw_degrees: f32,
+}
+
+impl Default for ZoneSceneView {
+    fn default() -> Self {
+        Self {
+            yaw: 0.65,
+            pitch: 0.55,
+            distance: 18.0,
+            target: Vec3::ZERO,
+            selected_object: SceneObjectId::ZoneFloor,
+            focus_selected: false,
+        }
+    }
+}
 
 #[derive(Resource, Default)]
 struct PlayPreview {
@@ -137,6 +213,61 @@ struct ZoneLabel;
 #[derive(Component)]
 struct TransformGizmo;
 
+#[derive(Component)]
+struct ZoneSceneCamera;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SceneObjectId {
+    ZoneFloor,
+    EntityPlacement(String),
+}
+
+impl SceneObjectId {
+    fn is_placement(&self, id: &str) -> bool {
+        matches!(self, Self::EntityPlacement(placement_id) if placement_id == id)
+    }
+
+    fn label(&self) -> &str {
+        match self {
+            Self::ZoneFloor => "Zone floor",
+            Self::EntityPlacement(id) => id,
+        }
+    }
+}
+
+#[derive(Component)]
+struct ZoneSceneObject(SceneObjectId);
+
+#[derive(Component)]
+struct ZoneSceneGeometry;
+
+#[derive(Resource, Default)]
+struct ZoneScenePalette {
+    floor: Option<Handle<StandardMaterial>>,
+    selected_floor: Option<Handle<StandardMaterial>>,
+    grid: Option<Handle<StandardMaterial>>,
+    object: Option<Handle<StandardMaterial>>,
+    selected_object: Option<Handle<StandardMaterial>>,
+}
+
+impl ZoneScenePalette {
+    fn initialize(&mut self, materials: &mut Assets<StandardMaterial>) {
+        self.floor
+            .get_or_insert_with(|| materials.add(Color::srgb(0.19, 0.27, 0.31)));
+        self.selected_floor
+            .get_or_insert_with(|| materials.add(Color::srgb(0.31, 0.47, 0.58)));
+        self.grid
+            .get_or_insert_with(|| materials.add(Color::srgb(0.42, 0.51, 0.54)));
+        self.object
+            .get_or_insert_with(|| materials.add(Color::srgb(0.24, 0.68, 0.76)));
+        self.selected_object
+            .get_or_insert_with(|| materials.add(Color::srgb(0.98, 0.69, 0.22)));
+    }
+}
+
+const MIN_ZONE_CAMERA_DISTANCE: f32 = 3.0;
+const MAX_ZONE_CAMERA_DISTANCE: f32 = 120.0;
+
 #[derive(Default)]
 struct DragState {
     zone: Option<DefinitionId>,
@@ -173,6 +304,12 @@ fn main() {
         .insert_resource(Notice(watch_notice))
         .insert_resource(content_watch)
         .init_resource::<PreviewMode>()
+        .init_resource::<ProjectDialog>()
+        .init_resource::<EditorSurface>()
+        .init_resource::<EditorPanels>()
+        .init_resource::<SceneViewport>()
+        .init_resource::<ZoneSceneView>()
+        .init_resource::<ZoneScenePalette>()
         .init_resource::<PlayPreview>()
         .add_systems(Startup, setup)
         .add_systems(
@@ -180,8 +317,13 @@ fn main() {
             (
                 poll_external_content,
                 keyboard,
+                sync_camera_surfaces,
                 select_with_mouse,
+                zone_scene_input,
                 sync_scene,
+                sync_zone_scene,
+                sync_zone_scene_selection,
+                update_zone_scene_camera,
                 autosave,
                 monitor_preview,
             )
@@ -193,24 +335,67 @@ fn main() {
 
 fn setup(mut commands: Commands) {
     commands.spawn((Camera2d, EditorCamera));
+    commands.spawn((
+        Camera3d::default(),
+        Tonemapping::Reinhard,
+        Transform::from_xyz(12.0, 10.0, 16.0).looking_at(Vec3::ZERO, Vec3::Y),
+        ZoneSceneCamera,
+    ));
+    commands.spawn((
+        DirectionalLight {
+            illuminance: 12_000.0,
+            ..default()
+        },
+        Transform::from_xyz(6.0, 12.0, 8.0).looking_at(Vec3::ZERO, Vec3::Y),
+    ));
 }
 
 #[derive(Component)]
 struct EditorCamera;
 
 #[allow(clippy::needless_pass_by_value)]
+fn sync_camera_surfaces(
+    surface: Res<EditorSurface>,
+    cameras: Query<(&mut Camera, Option<&EditorCamera>, Option<&ZoneSceneCamera>)>,
+) {
+    for (mut camera, atlas, scene) in cameras {
+        if atlas.is_some() {
+            camera.is_active = surface_is_active(*surface, EditorSurface::WorldAtlas);
+        } else if scene.is_some() {
+            camera.is_active = surface_is_active(*surface, EditorSurface::ZoneScene);
+        }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Bevy system inputs are kept explicit for the editor actions."
+)]
 fn keyboard(
+    mut contexts: EguiContexts,
     keys: Res<ButtonInput<KeyCode>>,
     mut session: ResMut<Session>,
+    mut project_dialog: ResMut<ProjectDialog>,
     mut notice: ResMut<Notice>,
     mut watch: ResMut<ContentWatch>,
     mut preview: ResMut<PreviewMode>,
+    surface: Res<EditorSurface>,
+    mut zone_view: ResMut<ZoneSceneView>,
     mut play: ResMut<PlayPreview>,
 ) {
+    if contexts
+        .ctx_mut()
+        .is_ok_and(|context| context.egui_wants_keyboard_input())
+    {
+        return;
+    }
     let control = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+    let open_project = control && keys.just_pressed(KeyCode::KeyO);
     if !(keys.just_pressed(KeyCode::Space)
         || keys.just_pressed(KeyCode::KeyP)
         || control && keys.just_pressed(KeyCode::KeyS)
+        || open_project
         || !preview.0)
     {
         return;
@@ -222,6 +407,13 @@ fn keyboard(
         } else {
             save_session(&mut session.0, &mut watch, "Saved project content.")
         };
+    } else if open_project {
+        if session.0.is_dirty() {
+            notice.0 = "Save your changes before opening another project.".into();
+        } else {
+            project_dialog.path = session.0.project_root().display().to_string();
+            project_dialog.open = true;
+        }
     } else if control && keys.just_pressed(KeyCode::KeyZ) {
         notice.0 = if session.0.undo() {
             "Undo.".into()
@@ -261,10 +453,13 @@ fn keyboard(
     } else if keys.just_pressed(KeyCode::KeyV) {
         let report = session.0.validate();
         notice.0 = format!("Validation finished: {} diagnostic(s).", report.len());
+    } else if keys.just_pressed(KeyCode::KeyF) && *surface == EditorSurface::ZoneScene {
+        zone_view.focus_selected = true;
+        notice.0 = "Focused the selected scene object.".into();
     } else if keys.just_pressed(KeyCode::Space) {
         preview.0 = !preview.0;
         notice.0 = if preview.0 {
-            "Preview mode: read-only map view.".into()
+            "Preview mode: content editing is disabled.".into()
         } else {
             "Edit mode.".into()
         };
@@ -458,8 +653,10 @@ fn monitor_preview(play: Res<PlayPreview>, mut notice: ResMut<Notice>) {
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 fn select_with_mouse(
+    surface: Res<EditorSurface>,
+    viewport: Res<SceneViewport>,
     buttons: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     markers: Query<(&Transform, &ZoneMarker)>,
@@ -468,6 +665,10 @@ fn select_with_mouse(
     mut notice: ResMut<Notice>,
     mut drag: Local<DragState>,
 ) {
+    if *surface != EditorSurface::WorldAtlas {
+        drag.zone = None;
+        return;
+    }
     let Ok(window) = windows.single() else {
         return;
     };
@@ -478,9 +679,7 @@ fn select_with_mouse(
         let Some(cursor) = window.cursor_position() else {
             return;
         };
-        let panel_width = window.width().min(350.0);
-        let panel_left = (window.width() - panel_width - 12.0).max(0.0);
-        if cursor.x >= panel_left {
+        if !viewport.contains(cursor) {
             return;
         }
         let Ok(world_position) = camera.viewport_to_world_2d(camera_transform, cursor) else {
@@ -521,6 +720,297 @@ fn select_with_mouse(
             apply_edit(&mut session.0, &mut notice, |session| {
                 session.move_selected(dx, dy)
             });
+        }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+fn zone_scene_input(
+    surface: Res<EditorSurface>,
+    viewport: Res<SceneViewport>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    motion: Res<bevy::input::mouse::AccumulatedMouseMotion>,
+    scroll: Res<bevy::input::mouse::AccumulatedMouseScroll>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    cameras: Query<(&Camera, &GlobalTransform), With<ZoneSceneCamera>>,
+    objects: Query<(&GlobalTransform, &ZoneSceneObject)>,
+    mut view: ResMut<ZoneSceneView>,
+    mut notice: ResMut<Notice>,
+) {
+    if *surface != EditorSurface::ZoneScene {
+        return;
+    }
+    let (Ok(window), Ok((camera, camera_transform))) = (windows.single(), cameras.single()) else {
+        return;
+    };
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+    if !viewport.contains(cursor) {
+        return;
+    }
+
+    if buttons.pressed(MouseButton::Right) {
+        orbit_zone_camera(&mut view, motion.delta);
+    }
+    if buttons.pressed(MouseButton::Middle) {
+        pan_zone_camera(
+            &mut view,
+            motion.delta,
+            viewport.0.map_or(window.height(), |rect| rect.height()),
+        );
+    }
+    zoom_zone_camera(&mut view, scroll.delta.y);
+
+    if buttons.just_pressed(MouseButton::Left) {
+        let selected = objects
+            .iter()
+            .filter_map(|(transform, object)| {
+                camera
+                    .world_to_viewport(camera_transform, transform.translation())
+                    .ok()
+                    .map(|screen| (screen.distance_squared(cursor), object.0.clone()))
+            })
+            .filter(|(distance, _)| *distance <= 44.0 * 44.0)
+            .min_by(|left, right| left.0.total_cmp(&right.0))
+            .map(|(_, id)| id);
+        if let Some(selected) = selected {
+            view.selected_object = selected;
+            notice.0 = format!("Selected scene object {}.", view.selected_object.label());
+        }
+    }
+}
+
+fn orbit_zone_camera(view: &mut ZoneSceneView, pointer_delta: Vec2) {
+    view.yaw -= pointer_delta.x * 0.005;
+    view.pitch = (view.pitch + pointer_delta.y * 0.005).clamp(0.15, 1.4);
+}
+
+fn pan_zone_camera(view: &mut ZoneSceneView, pointer_delta: Vec2, viewport_height: f32) {
+    let scale = view.distance / viewport_height.max(1.0);
+    view.target.x -= pointer_delta.x * scale;
+    view.target.z += pointer_delta.y * scale;
+}
+
+fn zoom_zone_camera(view: &mut ZoneSceneView, scroll_delta: f32) {
+    if scroll_delta != 0.0 {
+        view.distance = (view.distance * (-scroll_delta * 0.1).exp())
+            .clamp(MIN_ZONE_CAMERA_DISTANCE, MAX_ZONE_CAMERA_DISTANCE);
+    }
+}
+
+fn zone_camera_offset(yaw: f32, pitch: f32, distance: f32) -> Vec3 {
+    Vec3::new(
+        yaw.sin() * pitch.cos(),
+        pitch.sin(),
+        yaw.cos() * pitch.cos(),
+    ) * distance
+}
+
+fn zone_scene_layout(definition: Option<&ContentDefinition>) -> (Vec3, Vec2) {
+    let placements = definition.map_or(&[][..], |definition| {
+        definition.entity_placements.as_slice()
+    });
+    zone_scene_layout_from_placements(placements)
+}
+
+fn zone_scene_layout_from_placements(placements: &[ZoneEntityPlacement]) -> (Vec3, Vec2) {
+    if placements.is_empty() {
+        return (Vec3::ZERO, Vec2::splat(12.0));
+    }
+    let mut min_x = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut min_z = f32::INFINITY;
+    let mut max_z = f32::NEG_INFINITY;
+    for placement in placements {
+        min_x = min_x.min(placement.position.x);
+        max_x = max_x.max(placement.position.x);
+        min_z = min_z.min(placement.position.z);
+        max_z = max_z.max(placement.position.z);
+    }
+    let center = Vec3::new(
+        f32::midpoint(min_x, max_x),
+        0.0,
+        f32::midpoint(min_z, max_z),
+    );
+    let size = Vec2::new(
+        (max_x - min_x + 12.0).clamp(12.0, 64.0),
+        (max_z - min_z + 12.0).clamp(12.0, 64.0),
+    );
+    (center, size)
+}
+
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+fn sync_zone_scene(
+    mut commands: Commands,
+    session: Res<Session>,
+    mut view: ResMut<ZoneSceneView>,
+    geometry: Query<Entity, With<ZoneSceneGeometry>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut palette: ResMut<ZoneScenePalette>,
+    mut rendered_state: Local<Option<(u64, Option<DefinitionId>)>>,
+) {
+    let selected_zone = session.0.selected_zone().cloned();
+    let state = (session.0.content_revision(), selected_zone.clone());
+    if *rendered_state == Some(state.clone()) {
+        return;
+    }
+
+    let definition = session.0.selected_zone_definition();
+    let (center, size) = zone_scene_layout(definition);
+    if rendered_state
+        .as_ref()
+        .is_none_or(|(_, old_zone)| *old_zone != selected_zone)
+    {
+        view.target = center;
+        view.selected_object = SceneObjectId::ZoneFloor;
+    }
+    let Some(definition) = definition else {
+        for entity in &geometry {
+            commands.entity(entity).despawn();
+        }
+        *rendered_state = Some(state);
+        return;
+    };
+
+    let selection_exists = match &view.selected_object {
+        SceneObjectId::ZoneFloor => true,
+        SceneObjectId::EntityPlacement(id) => definition
+            .entity_placements
+            .iter()
+            .any(|placement| &placement.id == id),
+    };
+    if !selection_exists {
+        view.selected_object = SceneObjectId::ZoneFloor;
+    }
+    for entity in &geometry {
+        commands.entity(entity).despawn();
+    }
+
+    palette.initialize(&mut materials);
+    let floor_material = if view.selected_object == SceneObjectId::ZoneFloor {
+        palette.selected_floor.as_ref()
+    } else {
+        palette.floor.as_ref()
+    }
+    .expect("zone scene palette is initialized")
+    .clone();
+    commands.spawn((
+        ZoneSceneGeometry,
+        ZoneSceneObject(SceneObjectId::ZoneFloor),
+        Mesh3d(meshes.add(Cuboid::new(size.x, 0.12, size.y))),
+        MeshMaterial3d(floor_material),
+        Transform::from_translation(center - Vec3::Y * 0.06),
+    ));
+    let grid_material = palette
+        .grid
+        .as_ref()
+        .expect("zone scene palette is initialized")
+        .clone();
+    for offset in [-5.0_f32, -3.0, -1.0, 1.0, 3.0, 5.0] {
+        if offset.abs() < size.x * 0.5 {
+            commands.spawn((
+                ZoneSceneGeometry,
+                Mesh3d(meshes.add(Cuboid::new(size.x, 0.012, 0.025))),
+                MeshMaterial3d(grid_material.clone()),
+                Transform::from_xyz(center.x, 0.012, center.z + offset),
+            ));
+        }
+        if offset.abs() < size.y * 0.5 {
+            commands.spawn((
+                ZoneSceneGeometry,
+                Mesh3d(meshes.add(Cuboid::new(0.025, 0.012, size.y))),
+                MeshMaterial3d(grid_material.clone()),
+                Transform::from_xyz(center.x + offset, 0.012, center.z),
+            ));
+        }
+    }
+    for placement in &definition.entity_placements {
+        let material = if view.selected_object.is_placement(&placement.id) {
+            palette.selected_object.as_ref()
+        } else {
+            palette.object.as_ref()
+        }
+        .expect("zone scene palette is initialized")
+        .clone();
+        commands.spawn((
+            ZoneSceneGeometry,
+            ZoneSceneObject(SceneObjectId::EntityPlacement(placement.id.clone())),
+            Mesh3d(meshes.add(Cuboid::new(0.8, 1.0, 0.8))),
+            MeshMaterial3d(material),
+            Transform {
+                translation: Vec3::new(
+                    placement.position.x,
+                    placement.position.y + 0.5,
+                    placement.position.z,
+                ),
+                rotation: Quat::from_rotation_y(-placement.yaw_degrees.to_radians()),
+                ..default()
+            },
+        ));
+    }
+    *rendered_state = Some(state);
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn sync_zone_scene_selection(
+    view: Res<ZoneSceneView>,
+    palette: Res<ZoneScenePalette>,
+    mut objects: Query<(&ZoneSceneObject, &mut MeshMaterial3d<StandardMaterial>)>,
+    mut rendered_selection: Local<Option<SceneObjectId>>,
+) {
+    if rendered_selection.as_ref() == Some(&view.selected_object) {
+        return;
+    }
+    let floor_material = palette.floor.clone();
+    let selected_floor_material = palette.selected_floor.clone();
+    let selected_material = palette.selected_object.clone();
+    let normal_material = palette.object.clone();
+    for (object, mut material) in &mut objects {
+        let selected = object.0 == view.selected_object;
+        let next = if object.0 == SceneObjectId::ZoneFloor {
+            if selected {
+                selected_floor_material.clone()
+            } else {
+                floor_material.clone()
+            }
+        } else if selected {
+            selected_material.clone()
+        } else {
+            normal_material.clone()
+        };
+        if let Some(next) = next {
+            material.0 = next;
+        }
+    }
+    *rendered_selection = Some(view.selected_object.clone());
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn update_zone_scene_camera(
+    mut view: ResMut<ZoneSceneView>,
+    mut scene_entities: Query<(
+        &mut Transform,
+        Option<&ZoneSceneObject>,
+        Option<&ZoneSceneCamera>,
+    )>,
+) {
+    if view.focus_selected {
+        if let Some(target) = scene_entities.iter().find_map(|(transform, object, _)| {
+            object
+                .is_some_and(|object| object.0 == view.selected_object)
+                .then_some(transform.translation)
+        }) {
+            view.target = target;
+        }
+        view.focus_selected = false;
+    }
+    let offset = zone_camera_offset(view.yaw, view.pitch, view.distance);
+    for (mut transform, _, camera) in &mut scene_entities {
+        if camera.is_some() {
+            transform.translation = view.target + offset;
+            transform.look_at(view.target, Vec3::Y);
         }
     }
 }
@@ -734,26 +1224,314 @@ fn autosave(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn draw_menu_bar(
+    ui: &mut egui::Ui,
+    session: &mut EditorSession,
+    project_dialog: &mut ProjectDialog,
+    notice: &mut Notice,
+    preview: &mut PreviewMode,
+    surface: &mut EditorSurface,
+    panels: &mut EditorPanels,
+    zone_view: &mut ZoneSceneView,
+    watch: &mut ContentWatch,
+) {
+    egui::Panel::top("editor-menu-bar").show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.menu_button("File", |ui| {
+                if ui.button("Open Project…  Ctrl+O").clicked() {
+                    if session.is_dirty() {
+                        *notice =
+                            Notice("Save your changes before opening another project.".into());
+                    } else {
+                        project_dialog.path = session.project_root().display().to_string();
+                        project_dialog.open = true;
+                    }
+                }
+                if ui
+                    .add_enabled(
+                        session.is_dirty() && !watch.changed_on_disk,
+                        egui::Button::new("Save Project  Ctrl+S"),
+                    )
+                    .clicked()
+                {
+                    *notice = Notice(save_session(session, watch, "Saved project content."));
+                }
+                if ui.button("Show Project Folder").clicked() {
+                    *notice = Notice(match open_project_folder(session.project_root()) {
+                        Ok(()) => "Opened the project folder.".into(),
+                        Err(error) => format!("Could not open project folder: {error}"),
+                    });
+                }
+                if ui
+                    .add_enabled(
+                        watch.changed_on_disk && !session.is_dirty(),
+                        egui::Button::new("Reload External Changes"),
+                    )
+                    .clicked()
+                {
+                    *notice = Notice(match session.reload_external_changes() {
+                        Ok(()) => {
+                            watch.mark_resolved();
+                            "Reloaded project content.".into()
+                        }
+                        Err(error) => format!("Reload failed: {error}"),
+                    });
+                }
+                if ui.button("Validate Content  V").clicked() {
+                    let count = session.validate().len();
+                    *notice = Notice(format!("Validation finished: {count} diagnostic(s)."));
+                }
+                ui.separator();
+                if ui.button("Exit").clicked() {
+                    if session.is_dirty() {
+                        *notice = Notice(
+                            "Save your changes before exiting; recovery autosave is also active."
+                                .into(),
+                        );
+                    } else {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                }
+            });
+            ui.menu_button("Edit", |ui| {
+                if ui
+                    .add_enabled(!preview.0, egui::Button::new("Undo  Ctrl+Z"))
+                    .clicked()
+                {
+                    *notice = Notice(if session.undo() {
+                        "Undo.".into()
+                    } else {
+                        "Nothing to undo.".into()
+                    });
+                }
+                if ui
+                    .add_enabled(!preview.0, egui::Button::new("Redo  Ctrl+Y"))
+                    .clicked()
+                {
+                    *notice = Notice(if session.redo() {
+                        "Redo.".into()
+                    } else {
+                        "Nothing to redo.".into()
+                    });
+                }
+            });
+            ui.menu_button("View", |ui| {
+                ui.label("Authoring Surface");
+                ui.selectable_value(surface, EditorSurface::WorldAtlas, "World Atlas · 2D");
+                ui.selectable_value(surface, EditorSurface::ZoneScene, "Zone Scene · 3D");
+                ui.separator();
+                ui.checkbox(&mut panels.hierarchy, "Hierarchy Panel");
+                ui.checkbox(&mut panels.inspector, "Inspector Panel");
+                ui.checkbox(&mut preview.0, "Read-only Preview");
+                if ui.button("Focus Selected Object  F").clicked() {
+                    zone_view.focus_selected = true;
+                }
+            });
+        });
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_toolbar(
+    ui: &mut egui::Ui,
+    session: &mut EditorSession,
+    notice: &mut Notice,
+    preview: &mut PreviewMode,
+    surface: &mut EditorSurface,
+    play: &mut PlayPreview,
+    watch: &mut ContentWatch,
+) {
+    egui::Panel::top("editor-toolbar").show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.selectable_value(surface, EditorSurface::WorldAtlas, "Atlas");
+            ui.selectable_value(surface, EditorSurface::ZoneScene, "Zone Scene");
+            ui.separator();
+            if ui
+                .add_enabled(
+                    session.is_dirty() && !watch.changed_on_disk,
+                    egui::Button::new("Save"),
+                )
+                .clicked()
+            {
+                *notice = Notice(save_session(session, watch, "Saved project content."));
+            }
+            if ui
+                .add_enabled(!preview.0, egui::Button::new("Undo"))
+                .clicked()
+            {
+                *notice = Notice(if session.undo() {
+                    "Undo.".into()
+                } else {
+                    "Nothing to undo.".into()
+                });
+            }
+            if ui
+                .add_enabled(!preview.0, egui::Button::new("Redo"))
+                .clicked()
+            {
+                *notice = Notice(if session.redo() {
+                    "Redo.".into()
+                } else {
+                    "Nothing to redo.".into()
+                });
+            }
+            if ui.button("Validate").clicked() {
+                let count = session.validate().len();
+                *notice = Notice(format!("Validation finished: {count} diagnostic(s)."));
+            }
+            ui.separator();
+            if ui
+                .selectable_label(preview.0, if preview.0 { "Preview" } else { "Edit" })
+                .clicked()
+            {
+                preview.0 = !preview.0;
+            }
+            let play_label = if play.child.lock().is_ok_and(|child| child.is_some()) {
+                "Stop Play"
+            } else {
+                "Play"
+            };
+            if ui.button(play_label).clicked() {
+                toggle_play_preview(session, play, notice, watch);
+            }
+        });
+    });
+}
+
+fn draw_hierarchy_panel(
+    ui: &mut egui::Ui,
+    session: &mut EditorSession,
+    surface: &mut EditorSurface,
+    zone_view: &mut ZoneSceneView,
+    map_ids: &[DefinitionId],
+    placements: &[(DefinitionId, MapPosition)],
+    scene_objects: &[(String, DefinitionId)],
+) {
+    egui::Panel::left("editor-hierarchy")
+        .default_size(250.0)
+        .size_range(190.0..=420.0)
+        .resizable(true)
+        .show(ui, |ui| {
+            ui.heading("Hierarchy");
+            let mut selected_map = session.selected_map().cloned();
+            egui::ComboBox::from_id_salt("hierarchy-map-picker")
+                .selected_text(
+                    selected_map
+                        .as_ref()
+                        .map_or_else(|| "Select a map".into(), ToString::to_string),
+                )
+                .show_ui(ui, |ui| {
+                    for map_id in map_ids {
+                        ui.selectable_value(
+                            &mut selected_map,
+                            Some(map_id.clone()),
+                            map_id.as_str(),
+                        );
+                    }
+                });
+            if selected_map != session.selected_map().cloned()
+                && let Some(map_id) = selected_map
+            {
+                let _ = session.select_map(&map_id);
+                zone_view.selected_object = SceneObjectId::ZoneFloor;
+            }
+
+            ui.separator();
+            ui.label("Zones");
+            if placements.is_empty() {
+                ui.label("No zones are placed on this map.");
+            }
+            for (zone, position) in placements {
+                let selected = session.selected_zone() == Some(zone);
+                if ui
+                    .selectable_label(
+                        selected,
+                        format!("▸ {zone}  ·  ({}, {})", position.x, position.y),
+                    )
+                    .clicked()
+                {
+                    let _ = session.select_zone(zone);
+                    zone_view.selected_object = SceneObjectId::ZoneFloor;
+                }
+            }
+
+            if *surface == EditorSurface::ZoneScene {
+                ui.separator();
+                if let Some(zone_id) = session.selected_zone().cloned() {
+                    egui::CollapsingHeader::new(zone_id.to_string())
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            if ui
+                                .selectable_label(
+                                    zone_view.selected_object == SceneObjectId::ZoneFloor,
+                                    "Floor · placeholder",
+                                )
+                                .clicked()
+                            {
+                                zone_view.selected_object = SceneObjectId::ZoneFloor;
+                            }
+                            for (id, definition) in scene_objects {
+                                if ui
+                                    .selectable_label(
+                                        zone_view.selected_object.is_placement(id),
+                                        format!("{id}  ·  {definition}"),
+                                    )
+                                    .clicked()
+                                {
+                                    zone_view.selected_object =
+                                        SceneObjectId::EntityPlacement(id.clone());
+                                }
+                            }
+                        });
+                } else {
+                    ui.label("Select a zone to view its scene objects.");
+                }
+            }
+        });
+}
+
+fn open_project_folder(path: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    let mut command = Command::new("explorer");
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("open");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = Command::new("xdg-open");
+
+    command.arg(path).spawn().map(|_| ())
+}
+
 #[allow(
     clippy::needless_pass_by_value,
     clippy::too_many_lines,
-    reason = "Keeps the compact editor inspector layout and its actions together."
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    reason = "Coordinates the editor's dockable panels and shared Bevy session resources."
 )]
 fn draw_editor_ui(
     mut contexts: EguiContexts,
     mut session: ResMut<Session>,
     mut notice: ResMut<Notice>,
     mut preview: ResMut<PreviewMode>,
+    mut project_dialog: ResMut<ProjectDialog>,
+    mut surface: ResMut<EditorSurface>,
+    mut panels: ResMut<EditorPanels>,
+    mut zone_view: ResMut<ZoneSceneView>,
+    mut scene_viewport: ResMut<SceneViewport>,
+    mut transform_draft: Local<PlacementTransformDraft>,
     mut play: ResMut<PlayPreview>,
     mut watch: ResMut<ContentWatch>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut editor_cameras: Query<&mut Camera, Or<(With<EditorCamera>, With<ZoneSceneCamera>)>>,
 ) -> Result {
     let context = contexts.ctx_mut()?;
-    let viewport = context.viewport_rect();
-    let panel_width = viewport.width().min(350.0);
-    let panel_height = (viewport.height() - 24.0).max(120.0);
-    let panel_position = egui::pos2(
-        (viewport.right() - panel_width - 12.0).max(viewport.left()),
-        viewport.top() + 12.0,
+    let mut viewport_ui = egui::Ui::new(
+        context.clone(),
+        "lynx-editor-root".into(),
+        egui::UiBuilder::new()
+            .layer_id(egui::LayerId::background())
+            .max_rect(context.viewport_rect()),
     );
     let project_root = session.0.project_root().display().to_string();
     let is_dirty = session.0.is_dirty();
@@ -768,6 +1546,54 @@ fn draw_editor_ui(
                 .collect()
         })
         .unwrap_or_default();
+    let scene_objects: Vec<_> = session
+        .0
+        .selected_zone_definition()
+        .map(|definition| {
+            definition
+                .entity_placements
+                .iter()
+                .map(|placement| (placement.id.clone(), placement.definition.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let selected_scene_placement = match &zone_view.selected_object {
+        SceneObjectId::ZoneFloor => None,
+        SceneObjectId::EntityPlacement(id) => session
+            .0
+            .selected_zone_definition()
+            .and_then(|definition| {
+                definition
+                    .entity_placements
+                    .iter()
+                    .find(|placement| &placement.id == id)
+            })
+            .map(|placement| {
+                (
+                    placement.id.clone(),
+                    placement.definition.clone(),
+                    placement.position,
+                    placement.yaw_degrees,
+                )
+            }),
+    };
+    let draft_selection = selected_scene_placement.as_ref().and_then(|(id, _, _, _)| {
+        session
+            .0
+            .selected_zone()
+            .cloned()
+            .map(|zone_id| (zone_id, id.clone()))
+    });
+    if transform_draft.selection != draft_selection
+        || transform_draft.session_revision != session.0.revision()
+    {
+        transform_draft.selection.clone_from(&draft_selection);
+        if let Some((_, _, position, yaw_degrees)) = &selected_scene_placement {
+            transform_draft.position = [position.x, position.y, position.z];
+            transform_draft.yaw_degrees = *yaw_degrees;
+        }
+        transform_draft.session_revision = session.0.revision();
+    }
     let diagnostics: Vec<_> = session
         .0
         .validation()
@@ -782,65 +1608,73 @@ fn draw_editor_ui(
         })
         .collect();
 
-    egui::Window::new("Lynx Content Editor")
-        .id(egui::Id::new("lynx-editor-inspector"))
-        .title_bar(false)
-        .resizable(false)
-        .movable(false)
-        .fixed_pos(panel_position)
-        .fixed_size(egui::vec2(panel_width, panel_height))
-        .show(context, |ui| {
+    draw_menu_bar(
+        &mut viewport_ui,
+        &mut session.0,
+        &mut project_dialog,
+        &mut notice,
+        &mut preview,
+        &mut surface,
+        &mut panels,
+        &mut zone_view,
+        &mut watch,
+    );
+    draw_toolbar(
+        &mut viewport_ui,
+        &mut session.0,
+        &mut notice,
+        &mut preview,
+        &mut surface,
+        &mut play,
+        &mut watch,
+    );
+    egui::Panel::bottom("editor-status-bar").show(&mut viewport_ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(if is_dirty {
+                "● Unsaved changes"
+            } else {
+                "✓ All changes saved"
+            });
+            ui.separator();
+            ui.label(if *surface == EditorSurface::WorldAtlas {
+                "World Atlas · 2D"
+            } else {
+                "Zone Scene · 3D"
+            });
+            ui.separator();
+            if watch.changed_on_disk {
+                ui.colored_label(egui::Color32::YELLOW, "External changes detected");
+            } else {
+                ui.label("Ready");
+            }
+            if !notice.0.is_empty() {
+                ui.separator();
+                ui.label(&notice.0);
+            }
+        });
+    });
+
+    if panels.hierarchy {
+        draw_hierarchy_panel(
+            &mut viewport_ui,
+            &mut session.0,
+            &mut surface,
+            &mut zone_view,
+            &map_ids,
+            &placements,
+            &scene_objects,
+        );
+    }
+
+    if panels.inspector {
+        egui::Panel::right("editor-inspector")
+            .default_size(330.0)
+            .size_range(270.0..=520.0)
+            .resizable(true)
+            .show(&mut viewport_ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.heading(if preview.0 {
-                    "Lynx Content Editor · Preview"
-                } else {
-                    "Lynx Content Editor"
-                });
+                ui.heading("Inspector");
                 ui.label(&project_root);
-                ui.label(if is_dirty {
-                    "Unsaved map edits"
-                } else {
-                    "All map edits saved"
-                });
-
-                ui.horizontal(|ui| {
-                    if ui.button("Undo").clicked() {
-                        notice.0 = if session.0.undo() {
-                            "Undo.".into()
-                        } else {
-                            "Nothing to undo.".into()
-                        };
-                    }
-                    if ui.button("Redo").clicked() {
-                        notice.0 = if session.0.redo() {
-                            "Redo.".into()
-                        } else {
-                            "Nothing to redo.".into()
-                        };
-                    }
-                    if ui.button("Validate").clicked() {
-                        let count = session.0.validate().len();
-                        notice.0 = format!("Validation finished: {count} diagnostic(s).");
-                    }
-                });
-
-                ui.horizontal(|ui| {
-                    if ui.button(if preview.0 { "Edit mode" } else { "Map preview" }).clicked() {
-                        preview.0 = !preview.0;
-                        notice.0 = if preview.0 {
-                            "Preview mode: read-only map view.".into()
-                        } else {
-                            "Edit mode.".into()
-                        };
-                    }
-                    if ui.button(if play.child.lock().is_ok_and(|child| child.is_some()) {
-                        "Stop play"
-                    } else {
-                        "Play"
-                    }).clicked() {
-                        toggle_play_preview(&mut session.0, &mut play, &mut notice, &mut watch);
-                    }
-                });
 
                 if watch.changed_on_disk {
                     ui.colored_label(
@@ -848,7 +1682,7 @@ fn draw_editor_ui(
                         "Project files changed outside the editor.",
                     );
                     if session.0.is_dirty() {
-                        ui.label("Your in-memory edits were preserved. This overwrites the externally changed map files with your edits:");
+                        ui.label("Your in-memory edits were preserved. Saving overwrites the externally changed authored files with your edits:");
                         if ui.button("Keep my edits").clicked() {
                             notice.0 = save_session(
                                 &mut session.0,
@@ -873,54 +1707,138 @@ fn draw_editor_ui(
                     notice.0 = save_session(&mut session.0, &mut watch, "Saved project content.");
                 }
 
-                if !map_ids.is_empty() {
-                    let mut selected_map = session.0.selected_map().cloned();
-                    let selected_text = selected_map
-                        .as_ref()
-                        .map_or_else(|| "Select a map".to_owned(), ToString::to_string);
-                    egui::ComboBox::from_label("World map")
-                        .selected_text(selected_text)
-                        .show_ui(ui, |ui| {
-                            for map_id in &map_ids {
-                                if ui
-                                    .selectable_label(
-                                        selected_map.as_ref() == Some(map_id),
-                                        map_id.as_str(),
-                                    )
-                                    .clicked()
-                                {
-                                    selected_map = Some(map_id.clone());
-                                }
+                ui.separator();
+                ui.heading("Selection");
+                if let Some(zone) = session.0.selected_zone() {
+                    ui.label(format!("Zone: {zone}"));
+                } else {
+                    ui.label("No zone selected.");
+                }
+                if *surface == EditorSurface::WorldAtlas {
+                    if let Some(position) = session
+                        .0
+                        .map()
+                        .and_then(|map| {
+                            map.zones
+                                .iter()
+                                .find(|zone| Some(&zone.zone) == session.0.selected_zone())
+                        })
+                        .map(|zone| zone.position)
+                    {
+                        ui.label(format!(
+                            "Atlas cell: ({}, {})",
+                            position.x, position.y
+                        ));
+                    }
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(!preview.0, egui::Button::new("←"))
+                            .clicked()
+                        {
+                            apply_edit(&mut session.0, &mut notice, |session| {
+                                session.move_selected(-1, 0)
+                            });
+                        }
+                        if ui
+                            .add_enabled(!preview.0, egui::Button::new("→"))
+                            .clicked()
+                        {
+                            apply_edit(&mut session.0, &mut notice, |session| {
+                                session.move_selected(1, 0)
+                            });
+                        }
+                        if ui
+                            .add_enabled(!preview.0, egui::Button::new("↑"))
+                            .clicked()
+                        {
+                            apply_edit(&mut session.0, &mut notice, |session| {
+                                session.move_selected(0, -1)
+                            });
+                        }
+                        if ui
+                            .add_enabled(!preview.0, egui::Button::new("↓"))
+                            .clicked()
+                        {
+                            apply_edit(&mut session.0, &mut notice, |session| {
+                                session.move_selected(0, 1)
+                            });
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(
+                                !preview.0,
+                                egui::Button::new("Place next zone (N)"),
+                            )
+                            .clicked()
+                        {
+                            place_next_zone(&mut session.0, &mut notice);
+                        }
+                        if ui
+                            .add_enabled(
+                                !preview.0,
+                                egui::Button::new("Delete selected"),
+                            )
+                            .clicked()
+                        {
+                            apply_edit(&mut session.0, &mut notice, EditorSession::delete_selected);
+                        }
+                    });
+                } else {
+                    ui.horizontal(|ui| {
+                        if ui.button("Focus (F)").clicked() {
+                            zone_view.focus_selected = true;
+                        }
+                    });
+                    ui.strong(format!(
+                        "Scene object · {}",
+                        zone_view.selected_object.label()
+                    ));
+                    if let Some((id, definition, _, _)) = &selected_scene_placement {
+                        ui.label(format!("Placement: {id}"));
+                        ui.label(format!("Definition: {definition}"));
+                        ui.horizontal(|ui| {
+                            ui.label("Position");
+                            for axis in &mut transform_draft.position {
+                                ui.add(egui::DragValue::new(axis).speed(0.1).range(-1000.0..=1000.0));
                             }
                         });
-                    if selected_map != session.0.selected_map().cloned()
-                        && let Some(map_id) = selected_map
-                    {
-                        let _ = session.0.select_map(&map_id);
+                        ui.horizontal(|ui| {
+                            ui.label("Yaw");
+                            ui.add(
+                                egui::DragValue::new(&mut transform_draft.yaw_degrees)
+                                    .speed(1.0)
+                                    .suffix("°"),
+                            );
+                        });
+                        if ui
+                            .add_enabled(
+                                !preview.0,
+                                egui::Button::new("Apply transform"),
+                            )
+                            .clicked()
+                        {
+                            let result = session.0.set_selected_entity_placement_transform(
+                                id,
+                                engine_core::math::Vec3::new(
+                                    transform_draft.position[0],
+                                    transform_draft.position[1],
+                                    transform_draft.position[2],
+                                ),
+                                transform_draft.yaw_degrees,
+                            );
+                            match result {
+                                Ok(()) => {
+                                    transform_draft.session_revision = session.0.revision();
+                                    notice.0 = format!("Updated placement {id}.");
+                                }
+                                Err(error) => notice.0 = format!("Transform was not applied: {error}"),
+                            }
+                        }
+                    } else {
+                        ui.label("Zone floor placeholder has no authored transform.");
                     }
                 }
-
-                ui.separator();
-                ui.strong("Placed zones");
-                if placements.is_empty() {
-                    ui.label("No zones are placed on this map.");
-                }
-                for (zone, position) in &placements {
-                    let selected = session.0.selected_zone() == Some(zone);
-                    let label = format!("{}  ({}, {})", zone, position.x, position.y);
-                    if ui.selectable_label(selected, label).clicked() {
-                        let _ = session.0.select_zone(zone);
-                    }
-                }
-
-                ui.horizontal(|ui| {
-                    if ui.button("Place next zone (N)").clicked() {
-                        place_next_zone(&mut session.0, &mut notice);
-                    }
-                    if ui.button("Delete selected").clicked() {
-                        apply_edit(&mut session.0, &mut notice, EditorSession::delete_selected);
-                    }
-                });
 
                 ui.separator();
                 let report = session.0.validation();
@@ -935,22 +1853,115 @@ fn draw_editor_ui(
                 if let Ok(status) = play.status.lock() {
                     ui.label(status.as_str());
                 }
-                ui.separator();
-                ui.label("Click or drag a zone · arrows move · M map · Tab zone");
-                ui.label("N place · Delete remove · Ctrl+Z/Y undo/redo");
-                ui.label("Ctrl+S save · V validate · Space preview · P play");
-                if !notice.0.is_empty() {
-                    ui.separator();
-                    ui.label(&notice.0);
-                }
             });
-        });
+            });
+    }
+    let scene_rect = egui::CentralPanel::no_frame()
+        .frame(egui::Frame::NONE)
+        .show(&mut viewport_ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading(if *surface == EditorSurface::WorldAtlas {
+                    "Scene · World Atlas"
+                } else {
+                    "Scene · Zone View"
+                });
+                ui.separator();
+                ui.label(if *surface == EditorSurface::WorldAtlas {
+                    "2D topology"
+                } else {
+                    "3D authored placements"
+                });
+            });
+            ui.add_space(4.0);
+            ui.available_rect_before_wrap()
+        })
+        .inner;
+    scene_viewport.0 = Some(scene_rect);
+    if let Ok(window) = windows.single() {
+        let scale = window.scale_factor();
+        let physical_position = (Vec2::new(scene_rect.min.x, scene_rect.min.y) * scale)
+            .round()
+            .as_uvec2();
+        let physical_size = (Vec2::new(scene_rect.width(), scene_rect.height()) * scale)
+            .round()
+            .as_uvec2();
+        if physical_size.x > 0 && physical_size.y > 0 {
+            for mut camera in &mut editor_cameras {
+                camera.viewport = Some(Viewport {
+                    physical_position,
+                    physical_size,
+                    ..default()
+                });
+            }
+        }
+    }
+
+    if project_dialog.open {
+        let mut open_clicked = false;
+        let mut cancel_clicked = false;
+        egui::Window::new("Open Project")
+            .id(egui::Id::new("lynx-open-project"))
+            .collapsible(false)
+            .resizable(false)
+            .default_width(480.0)
+            .show(context, |ui| {
+                ui.label("Enter the project folder containing a content/ directory:");
+                ui.text_edit_singleline(&mut project_dialog.path);
+                ui.horizontal(|ui| {
+                    open_clicked = ui
+                        .add_enabled(
+                            !project_dialog.path.trim().is_empty(),
+                            egui::Button::new("Open"),
+                        )
+                        .clicked();
+                    cancel_clicked = ui.button("Cancel").clicked();
+                });
+            });
+        if open_clicked && session.0.is_dirty() {
+            notice.0 = "Save your changes before opening another project.".into();
+            project_dialog.open = false;
+        } else if open_clicked {
+            match EditorSession::open(project_dialog.path.trim()) {
+                Ok(opened) => {
+                    let project_root = opened.project_root().to_path_buf();
+                    let content_root = project_root.join("content");
+                    session.0 = opened;
+                    let watcher_error = match ContentWatch::new(&content_root) {
+                        Ok(next_watch) => {
+                            *watch = next_watch;
+                            None
+                        }
+                        Err(error) => {
+                            *watch = ContentWatch::disabled();
+                            Some(error)
+                        }
+                    };
+                    *surface = EditorSurface::WorldAtlas;
+                    *preview = PreviewMode::default();
+                    *zone_view = ZoneSceneView::default();
+                    transform_draft.selection = None;
+                    transform_draft.session_revision = u64::MAX;
+                    project_dialog.open = false;
+                    notice.0 = watcher_error.map_or_else(
+                        || format!("Opened project {}.", project_root.display()),
+                        |error| format!("Project opened, but file watching failed: {error}"),
+                    );
+                }
+                Err(error) => {
+                    notice.0 = format!("Could not open project: {error}");
+                }
+            }
+        } else if cancel_clicked {
+            project_dialog.open = false;
+        }
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_core::math::Vec3 as AuthoredVec3;
 
     fn event(path: &str) -> Event {
         Event::new(EventKind::Modify(notify::event::ModifyKind::Any)).add_path(PathBuf::from(path))
@@ -1001,5 +2012,103 @@ mod tests {
             "content/maps/overworld.ron.lynx-editor.bak"
         )));
         assert!(is_content_change(&event("content/maps/overworld.ron")));
+    }
+
+    #[test]
+    fn empty_zone_scene_uses_a_visible_placeholder_footprint() {
+        let (center, size) = zone_scene_layout_from_placements(&[]);
+        assert_eq!(center, Vec3::ZERO);
+        assert_eq!(size, Vec2::splat(12.0));
+    }
+
+    #[test]
+    fn zone_scene_centers_authored_placements_and_pads_the_floor() {
+        let placements = [
+            ZoneEntityPlacement {
+                id: "west".into(),
+                definition: DefinitionId::new("entity.west").unwrap(),
+                position: AuthoredVec3::new(-2.0, 0.0, 1.0),
+                yaw_degrees: 0.0,
+            },
+            ZoneEntityPlacement {
+                id: "east".into(),
+                definition: DefinitionId::new("entity.east").unwrap(),
+                position: AuthoredVec3::new(4.0, 0.0, 7.0),
+                yaw_degrees: 0.0,
+            },
+        ];
+        let (center, size) = zone_scene_layout_from_placements(&placements);
+        assert_eq!(center, Vec3::new(1.0, 0.0, 4.0));
+        assert_eq!(size, Vec2::new(18.0, 18.0));
+    }
+
+    #[test]
+    fn atlas_and_zone_scene_surfaces_are_mutually_exclusive() {
+        assert!(surface_is_active(
+            EditorSurface::WorldAtlas,
+            EditorSurface::WorldAtlas
+        ));
+        assert!(!surface_is_active(
+            EditorSurface::WorldAtlas,
+            EditorSurface::ZoneScene
+        ));
+        assert!(surface_is_active(
+            EditorSurface::ZoneScene,
+            EditorSurface::ZoneScene
+        ));
+        assert!(!surface_is_active(
+            EditorSurface::ZoneScene,
+            EditorSurface::WorldAtlas
+        ));
+    }
+
+    #[test]
+    fn scene_viewport_bounds_exclude_menu_and_docked_panels() {
+        let viewport = SceneViewport(Some(egui::Rect::from_min_max(
+            egui::pos2(250.0, 50.0),
+            egui::pos2(850.0, 700.0),
+        )));
+
+        assert!(viewport.contains(Vec2::new(500.0, 300.0)));
+        assert!(!viewport.contains(Vec2::new(120.0, 300.0)));
+        assert!(!viewport.contains(Vec2::new(900.0, 300.0)));
+        assert!(!viewport.contains(Vec2::new(500.0, 20.0)));
+    }
+
+    #[test]
+    fn zone_floor_selection_cannot_collide_with_an_authored_placement_id() {
+        assert_ne!(
+            SceneObjectId::ZoneFloor,
+            SceneObjectId::EntityPlacement("__lynx_zone_floor__".into())
+        );
+    }
+
+    #[test]
+    fn zone_scene_camera_orbit_and_zoom_are_bounded() {
+        let mut view = ZoneSceneView::default();
+        orbit_zone_camera(&mut view, Vec2::new(20.0, 1000.0));
+        assert_eq!(view.pitch, 1.4);
+        orbit_zone_camera(&mut view, Vec2::new(0.0, -1000.0));
+        assert_eq!(view.pitch, 0.15);
+
+        zoom_zone_camera(&mut view, 100.0);
+        assert_eq!(view.distance, MIN_ZONE_CAMERA_DISTANCE);
+        zoom_zone_camera(&mut view, -100.0);
+        assert_eq!(view.distance, MAX_ZONE_CAMERA_DISTANCE);
+        assert!(
+            (zone_camera_offset(view.yaw, view.pitch, view.distance).length() - view.distance)
+                .abs()
+                < 1e-4
+        );
+    }
+
+    #[test]
+    fn zone_scene_pan_scales_with_camera_distance() {
+        let mut view = ZoneSceneView {
+            distance: 20.0,
+            ..default()
+        };
+        pan_zone_camera(&mut view, Vec2::new(50.0, -25.0), 100.0);
+        assert_eq!(view.target, Vec3::new(-10.0, 0.0, -5.0));
     }
 }

@@ -213,6 +213,16 @@ fn generated_projects_round_trip_editor_edits_and_pass_cli_validation() {
         validate_cli(&cli, &project);
         let mut session = EditorSession::open(&project).unwrap();
         assert!(!session.validation().has_errors());
+        let zone = session
+            .selected_zone_definition()
+            .expect("the generated map's selected zone definition is loaded");
+        if template == "mmorpg" {
+            assert!(
+                !zone.entity_placements.is_empty(),
+                "the MMORPG fixture should exercise authored scene placeholders"
+            );
+        }
+        let zone_for_transform = (template == "mmorpg").then(|| zone.id.clone());
         let original = session.map().unwrap().clone();
         assert_eq!(
             original.zones.len(),
@@ -235,11 +245,48 @@ fn generated_projects_round_trip_editor_edits_and_pass_cli_validation() {
             assert!(session.redo());
         }
         assert_eq!(session.map(), Some(&edited));
+        let expected_zone_definition = if template == "mmorpg" {
+            let zone_id = zone_for_transform.as_ref().unwrap();
+            session.select_zone(zone_id).unwrap();
+            let placement = session
+                .selected_zone_definition()
+                .unwrap()
+                .entity_placements[0]
+                .clone();
+            session
+                .set_selected_entity_placement_transform(
+                    &placement.id,
+                    placement.position,
+                    placement.yaw_degrees + 12.0,
+                )
+                .unwrap();
+            let transformed = session.selected_zone_definition().unwrap().clone();
+            assert!(session.undo());
+            assert_eq!(
+                session
+                    .selected_zone_definition()
+                    .unwrap()
+                    .entity_placements[0],
+                placement
+            );
+            assert!(session.redo());
+            assert_eq!(session.selected_zone_definition(), Some(&transformed));
+            Some(transformed)
+        } else {
+            None
+        };
+        assert!(!session.validate().has_errors());
         session.save().unwrap();
         drop(session);
 
-        let reopened = EditorSession::open(&project).unwrap();
+        let mut reopened = EditorSession::open(&project).unwrap();
         assert_eq!(reopened.map(), Some(&edited));
+        if let Some(expected) = &expected_zone_definition {
+            reopened
+                .select_zone(zone_for_transform.as_ref().unwrap())
+                .unwrap();
+            assert_eq!(reopened.selected_zone_definition(), Some(expected));
+        }
         assert!(!reopened.is_dirty());
         assert!(!reopened.validation().has_errors());
         assert!(!project.join(".lynx/editor-recovery.ron").exists());

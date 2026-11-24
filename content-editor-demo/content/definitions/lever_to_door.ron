@@ -1,0 +1,12 @@
+(
+    id: "link.lever_to_door",
+    version: (major: 1, minor: 0),
+    display: (name: "link.lever_to_door.name", description: "link.lever_to_door.description"),
+    components: {},
+    link: Some((
+        source_component: "core.interactable",
+        target_component: "core.door",
+        supported_events: [activated],
+        action: toggle_door,
+    )),
+)

@@ -1,0 +1,12 @@
+(
+    id: "entity.tavern_keeper",
+    version: (major: 1, minor: 0),
+    display: (name: "entity.tavern_keeper.name", description: "entity.tavern_keeper.description"),
+    components: {
+        "core.interactable": {
+            "verbs": ["inspect", "talk"],
+            "range_m": 2.0,
+            "requires_line_of_sight": true,
+        },
+    },
+)

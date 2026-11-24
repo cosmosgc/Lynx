@@ -1,0 +1,13 @@
+(
+    id: "ui.inventory",
+    version: (major: 1, minor: 0),
+    display: (name: "ui.inventory.title", description: "ui.inventory.description"),
+    schema: "ui.inventory",
+    actions: [
+        (name: "close", label: "ui.action.close"),
+        (name: "inspect", label: "ui.action.inspect"),
+    ],
+    fields: [
+        (key: "selected_item", source: "inventory.selected_item"),
+    ],
+)

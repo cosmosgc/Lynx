@@ -9,7 +9,8 @@ explicit routes, UI panel schemas, faction/calendar content, manifests, hashing,
 compatibility-aware diffs, publish checks, a read-only MCP server, and content
 migration tooling. The `lynx` CLI supports `new`, `doctor`, `validate`, content
 hash/diff/publish checks, and migration workflows. The standalone editor shell
-is in progress; asset import remains unimplemented.
+is in progress, with a separate early 3D zone-scene surface using placeholder
+geometry; asset import remains unimplemented.
 
 **Editor direction:** Build a standalone game-development IDE with a workflow
 inspired by Unity and Unreal: a 3D zone scene view, hierarchy, inspector,
@@ -31,7 +32,7 @@ does not replace editing a zone's 3D scene.
 ## CNT-001 — Editor application shell
 
 - **Priority:** P1
-- **Status:** In progress — standalone Bevy editor opens projects and edits world-map placements in its current 2D atlas view; shared validation, undo/redo, recovery autosave, and offline play preview exist. The planned 3D zone-authoring IDE view and rendered acceptance remain open.
+- **Status:** In progress — standalone Bevy editor opens projects, edits world-map placements in a separate 2D atlas, and has an early 3D zone-scene placeholder view. Existing entity-placement position/yaw can be edited through a session-backed inspector and saved/recovered; transform gizmos, snapping, and rendered acceptance remain open.
 - **Depends on:** `CLT-001`
 - **References:** [project guide §23](../lightweight_mmorpg_engine_project_guide.md#23-suggested-implementation-roadmap),
   [content authoring](../content-authoring.md),
@@ -72,20 +73,20 @@ reuses the same validation path.
 - [ ] Autosave/recovery never leaves a half-written project.
 - [ ] Editor code is isolated from engine/runtime crates as D5 requires.
 
-**Validation progress (2026-11-23):** `cargo test -p lynx_editor --lib`
-passes three session tests. The new workflow test checks exact map state across
-edit, undo, redo, save, and reopen. The recovery test checks that autosave leaves
-the authored file byte-for-byte unchanged, simulates interruption between
-renaming the original file and installing its replacement, then verifies
-recovery, save, and a clean reopen. These exercise the editor's real session
-and filesystem code with temporary map fixtures.
+**Validation progress (2026-11-24):** `cargo test -p lynx_editor` exercises six
+session tests, eleven editor-control tests, and three generated-project integration
+tests. Session tests cover exact map and zone-definition state through edit,
+undo, redo, save, and reopen; reject non-finite transforms; and verify recovery
+autosave leaves a zone file byte-for-byte unchanged before reopening, saving,
+and reopening cleanly.
 
 `cargo test -p lynx_editor --test generated_project -- --nocapture` also passes:
 the integration test builds the actual `lynx` CLI, generates both `minimal` and
 `mmorpg` projects, opens each in `EditorSession`, translates the atlas while
-preserving passage adjacency, checks exact undo/redo state, saves, and reopens
-with no pending recovery or dirty state. Both the editor's shared validator and
-the actual `lynx validate` command accept the saved content.
+preserving passage adjacency, checks exact undo/redo state, and on the MMORPG
+fixture edits an existing entity placement's yaw. It then saves and reopens with
+no pending recovery or dirty state. Both the editor's shared validator and the
+actual `lynx validate` command accept the saved content.
 
 The multi-map integration test also passes: it splits a generated atlas into two
 valid maps, edits both, and injects a filesystem failure on the second map during
@@ -103,6 +104,32 @@ missing zone and `map.overworld`. The complete editor error list matches
 `lynx validate --json` exactly, with CLI exit code 2. Restoring the reference
 and reloading clears editor errors and passes CLI validation. Rendered controls
 and visual diagnostic presentation still need acceptance verification.
+
+**Zone-scene implementation progress (2026-11-24):** The standalone editor now
+has distinct **World Atlas · 2D** and **Zone Scene · 3D** surfaces, backed by
+separate active cameras. The 3D scene uses a grid/floor placeholder and cube
+placeholders for authored `entity_placements`; scene objects can be selected in
+the viewport or hierarchy, the inspector shows placement definition and supports
+session-backed position/yaw edits, and the camera supports orbit, pan, zoom, and
+focus.
+The generated-project fixture checks that the selected zone definition and
+MMORPG placements reach the editor session. This is a first viewport slice, not
+the transform-gizmo/snapping workflow in CNT-001 or full placement-authoring
+workflow in CNT-003. `cargo test -p lynx_editor`, Clippy with warnings denied,
+and formatting checks pass; native rendered acceptance has not been observed,
+so the visual acceptance criteria remain open. Next acceptance pass: open a
+generated `mmorpg` project in the native editor, switch between the two surfaces,
+verify scene selection and orbit/pan/zoom/focus, and record the rendered result
+before checking off the viewport criterion.
+
+**Workspace layout progress (2026-11-24):** The former single floating control
+window is now a central Scene panel with resizable Hierarchy and Inspector side
+panels, a menu bar (**File**, **Edit**, **View**), and a status bar. File actions
+include opening a project by folder path, saving, reloading external changes,
+validating, and exiting; Edit exposes undo/redo; View switches the independent
+atlas/zone-scene surfaces and toggles the panels. The rendered viewport is sized
+to the central scene area, and pointer selection/navigation ignore the docked
+panels. The native visual acceptance criteria above remain unchecked.
 
 ---
 
@@ -152,6 +179,13 @@ geometry and entity placement belong in the 3D scene view in `CNT-001`/`CNT-003`
 - Bulk select/move/delete with undo.
 - Authored placements only; player ownership and leases are deferred by
   [ADR 0030](../adr/0030-player-property-ownership.md).
+
+**Implementation progress (2026-11-24):** The selected zone's existing entity
+placements expose editable position and yaw fields in the 3D inspector. A single
+Apply action records one session edit; undo/redo, dirty tracking, atomic save,
+and recovery snapshots include the source zone definition. Creating placements,
+component/property overrides, and transform gizmos remain out of scope for this
+slice.
 
 **Acceptance criteria**
 

@@ -1,0 +1,8 @@
+(
+    id: "minigame.practice",
+    version: (major: 1, minor: 0),
+    display: (name: "minigame.practice.name", description: "minigame.practice.description"),
+    panel_schema: "ui.practice",
+    authority: "server",
+    rewards: ["item.torch"],
+)

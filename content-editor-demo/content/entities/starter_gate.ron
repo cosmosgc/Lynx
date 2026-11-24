@@ -1,0 +1,13 @@
+(
+    id: "entity.starter_gate",
+    version: (major: 1, minor: 0),
+    display: (name: "entity.starter_gate.name", description: "entity.starter_gate.description"),
+    components: {
+        "core.interactable": {
+            "verbs": ["inspect", "open", "close"],
+            "range_m": 2.0,
+            "requires_line_of_sight": true,
+        },
+        "core.door": {"open": false},
+    },
+)

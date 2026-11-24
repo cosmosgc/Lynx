@@ -1,0 +1,12 @@
+(
+    id: "entity.training_master",
+    version: (major: 1, minor: 0),
+    display: (name: "entity.training_master.name", description: "entity.training_master.description"),
+    components: {
+        "core.interactable": {
+            "verbs": ["inspect", "talk", "practice"],
+            "range_m": 2.0,
+            "requires_line_of_sight": true,
+        },
+    },
+)

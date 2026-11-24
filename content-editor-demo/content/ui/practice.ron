@@ -1,0 +1,13 @@
+(
+    id: "ui.practice",
+    version: (major: 1, minor: 0),
+    display: (name: "ui.practice.title", description: "ui.practice.description"),
+    schema: "ui.practice",
+    actions: [
+        (name: "practice", label: "ui.action.practice"),
+        (name: "close", label: "ui.action.close"),
+    ],
+    fields: [
+        (key: "progress", source: "minigame.progress", formatter: Some("percentage")),
+    ],
+)

@@ -1,0 +1,12 @@
+(
+    id: "entity.starter_lever",
+    version: (major: 1, minor: 0),
+    display: (name: "entity.starter_lever.name", description: "entity.starter_lever.description"),
+    components: {
+        "core.interactable": {
+            "verbs": ["inspect", "activate"],
+            "range_m": 2.0,
+            "requires_line_of_sight": true,
+        },
+    },
+)
