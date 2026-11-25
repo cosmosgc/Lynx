@@ -318,6 +318,144 @@ impl EditorSession {
         })
     }
 
+    /// Entity prototypes available to the zone placement picker.
+    pub fn entity_definitions(&self) -> impl Iterator<Item = &DefinitionId> {
+        self.content
+            .definitions
+            .keys()
+            .filter(|id| id.is_in("entity"))
+    }
+
+    /// Create an instance with a generated stable, zone-local ID.
+    pub fn add_entity_placement(
+        &mut self,
+        prototype: &DefinitionId,
+        position: Vec3,
+    ) -> Result<String, SessionError> {
+        if !prototype.is_in("entity") || !self.content.definitions.contains_key(prototype) {
+            return Err(SessionError::InvalidSelection(format!(
+                "unknown entity {prototype}"
+            )));
+        }
+        if !position.x.is_finite() || !position.y.is_finite() || !position.z.is_finite() {
+            return Err(SessionError::InvalidSelection(
+                "position must be finite".into(),
+            ));
+        }
+        let zone = self
+            .selected_zone
+            .clone()
+            .ok_or_else(|| SessionError::InvalidSelection("no zone selected".into()))?;
+        let mut created = String::new();
+        self.edit_definition(&zone, |definition| {
+            created = next_placement_id(definition);
+            definition
+                .entity_placements
+                .push(engine_content::definition::ZoneEntityPlacement {
+                    id: created.clone(),
+                    definition: prototype.clone(),
+                    position,
+                    yaw_degrees: 0.0,
+                });
+            Ok(())
+        })?;
+        Ok(created)
+    }
+
+    /// Duplicate a placement without duplicating its incident links.
+    pub fn duplicate_entity_placement(&mut self, id: &str) -> Result<String, SessionError> {
+        let zone = self
+            .selected_zone
+            .clone()
+            .ok_or_else(|| SessionError::InvalidSelection("no zone selected".into()))?;
+        let mut created = String::new();
+        self.edit_definition(&zone, |definition| {
+            let mut placement = definition
+                .entity_placements
+                .iter()
+                .find(|placement| placement.id == id)
+                .cloned()
+                .ok_or_else(|| SessionError::InvalidSelection(format!("unknown placement {id}")))?;
+            created = next_placement_id(definition);
+            placement.id.clone_from(&created);
+            definition.entity_placements.push(placement);
+            Ok(())
+        })?;
+        Ok(created)
+    }
+
+    /// Remove a placement and all incident links in one reversible command.
+    pub fn delete_entity_placement(&mut self, id: &str) -> Result<(), SessionError> {
+        self.delete_entity_placements(&BTreeSet::from([id.to_owned()]))
+    }
+
+    /// Translate the complete selection in one validated history entry.
+    pub fn move_entity_placements(
+        &mut self,
+        ids: &BTreeSet<String>,
+        delta: Vec3,
+    ) -> Result<(), SessionError> {
+        self.edit_placements(ids, |definition| {
+            for p in &mut definition.entity_placements {
+                if ids.contains(&p.id) {
+                    p.position = Vec3::new(
+                        p.position.x + delta.x,
+                        p.position.y + delta.y,
+                        p.position.z + delta.z,
+                    );
+                    if !p.position.x.is_finite()
+                        || !p.position.y.is_finite()
+                        || !p.position.z.is_finite()
+                    {
+                        return Err(SessionError::InvalidSelection(
+                            "position must be finite".into(),
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Remove all selected placements and their incident links as one edit.
+    pub fn delete_entity_placements(&mut self, ids: &BTreeSet<String>) -> Result<(), SessionError> {
+        self.edit_placements(ids, |definition| {
+            definition
+                .entity_placements
+                .retain(|p| !ids.contains(&p.id));
+            definition
+                .entity_links
+                .retain(|link| !ids.contains(&link.source) && !ids.contains(&link.target));
+            Ok(())
+        })
+    }
+
+    fn edit_placements(
+        &mut self,
+        ids: &BTreeSet<String>,
+        edit: impl FnOnce(&mut ContentDefinition) -> Result<(), SessionError>,
+    ) -> Result<(), SessionError> {
+        let zone = self
+            .selected_zone
+            .clone()
+            .ok_or_else(|| SessionError::InvalidSelection("no zone selected".into()))?;
+        self.edit_definition(&zone, |definition| {
+            if ids.is_empty()
+                || definition
+                    .entity_placements
+                    .iter()
+                    .filter(|p| ids.contains(&p.id))
+                    .count()
+                    != ids.len()
+            {
+                return Err(SessionError::InvalidSelection(
+                    "select existing placements in this zone".into(),
+                ));
+            }
+            edit(definition)
+        })
+    }
+
     /// Place an existing zone definition on the selected map.
     pub fn place_zone(
         &mut self,
@@ -642,6 +780,20 @@ impl EditorSession {
         if before == after {
             return Ok(());
         }
+        let registry = starter_component_registry().map_err(anyhow::Error::from)?;
+        let mut candidate = self.content.clone();
+        candidate
+            .definitions
+            .insert(definition_id.clone(), after.clone());
+        let report = candidate.validate(&registry);
+        let existing_errors: BTreeSet<_> =
+            self.validation.errors().map(ToString::to_string).collect();
+        if let Some(error) = report
+            .errors()
+            .find(|error| !existing_errors.contains(&error.to_string()))
+        {
+            return Err(SessionError::InvalidSelection(error.to_string()));
+        }
         self.content
             .definitions
             .insert(definition_id.clone(), after.clone());
@@ -743,6 +895,18 @@ impl EditorSession {
         self.refresh_validation();
         Ok(())
     }
+}
+
+fn next_placement_id(definition: &ContentDefinition) -> String {
+    (1..=definition.entity_placements.len().saturating_add(1))
+        .map(|index| format!("entity_{index}"))
+        .find(|id| {
+            !definition
+                .entity_placements
+                .iter()
+                .any(|placement| &placement.id == id)
+        })
+        .expect("one more candidate than placements guarantees an unused ID")
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), SessionError> {

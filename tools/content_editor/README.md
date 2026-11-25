@@ -42,6 +42,12 @@ placements and the selected zone's existing entity-placement transforms:
 | Zone Scene: right-drag / middle-drag / wheel | Orbit / pan / zoom the 3D view |
 | Click a scene placeholder | Select it in the scene and hierarchy |
 | Inspector → Apply transform | Save the selected placement's position/yaw as one undoable edit |
+| Inspector → Snap draft | Round position/yaw to configurable steps (defaults: 1 m / 15°), then Apply transform |
+| Zone Scene → Move / Rotate | Select a placement, drag a colored axis tip or the yellow yaw ring, then release to commit one edit. Enable Snap to use the inspector steps. Escape cancels the drag. |
+| Zone Scene → Create placement | Pick an entity definition and add it at the scene focus |
+| Inspector → Duplicate / Delete placement | Duplicate with a new ID, or delete the placement and connected links; both support undo/redo |
+| Zone Scene: `Ctrl+D` / `Delete` | Duplicate / delete the selected entity placement |
+| Hierarchy: `Ctrl`/`Cmd` + click placements | Toggle group membership. Use **Move selected** with an X/Y/Z offset or **Delete selected placements**. Each operation takes one undo; deletion also removes links touching the selection. |
 | View menu | Switch atlas/zone-scene views and show/hide Hierarchy or Inspector |
 | `P` | Save edits, then launch or stop the offline Lynx client for the selected zone |
 

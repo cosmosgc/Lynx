@@ -36,6 +36,96 @@ fn build_cli() -> PathBuf {
 }
 
 #[test]
+fn bulk_edits_are_atomic_and_restore_linked_placements_after_reopen() {
+    use engine_core::math::Vec3;
+    use std::collections::BTreeSet;
+
+    let cli = build_cli();
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("bulk-workflow");
+    let output = Command::new(&cli)
+        .args(["new", "bulk-workflow", "--template", "mmorpg", "--output"])
+        .arg(&project)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // An independent pair must survive the deletion, including its link.
+    let source = project.join("content/zones/starter.ron");
+    let mut fixture: engine_content::ContentDefinition =
+        ron::from_str(&std::fs::read_to_string(&source).unwrap()).unwrap();
+    for mut extra in fixture.entity_placements.clone() {
+        extra.id.insert_str(0, "extra_");
+        extra.position.z += 3.0;
+        fixture.entity_placements.push(extra);
+    }
+    let mut extra_link = fixture.entity_links[0].clone();
+    extra_link.source.insert_str(0, "extra_");
+    extra_link.target.insert_str(0, "extra_");
+    fixture.entity_links.push(extra_link);
+    std::fs::write(source, ron::to_string(&fixture).unwrap()).unwrap();
+    let mut session = EditorSession::open(&project).unwrap();
+    let original = session.selected_zone_definition().unwrap().clone();
+    let link = &original.entity_links[0];
+    let ids = BTreeSet::from([link.source.clone(), link.target.clone()]);
+    assert_eq!(ids.len(), 2);
+    let mut stale = ids.clone();
+    stale.insert("missing".into());
+    assert!(session.delete_entity_placements(&stale).is_err());
+    assert_eq!(session.selected_zone_definition(), Some(&original));
+    let revision = session.revision();
+    assert!(
+        session
+            .move_entity_placements(&ids, Vec3::new(1000.0, 0.0, 0.0))
+            .is_err()
+    );
+    assert_eq!(session.revision(), revision);
+    assert!(!session.undo());
+    let mut moved = original.clone();
+    for placement in &mut moved.entity_placements {
+        if ids.contains(&placement.id) {
+            placement.position.z += 1.0;
+        }
+    }
+    session
+        .move_entity_placements(&ids, Vec3::new(0.0, 0.0, 1.0))
+        .unwrap();
+    assert_eq!(session.selected_zone_definition(), Some(&moved));
+    assert!(session.undo());
+    assert_eq!(session.selected_zone_definition(), Some(&original));
+    assert!(!session.undo());
+    assert!(session.redo());
+    session.save().unwrap();
+    drop(session);
+    let mut session = EditorSession::open(&project).unwrap();
+    assert_eq!(session.selected_zone_definition(), Some(&moved));
+    validate_cli(&cli, &project);
+    session.delete_entity_placements(&ids).unwrap();
+    let mut deleted = moved.clone();
+    deleted.entity_placements.retain(|p| !ids.contains(&p.id));
+    deleted
+        .entity_links
+        .retain(|l| !ids.contains(&l.source) && !ids.contains(&l.target));
+    assert_eq!(session.selected_zone_definition(), Some(&deleted));
+    assert!(session.undo());
+    assert_eq!(session.selected_zone_definition(), Some(&moved));
+    assert!(!session.undo());
+    assert!(session.redo());
+    session.save().unwrap();
+    drop(session);
+    assert_eq!(
+        EditorSession::open(&project)
+            .unwrap()
+            .selected_zone_definition(),
+        Some(&deleted)
+    );
+    validate_cli(&cli, &project);
+}
+
+#[test]
 fn interrupted_multi_map_save_recovers_all_edits_and_passes_cli_validation() {
     let cli = build_cli();
     let temporary = tempfile::tempdir().unwrap();
@@ -192,6 +282,84 @@ fn invalid_map_reference_has_matching_editor_and_cli_field_diagnostics() {
     assert!(!session.validation().has_errors());
     validate_cli(&cli, &project);
     println!("repaired map: editor reload and CLI validation passed");
+}
+
+#[test]
+fn placement_creation_duplication_and_linked_deletion_recover_and_validate() {
+    let cli = build_cli();
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("placement-workflow");
+    let output = Command::new(&cli)
+        .args([
+            "new",
+            "placement-workflow",
+            "--template",
+            "mmorpg",
+            "--output",
+        ])
+        .arg(&project)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut session = EditorSession::open(&project).unwrap();
+    let original = session.selected_zone_definition().unwrap().clone();
+    let prototype = original.entity_placements[0].clone();
+    let revision = session.revision();
+    assert!(
+        session
+            .add_entity_placement(
+                &prototype.definition,
+                engine_core::math::Vec3::new(1_000_000.0, 0.0, 1_000_000.0),
+            )
+            .is_err()
+    );
+    assert_eq!(session.selected_zone_definition(), Some(&original));
+    assert_eq!(session.revision(), revision);
+    assert!(!session.is_dirty());
+    assert!(!session.undo());
+    let created = session
+        .add_entity_placement(&prototype.definition, prototype.position)
+        .unwrap();
+    let duplicated = session.duplicate_entity_placement(&created).unwrap();
+    assert_ne!(created, duplicated);
+    assert!(!session.validation().has_errors());
+    assert!(session.undo());
+    assert!(session.undo());
+    assert_eq!(session.selected_zone_definition(), Some(&original));
+    assert!(session.redo());
+    assert!(session.redo());
+    let before_delete = session.selected_zone_definition().unwrap().clone();
+    let linked = original
+        .entity_links
+        .first()
+        .expect("template has a lever/door link")
+        .source
+        .clone();
+    session.delete_entity_placement(&linked).unwrap();
+    let deleted = session.selected_zone_definition().unwrap().clone();
+    assert!(
+        !deleted
+            .entity_links
+            .iter()
+            .any(|link| link.source == linked || link.target == linked)
+    );
+    assert!(session.undo());
+    assert_eq!(session.selected_zone_definition(), Some(&before_delete));
+    assert!(session.redo());
+    assert_eq!(session.selected_zone_definition(), Some(&deleted));
+    session.autosave().unwrap();
+    drop(session);
+    let mut recovered = EditorSession::open(&project).unwrap();
+    assert_eq!(recovered.selected_zone_definition(), Some(&deleted));
+    recovered.save().unwrap();
+    let reopened = EditorSession::open(&project).unwrap();
+    assert_eq!(reopened.selected_zone_definition(), Some(&deleted));
+    assert!(!reopened.is_dirty());
+    validate_cli(&cli, &project);
 }
 
 #[test]

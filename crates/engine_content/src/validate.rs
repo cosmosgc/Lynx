@@ -509,6 +509,9 @@ impl ContentSet {
             let instance = ComponentInstance::new(key.clone(), schema.version, data.clone());
             match registry.prepare(&instance) {
                 Ok(prepared) => {
+                    if key.as_str() == "core.zone" && prepared.issues.is_empty() {
+                        validate_zone_placements(report, definition, &prepared.instance.data, path);
+                    }
                     for issue in prepared.issues {
                         report.push(Diagnostic::from_issue(path, issue));
                     }
@@ -728,6 +731,85 @@ impl ContentSet {
             keys.insert(map.display.description.clone());
         }
         keys
+    }
+}
+
+fn validate_zone_placements(
+    report: &mut ValidationReport,
+    definition: &ContentDefinition,
+    data: &serde_json::Map<String, Value>,
+    path: &str,
+) {
+    let number = |key: &str| data.get(key).and_then(Value::as_f64);
+    let (Some(width), Some(height), Some(cell), Some(x), Some(z), Some(floor), Some(ceiling)) = (
+        number("width_cells"),
+        number("height_cells"),
+        number("cell_size_m"),
+        number("origin_x_m"),
+        number("origin_z_m"),
+        number("floor_y_m"),
+        number("ceiling_y_m"),
+    ) else {
+        return;
+    };
+    if ceiling <= floor {
+        report.error(
+            "world.invalid_zone_bounds",
+            format!("{path}:components.core.zone.ceiling_y_m"),
+            "zone ceiling must be above its floor",
+        );
+    }
+    if let Some(budget) = data.get("max_entities").and_then(Value::as_u64)
+        && u64::try_from(definition.entity_placements.len()).unwrap_or(u64::MAX) > budget
+    {
+        report.error(
+            "world.placement_budget_exceeded",
+            format!("{path}:entity_placements"),
+            "authored placements exceed the zone max_entities budget",
+        );
+    }
+    for (index, placement) in definition.entity_placements.iter().enumerate() {
+        let px = f64::from(placement.position.x);
+        let py = f64::from(placement.position.y);
+        let pz = f64::from(placement.position.z);
+        let location = format!("{path}:entity_placements[{index}].position");
+        // Navigation cells are half-open at the upper X/Z bounds.
+        if px < x
+            || px >= x + width * cell
+            || pz < z
+            || pz >= z + height * cell
+            || py < floor
+            || py > ceiling
+        {
+            report.error(
+                "world.placement_out_of_bounds",
+                location,
+                format!(
+                    "placement {} lies outside zone {}",
+                    placement.id, definition.id
+                ),
+            );
+        } else {
+            let cell_index = ((pz - z) / cell).floor() * width + ((px - x) / cell).floor();
+            if data
+                .get("blocked_cells")
+                .and_then(Value::as_array)
+                .is_some_and(|blocked| {
+                    blocked
+                        .iter()
+                        .any(|value| value.as_f64() == Some(cell_index))
+                })
+            {
+                report.error(
+                    "world.placement_on_blocked_cell",
+                    location,
+                    format!(
+                        "placement {} lies on a blocked navigation cell",
+                        placement.id
+                    ),
+                );
+            }
+        }
     }
 }
 
@@ -1247,6 +1329,60 @@ mod tests {
 
     fn key(value: &str) -> MessageKey {
         MessageKey::parse(value).unwrap()
+    }
+
+    #[test]
+    fn zone_placement_validation_enforces_navigation_bounds_and_budget() {
+        let mut zone = definition("zone.geometry", None);
+        zone.components.clear();
+        zone.components.insert(
+            ComponentKey::new("core.zone").unwrap(),
+            serde_json::from_value(serde_json::json!({
+                "width_cells": 2, "height_cells": 2, "cell_size_m": 1.0,
+                "origin_x_m": -1.0, "origin_z_m": -1.0,
+                "floor_y_m": 0.0, "ceiling_y_m": 4.0,
+                "blocked_cells": [3], "max_entities": 1, "max_players": 1
+            }))
+            .unwrap(),
+        );
+        let placement = |id: &str, x, y, z| crate::definition::ZoneEntityPlacement {
+            id: id.into(),
+            definition: DefinitionId::new("entity.box").unwrap(),
+            position: engine_core::math::Vec3::new(x, y, z),
+            yaw_degrees: 0.0,
+        };
+        zone.entity_placements = vec![
+            placement("valid", -1.0, 0.0, -1.0),
+            placement("outside", 1.0, 0.0, -1.0),
+            placement("blocked", 0.5, 0.0, 0.5),
+            placement("above", -0.5, 4.1, -0.5),
+        ];
+        let mut content = ContentSet::new();
+        content
+            .insert_definition("zones/geometry.ron", zone)
+            .unwrap();
+        let report = content.validate(&starter_component_registry().unwrap());
+        let positions: Vec<_> = report
+            .errors()
+            .filter(|error| {
+                error.code == "world.placement_out_of_bounds"
+                    || error.code == "world.placement_on_blocked_cell"
+            })
+            .map(|error| error.path.as_str())
+            .collect();
+        assert_eq!(
+            positions,
+            vec![
+                "zones/geometry.ron:entity_placements[1].position",
+                "zones/geometry.ron:entity_placements[2].position",
+                "zones/geometry.ron:entity_placements[3].position",
+            ]
+        );
+        assert!(
+            report
+                .errors()
+                .any(|error| error.code == "world.placement_budget_exceeded")
+        );
     }
 
     fn catalog(locale: &str, messages: &[(&str, &str)]) -> MessageCatalog {

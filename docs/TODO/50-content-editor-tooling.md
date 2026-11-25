@@ -131,6 +131,21 @@ atlas/zone-scene surfaces and toggles the panels. The rendered viewport is sized
 to the central scene area, and pointer selection/navigation ignore the docked
 panels. The native visual acceptance criteria above remain unchecked.
 
+**Inspector snapping progress (2026-11-24):** Zone Scene transform drafts now
+offer configurable position and yaw steps (1 m and 15° by default). Snap draft
+rounds the fields; Apply transform commits through the existing session history,
+save, and recovery path. Read-only preview disables snapping and applying.
+This is inspector snapping; viewport transform gizmos and native visual
+acceptance remain open.
+
+**Viewport transforms (2026-11-25):** Selected entity placements now expose
+world X/Y/Z translation handles and a yaw ring. Dragging previews the mesh;
+release validates and commits a single session edit. Snap uses the inspector
+steps. Escape cancels. `drag_previews_commit_once_and_round_trip_with_snapping`
+exercises successive pointer samples on a copy of the demo, exact undo/redo,
+save/reopen and validation. The native Atlas window was observed; actual
+pointer operation in the native Zone Scene is still awaiting confirmation.
+
 ---
 
 ## CNT-002 — World atlas and map editor
@@ -186,6 +201,25 @@ Apply action records one session edit; undo/redo, dirty tracking, atomic save,
 and recovery snapshots include the source zone definition. Creating placements,
 component/property overrides, and transform gizmos remain out of scope for this
 slice.
+
+**Placement lifecycle progress (2026-11-24):** The Zone Scene inspector now has
+an entity-definition picker, creation at the scene focus, duplication with a new
+zone-local ID, and deletion. Deletion removes incident links in the same undo
+command; undo restores placements and links exactly. Definition edits validate
+a candidate before mutating session state and reject newly introduced errors.
+The shared content validator now checks placement bounds, blocked navigation
+cells, and the zone's entity budget, so CLI and editor use the same diagnostics.
+Generated-project coverage exercises rejected out-of-bounds creation without
+dirty/history changes, create/duplicate/delete, undo/redo, recovery, save/reopen,
+and CLI validation. Bulk selection, component overrides, gizmos, and native
+rendered acceptance remain open.
+
+**Bulk placement editing (2026-11-25):** Ctrl/Cmd-click toggles placements in
+the Zone Scene hierarchy. The inspector applies one translation offset to all
+members or deletes them and their incident links. Each action validates the
+whole candidate and records one undo entry. `bulk_edits_are_atomic_and_restore_linked_placements_after_reopen`
+exercises both operations on a CLI-generated project, including exact undo,
+redo, save/reopen and CLI validation. Native group interaction awaits review.
 
 **Acceptance criteria**
 
